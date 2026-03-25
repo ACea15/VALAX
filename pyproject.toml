@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "valax"
+version = "0.1.0"
+description = "JAX-native quantitative finance valuation engine"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "jax[cpu]",
+    "equinox",
+    "diffrax",
+    "optimistix",
+    "optax",
+    "lineax",
+    "jaxtyping",
+    "beartype",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-benchmark",
+    "hypothesis",
+]
+docs = [
+    "sphinx",
+    "jupyter-book",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["valax"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
