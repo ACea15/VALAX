@@ -26,8 +26,8 @@ dev = [
     "hypothesis",
 ]
 docs = [
-    "sphinx",
-    "jupyter-book",
+    "mkdocs",
+    "mkdocs-material",
 ]
 
 [tool.hatch.build.targets.wheel]

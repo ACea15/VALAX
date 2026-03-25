@@ -24,6 +24,12 @@ pytest tests/test_pricing/test_black_scholes.py::test_call_price -v
 # Run benchmarks
 pytest --benchmark-only
 
+# Build docs
+mkdocs build --strict
+
+# Serve docs locally (http://127.0.0.1:8000)
+mkdocs serve
+
 # Environment: pyenv virtualenv "valax" on Python 3.13.12
 pyenv activate valax
 ```
