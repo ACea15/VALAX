@@ -76,6 +76,40 @@ prices = batch_price(
 print(f"Priced {n} options, shape: {prices.shape}")
 ```
 
+### Price a Bond
+
+```python
+import jax.numpy as jnp
+from valax.dates import ymd_to_ordinal, generate_schedule
+from valax.instruments import FixedRateBond
+from valax.curves import DiscountCurve
+from valax.pricing.analytic import fixed_rate_bond_price, modified_duration, yield_to_maturity
+
+# 5-year, 4% semi-annual bond
+ref = ymd_to_ordinal(2025, 1, 1)
+bond = FixedRateBond(
+    payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2),
+    settlement_date=ref,
+    coupon_rate=jnp.array(0.04),
+    face_value=jnp.array(100.0),
+    frequency=2,
+)
+
+# Flat 5% discount curve
+pillars = jnp.array([int(ymd_to_ordinal(2025+i, 1, 1)) for i in range(6)], dtype=jnp.int32)
+times = (pillars - int(ref)).astype(jnp.float64) / 365.0
+curve = DiscountCurve(
+    pillar_dates=pillars,
+    discount_factors=jnp.exp(-0.05 * times),
+    reference_date=ref,
+)
+
+price = fixed_rate_bond_price(bond, curve)
+ytm = yield_to_maturity(bond, price)
+dur = modified_duration(bond, ytm)
+print(f"Price: {price:.4f}, YTM: {ytm:.4f}, Duration: {dur:.4f}")
+```
+
 ### Monte Carlo Pricing
 
 ```python

@@ -56,10 +56,12 @@ This works for **all** pricing methods — analytical, Monte Carlo, PDE, and lat
 ```
 valax/
 ├── core/          # Type aliases, constants
+├── dates/         # Day count conventions, ordinal dates, schedule generation
+├── curves/        # DiscountCurve, interpolation, forward/zero rates
 ├── instruments/   # Data-only pytrees (options, bonds, swaps)
 ├── models/        # Stochastic process definitions (GBM, Heston)
 ├── pricing/
-│   ├── analytic/  # Black-Scholes, Black-76, Bachelier
+│   ├── analytic/  # Black-Scholes, Black-76, Bachelier, bond pricing
 │   ├── mc/        # Monte Carlo engine (diffrax SDE paths)
 │   ├── pde/       # Crank-Nicolson finite differences (lineax)
 │   └── lattice/   # CRR binomial tree

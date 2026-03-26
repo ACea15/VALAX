@@ -36,6 +36,7 @@ nav:
   - Architecture: architecture.md
   - User Guide:
       - Analytical Pricing: guide/analytical.md
+      - Fixed Income: guide/fixed-income.md
       - Greeks via Autodiff: guide/greeks.md
       - Monte Carlo: guide/monte-carlo.md
       - PDE Solvers: guide/pde.md
@@ -43,5 +44,7 @@ nav:
   - API Reference:
       - Instruments: api/instruments.md
       - Pricing: api/pricing.md
+      - Dates: api/dates.md
+      - Curves: api/curves.md
       - Greeks: api/greeks.md
       - Models: api/models.md

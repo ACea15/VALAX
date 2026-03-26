@@ -7,6 +7,7 @@ VALAX is a quantitative finance library built entirely on JAX and its ecosystem.
 ## Key Features
 
 - **Autodiff Greeks** — `jax.grad` gives exact delta, gamma, vega, vanna, volga, rho and more. Higher-order Greeks via nested differentiation.
+- **Fixed income** — Discount curves, bond pricing, yield-to-maturity, and autodiff risk measures (duration, convexity, key-rate durations).
 - **Multiple pricing methods** — Analytical (Black-Scholes, Black-76, Bachelier), Monte Carlo (GBM, Heston via diffrax), PDE (Crank-Nicolson), and lattice (CRR binomial with American exercise).
 - **Portfolio vectorization** — `jax.vmap` prices thousands of instruments in a single call.
 - **GPU/TPU ready** — All code runs on accelerators with zero changes.

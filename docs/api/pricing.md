@@ -37,6 +37,64 @@ black_scholes_implied_vol(option, spot, rate, dividend, market_price,
 
 Newton-Raphson implied volatility using autodiff vega.
 
+### Bond Pricing
+
+#### `zero_coupon_bond_price`
+
+```python
+zero_coupon_bond_price(bond, curve) -> Float[Array, ""]
+```
+
+Price a zero-coupon bond from a discount curve. Returns `face_value * DF(maturity)`.
+
+#### `fixed_rate_bond_price`
+
+```python
+fixed_rate_bond_price(bond, curve) -> Float[Array, ""]
+```
+
+Price a fixed-rate coupon bond by discounting each future coupon and the face value redemption using the curve.
+
+#### `fixed_rate_bond_price_from_yield`
+
+```python
+fixed_rate_bond_price_from_yield(bond, ytm) -> Float[Array, ""]
+```
+
+Standard yield-based bond pricing: $P = \sum_i \frac{C}{(1+y/f)^i} + \frac{F}{(1+y/f)^n}$.
+
+#### `yield_to_maturity`
+
+```python
+yield_to_maturity(bond, market_price, n_iterations=50) -> Float[Array, ""]
+```
+
+Newton-Raphson YTM solver using autodiff for the price-yield derivative.
+
+#### `modified_duration`
+
+```python
+modified_duration(bond, ytm) -> Float[Array, ""]
+```
+
+$-\frac{1}{P}\frac{dP}{dy}$ computed via `jax.grad`.
+
+#### `convexity`
+
+```python
+convexity(bond, ytm) -> Float[Array, ""]
+```
+
+$\frac{1}{P}\frac{d^2P}{dy^2}$ computed via nested `jax.grad`.
+
+#### `key_rate_durations`
+
+```python
+key_rate_durations(bond, curve) -> Float[Array, "n_pillars"]
+```
+
+Sensitivity of bond price to each curve pillar's zero rate. One backward pass gives all sensitivities.
+
 ## Monte Carlo
 
 ### `mc_price`
