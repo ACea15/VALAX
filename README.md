@@ -99,6 +99,23 @@ valax/
 └── portfolio/     # vmap batch pricing, risk aggregation
 ```
 
+## Examples
+
+Runnable scripts in `examples/` demonstrate the full library with synthetic market data. Use `# %%` cell markers for interactive execution in VS Code or PyCharm.
+
+| Example | Topics |
+|---------|--------|
+| `01_equity_options.py` | Black-Scholes pricing, all Greeks via autodiff, implied vol, portfolio vmap, JIT |
+| `02_sabr_smile.py` | SABR smile generation, parameter sensitivity, calibration (LM/BFGS) |
+| `03_fixed_income.py` | Discount curves, bond pricing, YTM, duration/convexity/KRD via autodiff |
+| `04_rates_derivatives.py` | Caplet/floor pricing, cap strips, swaps, swaptions, rate Greeks |
+| `05_monte_carlo.py` | GBM/Heston/SABR paths, convergence, Asian + barrier exotics |
+| `06_pde_and_lattice.py` | Crank-Nicolson PDE, binomial trees, American options, method comparison |
+
+```bash
+python examples/01_equity_options.py
+```
+
 ## Key Dependencies
 
 | Package | Role |

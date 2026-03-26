@@ -50,3 +50,18 @@ Traditional quant libraries compute Greeks via finite differences (bump-and-repr
 | **Autodiff (VALAX)** | **Zero** | **Machine precision** | **One backward pass for all Greeks** |
 
 This means every pricing function — analytical, Monte Carlo, PDE, or lattice — automatically supports Greeks with no additional code.
+
+## Examples
+
+Runnable Python scripts in `examples/` demonstrate the full library with synthetic market data. Each file uses `# %%` cell markers for interactive IDE execution.
+
+| Example | What it covers |
+|---------|----------------|
+| `01_equity_options.py` | Black-Scholes pricing, all Greeks via autodiff, implied vol, portfolio vmap, JIT |
+| `02_sabr_smile.py` | SABR smile generation, parameter sensitivity, calibration (LM/BFGS) |
+| `03_fixed_income.py` | Discount curves, bond pricing, YTM, duration/convexity/KRD via autodiff |
+| `04_rates_derivatives.py` | Caplet/floor pricing, cap strips, swaps, swaptions, rate Greeks |
+| `05_monte_carlo.py` | GBM/Heston/SABR paths, convergence, Asian + barrier exotics |
+| `06_pde_and_lattice.py` | Crank-Nicolson PDE, binomial trees, American options, method comparison |
+
+See the [Examples](examples.md) page for details and code snippets.
