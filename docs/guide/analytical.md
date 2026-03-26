@@ -66,6 +66,32 @@ price = bachelier_price(option, forward=jnp.array(100.0), vol=jnp.array(20.0),
 
 **Arguments**: `(option, forward, vol, rate)`
 
+## SABR Stochastic Volatility
+
+The SABR model generates a volatility smile from four parameters ($\alpha$, $\beta$, $\rho$, $\nu$). Pricing uses Hagan's implied vol formula fed into Black-76.
+
+$$dF = \alpha F^\beta\, dW_1, \quad d\alpha_t = \nu \alpha_t\, dW_2, \quad \text{Corr}(dW_1, dW_2) = \rho$$
+
+```python
+from valax.models import SABRModel
+from valax.pricing.analytic import sabr_implied_vol, sabr_price
+
+model = SABRModel(alpha=jnp.array(0.3), beta=jnp.array(0.5),
+                  rho=jnp.array(-0.3), nu=jnp.array(0.4))
+
+# Implied vol at a given strike
+vol = sabr_implied_vol(model, forward=jnp.array(100.0),
+                       strike=jnp.array(105.0), expiry=jnp.array(1.0))
+
+# Full option price via Black-76
+price = sabr_price(option, forward=jnp.array(100.0),
+                   rate=jnp.array(0.05), model=model)
+```
+
+**Arguments**: `sabr_price(option, forward, rate, model)`
+
+The implied vol formula is autodiff-safe — you can compute Greeks via `jax.grad` through the full SABR → Black-76 chain.
+
 ## Choosing a Model
 
 | Model | Underlying | Vol type | Negative rates? |
@@ -73,3 +99,4 @@ price = bachelier_price(option, forward=jnp.array(100.0), vol=jnp.array(20.0),
 | Black-Scholes | Equity spot | Lognormal | No |
 | Black-76 | Forward/futures | Lognormal | No |
 | Bachelier | Forward | Normal (absolute) | Yes |
+| SABR | Forward | Stochastic (smile) | Depends on $\beta$ |

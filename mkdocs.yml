@@ -41,6 +41,7 @@ nav:
       - Monte Carlo: guide/monte-carlo.md
       - PDE Solvers: guide/pde.md
       - Binomial Trees: guide/lattice.md
+      - Calibration: guide/calibration.md
   - API Reference:
       - Instruments: api/instruments.md
       - Pricing: api/pricing.md
@@ -48,3 +49,4 @@ nav:
       - Curves: api/curves.md
       - Greeks: api/greeks.md
       - Models: api/models.md
+      - Calibration: api/calibration.md
