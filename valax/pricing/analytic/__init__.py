@@ -12,3 +12,16 @@ from valax.pricing.analytic.bonds import (
     convexity,
     key_rate_durations,
 )
+from valax.pricing.analytic.caplets import (
+    caplet_price_black76,
+    caplet_price_bachelier,
+    cap_price_black76,
+    cap_price_bachelier,
+)
+from valax.pricing.analytic.swaptions import (
+    swap_rate,
+    swap_price,
+    swaption_price_black76,
+    swaption_price_bachelier,
+)
+from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_price
