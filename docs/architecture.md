@@ -66,6 +66,8 @@ valax/
 │   ├── pde/       # Crank-Nicolson finite differences (lineax)
 │   └── lattice/   # CRR binomial tree
 ├── greeks/        # Generic autodiff wrappers
+├── market/        # MarketData container, scenario definitions
+├── risk/          # Scenario generation, curve shocks, VaR/ES
 └── portfolio/     # vmap batch pricing
 ```
 
