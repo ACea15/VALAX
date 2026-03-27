@@ -44,6 +44,7 @@ nav:
       - PDE Solvers: guide/pde.md
       - Binomial Trees: guide/lattice.md
       - Calibration: guide/calibration.md
+      - Volatility Surfaces: guide/vol-surfaces.md
       - Risk & Scenarios: guide/risk.md
   - API Reference:
       - Instruments: api/instruments.md
@@ -53,4 +54,5 @@ nav:
       - Greeks: api/greeks.md
       - Models: api/models.md
       - Calibration: api/calibration.md
+      - Surfaces: api/surfaces.md
       - Risk: api/risk.md

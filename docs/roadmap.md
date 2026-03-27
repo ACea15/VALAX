@@ -42,15 +42,18 @@ These are foundational pieces that block almost everything else. They should be 
 
 ### 1.2 Volatility Surface Construction
 
-- [ ] **Vol surface object** — grid of (strike, expiry) -> implied vol with interpolation
-- [ ] **SABR smile per expiry** — fit SABR params at each expiry, interpolate across expiries
-- [ ] **SVI / SSVI parametric fitting** — arbitrage-free smile parameterization
+- [x] **Vol surface object** — `GridVolSurface` with bilinear interpolation on (strike, expiry) grid
+- [x] **SABR smile per expiry** — `SABRVolSurface` with per-expiry SABR calibration and parameter interpolation
+- [x] **SVI parametric fitting** — `SVIVolSurface` with Gatheral's SVI parameterization and LM calibration
+- [ ] **SSVI** — global arbitrage-free parameterization (Gatheral-Jacquier)
 - [ ] **Sticky-strike vs sticky-delta** conventions
 - [ ] **Local vol extraction** from implied vol surface (Dupire formula)
 
 **Why:** Every option product needs a vol surface. Scalar vol is a toy assumption.
 
 **Approach:** Store the surface as an `eqx.Module` pytree with pillar data. Interpolation via cubic splines (or SABR per expiry). SVI fitting via `optimistix.least_squares`. The surface must be differentiable for Greeks.
+
+**Status:** Three surface types implemented in `valax/surfaces/`: `GridVolSurface` (interpolated grid), `SABRVolSurface` (SABR per expiry with calibration), `SVIVolSurface` (SVI per expiry with calibration). All are callable, JIT-able, differentiable pytrees. See the [Vol Surfaces guide](guide/vol-surfaces.md).
 
 ### 1.3 Business Calendars and Holiday Schedules
 
