@@ -246,7 +246,7 @@ Portfolio-level risk management and valuation adjustments.
 ### 4.1 VaR and Expected Shortfall
 
 - [x] **Historical VaR** — P&L distribution from historical scenarios
-- [ ] **Parametric VaR** — delta-normal, delta-gamma-normal
+- [x] **Parametric VaR** — delta-normal using autodiff sensitivities and covariance matrix
 - [x] **Monte Carlo VaR** — full revaluation under simulated scenarios (parametric + t-distribution)
 - [x] **Expected Shortfall (CVaR)** — tail risk measure
 - [ ] **Marginal / component / incremental VaR**
@@ -255,20 +255,20 @@ Portfolio-level risk management and valuation adjustments.
 
 **Approach:** Scenario generation + batch repricing via `vmap`. Autodiff gives portfolio Greeks for parametric VaR. Full reval VaR benefits from JIT compilation and GPU acceleration — this is where JAX shines.
 
-**Status:** Core framework implemented in `valax/risk/`. Parametric (normal/t) and historical scenario generation, curve shocks (parallel, steepener, flattener, butterfly, key-rate), full-revaluation VaR/ES via vmapped repricing. See the [Risk guide](guide/risk.md).
+**Status:** Core framework implemented in `valax/risk/`. Parametric (normal/t) and historical scenario generation, curve shocks (parallel, steepener, flattener, butterfly, key-rate), full-revaluation VaR/ES via vmapped repricing. Parametric VaR via delta-normal with autodiff gradients. See the [Risk guide](guide/risk.md).
 
 ### 4.2 Stress Testing and Scenario Analysis
 
 - [x] **Scenario definition framework** — shifts to curves, vols, spots, correlations
 - [ ] **Historical stress scenarios** — replay historical crises (2008, COVID, SVB)
 - [ ] **Reverse stress testing** — find scenarios that cause a target loss (optimization problem)
-- [ ] **P&L attribution** — decompose daily P&L into risk factors (theta, delta, gamma, vega, cross-gamma, unexplained)
+- [x] **P&L attribution** — second-order Taylor decomposition into delta (spot, vol, rate, div), gamma, and unexplained via autodiff
 
 **Why:** Regulatory requirement and core risk management practice.
 
 **Approach:** Scenarios as pytree diffs applied to `MarketData`. Batch repricing via `vmap`. P&L attribution via Taylor expansion using autodiff Greeks. Reverse stress testing via `optimistix.minimize`.
 
-**Status:** Scenario framework implemented. `MarketScenario` and `ScenarioSet` pytrees, `apply_scenario` for full market state shocks, named stress builders (steepener, flattener, butterfly). Historical crisis replay and reverse stress testing are next.
+**Status:** Scenario framework implemented. `MarketScenario` and `ScenarioSet` pytrees, `apply_scenario` for full market state shocks, named stress builders (steepener, flattener, butterfly). P&L attribution via `pnl_attribution()` with second-order Taylor expansion. Historical crisis replay and reverse stress testing are next.
 
 ### 4.3 XVA Suite
 

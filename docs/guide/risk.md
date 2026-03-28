@@ -202,7 +202,38 @@ shocked_market = apply_scenario(base, scenario)
 # shocked_market.discount_curve has bumped zero rates
 ```
 
-## VaR and Expected Shortfall
+## Pricing Functions for Risk
+
+The risk engine accepts any pricing function with the signature:
+
+```python
+def my_pricing_fn(instrument, market: MarketData) -> Float[Array, ""]:
+    ...
+```
+
+Each instrument receives a per-instrument `MarketData` with scalar `spots`, `vols`, `dividends` and the **full shared discount curve**. This means both equity and rates products work through the same risk framework:
+
+```python
+# Equity: extract spot/vol/rate from market
+def bs_pricer(option, market):
+    from valax.risk.var import _extract_short_rate
+    rate = _extract_short_rate(market.discount_curve)
+    return black_scholes_price(option, market.spots, market.vols, rate, market.dividends)
+
+# Rates: use the full curve directly
+def swap_pricer(swap, market):
+    return swap_price(swap, market.discount_curve)
+```
+
+For existing equity-style functions with signature `(instrument, spot, vol, rate, dividend) -> price`, use the adapter:
+
+```python
+from valax.risk import wrap_equity_pricing_fn
+
+market_fn = wrap_equity_pricing_fn(black_scholes_price)
+```
+
+## Full-Revaluation VaR
 
 The end-to-end VaR workflow: generate scenarios, reprice the portfolio under each one via `jax.vmap`, compute risk measures on the P&L vector.
 
@@ -210,7 +241,7 @@ The end-to-end VaR workflow: generate scenarios, reprice the portfolio under eac
 from valax.risk import portfolio_pnl, value_at_risk, expected_shortfall
 
 # Reprice portfolio under all scenarios (vmapped)
-pnl = portfolio_pnl(black_scholes_price, instruments, base, scenarios)
+pnl = portfolio_pnl(my_pricing_fn, instruments, base, scenarios)
 
 # Risk measures
 var_99 = value_at_risk(pnl, confidence=0.99)
@@ -220,6 +251,60 @@ es_99 = expected_shortfall(pnl, confidence=0.99)
 `portfolio_pnl` uses `jax.vmap` over the scenario axis — each iteration applies one scenario, reprices via `jax.vmap` over instruments, and returns a scalar P&L. The base `MarketData` is closed over (constant); only the scenario varies.
 
 This means **10,000 scenarios x 100 instruments = 1,000,000 repricings** compile down to a single JIT-compiled, vectorized computation — no Python loops.
+
+## Parametric VaR (Delta-Normal)
+
+For fast VaR without repricing, `parametric_var` uses autodiff to compute portfolio sensitivities (delta vector) and the covariance matrix to estimate portfolio variance:
+
+$$\text{VaR}_\alpha = z_\alpha \cdot \sqrt{\boldsymbol{\delta}^T \Sigma \boldsymbol{\delta}}$$
+
+where $\boldsymbol{\delta}$ is the gradient of portfolio value w.r.t. all risk factors and $\Sigma$ is the covariance matrix.
+
+```python
+from valax.risk import parametric_var
+
+pvar_99 = parametric_var(my_pricing_fn, instruments, base, cov, confidence=0.99)
+```
+
+This is a first-order (linear) approximation — fast and accurate for well-hedged portfolios. For highly convex positions (e.g., short gamma), use full-revaluation VaR instead.
+
+Internally, the sensitivity to curve pillars is converted from DF-space to zero-rate-space: $\frac{\partial P}{\partial r_i} = \frac{\partial P}{\partial DF_i} \cdot (-t_i \cdot DF_i)$, matching the covariance matrix's column ordering.
+
+## P&L Attribution
+
+`pnl_attribution` decomposes a scenario's P&L into risk factor contributions using a second-order Taylor expansion with autodiff-computed sensitivities:
+
+$$\Delta P \approx \underbrace{\sum_i \delta_i \Delta x_i}_{\text{first order}} + \underbrace{\frac{1}{2} \sum_i \gamma_i (\Delta x_i)^2}_{\text{second order}} + \underbrace{\text{remainder}}_{\text{unexplained}}$$
+
+```python
+from valax.risk import pnl_attribution
+
+attr = pnl_attribution(my_pricing_fn, instruments, base, scenario)
+
+print(f"Delta (spot):  {attr['delta_spot']:.2f}")
+print(f"Vega:          {attr['delta_vol']:.2f}")
+print(f"Rho (rates):   {attr['delta_rate']:.2f}")
+print(f"Gamma (spot):  {attr['gamma_spot']:.2f}")
+print(f"Total approx:  {attr['total_second_order']:.2f}")
+print(f"Actual P&L:    {attr['actual']:.2f}")
+print(f"Unexplained:   {attr['unexplained']:.2f}")
+```
+
+The returned dict contains:
+
+| Key | Description |
+|-----|------------|
+| `delta_spot` | P&L from spot moves (first order) |
+| `delta_vol` | P&L from vol moves (vega) |
+| `delta_rate` | P&L from rate moves (rho / DV01) |
+| `delta_div` | P&L from dividend moves |
+| `gamma_spot` | P&L from spot convexity (second order) |
+| `total_first_order` | Sum of all delta terms |
+| `total_second_order` | First order + gamma |
+| `actual` | True P&L from full repricing |
+| `unexplained` | `actual - total_second_order` |
+
+All sensitivities are computed via `jax.grad` and `jax.hessian` — no finite differences.
 
 ---
 

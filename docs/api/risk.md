@@ -142,7 +142,27 @@ Quadratic rate profile: wings at `wing_bump`, belly at `belly_bump`.
 
 ---
 
+## Pricing Function Adapter
+
+### `wrap_equity_pricing_fn`
+
+```python
+wrap_equity_pricing_fn(fn) -> Callable
+```
+
+Adapts an equity-style pricing function with signature `(instrument, spot, vol, rate, dividend) -> price` to the market-data-aware signature `(instrument, MarketData) -> price` used by the risk engine. Extracts a scalar rate from the discount curve's shortest maturity.
+
+---
+
 ## Risk Measures
+
+### `reprice_under_scenario`
+
+```python
+reprice_under_scenario(pricing_fn, instruments, base, scenario) -> Float[Array, ""]
+```
+
+Reprice a portfolio under a single scenario. The `pricing_fn` must have signature `(instrument, MarketData) -> price`. Each instrument receives per-asset `MarketData` (scalar spot, vol, dividend) with the shared discount curve via `jax.vmap`.
 
 ### `portfolio_pnl`
 
@@ -151,14 +171,6 @@ portfolio_pnl(pricing_fn, instruments, base, scenarios) -> Float[Array, "n_scena
 ```
 
 Compute P&L under each scenario via `jax.vmap`. Returns `portfolio_value(scenario_i) - portfolio_value(base)`.
-
-### `reprice_under_scenario`
-
-```python
-reprice_under_scenario(pricing_fn, instruments, base, scenario) -> Float[Array, ""]
-```
-
-Reprice a portfolio under a single scenario. Applies the scenario, extracts market args, prices via `jax.vmap` over instruments, and sums.
 
 ### `value_at_risk`
 
@@ -175,3 +187,39 @@ expected_shortfall(pnl, confidence=0.99) -> Float[Array, ""]
 ```
 
 CVaR: mean of losses beyond VaR. Always $\geq$ VaR.
+
+### `parametric_var`
+
+```python
+parametric_var(pricing_fn, instruments, base, cov, confidence=0.99) -> Float[Array, ""]
+```
+
+Delta-normal VaR using autodiff sensitivities. Computes the portfolio gradient w.r.t. all risk factors via `jax.grad`, then:
+
+$$\text{VaR} = z_\alpha \cdot \sqrt{\delta^T \Sigma \delta}$$
+
+where $\delta$ is the sensitivity vector and $\Sigma$ is the covariance matrix. Risk factor ordering in `cov`: `[spots, vols, rates, dividends]`. DF sensitivities are converted to zero-rate sensitivities internally.
+
+---
+
+## P&L Attribution
+
+### `pnl_attribution`
+
+```python
+pnl_attribution(pricing_fn, instruments, base, scenario) -> dict[str, Float[Array, ""]]
+```
+
+Decompose a scenario's P&L into risk factor contributions using a second-order Taylor expansion with autodiff sensitivities. Returns:
+
+| Key | Description |
+|-----|-------------|
+| `delta_spot` | First-order spot contribution |
+| `delta_vol` | First-order vol contribution (vega) |
+| `delta_rate` | First-order rate contribution (rho/DV01) |
+| `delta_div` | First-order dividend contribution |
+| `gamma_spot` | Second-order spot convexity |
+| `total_first_order` | Sum of all delta terms |
+| `total_second_order` | First order + gamma |
+| `actual` | True P&L from full repricing |
+| `unexplained` | Actual − second-order approximation |

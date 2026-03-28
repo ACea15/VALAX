@@ -15,8 +15,11 @@ from valax.risk.scenarios import (
     butterfly,
 )
 from valax.risk.var import (
+    wrap_equity_pricing_fn,
     reprice_under_scenario,
     portfolio_pnl,
+    parametric_var,
+    pnl_attribution,
     value_at_risk,
     expected_shortfall,
 )
