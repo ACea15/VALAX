@@ -31,14 +31,18 @@ These are foundational pieces that block almost everything else. They should be 
 
 ### 1.1 Multi-Curve Bootstrapping
 
-- [ ] **Simultaneous bootstrap** of OIS discount curve + SOFR forward curve from market instruments (deposits, FRAs, swaps)
+- [x] **Sequential bootstrap** from deposits, FRAs, and par swap rates — analytic solve per pillar
+- [x] **Simultaneous bootstrap** via `optimistix.root_find` (Newton) in log-DF space — handles overlapping instruments
+- [x] **Multi-curve framework** — `MultiCurveSet` with OIS discount curve + tenor-specific forward curves, dual-curve swap bootstrap
+- [x] **Jacobian of discount factors w.r.t. input rates** via autodiff (free with JAX, verified in tests)
 - [ ] **Basis curve** support (e.g., 1M vs 3M SOFR basis)
 - [ ] **Turn-of-year effects** and stub handling
-- [ ] **Jacobian of discount factors w.r.t. input rates** via autodiff (free with JAX)
 
 **Why:** Every rates product needs proper forward curves. Manual pillar specification doesn't scale.
 
 **Approach:** Root-finding via `optimistix.root_find` on the system of bootstrapping equations. Each instrument (deposit, swap) provides one equation. The curve is a pytree — autodiff gives the Jacobian for free.
+
+**Status:** Core bootstrapping implemented in `valax/curves/bootstrap.py` and `valax/curves/multi_curve.py`. Bootstrap instrument pytrees (`DepositRate`, `FRA`, `SwapRate`) in `valax/curves/instruments.py`. Both sequential and simultaneous methods produce `DiscountCurve` objects compatible with all existing pricing functions. Dual-curve bootstrap supports OIS discounting with separate forward projection curves.
 
 ### 1.2 Volatility Surface Construction
 
