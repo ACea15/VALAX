@@ -136,6 +136,14 @@ def generate_lmm_paths(
         # Extract F_i(T_i): forward i at its fixing date
         forwards_at_fix = jnp.exp(log_fwd_all[tenor_step_indices_arr, jnp.arange(N)])
 
+        # Full forward curve at each tenor date T_i:
+        # fwd_at_tenors[i, j] = F_j(T_i) for all j.
+        # Dead forwards (j < i) are masked to 0.
+        log_fwd_at_tenors = log_fwd_all[tenor_step_indices_arr]  # (N, N)
+        fwd_at_tenors = jnp.exp(log_fwd_at_tenors)
+        alive_mask = jnp.triu(jnp.ones((N, N), dtype=fwd_at_tenors.dtype))
+        fwd_at_tenors = fwd_at_tenors * alive_mask
+
         # Discount factors from realized forwards:
         # DF(0, T_0) = initial_df (from curve)
         # DF(0, T_{k+1}) = DF(0, T_0) / prod_{j=0}^{k} (1 + tau_j * F_j(T_j))
@@ -146,12 +154,13 @@ def generate_lmm_paths(
             initial_df / cum_accrual,            # DF(0, T_1), ..., DF(0, T_N)
         ])
 
-        return forwards_at_fix, dfs
+        return forwards_at_fix, fwd_at_tenors, dfs
 
     keys = jax.random.split(key, n_paths)
-    forwards_at_fixing, discount_factors = jax.vmap(single_path)(keys)
+    forwards_at_fixing, forwards_at_tenors, discount_factors = jax.vmap(single_path)(keys)
 
     return LMMPathResult(
         forwards_at_fixing=forwards_at_fixing,
+        forwards_at_tenors=forwards_at_tenors,
         discount_factors=discount_factors,
     )

@@ -9,3 +9,4 @@ from valax.pricing.mc.rate_payoffs import (
     swaption_mc_payoff,
 )
 from valax.pricing.mc.sabr_paths import generate_sabr_paths
+from valax.pricing.mc.bermudan import bermudan_swaption_lsm, LSMConfig

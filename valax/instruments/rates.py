@@ -97,3 +97,32 @@ class Swaption(eqx.Module):
     notional: Float[Array, ""]
     is_payer: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+
+
+class BermudanSwaption(eqx.Module):
+    """Bermudan option to enter a vanilla fixed-for-float interest rate swap.
+
+    The holder may exercise at any date in exercise_dates. If exercised at
+    exercise_dates[e], the holder enters a tail swap with fixed leg payments
+    on fixed_dates[e:] (the remaining coupons from that point onward).
+
+    Exercise dates must align with the LMM tenor structure. Typically
+    exercise_dates[e] = fixed_dates[e] shifted back by one period, or
+    equivalently, the exercise dates are the start of each swap period.
+
+    Attributes:
+        exercise_dates: Ordinal dates at which exercise is allowed, shape (n_exercise,).
+        fixed_dates: Full set of fixed leg payment dates, shape (n_periods,).
+                     fixed_dates[-1] is the swap maturity.
+        strike: Fixed rate K.
+        notional: Notional principal.
+        is_payer: True = right to pay fixed / receive float (payer Bermudan).
+        day_count: Day count convention.
+    """
+
+    exercise_dates: Int[Array, " n_exercise"]
+    fixed_dates: Int[Array, " n_periods"]
+    strike: Float[Array, ""]
+    notional: Float[Array, ""]
+    is_payer: bool = eqx.field(static=True, default=True)
+    day_count: str = eqx.field(static=True, default="act_360")
