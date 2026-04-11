@@ -35,8 +35,10 @@ nav:
   - Getting Started: getting-started.md
   - Examples: examples.md
   - Architecture: architecture.md
+  - Models & Theory: theory.md
   - Roadmap: roadmap.md
   - User Guide:
+      - Instruments: guide/instruments.md
       - Analytical Pricing: guide/analytical.md
       - Fixed Income: guide/fixed-income.md
       - Greeks via Autodiff: guide/greeks.md

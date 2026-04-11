@@ -12,7 +12,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 
 | Area | What We Have |
 |------|-------------|
-| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption` |
+| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
 | **Models** | Black-Scholes, Heston (MC), SABR (analytic + MC), LMM (MC with PCA factors) |
 | **Pricing** | Black-Scholes, Black-76, Bachelier analytic; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
@@ -21,7 +21,168 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | **Calibration** | SABR and Heston calibration with LM, BFGS, and Optax solvers; parameter constraint transforms |
 | **Portfolio** | `batch_price()` and `batch_greeks()` via vmap |
 | **Market Data** | `MarketData` container, `MarketScenario` / `ScenarioSet` for risk factor shocks |
-| **Risk** | Curve shocks (parallel, steepener, butterfly, key-rate), parametric/historical/stress scenarios, VaR, ES |
+| **Risk** | Curve shocks (parallel, steepener, butterfly, key-rate), parametric/historical/stress scenarios, VaR, ES, sensitivity ladders with waterfall P&L |
+
+### Instrument Coverage Matrix
+
+A snapshot of every instrument class relevant to production bank systems, with implementation status and blocking dependencies.
+
+#### ✅ Implemented
+
+| Instrument | Asset class | Module | Pricing available |
+|------------|-------------|--------|-------------------|
+| `EuropeanOption` | Equity | `instruments/options.py` | BSM, Black-76, Bachelier, SABR, MC (GBM/Heston), PDE, Lattice |
+| `ZeroCouponBond` | Fixed income | `instruments/bonds.py` | Curve discounting |
+| `FixedRateBond` | Fixed income | `instruments/bonds.py` | Curve discounting, YTM, duration, convexity, KRDs |
+| `Caplet` | Rates | `instruments/rates.py` | Black-76, Bachelier |
+| `Cap` (and Floor) | Rates | `instruments/rates.py` | Black-76, Bachelier (strip pricing) |
+| `InterestRateSwap` | Rates | `instruments/rates.py` | Analytic (replication), curve discounting |
+| `Swaption` | Rates | `instruments/rates.py` | Black-76, Bachelier |
+| `BermudanSwaption` | Rates | `instruments/rates.py` | Longstaff-Schwartz MC on LMM paths |
+| `FXForward` | FX | `instruments/fx.py` | Covered interest rate parity |
+| `FXVanillaOption` | FX | `instruments/fx.py` | Garman-Kohlhagen, implied vol, 3 delta conventions |
+| `FXBarrierOption` | FX | `instruments/fx.py` | Instrument defined; analytical pricing TBD |
+| `AmericanOption` | Equity | `instruments/options.py` | Binomial tree (CRR), European/American exercise |
+| `EquityBarrierOption` | Equity exotics | `instruments/options.py` | MC with sigmoid smoothing, knock-in/knock-out parity |
+| `AsianOption` | Equity exotics | `instruments/options.py` | MC arithmetic and geometric averaging |
+| `LookbackOption` | Equity exotics | `instruments/options.py` | MC floating-strike and fixed-strike variants |
+| `VarianceSwap` | Volatility | `instruments/options.py` | Analytic (BSM), MC realized variance, seasoned pricing |
+
+#### 🔴 Missing — High Priority (blocks desk adoption)
+
+| Instrument | Asset class | Complexity | Blocked by | Notes |
+|------------|-------------|------------|------------|-------|
+| `FloatingRateBond` / FRN | Fixed income | Medium | Cashflow engine (P1.2) | Requires floating coupon projection from curve |
+
+#### 🟠 Missing — Medium Priority (specific desks)
+
+| Instrument | Asset class | Complexity | Blocked by | Notes |
+|------------|-------------|------------|------------|-------|
+| `CallableBond` / `PuttableBond` | Fixed income | High | Short-rate models (P1.4) | OAS, effective duration. Most corporate bonds are callable |
+| `OISSwap` / `SOFRSwap` | Rates | Medium | Cashflow engine (P1.2) | Daily compounding, post-LIBOR dominant swap type |
+| `CrossCurrencySwap` | Rates / FX | High | Cashflow engine + multi-curve | Notional exchange, basis spread, two currencies |
+| `CDS` | Credit | Medium | Survival curve / hazard rates | Prerequisite for XVA (CVA). Huge market |
+| `InflationSwap` (ZC and YoY) | Inflation | Medium | Inflation curve | Liability hedging. Growing market |
+| `InflationCapFloor` | Inflation | Medium | Inflation curve | Black-76 on forward CPI ratio |
+| `TotalReturnSwap` | Equity / prime brokerage | Medium | Cashflow engine | Funding + equity combined |
+| `QuantoOption` | FX / equity cross | Medium | Correlated 2-asset MC | FX-equity correlation adjustment |
+| `SpreadOption` | Multi-asset | Medium | 2-asset MC or Kirk approx. | Option on spread (Margrabe, Kirk) |
+
+#### 🟡 Missing — Lower Priority (structured / exotic)
+
+| Instrument | Asset class | Complexity | Blocked by | Notes |
+|------------|-------------|------------|------------|-------|
+| `Autocallable` / Phoenix | Structured products | High | SLV model, correlated MC | Multi-hundred-billion dollar market. Path-dependent, multi-asset |
+| `WorstOfBasketOption` | Structured products | High | Correlated multi-asset MC | Correlation-sensitive, multi-asset |
+| `RangeAccrual` | Rates / structured | Medium | MC with path monitoring | Coupon accrues while index in range |
+| `CMSSwap` / `CMSCapFloor` | Rates | Medium | Replication or SABR integration | CMS rate with convexity adjustment |
+| `CDOTranche` | Credit correlation | High | CDS + copula simulation | Gaussian copula, base correlation |
+| `ConvertibleBond` | Equity-credit hybrid | High | PDE or tree with credit | Equity + credit + optionality |
+| `TARF` | FX structured | High | MC with early termination | Target accrual range forward |
+| `Cliquet` / Ratchet | Equity structured | Medium | Forward-starting option pricer | Popular in structured notes |
+| `MBS` | Securitized | Very high | Prepayment models, OAS | Very US-market-specific |
+| `CompoundOption` | Exotic | Low | BSM extension | Option on an option. Rare in practice |
+| `ChooserOption` | Exotic | Low | BSM extension | Choose call/put at a future date |
+
+---
+
+## Production Priority Roadmap (Snapshot: June 2025)
+
+The tier-based feature inventory below is comprehensive but feature-area oriented. This section reorganizes the most critical work into **execution priorities** — what a bank evaluating VALAX would need to see, in roughly the order it should be built.
+
+This is a **point-in-time snapshot**. Priorities will shift as items are completed and real user feedback arrives.
+
+### Priority 1 — Foundational Infrastructure *(Blocks Everything)*
+
+These items are hard prerequisites. Every downstream feature, product, and integration depends on them.
+
+| # | Task | Why It's Critical | Tier Ref |
+|---|------|-------------------|----------|
+| **P1.1** | **Business Calendars & Date Adjustment** | Every trade in a bank settles on business days. Wrong dates = wrong cashflows = wrong P&L. Precomputed holiday arrays (TARGET, NYSE, SOFR/Fed, London, Tokyo) with modified-following/preceding and end-of-month conventions. | 1.3 |
+| **P1.2** | **Cashflow Engine (Legs, Stubs, Compounding)** | Real swaps have short/long stubs, compounding-in-arrears, amortizing notionals, fixing histories. The current schedule generator can't represent production trades. `FixedLeg` / `FloatingLeg` pytrees with full convention support. | 1.4 |
+| **P1.3** | **CI/CD Pipeline** | No bank adopts a library without automated testing. GitHub Actions with: lint, type-check, full test suite, QuantLib comparison, coverage reporting. A gate before anything else ships. | — |
+| **P1.4** | **Short-Rate Models (Hull-White, G2++)** | Backbone of every rates desk — needed for callable bonds, Bermudan swaptions (backward induction alternative to LSM), and IR exotics. Analytic bond prices + swaption calibration. | 2.1 |
+
+### Priority 2 — Production Pricing Capabilities
+
+These unlock entire asset classes and bring pricing to the speed and accuracy required by trading desks.
+
+| # | Task | Why It's Critical | Tier Ref |
+|---|------|-------------------|----------|
+| **P2.1** | **Heston Semi-Analytic (COS / Fourier)** | MC-only Heston is ~1000x too slow for real-time pricing and calibration loops. The COS method gives microsecond pricing — essential for any equity desk. | 2.2 |
+| **P2.2** | **Local Volatility + SLV** | Local vol (Dupire) is the *minimum* standard for exotic equity pricing. SLV (Heston + leverage function) is the actual industry standard. Without this, no structured products desk can use VALAX. | 2.3, 2.4 |
+| **P2.3** | **FX Derivatives (Garman-Kohlhagen, Barriers, Delta Conventions)** | FX is one of the largest derivatives markets with unique conventions (delta-space quoting). Unlocks an entire asset class. | 3.3 |
+| **P2.4** | **Credit Derivatives (CDS, Survival Curves)** | Survival curves are a prerequisite for XVA (CVA). CDS pricing and hazard rate bootstrapping are foundational. Unlocks credit trading and the entire XVA workstream. | 3.4 |
+
+### Priority 3 — Risk & Regulation *(Required for Sign-Off)*
+
+Banks cannot go live without regulatory compliance. These items satisfy Basel requirements and complete the risk framework.
+
+| # | Task | Why It's Critical | Tier Ref |
+|---|------|-------------------|----------|
+| **P3.1** | **XVA Suite (CVA, DVA, FVA at minimum)** | XVA is now a first-class P&L line at every bank. CVA alone changes pricing by 10–50 bps on uncollateralized trades. This is where JAX's GPU acceleration creates the biggest competitive advantage (nested MC). | 4.3 |
+| **P3.2** | **FRTB Standardized Approach** | Basel III.1/IV mandates FRTB for market risk capital. The Standardized Approach (SA) is the minimum — sensitivity-based with prescribed risk weights. Banks need this for regulatory capital reporting. | — |
+| **P3.3** | **Marginal / Component / Incremental VaR** | Current VaR is portfolio-level only. Desks need to attribute risk to individual trades and see the marginal impact of new trades. | 4.1 |
+
+### Priority 4 — Service Layer *(Required for Integration)*
+
+VALAX is currently a Python library. Banks integrate pricing engines as services. This priority turns the library into a deployable system.
+
+| # | Task | Why It's Critical | Tier Ref |
+|---|------|-------------------|----------|
+| **P4.1** | **API Server (gRPC + REST)** | Banks integrate pricing via services, not Python imports. A gRPC server (low-latency inter-service) + REST (UIs/dashboards) with OpenAPI docs is the delivery mechanism. | — |
+| **P4.2** | **Market Data Adapters & Persistence** | Production systems consume Bloomberg/Refinitiv feeds and store EOD snapshots. Need adapters for market data ingest and a storage layer for curves, surfaces, and fixings. | 6.1 |
+| **P4.3** | **Audit Logging & Observability** | Regulatory requirement: every pricing must be reproducible. Structured logging (who priced what, when, with which market data), OpenTelemetry tracing, Prometheus metrics. | — |
+| **P4.4** | **Docker + Helm Deployment** | Containerized deployment with GPU support, health checks, graceful shutdown, resource limits. Helm charts for Kubernetes — the standard bank deployment platform. | — |
+
+### Priority 5 — Competitive Differentiators *(Leverage JAX Advantages)*
+
+These are the features that make VALAX not just *another* pricing library but a fundamentally better one. They exploit the JAX-native architecture in ways traditional C++ stacks cannot replicate.
+
+| # | Task | Why It's Critical | Tier Ref |
+|---|------|-------------------|----------|
+| **P5.1** | **Neural Surrogate Pricers (Differential ML)** | XVA nested MC is the most compute-intensive task in banking. Neural surrogates trained with autodiff Greeks reduce compute 100–1000x. Same framework for training and deployment — VALAX's killer feature. | 5.1 |
+| **P5.2** | **GPU/TPU Benchmark Suite** | Prove the value proposition with numbers. Benchmark VALAX on GPU vs QuantLib on CPU for: batch European pricing, MC VaR, XVA exposure simulation. Publish results. | — |
+| **P5.3** | **Deep Hedging** | RL-based hedging with transaction costs is a frontier area. JAX makes the entire training loop differentiable. Positions VALAX at the cutting edge. | 5.3 |
+
+### Recommended Execution Order
+
+```
+Q1 (Foundation):
+  ├─ [P1.1] Business Calendars ──→ [P1.2] Cashflow Engine
+  ├─ [P1.3] CI/CD Pipeline
+  └─ [P1.4] Short-Rate Models (Hull-White)
+
+Q2 (Pricing Depth):
+  ├─ [P2.1] Heston COS / Fourier
+  ├─ [P2.2] Local Vol → SLV
+  ├─ [P2.3] FX Derivatives
+  └─ [P2.4] Credit (CDS, Survival Curves)
+
+Q3 (Risk & Regulation):
+  ├─ [P3.1] XVA (CVA / DVA / FVA)
+  ├─ [P3.2] FRTB Standardized Approach
+  └─ [P3.3] Advanced VaR Decomposition
+
+Q4 (Production Delivery):
+  ├─ [P4.1] API Server (gRPC + REST)
+  ├─ [P4.2] Market Data Layer
+  ├─ [P4.3] Audit & Observability
+  └─ [P4.4] Docker / K8s Deployment
+
+Ongoing (Differentiators):
+  ├─ [P5.1] Neural Surrogates
+  ├─ [P5.2] GPU Benchmarks
+  └─ [P5.3] Deep Hedging
+```
+
+### Assessment
+
+VALAX has excellent bones. The pure-functional JAX architecture is genuinely superior to what most banks run internally (mutable C++ object graphs built 20+ years ago). Autodiff Greeks, `vmap` batching, and GPU portability are structural advantages that compound with every new feature added.
+
+The most urgent gap is **foundational infrastructure** (P1: calendars, cashflows, CI/CD) — not because it's glamorous, but because every downstream feature depends on it. A bank quant evaluating VALAX will immediately ask: *"Can it handle modified-following date adjustment on a 10Y EUR swap with short front stub and compounding-in-arrears on the floating leg?"* — and today the answer is no.
+
+The **highest-ROI parallel investment** is **short-rate models + Heston COS** alongside calendars/cashflows, because they unlock the most actively traded products (callable bonds, fast equity vol calibration) while the plumbing is being built.
 
 ---
 
@@ -170,16 +331,18 @@ New instrument types and entire asset classes.
 
 ### 3.3 FX Derivatives
 
-- [ ] **FX forward** pricing with domestic/foreign discount curves
-- [ ] **FX vanilla options** — Garman-Kohlhagen (modified Black-Scholes)
-- [ ] **FX barrier options** — continuous and discrete monitoring
-- [ ] **FX smile conventions** — delta-based quoting (10D put, 25D put, ATM DNS, 25D call, 10D call)
+- [x] **FX forward** pricing with domestic/foreign discount curves
+- [x] **FX vanilla options** — Garman-Kohlhagen (modified Black-Scholes)
+- [x] **FX smile conventions** — delta-based quoting (spot delta, forward delta, premium-adjusted delta), `strike_to_delta` and `delta_to_strike` conversion
+- [ ] **FX barrier options** — continuous and discrete monitoring (instrument defined, analytical pricing TBD)
 - [ ] **Quanto options** — correlation between FX and underlying
 - [ ] **TARFs (Target Accrual Range Forwards)** — path-dependent FX exotics via MC
 
 **Why:** FX is one of the largest derivatives markets. FX options have unique smile conventions (delta-space, not strike-space).
 
 **Approach:** Garman-Kohlhagen is a minor extension of Black-Scholes. FX smile needs delta-strike conversion utilities. TARFs via MC with diffrax.
+
+**Status:** Core FX pricing implemented in `valax/pricing/analytic/fx.py` and instruments in `valax/instruments/fx.py`. Garman-Kohlhagen pricing, FX forward valuation, implied vol inversion, and all three delta conventions (spot, forward, premium-adjusted) with strike↔delta conversion. See the [Analytical Pricing guide](guide/analytical.md#fx-options-garman-kohlhagen).
 
 ### 3.4 Credit Derivatives
 
