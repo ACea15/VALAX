@@ -12,7 +12,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 
 | Area | What We Have |
 |------|-------------|
-| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
+| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
 | **Models** | Black-Scholes, Heston (MC), SABR (analytic + MC), LMM (MC with PCA factors) |
 | **Pricing** | Black-Scholes, Black-76, Bachelier analytic; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
@@ -34,10 +34,12 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `EuropeanOption` | Equity | `instruments/options.py` | BSM, Black-76, Bachelier, SABR, MC (GBM/Heston), PDE, Lattice |
 | `ZeroCouponBond` | Fixed income | `instruments/bonds.py` | Curve discounting |
 | `FixedRateBond` | Fixed income | `instruments/bonds.py` | Curve discounting, YTM, duration, convexity, KRDs |
+| `FloatingRateBond` / FRN | Fixed income | `instruments/bonds.py` | Forward projection + single-curve discounting, seasoned fixings |
 | `Caplet` | Rates | `instruments/rates.py` | Black-76, Bachelier |
 | `Cap` (and Floor) | Rates | `instruments/rates.py` | Black-76, Bachelier (strip pricing) |
 | `InterestRateSwap` | Rates | `instruments/rates.py` | Analytic (replication), curve discounting |
 | `Swaption` | Rates | `instruments/rates.py` | Black-76, Bachelier |
+| `OISSwap` / `SOFRSwap` | Rates | `instruments/rates.py` | Telescoping float-leg identity + fixed-leg annuity (single-curve) |
 | `BermudanSwaption` | Rates | `instruments/rates.py` | Longstaff-Schwartz MC on LMM paths |
 | `FXForward` | FX | `instruments/fx.py` | Covered interest rate parity |
 | `FXVanillaOption` | FX | `instruments/fx.py` | Garman-Kohlhagen, implied vol, 3 delta conventions |
@@ -48,18 +50,11 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `LookbackOption` | Equity exotics | `instruments/options.py` | MC floating-strike and fixed-strike variants |
 | `VarianceSwap` | Volatility | `instruments/options.py` | Analytic (BSM), MC realized variance, seasoned pricing |
 
-#### 🔴 Missing — High Priority (blocks desk adoption)
-
-| Instrument | Asset class | Complexity | Blocked by | Notes |
-|------------|-------------|------------|------------|-------|
-| `FloatingRateBond` / FRN | Fixed income | Medium | Cashflow engine (P1.2) | Requires floating coupon projection from curve |
-
 #### 🟠 Missing — Medium Priority (specific desks)
 
 | Instrument | Asset class | Complexity | Blocked by | Notes |
 |------------|-------------|------------|------------|-------|
 | `CallableBond` / `PuttableBond` | Fixed income | High | Short-rate models (P1.4) | OAS, effective duration. Most corporate bonds are callable |
-| `OISSwap` / `SOFRSwap` | Rates | Medium | Cashflow engine (P1.2) | Daily compounding, post-LIBOR dominant swap type |
 | `CrossCurrencySwap` | Rates / FX | High | Cashflow engine + multi-curve | Notional exchange, basis spread, two currencies |
 | `CDS` | Credit | Medium | Survival curve / hazard rates | Prerequisite for XVA (CVA). Huge market |
 | `InflationSwap` (ZC and YoY) | Inflation | Medium | Inflation curve | Liability hedging. Growing market |

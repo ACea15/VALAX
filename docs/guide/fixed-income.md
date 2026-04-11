@@ -239,3 +239,93 @@ print(f"Duration: {md:.4f}")
 print(f"Convexity:{cx:.4f}")
 print(f"KRDs:     {krd}")
 ```
+
+## Floating Rate Notes & OIS Swaps
+
+Floating-rate notes and overnight-index swaps share the same core identity: under a **single curve** (the discount curve is also the projection curve for the floating index), their float legs telescope. This gives exact, closed-form pricing without any cashflow simulation.
+
+### The telescoping identity
+
+For a single accrual period $[T_{i-1}, T_i]$ the simply-compounded forward rate satisfies
+
+$$F_i \cdot \tau_i = \frac{DF(T_{i-1})}{DF(T_i)} - 1.$$
+
+Multiplying by $N \cdot DF(T_i)$ and summing over the schedule:
+
+$$\sum_i N \cdot F_i \cdot \tau_i \cdot DF(T_i) = N \cdot \sum_i \bigl(DF(T_{i-1}) - DF(T_i)\bigr) = N \cdot \bigl(DF(T_0) - DF(T_n)\bigr).$$
+
+The floating leg PV collapses to **two discount factors** — the start and the end of the schedule.
+
+### Floating rate note (FRN)
+
+`floating_rate_bond_price(bond, curve)` applies this identity coupon-by-coupon so that a fixed **spread** and any **known past fixings** can be layered on top.  For each period $i$,
+
+$$C_i = N \cdot (F_i + s) \cdot \tau_i$$
+
+where $F_i$ is either taken from `bond.fixing_rates[i]` (when that entry is finite) or projected from the curve. The PV is then $\sum_i C_i \cdot DF(T_i) + N \cdot DF(T_n)$, summed over **future** cash flows only.
+
+**Par-at-reset invariant.** For a zero-spread FRN valued on its first reset date, the coupon sum collapses via telescoping to $N \cdot DF(T_0) - N \cdot DF(T_n)$, and adding the redemption $N \cdot DF(T_n)$ gives exactly the face value. With a non-zero spread this becomes $P = N + N \cdot s \cdot A$, where $A$ is the discounted day-count annuity of the schedule.
+
+```python
+from valax.instruments import FloatingRateBond
+from valax.pricing.analytic import floating_rate_bond_price
+from valax.dates import generate_schedule, ymd_to_ordinal
+import jax.numpy as jnp
+import numpy as np
+
+ref = ymd_to_ordinal(2025, 1, 1)
+sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=4)  # quarterly
+# Fixing dates = start of each accrual period (previous payment date, or ref)
+fixings = jnp.array([int(ref)] + list(np.asarray(sched[:-1]).tolist()), dtype=jnp.int32)
+
+frn = FloatingRateBond(
+    payment_dates=sched,
+    fixing_dates=fixings,
+    settlement_date=ref,
+    spread=jnp.array(0.005),     # 50 bps over the index
+    face_value=jnp.array(100.0),
+)
+price = floating_rate_bond_price(frn, curve)
+# At issue, price ≈ 100 + 100 · 0.005 · annuity
+```
+
+**Seasoned FRNs.** Pass the historical fixings as a 1-D array in `fixing_rates`, using `NaN` for periods that have not yet fixed. The pricer uses known rates where available and projects from the curve elsewhere:
+
+```python
+known = jnp.array([0.045, float("nan"), float("nan"), ...])  # period 0 already fixed
+frn_seasoned = FloatingRateBond(
+    payment_dates=sched, fixing_dates=fixings,
+    settlement_date=ref, spread=jnp.array(0.005),
+    face_value=jnp.array(100.0),
+    fixing_rates=known,
+)
+```
+
+### OIS swap
+
+`ois_swap_price(swap, curve)` values an overnight index swap under the same single-curve assumption. The floating leg pays the daily-compounded overnight rate, but under log-linear DF interpolation the compounded rate *exactly* matches the simply-compounded forward, so the same telescoping identity applies:
+
+$$\text{PV}_{\text{float}} = N \cdot \bigl(DF(T_0) - DF(T_n^{\text{float}})\bigr), \qquad \text{PV}_{\text{fixed}} = N \cdot K \cdot A^{\text{fixed}}.$$
+
+```python
+from valax.instruments import OISSwap
+from valax.pricing.analytic import ois_swap_price, ois_swap_rate
+
+ois = OISSwap(
+    start_date=ref,
+    fixed_dates=sched,
+    float_dates=sched,           # same schedule on both legs
+    fixed_rate=jnp.array(0.05),
+    notional=jnp.array(1_000_000.0),
+)
+npv = ois_swap_price(ois, curve)
+par = ois_swap_rate(ois, curve)   # par rate makes NPV exactly zero
+```
+
+`ois_swap_rate` is the companion par-rate solver: $K^\ast = \bigl(DF(T_0) - DF(T_n)\bigr) / A$. Structurally identical to `swap_rate` from the vanilla IRS pricer, but keyed off the `OISSwap` pytree so fixed and floating legs can carry distinct schedules (e.g. annual fixed vs. quarterly float).
+
+!!! note "Single-curve assumption"
+    Both `floating_rate_bond_price` and `ois_swap_price` assume the discount curve also forecasts the floating index. Separating a tenor-specific forecasting curve from the OIS discount curve (a **multi-curve** setup) is the right next step for basis-spread products such as cross-currency and Libor-OIS basis swaps — the `valax.curves.multi_curve` module has the primitives but is not yet wired into these pricers.
+
+!!! tip "Autodiff Greeks come for free"
+    Because these pricers are ordinary JAX functions of the curve pytree, `jax.grad` with respect to the curve's log-discount-factors gives the full **key-rate sensitivity vector** in a single backward pass — the same technique used for fixed-rate bonds above.
