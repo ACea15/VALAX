@@ -39,3 +39,8 @@ from valax.pricing.analytic.variance_swap import (
     variance_swap_price,
     variance_swap_price_seasoned,
 )
+from valax.pricing.analytic.floating import (
+    floating_rate_bond_price,
+    ois_swap_price,
+    ois_swap_rate,
+)
