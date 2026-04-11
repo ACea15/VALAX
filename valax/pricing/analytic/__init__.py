@@ -25,3 +25,17 @@ from valax.pricing.analytic.swaptions import (
     swaption_price_bachelier,
 )
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_price
+from valax.pricing.analytic.fx import (
+    fx_forward_rate,
+    fx_forward_price,
+    garman_kohlhagen_price,
+    fx_implied_vol,
+    fx_delta,
+    strike_to_delta,
+    delta_to_strike,
+)
+from valax.pricing.analytic.variance_swap import (
+    variance_swap_fair_strike,
+    variance_swap_price,
+    variance_swap_price_seasoned,
+)
