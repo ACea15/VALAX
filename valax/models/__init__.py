@@ -11,3 +11,4 @@ from valax.models.lmm import (
     build_lmm_model,
 )
 from valax.models.sabr import SABRModel
+from valax.models.hull_white import HullWhiteModel
