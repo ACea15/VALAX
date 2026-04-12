@@ -12,9 +12,9 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 
 | Area | What We Have |
 |------|-------------|
-| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSCapFloor`, `RangeAccrual`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
-| **Models** | Black-Scholes, Heston (MC), SABR (analytic + MC), LMM (MC with PCA factors) |
-| **Pricing** | Black-Scholes, Black-76, Bachelier analytic; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree |
+| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSCapFloor`, `RangeAccrual`, `CallableBond`, `PuttableBond`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
+| **Models** | Black-Scholes, Heston (MC), SABR (analytic + MC), LMM (MC with PCA factors), **Hull-White** (analytic ZCB, trinomial tree) |
+| **Pricing** | Black-Scholes, Black-76, Bachelier analytic; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree; **Hull-White trinomial tree** (callable/puttable bonds) |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
 | **Curves** | `DiscountCurve` with log-linear interpolation, flat extrapolation |
 | **Dates** | Act/360, Act/365, Act/Act, 30/360; ordinal-based date arithmetic; coupon schedule generation |
@@ -54,12 +54,13 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `CMSSwap` | Rates | `instruments/rates.py` | Forward par swap rate (no convexity adjustment) |
 | `CMSCapFloor` | Rates | `instruments/rates.py` | Black-76 on forward CMS rate (no convexity adjustment) |
 | `RangeAccrual` | Rates / structured | `instruments/rates.py` | Black-76 digital-replication (snapshot probability) |
+| `CallableBond` | Fixed income | `instruments/bonds.py` | Hull-White trinomial tree with backward induction, issuer-optimal call exercise |
+| `PuttableBond` | Fixed income | `instruments/bonds.py` | Hull-White trinomial tree with backward induction, holder-optimal put exercise |
 
 #### 🟠 Missing — Medium Priority (specific desks)
 
 | Instrument | Asset class | Complexity | Blocked by | Notes |
 |------------|-------------|------------|------------|-------|
-| `CallableBond` / `PuttableBond` | Fixed income | High | Short-rate models (P1.4) | OAS, effective duration. Most corporate bonds are callable |
 | `CDS` | Credit | Medium | Survival curve / hazard rates | Prerequisite for XVA (CVA). Huge market |
 | `InflationSwap` (ZC and YoY) | Inflation | Medium | Inflation curve | Liability hedging. Growing market |
 | `InflationCapFloor` | Inflation | Medium | Inflation curve | Black-76 on forward CPI ratio |
@@ -97,7 +98,7 @@ These items are hard prerequisites. Every downstream feature, product, and integ
 | **P1.1** | **Business Calendars & Date Adjustment** | Every trade in a bank settles on business days. Wrong dates = wrong cashflows = wrong P&L. Precomputed holiday arrays (TARGET, NYSE, SOFR/Fed, London, Tokyo) with modified-following/preceding and end-of-month conventions. | 1.3 |
 | **P1.2** | **Cashflow Engine (Legs, Stubs, Compounding)** | Real swaps have short/long stubs, compounding-in-arrears, amortizing notionals, fixing histories. The current schedule generator can't represent production trades. `FixedLeg` / `FloatingLeg` pytrees with full convention support. | 1.4 |
 | **P1.3** | **CI/CD Pipeline** | No bank adopts a library without automated testing. GitHub Actions with: lint, type-check, full test suite, QuantLib comparison, coverage reporting. A gate before anything else ships. | — |
-| **P1.4** | **Short-Rate Models (Hull-White, G2++)** | Backbone of every rates desk — needed for callable bonds, Bermudan swaptions (backward induction alternative to LSM), and IR exotics. Analytic bond prices + swaption calibration. | 2.1 |
+| **P1.4** | ~~**Short-Rate Models (Hull-White, G2++)**~~ ✅ **Hull-White implemented** | One-factor Hull-White with analytic ZCB pricing (exact-fit to initial curve), trinomial tree for callable/puttable bonds. G2++ and swaption calibration (Jamshidian) are follow-ups. | 2.1 |
 
 ### Priority 2 — Production Pricing Capabilities
 
