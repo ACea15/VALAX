@@ -150,3 +150,231 @@ CRR binomial tree. Supports both European and American exercise.
 ```python
 BinomialConfig(n_steps: int = 200, american: bool = False)
 ```
+
+---
+
+## FX Pricing
+
+### `fx_forward_rate`
+
+```python
+fx_forward_rate(spot, r_domestic, r_foreign, T) -> Float[Array, ""]
+```
+
+Covered-interest-rate-parity forward rate: $F = S \cdot e^{(r_d - r_f) T}$.
+
+### `fx_forward_price`
+
+```python
+fx_forward_price(forward: FXForward, spot, r_domestic, r_foreign) -> Float[Array, ""]
+```
+
+NPV of an FX forward contract. Positive = forward buyer is in-the-money.
+
+### `garman_kohlhagen_price`
+
+```python
+garman_kohlhagen_price(option: FXVanillaOption, spot, vol, r_domestic, r_foreign) -> Float[Array, ""]
+```
+
+Garman-Kohlhagen (modified Black-Scholes) for European FX options. The foreign rate acts as a continuous dividend yield.
+
+### `fx_implied_vol`
+
+```python
+fx_implied_vol(option: FXVanillaOption, spot, r_domestic, r_foreign,
+               market_price, n_iterations=20) -> Float[Array, ""]
+```
+
+Newton-Raphson implied volatility using autodiff vega.
+
+### `fx_delta`
+
+```python
+fx_delta(option: FXVanillaOption, spot, vol, r_domestic, r_foreign,
+         convention="spot") -> Float[Array, ""]
+```
+
+FX delta in one of three market conventions:
+
+- `"spot"` — standard spot delta: $e^{-r_f T} \Phi(d_1)$
+- `"forward"` — forward delta: $\Phi(d_1)$
+- `"premium_adjusted"` — premium-adjusted spot delta: $e^{-r_f T} \Phi(d_1) - P/S$
+
+### `strike_to_delta`
+
+```python
+strike_to_delta(strike, spot, vol, r_domestic, r_foreign, T, is_call,
+                convention="spot") -> Float[Array, ""]
+```
+
+Convert a strike to its delta value under the specified convention.
+
+### `delta_to_strike`
+
+```python
+delta_to_strike(delta, spot, vol, r_domestic, r_foreign, T, is_call,
+                convention="spot", n_iterations=20) -> Float[Array, ""]
+```
+
+Invert delta to find the corresponding strike (Newton-Raphson via autodiff).
+
+---
+
+## Variance Swap Pricing
+
+### `variance_swap_fair_strike`
+
+```python
+variance_swap_fair_strike(vol) -> Float[Array, ""]
+```
+
+BSM fair variance strike: $K_{\text{var}} = \sigma^2$. Under Black-Scholes the fair variance is the squared implied vol.
+
+### `variance_swap_price`
+
+```python
+variance_swap_price(swap: VarianceSwap, vol, rate) -> Float[Array, ""]
+```
+
+Mark-to-market of a variance swap under BSM. NPV = $N_{\text{var}} \cdot (\sigma^2 - K_{\text{var}}) \cdot e^{-rT}$.
+
+### `variance_swap_price_seasoned`
+
+```python
+variance_swap_price_seasoned(swap: VarianceSwap, vol, rate,
+                              realized_var, elapsed_fraction) -> Float[Array, ""]
+```
+
+Seasoned variance swap accounting for the portion already accrued: blends realized variance over the elapsed period with implied variance over the remaining period.
+
+---
+
+## Floating Rate Instruments
+
+### `floating_rate_bond_price`
+
+```python
+floating_rate_bond_price(bond: FloatingRateBond, curve: DiscountCurve) -> Float[Array, ""]
+```
+
+Price a floating-rate note under the single-curve assumption. Projects forward rates from the curve (or uses known fixings from `bond.fixing_rates` where finite). Satisfies the par-at-reset invariant: a zero-spread FRN on its first reset date prices to face value.
+
+### `ois_swap_price`
+
+```python
+ois_swap_price(swap: OISSwap, curve: DiscountCurve) -> Float[Array, ""]
+```
+
+NPV of an Overnight Index Swap. Float leg uses the telescoping identity $N \cdot (DF(T_0) - DF(T_n))$; fixed leg is the standard annuity. Sign follows `pay_fixed`.
+
+### `ois_swap_rate`
+
+```python
+ois_swap_rate(swap: OISSwap, curve: DiscountCurve) -> Float[Array, ""]
+```
+
+Par OIS rate: $K^* = (DF(T_0) - DF(T_n)) / A$.
+
+---
+
+## Rates Exotics
+
+### `cross_currency_swap_price`
+
+```python
+cross_currency_swap_price(swap: CrossCurrencySwap, domestic_curve: DiscountCurve,
+                          foreign_curve: DiscountCurve, spot) -> Float[Array, ""]
+```
+
+NPV (in domestic currency) of a cross-currency basis swap. Two-curve telescoping with spot conversion. With `exchange_notional=True`, the NPV collapses to $N_d \cdot s \cdot A_d$.
+
+### `cross_currency_basis_spread`
+
+```python
+cross_currency_basis_spread(swap: CrossCurrencySwap, domestic_curve: DiscountCurve,
+                            foreign_curve: DiscountCurve, spot) -> Float[Array, ""]
+```
+
+Par basis spread that zeroes the XCCY NPV.
+
+### `total_return_swap_price`
+
+```python
+total_return_swap_price(swap: TotalReturnSwap, curve: DiscountCurve,
+                        unrealized_return=None) -> Float[Array, ""]
+```
+
+NPV under the self-financing asset assumption. At reset: $\text{NPV}_{\text{receiver}} = -N \cdot s \cdot A$. Optional `unrealized_return` adds accrued mark-to-market.
+
+### `cms_swap_price`
+
+```python
+cms_swap_price(swap: CMSSwap, curve: DiscountCurve) -> Float[Array, ""]
+```
+
+CMS swap NPV using per-period forward par swap rates on a synthetic annual underlying swap. **No convexity adjustment** — see the guide for caveats.
+
+### `cms_cap_floor_price_black76`
+
+```python
+cms_cap_floor_price_black76(cap: CMSCapFloor, curve: DiscountCurve,
+                            vol) -> Float[Array, ""]
+```
+
+Black-76 on the unadjusted forward CMS rate. `vol` is scalar or per-period. Floor via put-call parity. Same convexity caveat as `cms_swap_price`.
+
+### `range_accrual_price_black76`
+
+```python
+range_accrual_price_black76(accrual: RangeAccrual, curve: DiscountCurve,
+                            vol) -> Float[Array, ""]
+```
+
+Digital-replication range accrual: per-period snapshot probability $P(L < F < U)$ under Black-76. `vol` is scalar or per-period.
+
+---
+
+## Lattice — Hull-White Trinomial Tree
+
+### `build_hull_white_tree`
+
+```python
+build_hull_white_tree(model: HullWhiteModel, T: float, n_steps: int = 100) -> HullWhiteTree
+```
+
+Construct a Hull-White recombining trinomial tree from $t = 0$ to $T$. Per-step $\alpha$ calibration matches market discount factors exactly. Returns a `HullWhiteTree` pytree containing rates, Arrow-Debreu prices, probabilities, and target indices.
+
+### `callable_bond_price`
+
+```python
+callable_bond_price(bond: CallableBond, model: HullWhiteModel,
+                    n_steps: int = 100) -> Float[Array, ""]
+```
+
+Price a callable bond via backward induction on the Hull-White tree. The issuer calls when continuation value exceeds the call price. Result < straight bond price.
+
+### `puttable_bond_price`
+
+```python
+puttable_bond_price(bond: PuttableBond, model: HullWhiteModel,
+                    n_steps: int = 100) -> Float[Array, ""]
+```
+
+Price a puttable bond via backward induction. The holder puts when continuation value falls below the put price. Result > straight bond price.
+
+### `HullWhiteTree`
+
+```python
+class HullWhiteTree(eqx.Module):
+    dt: Float[Array, ""]
+    dx: Float[Array, ""]
+    n_steps: int           # static
+    j_max: int             # static
+    alpha: Float[Array, "n_steps"]
+    rates: Float[Array, "n_steps_plus1 n_states"]
+    probs: Float[Array, "n_states 3"]
+    targets: Int[Array, "n_states 3"]
+```
+
+Pre-built tree data structure. `n_states = 2 * j_max + 1`.
