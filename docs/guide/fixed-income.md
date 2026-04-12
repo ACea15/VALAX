@@ -329,3 +329,137 @@ par = ois_swap_rate(ois, curve)   # par rate makes NPV exactly zero
 
 !!! tip "Autodiff Greeks come for free"
     Because these pricers are ordinary JAX functions of the curve pytree, `jax.grad` with respect to the curve's log-discount-factors gives the full **key-rate sensitivity vector** in a single backward pass — the same technique used for fixed-rate bonds above.
+
+## Rates Exotics
+
+VALAX now prices five additional rates and cross-asset swap products:
+**cross-currency basis swaps**, **total return swaps**, **CMS swaps**,
+**CMS caps/floors**, and **range accrual notes**. All pricers live in
+`valax.pricing.analytic.rates_exotics` and follow the same
+pure-function, single-curve-per-currency philosophy as the FRN and OIS
+pricers above.
+
+### Cross-currency basis swap
+
+A cross-currency swap exchanges floating-rate coupons in two currencies,
+with optional notional exchanges at inception and maturity.
+`cross_currency_swap_price(swap, domestic_curve, foreign_curve, spot)`
+applies the telescoping identity **in each currency independently**,
+then converts the foreign leg to domestic at the prevailing spot rate:
+
+$$\text{PV}_{\text{receive dom}} = \underbrace{N_d(DF_d(T_0) - DF_d(T_n))}_{\text{dom float}} + \underbrace{N_d \cdot s \cdot A_d}_{\text{basis spread}} - \underbrace{\text{spot} \cdot N_f(DF_f(T_0) - DF_f(T_n))}_{\text{for float}} + \text{notional exchanges}$$
+
+When `exchange_notional=True` the notional exchange terms cancel exactly
+against the respective float legs, collapsing the entire NPV to
+
+$$\text{NPV} = N_d \cdot s \cdot A_d.$$
+
+This is the classic XCCY identity — the par basis spread is determined
+entirely by the funding-value mismatch between the two currencies.
+
+```python
+from valax.instruments import CrossCurrencySwap
+from valax.pricing.analytic import cross_currency_swap_price, cross_currency_basis_spread
+
+xccy = CrossCurrencySwap(
+    start_date=ref, payment_dates=sched, maturity_date=sched[-1],
+    domestic_notional=jnp.array(110_000_000.0),  # spot × 100M
+    foreign_notional=jnp.array(100_000_000.0),
+    basis_spread=jnp.array(-0.002),              # -20 bps
+    exchange_notional=True,
+)
+npv = cross_currency_swap_price(xccy, usd_curve, eur_curve, jnp.array(1.10))
+par_spread = cross_currency_basis_spread(xccy, usd_curve, eur_curve, jnp.array(1.10))
+```
+
+### Total return swap
+
+A total return swap exchanges the full economic return (price change +
+income) on a reference asset against a funding leg paying floating +
+spread. Under the **self-financing** assumption (the asset's expected
+return equals the risk-free rate), the TR and floating legs telescope
+identically and the NPV at a reset date is:
+
+$$\text{NPV}_{\text{TR receiver}} = -N \cdot s \cdot A$$
+
+An optional `unrealized_return` argument captures mid-period mark-to-market:
+
+```python
+from valax.instruments import TotalReturnSwap
+from valax.pricing.analytic import total_return_swap_price
+
+trs = TotalReturnSwap(
+    start_date=ref, payment_dates=sched,
+    notional=jnp.array(10_000_000.0), funding_spread=jnp.array(0.005),
+)
+npv = total_return_swap_price(trs, curve)
+npv_live = total_return_swap_price(trs, curve, unrealized_return=jnp.array(0.02))
+```
+
+### CMS swap and CMS cap/floor
+
+A CMS swap pays the N-year par swap rate at each fixing date vs. a fixed
+rate. `cms_swap_price` computes the forward par swap rate of a synthetic
+annual N-year underlying swap for each fixing date:
+
+$$S_i = \frac{DF(t_i) - DF(t_i + N \cdot Y)}{\sum_{k=1}^{N} DF(t_i + k \cdot Y)}$$
+
+and sums the discounted CMS vs. fixed legs.
+
+`cms_cap_floor_price_black76` applies Black-76 to each per-period CMS
+rate, giving European caplets/floorlets on the forward CMS rate:
+
+```python
+from valax.instruments import CMSSwap, CMSCapFloor
+from valax.pricing.analytic import cms_swap_price, cms_cap_floor_price_black76
+
+cms = CMSSwap(
+    start_date=ref, payment_dates=sched,
+    fixed_rate=jnp.array(0.05), notional=jnp.array(1_000_000.0), cms_tenor=10,
+)
+npv = cms_swap_price(cms, curve)
+
+cms_cap = CMSCapFloor(
+    payment_dates=sched, strike=jnp.array(0.05),
+    notional=jnp.array(1_000_000.0), cms_tenor=10, is_cap=True,
+)
+cap_pv = cms_cap_floor_price_black76(cms_cap, curve, vol=jnp.array(0.25))
+```
+
+!!! warning "No convexity adjustment"
+    The true expected CMS rate under each payment measure differs from
+    the forward par swap rate by a **convexity term** that depends on
+    the swap-rate volatility surface.  The current pricers use the
+    forward directly, which is a standard baseline but not
+    market-accurate.  Full Hagan-replication / SABR-integration is a
+    legitimate larger piece of work tracked in the roadmap.
+
+### Range accrual note
+
+A range accrual pays a coupon proportional to the fraction of time the
+reference rate spends inside a range $[L, U]$.
+`range_accrual_price_black76` replaces true day-by-day monitoring with
+the **snapshot probability** under Black-76 that the forward rate is
+in-range at the start of each period:
+
+$$\mathbb{P}(L < F_i < U) = \Phi(-d_{2,U}) - \Phi(-d_{2,L})$$
+
+$$\text{Coupon PV}_i = N \cdot R \cdot \tau_i \cdot \mathbb{P}(L < F_i < U) \cdot DF(t_i)$$
+
+```python
+from valax.instruments import RangeAccrual
+from valax.pricing.analytic import range_accrual_price_black76
+
+ra = RangeAccrual(
+    payment_dates=sched, coupon_rate=jnp.array(0.08),
+    lower_barrier=jnp.array(0.01), upper_barrier=jnp.array(0.10),
+    notional=jnp.array(1_000_000.0),
+)
+pv = range_accrual_price_black76(ra, curve, vol=jnp.array(0.30))
+```
+
+!!! note "Snapshot approximation"
+    The digital-replication approach gives a single probability per
+    period rather than per-day monitoring.  For short accrual periods
+    and moderate vol this is a good approximation; for production-grade
+    per-day range accruals, use Monte Carlo simulation.

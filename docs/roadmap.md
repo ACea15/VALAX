@@ -12,7 +12,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 
 | Area | What We Have |
 |------|-------------|
-| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
+| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSCapFloor`, `RangeAccrual`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
 | **Models** | Black-Scholes, Heston (MC), SABR (analytic + MC), LMM (MC with PCA factors) |
 | **Pricing** | Black-Scholes, Black-76, Bachelier analytic; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
@@ -49,17 +49,20 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `AsianOption` | Equity exotics | `instruments/options.py` | MC arithmetic and geometric averaging |
 | `LookbackOption` | Equity exotics | `instruments/options.py` | MC floating-strike and fixed-strike variants |
 | `VarianceSwap` | Volatility | `instruments/options.py` | Analytic (BSM), MC realized variance, seasoned pricing |
+| `CrossCurrencySwap` | Rates / FX | `instruments/rates.py` | Two-curve telescoping + spot conversion, par basis solver |
+| `TotalReturnSwap` | Equity / prime brokerage | `instruments/rates.py` | Self-financing reduction to spread annuity, optional unrealized return |
+| `CMSSwap` | Rates | `instruments/rates.py` | Forward par swap rate (no convexity adjustment) |
+| `CMSCapFloor` | Rates | `instruments/rates.py` | Black-76 on forward CMS rate (no convexity adjustment) |
+| `RangeAccrual` | Rates / structured | `instruments/rates.py` | Black-76 digital-replication (snapshot probability) |
 
 #### 🟠 Missing — Medium Priority (specific desks)
 
 | Instrument | Asset class | Complexity | Blocked by | Notes |
 |------------|-------------|------------|------------|-------|
 | `CallableBond` / `PuttableBond` | Fixed income | High | Short-rate models (P1.4) | OAS, effective duration. Most corporate bonds are callable |
-| `CrossCurrencySwap` | Rates / FX | High | Cashflow engine + multi-curve | Notional exchange, basis spread, two currencies |
 | `CDS` | Credit | Medium | Survival curve / hazard rates | Prerequisite for XVA (CVA). Huge market |
 | `InflationSwap` (ZC and YoY) | Inflation | Medium | Inflation curve | Liability hedging. Growing market |
 | `InflationCapFloor` | Inflation | Medium | Inflation curve | Black-76 on forward CPI ratio |
-| `TotalReturnSwap` | Equity / prime brokerage | Medium | Cashflow engine | Funding + equity combined |
 | `QuantoOption` | FX / equity cross | Medium | Correlated 2-asset MC | FX-equity correlation adjustment |
 | `SpreadOption` | Multi-asset | Medium | 2-asset MC or Kirk approx. | Option on spread (Margrabe, Kirk) |
 
@@ -69,8 +72,6 @@ A snapshot of every instrument class relevant to production bank systems, with i
 |------------|-------------|------------|------------|-------|
 | `Autocallable` / Phoenix | Structured products | High | SLV model, correlated MC | Multi-hundred-billion dollar market. Path-dependent, multi-asset |
 | `WorstOfBasketOption` | Structured products | High | Correlated multi-asset MC | Correlation-sensitive, multi-asset |
-| `RangeAccrual` | Rates / structured | Medium | MC with path monitoring | Coupon accrues while index in range |
-| `CMSSwap` / `CMSCapFloor` | Rates | Medium | Replication or SABR integration | CMS rate with convexity adjustment |
 | `CDOTranche` | Credit correlation | High | CDS + copula simulation | Gaussian copula, base correlation |
 | `ConvertibleBond` | Equity-credit hybrid | High | PDE or tree with credit | Equity + credit + optionality |
 | `TARF` | FX structured | High | MC with early termination | Target accrual range forward |
