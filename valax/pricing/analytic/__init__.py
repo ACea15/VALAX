@@ -44,3 +44,11 @@ from valax.pricing.analytic.floating import (
     ois_swap_price,
     ois_swap_rate,
 )
+from valax.pricing.analytic.rates_exotics import (
+    cross_currency_swap_price,
+    cross_currency_basis_spread,
+    total_return_swap_price,
+    cms_swap_price,
+    cms_cap_floor_price_black76,
+    range_accrual_price_black76,
+)
