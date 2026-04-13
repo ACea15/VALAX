@@ -420,3 +420,34 @@ inflation_cap_floor_price_black76(cap: InflationCapFloor,
 ```
 
 Black-76 on the YoY forward inflation rate. `vol` is scalar or per-period. Floor via put-call parity.
+
+---
+
+## Spread Options
+
+### `margrabe_price`
+
+```python
+margrabe_price(option: SpreadOption, s1, s2, vol1, vol2, rho,
+               q1=0.0, q2=0.0) -> Float[Array, ""]
+```
+
+Margrabe's exact formula for exchange options ($K = 0$). Price is independent of the risk-free rate. Put via Margrabe parity.
+
+### `kirk_price`
+
+```python
+kirk_price(option: SpreadOption, s1, s2, vol1, vol2, rho, rate,
+           q1=0.0, q2=0.0) -> Float[Array, ""]
+```
+
+Kirk's approximation for spread options ($K \neq 0$). Treats $S_2 + K$ as a single asset with adjusted vol. Degenerates to Margrabe when $K = 0$. Put via put-call parity.
+
+### `spread_option_price`
+
+```python
+spread_option_price(option: SpreadOption, s1, s2, vol1, vol2, rho, rate,
+                    q1=0.0, q2=0.0) -> Float[Array, ""]
+```
+
+Convenience wrapper — dispatches to `kirk_price` (handles all $K$).

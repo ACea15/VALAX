@@ -59,6 +59,7 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `ZeroCouponInflationSwap` | Inflation | `instruments/inflation.py` | Forward CPI projection + nominal discounting, breakeven solver |
 | `YearOnYearInflationSwap` | Inflation | `instruments/inflation.py` | YoY forward CPI ratio + nominal discounting (no convexity adjustment) |
 | `InflationCapFloor` | Inflation | `instruments/inflation.py` | Black-76 on YoY forward inflation rate |
+| `SpreadOption` | Multi-asset | `instruments/options.py` | Margrabe (K=0) and Kirk's approximation (K≠0) |
 
 #### 🟠 Missing — Medium Priority (specific desks)
 
@@ -66,7 +67,6 @@ A snapshot of every instrument class relevant to production bank systems, with i
 |------------|-------------|------------|------------|-------|
 | `CDS` | Credit | Medium | Survival curve / hazard rates | Prerequisite for XVA (CVA). Huge market |
 | `QuantoOption` | FX / equity cross | Medium | Correlated 2-asset MC | FX-equity correlation adjustment |
-| `SpreadOption` | Multi-asset | Medium | 2-asset MC or Kirk approx. | Option on spread (Margrabe, Kirk) |
 
 #### 🟡 Missing — Lower Priority (structured / exotic)
 

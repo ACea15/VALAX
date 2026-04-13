@@ -58,3 +58,8 @@ from valax.pricing.analytic.inflation import (
     yyis_price,
     inflation_cap_floor_price_black76,
 )
+from valax.pricing.analytic.spread import (
+    margrabe_price,
+    kirk_price,
+    spread_option_price,
+)
