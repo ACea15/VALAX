@@ -53,3 +53,39 @@ zero_rate(curve, date) -> Float[Array, ""]
 Continuously-compounded zero rate to a given date:
 
 $$r(t) = -\frac{\ln DF(t)}{\tau(\text{ref}, t)}$$
+
+---
+
+## `InflationCurve`
+
+Term structure of forward CPI (Consumer Price Index) levels. Interpolates in **log-CPI** space for smooth implied forward inflation rates.
+
+```python
+class InflationCurve(eqx.Module):
+    pillar_dates: Int[Array, "n"]       # sorted ordinal dates
+    forward_cpis: Float[Array, "n"]     # forward CPI at each pillar
+    base_cpi: Float[Array, ""]          # CPI at inception
+    reference_date: Int[Array, ""]      # valuation date
+    day_count: str = "act_act"          # static field
+```
+
+**Functions**:
+
+| Function | Description |
+|---|---|
+| `forward_cpi(curve, dates)` | Interpolated forward CPI at arbitrary dates |
+| `zc_inflation_rate(curve, dates)` | Zero-coupon breakeven rate: $(CPI(T)/CPI(0))^{1/T} - 1$ |
+| `yoy_forward_rate(curve, starts, ends)` | Year-on-year forward: $CPI(T_i)/CPI(T_{i-1}) - 1$ |
+| `from_zc_rates(ref, pillars, rates, base_cpi)` | Constructor from ZC breakeven rates |
+
+**Usage**:
+
+```python
+from valax.curves import InflationCurve, forward_cpi, from_zc_rates
+
+curve = from_zc_rates(ref_date, pillar_dates, zc_rates, base_cpi=jnp.array(100.0))
+cpi_5y = forward_cpi(curve, maturity_date)
+```
+
+!!! note "Differentiability"
+    `forward_cpis` and `base_cpi` are differentiable leaves. `jax.grad` gives inflation-delta (IE01) sensitivities.

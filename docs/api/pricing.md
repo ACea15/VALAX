@@ -378,3 +378,45 @@ class HullWhiteTree(eqx.Module):
 ```
 
 Pre-built tree data structure. `n_states = 2 * j_max + 1`.
+
+---
+
+## Inflation Derivatives
+
+### `zcis_price`
+
+```python
+zcis_price(swap: ZeroCouponInflationSwap, inflation_curve: InflationCurve,
+           discount_curve: DiscountCurve) -> Float[Array, ""]
+```
+
+NPV of a zero-coupon inflation swap. Inflation leg = $N \cdot (CPI(T)/CPI(0) - 1) \cdot DF(T)$; fixed leg = $N \cdot ((1+K)^T - 1) \cdot DF(T)$. Sign follows `is_inflation_receiver`.
+
+### `zcis_breakeven_rate`
+
+```python
+zcis_breakeven_rate(swap: ZeroCouponInflationSwap,
+                    inflation_curve: InflationCurve) -> Float[Array, ""]
+```
+
+Par (breakeven) rate $K^* = (CPI(T)/CPI(0))^{1/T} - 1$. Independent of the discount curve.
+
+### `yyis_price`
+
+```python
+yyis_price(swap: YearOnYearInflationSwap, inflation_curve: InflationCurve,
+           discount_curve: DiscountCurve) -> Float[Array, ""]
+```
+
+NPV of a year-on-year inflation swap. Per-period YoY forward rate from the inflation curve ratio, discounted. No convexity adjustment.
+
+### `inflation_cap_floor_price_black76`
+
+```python
+inflation_cap_floor_price_black76(cap: InflationCapFloor,
+                                  inflation_curve: InflationCurve,
+                                  discount_curve: DiscountCurve,
+                                  vol) -> Float[Array, ""]
+```
+
+Black-76 on the YoY forward inflation rate. `vol` is scalar or per-period. Floor via put-call parity.

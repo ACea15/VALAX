@@ -52,3 +52,9 @@ from valax.pricing.analytic.rates_exotics import (
     cms_cap_floor_price_black76,
     range_accrual_price_black76,
 )
+from valax.pricing.analytic.inflation import (
+    zcis_price,
+    zcis_breakeven_rate,
+    yyis_price,
+    inflation_cap_floor_price_black76,
+)

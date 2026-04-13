@@ -12,7 +12,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 
 | Area | What We Have |
 |------|-------------|
-| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSCapFloor`, `RangeAccrual`, `CallableBond`, `PuttableBond`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
+| **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSCapFloor`, `RangeAccrual`, `CallableBond`, `PuttableBond`, `ZeroCouponInflationSwap`, `YearOnYearInflationSwap`, `InflationCapFloor`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
 | **Models** | Black-Scholes, Heston (MC), SABR (analytic + MC), LMM (MC with PCA factors), **Hull-White** (analytic ZCB, trinomial tree) |
 | **Pricing** | Black-Scholes, Black-76, Bachelier analytic; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree; **Hull-White trinomial tree** (callable/puttable bonds) |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
@@ -56,14 +56,15 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `RangeAccrual` | Rates / structured | `instruments/rates.py` | Black-76 digital-replication (snapshot probability) |
 | `CallableBond` | Fixed income | `instruments/bonds.py` | Hull-White trinomial tree with backward induction, issuer-optimal call exercise |
 | `PuttableBond` | Fixed income | `instruments/bonds.py` | Hull-White trinomial tree with backward induction, holder-optimal put exercise |
+| `ZeroCouponInflationSwap` | Inflation | `instruments/inflation.py` | Forward CPI projection + nominal discounting, breakeven solver |
+| `YearOnYearInflationSwap` | Inflation | `instruments/inflation.py` | YoY forward CPI ratio + nominal discounting (no convexity adjustment) |
+| `InflationCapFloor` | Inflation | `instruments/inflation.py` | Black-76 on YoY forward inflation rate |
 
 #### 🟠 Missing — Medium Priority (specific desks)
 
 | Instrument | Asset class | Complexity | Blocked by | Notes |
 |------------|-------------|------------|------------|-------|
 | `CDS` | Credit | Medium | Survival curve / hazard rates | Prerequisite for XVA (CVA). Huge market |
-| `InflationSwap` (ZC and YoY) | Inflation | Medium | Inflation curve | Liability hedging. Growing market |
-| `InflationCapFloor` | Inflation | Medium | Inflation curve | Black-76 on forward CPI ratio |
 | `QuantoOption` | FX / equity cross | Medium | Correlated 2-asset MC | FX-equity correlation adjustment |
 | `SpreadOption` | Multi-asset | Medium | 2-asset MC or Kirk approx. | Option on spread (Margrabe, Kirk) |
 

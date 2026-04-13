@@ -463,3 +463,83 @@ pv = range_accrual_price_black76(ra, curve, vol=jnp.array(0.30))
     period rather than per-day monitoring.  For short accrual periods
     and moderate vol this is a good approximation; for production-grade
     per-day range accruals, use Monte Carlo simulation.
+
+## Inflation Derivatives
+
+VALAX provides an `InflationCurve` (forward CPI term structure) and
+pricers for the three standard inflation products: **zero-coupon
+inflation swaps (ZCIS)**, **year-on-year inflation swaps (YYIS)**, and
+**inflation caps/floors**.
+
+### Inflation curve
+
+The `InflationCurve` stores forward CPI levels at pillar dates and
+interpolates in log-CPI space. It can be constructed directly or from
+zero-coupon breakeven rates via `from_zc_rates`:
+
+```python
+from valax.curves import InflationCurve, from_zc_rates, forward_cpi
+
+infl_curve = from_zc_rates(
+    ref, pillar_dates, zc_rates=jnp.full(10, 0.025), base_cpi=jnp.array(100.0),
+)
+cpi_5y = forward_cpi(infl_curve, maturity_date)  # forward CPI at 5Y
+```
+
+### Zero-coupon inflation swap
+
+At maturity the inflation receiver gets $N \cdot (CPI(T)/CPI(0) - 1)$
+and pays $N \cdot ((1+K)^T - 1)$, both discounted at $DF(T)$:
+
+```python
+from valax.instruments import ZeroCouponInflationSwap
+from valax.pricing.analytic import zcis_price, zcis_breakeven_rate
+
+zcis = ZeroCouponInflationSwap(
+    effective_date=ref, maturity_date=maturity,
+    fixed_rate=jnp.array(0.025), notional=jnp.array(1_000_000.0),
+    base_cpi=jnp.array(100.0),
+)
+npv = zcis_price(zcis, infl_curve, disc_curve)
+breakeven = zcis_breakeven_rate(zcis, infl_curve)  # par rate
+```
+
+### Year-on-year inflation swap
+
+Per-period YoY forward rates are taken from the inflation curve:
+
+```python
+from valax.instruments import YearOnYearInflationSwap
+from valax.pricing.analytic import yyis_price
+
+yyis = YearOnYearInflationSwap(
+    effective_date=ref, payment_dates=annual_sched,
+    fixed_rate=jnp.array(0.025), notional=jnp.array(1_000_000.0),
+    base_cpi=jnp.array(100.0),
+)
+npv = yyis_price(yyis, infl_curve, disc_curve)
+```
+
+### Inflation cap/floor
+
+Black-76 on the YoY forward inflation rate, same pattern as the
+rates cap/floor:
+
+```python
+from valax.instruments import InflationCapFloor
+from valax.pricing.analytic import inflation_cap_floor_price_black76
+
+cap = InflationCapFloor(
+    effective_date=ref, payment_dates=annual_sched,
+    strike=jnp.array(0.03), notional=jnp.array(1_000_000.0),
+    base_cpi=jnp.array(100.0), is_cap=True,
+)
+cap_pv = inflation_cap_floor_price_black76(cap, infl_curve, disc_curve, vol=jnp.array(0.03))
+```
+
+!!! warning "No YoY convexity adjustment"
+    The YYIS and inflation cap/floor pricers use the ratio of forward
+    CPIs as the YoY forward rate.  The true expected YoY ratio under
+    the payment measure differs by a convexity correction that depends
+    on inflation vol and the nominal-real rate correlation.  This is a
+    standard baseline — the adjustment is a follow-up item.
