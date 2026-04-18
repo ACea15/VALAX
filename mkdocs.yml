@@ -39,6 +39,7 @@ nav:
   - Architecture: architecture.md
   - Models & Theory: theory.md
   - Roadmap: roadmap.md
+  - Benchmarks: benchmarks.md
   - User Guide:
       - Instruments Overview: guide/instruments.md
       - Analytical Pricing: guide/analytical.md
