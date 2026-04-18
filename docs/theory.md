@@ -352,6 +352,152 @@ The **premium-adjusted delta** accounts for the fact that when the option premiu
 
 **VALAX implementation:** Instruments in `valax/instruments/fx.py` (`FXForward`, `FXVanillaOption`, `FXBarrierOption`). Pricing and delta utilities in `valax/pricing/analytic/fx.py`: `garman_kohlhagen_price`, `fx_forward_price`, `fx_delta` (all three conventions), `strike_to_delta`, `delta_to_strike` (Newton-Raphson inversion for vol surface construction from delta quotes). All functions are differentiable — `jax.grad` gives the full set of FX Greeks including domestic rho, foreign rho, vanna, and volga.
 
+### 2.8 Hull-White One-Factor Short-Rate Model
+
+The Hull-White (1990) model is the **extended Vasicek** process, designed so that the initial discount curve is fit exactly. It is the workhorse of rates desks for callable bonds, puttable bonds, Bermudan swaptions, and any rate instrument with embedded optionality where an exact match to the initial curve matters.
+
+**SDE** (under the risk-neutral measure, implemented in `valax/models/hull_white.py`):
+
+$$
+dr_t = \left[\theta(t) - a\,r_t\right]dt + \sigma\,dW_t
+$$
+
+| Parameter | Meaning | Typical range |
+|-----------|---------|---------------|
+| $a$ | Mean-reversion speed | 0.01–0.10 |
+| $\sigma$ | Short-rate volatility | 0.005–0.02 |
+| $\theta(t)$ | Time-dependent drift | Calibrated to initial curve |
+
+The key feature is that $\theta(t)$ is a **free function**, not a scalar parameter. It is chosen to make the model-implied zero-coupon bond prices $P(0, T)$ match the initial market curve $P^M(0, T)$ exactly:
+
+$$
+\theta(t) = \frac{\partial f^M(0, t)}{\partial t} + a\,f^M(0, t) + \frac{\sigma^2}{2a}\left(1 - e^{-2at}\right)
+$$
+
+where $f^M(0, t) = -\partial \ln P^M(0, t)/\partial t$ is the instantaneous forward rate. In practice $\theta(t)$ is never computed explicitly — its effect is absorbed directly into the analytic bond price (below) and the trinomial tree shifts $\alpha_i$.
+
+**Affine term structure** (closed-form zero-coupon bond prices):
+
+$$
+P(t, T \mid r_t) = A(t, T)\,e^{-B(t, T)\,r_t}
+$$
+
+$$
+B(t, T) = \frac{1 - e^{-a(T - t)}}{a}
+$$
+
+$$
+\ln A(t, T) = \ln\frac{P^M(0, T)}{P^M(0, t)} + B(t, T)\,f^M(0, t) - \frac{\sigma^2}{4a}\left(1 - e^{-2at}\right)B(t, T)^2
+$$
+
+At $t = 0$ and $r_0 = f^M(0, 0)$, these formulas recover $P^M(0, T)$ exactly — this is the **exact-fit property**. Implemented in `valax/models/hull_white.py` as `hw_bond_price`. VALAX computes the instantaneous forward $f^M(0, t)$ via `jax.grad` through the curve's log-DF interpolation, giving piecewise-constant forwards for a log-linear curve with no manual finite differences.
+
+**Short-rate distribution:**
+
+$$
+r_t \sim \mathcal{N}\!\left(\mathbb{E}[r_t],\;\frac{\sigma^2}{2a}\!\left(1 - e^{-2at}\right)\right)
+$$
+
+The unconditional short-rate variance is implemented as `hw_short_rate_variance`. One uncomfortable consequence: $r_t$ can be **negative** with non-zero probability. For rates that stayed negative in EUR/JPY/CHF markets post-2014 this was a feature; for USD pre-2008 it was a known limitation. Squared-Gaussian and shifted-lognormal extensions exist but are out of scope.
+
+**Jamshidian decomposition for European swaption pricing** (not yet implemented in VALAX):
+
+Because the short rate is the single state variable, a European swaption can be decomposed into a portfolio of options on individual zero-coupon bonds. The decomposition hinges on the monotone dependence of each $P(T_0, T_i)$ on $r_{T_0}$, allowing the swaption strike to be converted into a single critical rate $r^*$ such that:
+
+$$
+\text{Swaption} = \sum_{i=1}^{N} c_i \cdot \text{ZBO}(K_i^*)
+$$
+
+where each $\text{ZBO}(K_i^*)$ is a zero-coupon bond option priced by the Black-76 formula (with a maturity-dependent volatility coming from the integrated short-rate variance). This is the standard fast calibration route for HW parameters against a swaption grid.
+
+**Trinomial tree** (Hull & White 1994, implemented in `valax/pricing/lattice/hull_white_tree.py`):
+
+For products with early exercise (callable/puttable bonds, Bermudan swaptions), VALAX builds a **recombining trinomial tree** via a two-pass construction:
+
+1. **Symmetric *x*-tree:** First build a tree on the auxiliary process $x_t = r_t - \alpha_t$, which has zero drift. The tree has time step $\Delta t$, state step $\Delta x = \sigma\sqrt{3\Delta t}$, and three branch types: normal (up/mid/down), up-branching at the bottom of the tree, and down-branching at the top. The truncation level $j_{\max} \approx \lceil 0.1835 / (a\,\Delta t)\rceil$ is chosen so transition probabilities stay non-negative. Branching probabilities depend only on $\eta_j = -a\,j\,\Delta t$ and sum to one per state.
+2. **Arrow-Debreu forward induction:** Sweep forward in time solving for each $\alpha_i$ such that the tree-implied discount factor $P(0, t_{i+1})$ matches the initial curve. This is a one-dimensional equation per step — VALAX solves it in closed form using the Arrow-Debreu state prices. The resulting tree **exactly reprices the initial curve by construction**, just like the analytic bond formula.
+
+For callable and puttable bonds, backward induction rolls the bond cashflows back through the tree. At each call date, the value at node $(i, j)$ becomes $\min(\text{continuation}, \text{call price})$ (issuer-optimal). At each put date, it becomes $\max(\text{continuation}, \text{put price})$ (holder-optimal). Both operations are smooth enough for `jax.grad` to flow through, so **Greeks of callable bonds come from autodiff through the tree** — no bumping the curve and rebuilding.
+
+**When to use Hull-White:**
+
+- Callable and puttable bonds (the primary driver — implemented in VALAX)
+- Bermudan swaptions (on the roadmap)
+- Any IR exotic where the initial curve must be matched exactly
+
+**When Hull-White is insufficient:**
+
+- Smile-sensitive products — HW has a single vol parameter, so the entire swaption vol grid cannot be fitted. G2++ (two-factor) partially addresses this. SABR or LMM with a vol surface is the smile-aware alternative.
+- Products sensitive to the distribution of forward rate curves, not just the short rate. LMM wins here.
+
+**VALAX implementation:** Model in `valax/models/hull_white.py` (`HullWhiteModel`, `hw_B`, `hw_bond_price`, `hw_short_rate_variance`). Trinomial tree construction and pricing in `valax/pricing/lattice/hull_white_tree.py` (`HullWhiteTree`, `build_hull_white_tree`, `price_callable_bond`, `price_puttable_bond`). Calibration to swaption surface (Jamshidian) is on the roadmap (P1.4 follow-up).
+
+### 2.9 Two-Asset Correlated BSM and Spread Options
+
+Spread options pay on the difference of two underlyings — a standard structure across energy (heat rate, crack spread), equities (pairs), and commodities (calendar spread). VALAX implements two complementary closed-form methods under correlated BSM dynamics.
+
+**Model** (two assets under the risk-neutral measure):
+
+$$
+dS_1 = (r - q_1)S_1\,dt + \sigma_1 S_1\,dW_1, \qquad dS_2 = (r - q_2)S_2\,dt + \sigma_2 S_2\,dW_2
+$$
+
+$$
+dW_1\,dW_2 = \rho\,dt
+$$
+
+**Spread call payoff:**
+
+$$
+V_T = N \cdot \max\!\left(S_1(T) - S_2(T) - K,\; 0\right)
+$$
+
+#### Margrabe's Formula (Exact for $K = 0$)
+
+When the strike is zero, a spread call is an **exchange option**: the right to deliver $S_2$ and receive $S_1$. Margrabe (1978) observed that changing numéraire from the money-market account to $S_2$ itself makes the problem one-dimensional. Under the $S_2$-forward measure, the ratio $X_t = S_1(t)/S_2(t)$ is a martingale following geometric Brownian motion with volatility:
+
+$$
+\sigma_s = \sqrt{\sigma_1^2 - 2\rho\,\sigma_1\sigma_2 + \sigma_2^2}
+$$
+
+which is precisely the standard deviation of the log-return of the ratio. The exchange-option price is then Black-Scholes on $X$ with "strike" 1, re-expressed in original coordinates:
+
+$$
+C = N\left[S_1\,e^{-q_1 T}\,\Phi(d_1) - S_2\,e^{-q_2 T}\,\Phi(d_2)\right]
+$$
+
+$$
+d_1 = \frac{\ln(S_1/S_2) + (q_2 - q_1 + \tfrac{1}{2}\sigma_s^2)T}{\sigma_s\sqrt{T}}, \qquad d_2 = d_1 - \sigma_s\sqrt{T}
+$$
+
+This is **exact** — no approximation error. Note that the risk-free rate does not appear: discounting cancels because the payoff is a ratio of traded assets. Margrabe's formula is implemented in `valax/pricing/analytic/spread.py` as `margrabe_price`.
+
+#### Kirk's Approximation (for $K \neq 0$)
+
+For general spread options with $K \neq 0$, no closed form exists — the sum $S_2(T) + K$ is not lognormal. Kirk (1995) proposed the industry-standard approximation: treat $S_2(T) + K$ **as if** it were a single lognormal asset with an adjusted volatility. Defining forwards $F_i = S_i e^{(r - q_i)T}$ and the moneyness ratio $\lambda = F_2 / (F_2 + K)$:
+
+$$
+\sigma_{\text{kirk}} = \sqrt{\sigma_1^2 - 2\rho\,\sigma_1\sigma_2\,\lambda + \sigma_2^2\,\lambda^2}
+$$
+
+$$
+C = N\,e^{-rT}\left[F_1\,\Phi(d_1) - (F_2 + K)\,\Phi(d_2)\right]
+$$
+
+$$
+d_1 = \frac{\ln\!\big(F_1 / (F_2 + K)\big) + \tfrac{1}{2}\sigma_{\text{kirk}}^2 T}{\sigma_{\text{kirk}}\sqrt{T}}, \qquad d_2 = d_1 - \sigma_{\text{kirk}}\sqrt{T}
+$$
+
+The intuition: as $K \to 0$, $\lambda \to 1$ and $\sigma_{\text{kirk}} \to \sigma_s$, recovering Margrabe. For $K$ small relative to $F_2$, the approximation is extremely accurate (typically better than 10 bps on a 20% vol, 6-month option). It deteriorates when $|K|$ is large relative to $F_2$, when the correlation is highly negative, or when $\sigma_2$ is much larger than $\sigma_1$. Carmona & Durrleman (2003) give tighter bounds and alternative approximations.
+
+Kirk's formula is implemented in `valax/pricing/analytic/spread.py` as `kirk_price`. A convenience dispatcher `spread_option_price` routes to `margrabe_price` when the strike is zero, though for `jax.jit` compatibility call `kirk_price` directly — it handles $K = 0$ gracefully.
+
+**Greeks via autodiff:** Because both formulas are pure JAX, the full set of spread-option Greeks — delta 1, delta 2, gamma 1, gamma 2, cross-gamma ($\partial^2 V / \partial S_1 \partial S_2$), correlation vega, and cross-vega — come from `jax.grad` with zero additional code. Cross-gamma in particular is the sensitivity that traders use to size the correlation hedge; it is notoriously expensive to compute via finite differences on a 2D spot grid but free in VALAX.
+
+**When MC is still required:** Path-dependent spread options (Asian spread, spread barrier, Bermudan spread) have no closed form and require correlated 2D Monte Carlo. VALAX's diffrax integration supports correlated Brownian motions directly via Cholesky factorization, though a packaged multi-asset MC payoff library is roadmap P2.2/P5.x.
+
+**VALAX implementation:** Instrument in `valax/instruments/options.py` (`SpreadOption`). Closed-form pricers in `valax/pricing/analytic/spread.py` (`margrabe_price`, `kirk_price`, `spread_option_price`).
+
 ---
 
 ## 3. Curve Framework
@@ -475,6 +621,120 @@ where $d$ is the actual number of days and $D$ is the denominator (360 or 365).
 **VALAX implementation:** `valax/dates/daycounts.py` implements all four conventions as pure functions on integer ordinals. The `year_fraction(start, end, convention)` dispatcher selects the appropriate function. All are JIT-compatible.
 
 **Practical impact:** Using Act/360 instead of Act/365 on a $100M 5Y swap changes the PV by thousands of dollars. Getting the day count wrong is one of the most common sources of pricing discrepancies between systems.
+
+### 3.6 Inflation Curves and Breakeven Pricing
+
+Inflation derivatives link two different economies: the **nominal** economy (where cashflows are paid and discounted) and the **real** economy (where index-linked payoffs are determined). Pricing any inflation instrument requires two curves:
+
+- The **nominal discount curve** $P^N(0, T)$ — same object used for every other fixed income product.
+- The **inflation curve** — a term structure of **forward CPI levels** $\text{CPI}(T)$ derived from inflation swap quotes.
+
+#### Forward CPI vs. Real Rates
+
+There are two equivalent representations of the inflation curve:
+
+**Forward CPI representation** (used in VALAX):
+
+$$
+\text{CPI}(T) = \mathbb{E}^{\mathbb{Q}_N}\!\left[\text{CPI}_T\right]
+$$
+
+i.e. the expected future CPI index under the nominal risk-neutral measure. From the forward CPI curve, two derived rates are used in pricing:
+
+**Zero-coupon (breakeven) inflation rate** $z(T)$ — the annually-compounded rate such that:
+
+$$
+\text{CPI}(T) = \text{CPI}(0) \cdot (1 + z(T))^T \quad\Longleftrightarrow\quad z(T) = \left(\frac{\text{CPI}(T)}{\text{CPI}(0)}\right)^{1/T} - 1
+$$
+
+**Year-on-year forward inflation rate** — the single-period rate between two pillars:
+
+$$
+\text{YoY}(T_{i-1}, T_i) = \frac{\text{CPI}(T_i)}{\text{CPI}(T_{i-1})} - 1
+$$
+
+**Real-rate representation** (equivalent, not directly stored in VALAX):
+
+$$
+\text{CPI}(T) = \text{CPI}(0) \cdot \frac{P^R(0, T)}{P^N(0, T)}
+$$
+
+where $P^R(0, T)$ is the real-curve discount factor. This is a **Fisher-identity-in-expectation** statement: the forward CPI ratio equals the ratio of real to nominal discount factors. VALAX stores the forward CPI levels directly, which is more numerically stable (no division of two small discount factors) and maps cleanly to the quoted ZCIS breakeven market.
+
+**Interpolation:** VALAX interpolates the inflation curve in **log-CPI space**, giving piecewise-constant instantaneous forward inflation rates between pillars — the direct analogue of log-linear discount factor interpolation. This keeps forward CPI levels positive and produces smooth year-on-year forward rates.
+
+#### Zero-Coupon Inflation Swaps (ZCIS)
+
+The ZCIS is the liquid benchmark of the inflation market — it defines the curve. One party pays a fixed rate compounded over the maturity; the counterparty pays the realized CPI ratio. Both settle as a **single cashflow at maturity**:
+
+$$
+\text{PV}^{\text{fix}} = N\,DF^N(T)\left[(1 + K)^T - 1\right]
+$$
+
+$$
+\text{PV}^{\text{inf}} = N\,DF^N(T)\left[\frac{\text{CPI}(T)}{\text{CPI}(0)} - 1\right]
+$$
+
+The **breakeven rate** $K^*$ is the fixed rate that makes the NPV zero. Because both legs discount at the same $DF^N(T)$, the discount factor cancels and the breakeven is a pure statement about the forward CPI curve:
+
+$$
+K^*(T) = \left(\frac{\text{CPI}(T)}{\text{CPI}(0)}\right)^{1/T} - 1
+$$
+
+This is algebraically identical to the zero-coupon inflation rate $z(T)$ — the ZCIS breakeven *is* the quoted point on the inflation curve. Implemented in `valax/pricing/analytic/inflation.py` as `zcis_price` and `zcis_breakeven_rate`.
+
+#### Year-on-Year Inflation Swaps (YYIS)
+
+The YYIS pays the one-period YoY CPI ratio at each coupon date rather than the cumulative ratio at maturity:
+
+$$
+\text{PV}^{\text{inf}} = N \sum_{i=1}^{n}\left(\frac{\text{CPI}(t_i)}{\text{CPI}(t_{i-1})} - 1\right)DF^N(t_i)
+$$
+
+$$
+\text{PV}^{\text{fix}} = N\,K \sum_{i=1}^{n} \tau_i\,DF^N(t_i)
+$$
+
+**Convexity adjustment** (not applied in VALAX's baseline pricer — documented as a known limitation):
+
+The true expected YoY CPI ratio under the $t_i$-forward measure differs from the ratio of forward CPIs:
+
+$$
+\mathbb{E}^{\mathbb{Q}_{t_i}}\!\left[\frac{\text{CPI}(t_i)}{\text{CPI}(t_{i-1})}\right] \neq \frac{\text{CPI}(t_i)}{\text{CPI}(t_{i-1})}
+$$
+
+The difference is a **convexity correction** that depends on:
+
+- The volatility of the forward CPI ratio (inflation vol)
+- The correlation between real and nominal short rates
+
+Under the Jarrow-Yildirim model (a three-factor Heath-Jarrow-Morton framework with nominal rates, real rates, and CPI), the convexity adjustment has a closed form involving the covariance of the three Brownian motions. VALAX's YYIS pricer (`yyis_price`) uses the forward ratio directly — this is the standard **baseline** practice and is accurate to within a few basis points for typical inflation volatilities and rate correlations. A Jarrow-Yildirim extension with convexity adjustment is on the roadmap.
+
+#### Inflation Caps and Floors
+
+An inflation cap is a strip of caplets, each paying:
+
+$$
+\text{Caplet}_i = N \cdot \max\!\left(\text{YoY}_i - K,\; 0\right)
+$$
+
+where $\text{YoY}_i$ is the realized year-on-year CPI ratio. Market practice is to price each caplet via **Black-76** on the forward YoY rate $F_i$ (treated as lognormal) with a market-quoted inflation volatility:
+
+$$
+\text{Caplet}_i = N\,DF^N(t_i)\left[F_i\,\Phi(d_1) - K\,\Phi(d_2)\right]
+$$
+
+$$
+d_1 = \frac{\ln(F_i/K) + \tfrac{1}{2}\sigma^2 T_i}{\sigma\sqrt{T_i}}, \qquad d_2 = d_1 - \sigma\sqrt{T_i}
+$$
+
+Floors follow by put-call parity. Implemented in `valax/pricing/analytic/inflation.py` as `inflation_cap_floor_price_black76`. The same caveat on the convexity adjustment applies: using the forward YoY rate directly is the baseline; a full Jarrow-Yildirim treatment would add a convexity term.
+
+#### Seasonality
+
+Published CPI indices exhibit strong **monthly seasonality** — energy in winter, retail around holidays. Market practice is to bootstrap a seasonally-adjusted CPI curve from ZCIS quotes (which span annual periods so seasonality averages out), then overlay a monthly seasonality factor pattern to produce month-end CPI projections. VALAX does not yet model seasonality — the `InflationCurve` stores forward CPI levels at whatever pillar dates are provided and interpolates smoothly between them. For instruments that settle on ZCIS anniversary dates, this is exact; for month-end indexed instruments, a seasonality overlay is a roadmap item.
+
+**VALAX implementation:** Curve in `valax/curves/inflation.py` (`InflationCurve`, `forward_cpi`, `zc_inflation_rate`, `yoy_forward_rate`, `from_zc_rates`). Pricers in `valax/pricing/analytic/inflation.py` (`zcis_price`, `zcis_breakeven_rate`, `yyis_price`, `inflation_cap_floor_price_black76`). Instruments in `valax/instruments/inflation.py`. Because the inflation curve is an `equinox.Module` pytree, `jax.grad` of any price w.r.t. the curve's `forward_cpis` gives **inflation key-rate sensitivities (IE01)** for free.
 
 ---
 
@@ -972,6 +1232,19 @@ VALAX optimizes over the **unconstrained** variable $x$ and applies the transfor
 - Heston, S. (1993). "A Closed-Form Solution for Options with Stochastic Volatility." *Review of Financial Studies*.
 - Hagan, P. et al. (2002). "Managing Smile Risk." *Wilmott Magazine*.
 - Brace, A., Gatarek, D., and Musiela, M. (1997). "The Market Model of Interest Rate Dynamics." *Mathematical Finance*.
+- Hull, J. and White, A. (1990). "Pricing Interest-Rate-Derivative Securities." *Review of Financial Studies*.
+- Hull, J. and White, A. (1994). "Numerical Procedures for Implementing Term Structure Models I: Single-Factor Models." *Journal of Derivatives*.
+- Jamshidian, F. (1989). "An Exact Bond Option Formula." *Journal of Finance*.
+- Margrabe, W. (1978). "The Value of an Option to Exchange One Asset for Another." *Journal of Finance*.
+- Kirk, E. (1995). "Correlation in the Energy Markets." In *Managing Energy Price Risk*, Risk Books.
+- Carmona, R. and Durrleman, V. (2003). "Pricing and Hedging Spread Options." *SIAM Review*.
+- Garman, M. and Kohlhagen, S. (1983). "Foreign Currency Option Values." *Journal of International Money and Finance*.
+
+### Inflation
+
+- Jarrow, R. and Yildirim, Y. (2003). "Pricing Treasury Inflation Protected Securities and Related Derivatives using an HJM Model." *Journal of Financial and Quantitative Analysis*.
+- Kerkhof, J. (2005). "Inflation Derivatives Explained." Lehman Brothers Fixed Income Quantitative Research.
+- Brigo, D. and Mercurio, F. (2006). *Interest Rate Models — Theory and Practice*, ch. 15 (Inflation).
 
 ### Volatility Surfaces
 
