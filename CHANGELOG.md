@@ -12,6 +12,31 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Monte Carlo dispatcher
+
+- **Unified MC entry point** (`valax/pricing/mc/dispatch.py`):
+  `mc_price_dispatch(instrument, model, config, key, **market_args)`
+  looks up a recipe keyed on `(type(instrument), type(model))` and runs
+  the appropriate path generation + payoff + discounting. Replaces the
+  hand-assembly of path generators + payoff functions for every
+  instrument / model pair.
+- **`MCResult` container** (price + stderr + n_paths) as a frozen
+  `equinox.Module`; `float(result)` shortcut for scalar use.
+- **`register()` decorator** for contributors to add new
+  (instrument, model) recipes without modifying engine code. Duplicate
+  registration raises unless `overwrite=True`.
+- **`registered_recipes()`** introspection helper.
+- **14 built-in recipes** shipped in `valax/pricing/mc/recipes.py`:
+  - Equity × (`BlackScholesModel`, `HestonModel`): `EuropeanOption`,
+    `AsianOption`, `EquityBarrierOption`, `LookbackOption`,
+    `VarianceSwap`.
+  - Rates × `LMMModel`: `Caplet`, `Cap`, `Swaption` (European),
+    `BermudanSwaption` (Longstaff-Schwartz).
+- **Helper** `discounted_mean_and_stderr(cashflows, df, n_paths)` for
+  consistent discounting across recipes.
+- Legacy `mc_price` / `mc_price_with_stderr` kept unchanged for
+  backward compatibility; new code should use `mc_price_dispatch`.
+
 ### Added — Models
 
 - **Hull-White one-factor short-rate model** (`valax/models/hull_white.py`):

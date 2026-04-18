@@ -97,15 +97,86 @@ Sensitivity of bond price to each curve pillar's zero rate. One backward pass gi
 
 ## Monte Carlo
 
-### `mc_price`
+See the [Monte Carlo guide](../guide/monte-carlo.md) for the full coverage map and contributor cookbook.
+
+### Unified dispatcher (preferred)
+
+#### `mc_price_dispatch`
+
+```python
+mc_price_dispatch(instrument, model, config, key, **market_args) -> MCResult
+```
+
+Looks up a recipe keyed on `(type(instrument), type(model))` and runs the appropriate path generation + payoff + discounting. Raises `ValueError` with the list of available recipes if the pair is not registered.
+
+Typical `market_args`:
+
+- Equity recipes: `spot` (required).
+- LMM rate recipes: `forward_index` / `forward_indices` + `taus` (or `exercise_indices` for Bermudan).
+- Optional per-recipe knobs: e.g. `annual_factor` for variance-swap realization, `n_steps_per_period` for LMM, `lsm_config` for Bermudan.
+
+Returns `MCResult` (see below).
+
+#### `MCResult`
+
+```python
+MCResult(price: Float[Array, ""], stderr: Float[Array, ""], n_paths: int)
+```
+
+Frozen `equinox.Module`. `float(result)` returns `float(result.price)`. For recipes where path-wise standard error is not meaningful (Longstaff-Schwartz Bermudan), `stderr` is set to `0.0` — estimate dispersion by running multiple independent seeds.
+
+#### `MCConfig`
+
+```python
+MCConfig(n_paths: int, n_steps: int)
+```
+
+Both fields are static — fixes JAX array shapes for JIT.
+
+#### `register`
+
+```python
+register(instrument_cls: type, model_cls: type, *, overwrite: bool = False)
+```
+
+Decorator. Adds an `(instrument_cls, model_cls)` → recipe mapping to the global registry. The decorated recipe must accept keyword arguments `instrument`, `model`, `config`, `key`, plus any `market_args` it consumes, and return an `MCResult`. Raises `ValueError` on duplicate registration unless `overwrite=True`.
+
+#### `registered_recipes`
+
+```python
+registered_recipes() -> list[tuple[str, str]]
+```
+
+Sorted list of `(instrument_name, model_name)` for every registered recipe. Useful for introspection.
+
+### Built-in recipes (14)
+
+Equity (each combo with `BlackScholesModel` and `HestonModel`):
+
+- `(EuropeanOption, ...)`
+- `(AsianOption, ...)`
+- `(EquityBarrierOption, ...)`
+- `(LookbackOption, ...)`
+- `(VarianceSwap, ...)`
+
+Rates (LMM):
+
+- `(Caplet, LMMModel)`
+- `(Cap, LMMModel)`
+- `(Swaption, LMMModel)`
+- `(BermudanSwaption, LMMModel)`
+
+### Legacy entry points
+
+#### `mc_price` *(legacy)*
 
 ```python
 mc_price(option, spot, model, config, key, payoff_fn=european_payoff) -> Float[Array, ""]
 ```
 
-Monte Carlo pricing. Dispatches path generation based on model type (`BlackScholesModel` or `HestonModel`).
+Monte Carlo pricing. Dispatches path generation based on model type (`BlackScholesModel` or `HestonModel`). Still exported for backward compatibility; use `mc_price_dispatch` for new code.
 
-### `mc_price_with_stderr`
+#### `mc_price_with_stderr` *(legacy)*
 
 ```python
 mc_price_with_stderr(...) -> tuple[Float[Array, ""], Float[Array, ""]]
@@ -113,11 +184,40 @@ mc_price_with_stderr(...) -> tuple[Float[Array, ""], Float[Array, ""]]
 
 Same as `mc_price` but also returns the standard error estimate.
 
-### `MCConfig`
+### Path generators (low-level)
+
+| Function | Model | Output |
+|----------|-------|--------|
+| `generate_gbm_paths` | `BlackScholesModel` | `(n_paths, n_steps+1)` array |
+| `generate_heston_paths` | `HestonModel` | `(spot_paths, var_paths)` |
+| `generate_sabr_paths` | `SABRModel` | `(forward_paths, vol_paths)` |
+| `generate_lmm_paths` | `LMMModel` | `LMMPathResult` |
+
+### Payoff functions (low-level)
+
+Equity:
+
+- `european_payoff(paths, option)` — terminal-only
+- `asian_option_payoff(paths, option)` — arithmetic / geometric averaging
+- `equity_barrier_payoff(paths, option)` — KI/KO with sigmoid smoothing
+- `barrier_payoff(paths, option, barrier, is_up, is_knock_in, smoothing)` — manual barrier
+- `lookback_payoff(paths, option)` — floating + fixed strike
+- `variance_swap_payoff(paths, swap, annual_factor)` — mean-zero realized variance
+
+Rates (LMM):
+
+- `caplet_mc_payoff(result, caplet, forward_index, tau)`
+- `cap_mc_payoff(result, cap, forward_indices, taus)`
+- `swaption_mc_payoff(result, swaption, forward_indices, taus)`
+- `bermudan_swaption_lsm(result, swaption, exercise_indices, taus, config)` — Longstaff-Schwartz
+
+### `LSMConfig`
 
 ```python
-MCConfig(n_paths: int, n_steps: int)
+LSMConfig(poly_degree: int = 3)
 ```
+
+Polynomial basis configuration for Longstaff-Schwartz regression.
 
 ## PDE
 

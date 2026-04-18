@@ -335,6 +335,7 @@ jit_price(option, spot, vol, rate, div)
 | New runnable demo | `examples/` and `docs/examples.md` |
 | Roadmap status change | `docs/roadmap.md` (move from 🟠/🟡 to ✅) |
 | Release-worthy feature | `CHANGELOG.md` under `[Unreleased]` |
+| New MC (instrument, model) recipe | `valax/pricing/mc/recipes.py` + `@register` + test under `tests/test_mc/test_dispatch.py` + coverage-map row in `docs/guide/monte-carlo.md` |
 
 ### 5.2 Build docs locally before opening a PR
 
