@@ -40,9 +40,16 @@ nav:
   - Models & Theory: theory.md
   - Roadmap: roadmap.md
   - User Guide:
-      - Instruments: guide/instruments.md
+      - Instruments Overview: guide/instruments.md
       - Analytical Pricing: guide/analytical.md
       - Fixed Income: guide/fixed-income.md
+      - Callable/Puttable/FRN/Convertible Bonds: guide/callable-bonds.md
+      - Short-Rate Models: guide/short-rate.md
+      - FX Derivatives: guide/fx.md
+      - Inflation Derivatives: guide/inflation.md
+      - Interest Rate Exotics: guide/rates-exotics.md
+      - Equity Exotics: guide/equity-exotics.md
+      - Credit Derivatives: guide/credit.md
       - Greeks via Autodiff: guide/greeks.md
       - Monte Carlo: guide/monte-carlo.md
       - PDE Solvers: guide/pde.md
