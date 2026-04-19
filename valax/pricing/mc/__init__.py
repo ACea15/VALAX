@@ -38,6 +38,7 @@ from valax.pricing.mc.engine import mc_price, mc_price_with_stderr
 from valax.pricing.mc.paths import generate_gbm_paths, generate_heston_paths
 from valax.pricing.mc.sabr_paths import generate_sabr_paths
 from valax.pricing.mc.lmm_paths import LMMPathResult, generate_lmm_paths
+from valax.pricing.mc.multi_asset_paths import generate_correlated_gbm_paths
 
 # Payoff functions
 from valax.pricing.mc.payoffs import (
@@ -47,7 +48,9 @@ from valax.pricing.mc.payoffs import (
     equity_barrier_payoff,
     european_payoff,
     lookback_payoff,
+    spread_option_mc_payoff,
     variance_swap_payoff,
+    worst_of_basket_payoff,
 )
 from valax.pricing.mc.rate_payoffs import (
     cap_mc_payoff,
@@ -74,6 +77,7 @@ __all__ = [
     "generate_heston_paths",
     "generate_sabr_paths",
     "generate_lmm_paths",
+    "generate_correlated_gbm_paths",
     "LMMPathResult",
     # Payoffs
     "european_payoff",
@@ -82,6 +86,8 @@ __all__ = [
     "barrier_payoff",
     "equity_barrier_payoff",
     "lookback_payoff",
+    "spread_option_mc_payoff",
+    "worst_of_basket_payoff",
     "variance_swap_payoff",
     "caplet_mc_payoff",
     "cap_mc_payoff",

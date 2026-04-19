@@ -13,7 +13,9 @@ from valax.instruments.options import (
     EquityBarrierOption,
     AsianOption,
     LookbackOption,
+    SpreadOption,
     VarianceSwap,
+    WorstOfBasketOption,
 )
 
 
@@ -204,6 +206,93 @@ def variance_swap_payoff(
     n_obs = log_returns.shape[1]
     realized_var = (annual_factor / n_obs) * jnp.sum(log_returns**2, axis=1)
     return swap.notional_var * (realized_var - swap.strike_var)
+
+
+def spread_option_mc_payoff(
+    paths: Float[Array, "n_paths n_steps_plus1 n_assets"],
+    option: SpreadOption,
+    asset1_index: int = 0,
+    asset2_index: int = 1,
+) -> Float[Array, " n_paths"]:
+    r"""Spread-option payoff on correlated multi-asset paths.
+
+    Payoff (call):
+
+    .. math::
+
+        N \cdot \max(S_1(T) - S_2(T) - K,\; 0)
+
+    Payoff (put, via parity):
+
+    .. math::
+
+        N \cdot \max(K - (S_1(T) - S_2(T)),\; 0)
+
+    Args:
+        paths: Correlated multi-asset GBM paths from
+            :func:`generate_correlated_gbm_paths`, shape
+            ``(n_paths, n_steps + 1, n_assets)``.
+        option: :class:`SpreadOption` instrument.
+        asset1_index: Which column of ``paths`` is asset :math:`S_1`
+            (default 0).
+        asset2_index: Which column is :math:`S_2` (default 1).
+
+    Returns:
+        Per-path terminal payoff, shape ``(n_paths,)``.
+    """
+    s1_T = paths[:, -1, asset1_index]
+    s2_T = paths[:, -1, asset2_index]
+    spread = s1_T - s2_T
+    if option.is_call:
+        intrinsic = jnp.maximum(spread - option.strike, 0.0)
+    else:
+        intrinsic = jnp.maximum(option.strike - spread, 0.0)
+    return option.notional * intrinsic
+
+
+def worst_of_basket_payoff(
+    paths: Float[Array, "n_paths n_steps_plus1 n_assets"],
+    option: WorstOfBasketOption,
+    initial_spots: Float[Array, " n_assets"],
+) -> Float[Array, " n_paths"]:
+    r"""Worst-of basket option payoff.
+
+    Payoff (call):
+
+    .. math::
+
+        N \cdot \max\!\left(\min_i \frac{S_i(T)}{S_i(0)} - K,\; 0\right)
+
+    Payoff (put):
+
+    .. math::
+
+        N \cdot \max\!\left(K - \min_i \frac{S_i(T)}{S_i(0)},\; 0\right)
+
+    The strike ``option.strike`` is expressed as a return level
+    (``1.0`` = ATM), so a "100% ATM worst-of put" has
+    ``option.strike = 1.0``.
+
+    Args:
+        paths: Correlated multi-asset GBM paths from
+            :func:`generate_correlated_gbm_paths`, shape
+            ``(n_paths, n_steps + 1, n_assets)``.
+        option: :class:`WorstOfBasketOption` instrument.
+        initial_spots: Per-asset initial spots used to normalize each
+            asset into return space, shape ``(n_assets,)``. Usually
+            equals ``paths[0, 0, :]``.
+
+    Returns:
+        Per-path terminal payoff, shape ``(n_paths,)``.
+    """
+    terminal = paths[:, -1, :]  # (n_paths, n_assets)
+    returns = terminal / initial_spots  # (n_paths, n_assets)
+    worst = jnp.min(returns, axis=1)  # (n_paths,)
+    if option.is_call:
+        intrinsic = jnp.maximum(worst - option.strike, 0.0)
+    else:
+        intrinsic = jnp.maximum(option.strike - worst, 0.0)
+    return option.notional * intrinsic
 
 
 def jax_sigmoid(x):

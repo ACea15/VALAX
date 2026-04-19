@@ -61,12 +61,15 @@ from valax.instruments.options import (
     EquityBarrierOption,
     EuropeanOption,
     LookbackOption,
+    SpreadOption,
     VarianceSwap,
+    WorstOfBasketOption,
 )
 from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
 from valax.models.lmm import LMMModel
+from valax.models.multi_asset import MultiAssetGBMModel
 from valax.pricing.mc.bermudan import LSMConfig, bermudan_swaption_lsm
 from valax.pricing.mc.dispatch import (
     MCConfig,
@@ -75,13 +78,16 @@ from valax.pricing.mc.dispatch import (
     register,
 )
 from valax.pricing.mc.lmm_paths import generate_lmm_paths
+from valax.pricing.mc.multi_asset_paths import generate_correlated_gbm_paths
 from valax.pricing.mc.paths import generate_gbm_paths, generate_heston_paths
 from valax.pricing.mc.payoffs import (
     asian_option_payoff,
     equity_barrier_payoff,
     european_payoff,
     lookback_payoff,
+    spread_option_mc_payoff,
     variance_swap_payoff,
+    worst_of_basket_payoff,
 )
 from valax.pricing.mc.rate_payoffs import (
     cap_mc_payoff,
@@ -370,6 +376,102 @@ def _swaption_lmm(
     stderr = jnp.std(cashflows) / jnp.sqrt(
         jnp.array(config.n_paths, dtype=cashflows.dtype),
     )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Multi-asset equity recipes (MultiAssetGBMModel)
+#
+# These unlock spread options and worst-of-basket options. The caller
+# passes `spots` as a length-n_assets array; the recipe uses the model's
+# per-asset vols, dividends, and correlation to generate correlated
+# paths.
+# ─────────────────────────────────────────────────────────────────────
+
+
+@register(SpreadOption, MultiAssetGBMModel)
+def _spread_option_multi_asset(
+    *,
+    instrument,
+    model,
+    config,
+    key,
+    spots: Float[Array, " n_assets"],
+    asset1_index: int = 0,
+    asset2_index: int = 1,
+    **kwargs,
+) -> MCResult:
+    """Spread option under correlated multi-asset GBM.
+
+    Required market args:
+        spots: Initial spot prices, shape ``(n_assets,)``. ``n_assets``
+            must be at least 2.
+
+    Optional:
+        asset1_index: Column of ``spots`` / ``paths`` for :math:`S_1`
+            (default 0).
+        asset2_index: Column for :math:`S_2` (default 1).
+
+    The recipe validates the model's correlation matrix shape against
+    ``len(spots)``; mismatches raise a clear ValueError at trace time.
+    """
+    if spots.shape[0] < 2:
+        raise ValueError(
+            f"SpreadOption recipe needs at least 2 assets; got "
+            f"spots.shape={spots.shape}.",
+        )
+    if model.correlation.shape != (spots.shape[0], spots.shape[0]):
+        raise ValueError(
+            f"model.correlation has shape {model.correlation.shape} but "
+            f"spots has {spots.shape[0]} assets. These must match.",
+        )
+    T = instrument.expiry
+    paths = generate_correlated_gbm_paths(
+        model, spots, T, config.n_steps, config.n_paths, key,
+    )
+    cashflows = spread_option_mc_payoff(
+        paths, instrument, asset1_index=asset1_index, asset2_index=asset2_index,
+    )
+    df = jnp.exp(-model.rate * T)
+    price, stderr = discounted_mean_and_stderr(cashflows, df, config.n_paths)
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(WorstOfBasketOption, MultiAssetGBMModel)
+def _worst_of_basket_multi_asset(
+    *,
+    instrument,
+    model,
+    config,
+    key,
+    spots: Float[Array, " n_assets"],
+    **kwargs,
+) -> MCResult:
+    """Worst-of basket option under correlated multi-asset GBM.
+
+    Required market args:
+        spots: Initial spot prices, shape ``(n_assets,)``. Must match
+            ``instrument.n_assets`` and the size of
+            ``model.correlation``.
+    """
+    n = spots.shape[0]
+    if n != instrument.n_assets:
+        raise ValueError(
+            f"spots has {n} assets but instrument.n_assets="
+            f"{instrument.n_assets}; these must match.",
+        )
+    if model.correlation.shape != (n, n):
+        raise ValueError(
+            f"model.correlation has shape {model.correlation.shape} but "
+            f"spots has {n} assets.",
+        )
+    T = instrument.expiry
+    paths = generate_correlated_gbm_paths(
+        model, spots, T, config.n_steps, config.n_paths, key,
+    )
+    cashflows = worst_of_basket_payoff(paths, instrument, spots)
+    df = jnp.exp(-model.rate * T)
+    price, stderr = discounted_mean_and_stderr(cashflows, df, config.n_paths)
     return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
 
 
