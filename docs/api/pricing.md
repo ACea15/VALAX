@@ -149,15 +149,20 @@ registered_recipes() -> list[tuple[str, str]]
 
 Sorted list of `(instrument_name, model_name)` for every registered recipe. Useful for introspection.
 
-### Built-in recipes (14)
+### Built-in recipes (16)
 
-Equity (each combo with `BlackScholesModel` and `HestonModel`):
+Single-asset equity (each combo with `BlackScholesModel` and `HestonModel`):
 
 - `(EuropeanOption, ...)`
 - `(AsianOption, ...)`
 - `(EquityBarrierOption, ...)`
 - `(LookbackOption, ...)`
 - `(VarianceSwap, ...)`
+
+Multi-asset equity (`MultiAssetGBMModel`):
+
+- `(SpreadOption, MultiAssetGBMModel)` — payoff $\max(S_1 - S_2 - K, 0)$; validates Margrabe at $K=0$ and Kirk at $K\neq 0$.
+- `(WorstOfBasketOption, MultiAssetGBMModel)` — payoff on $\min_i S_i(T)/S_i(0)$; correlation-sensitive.
 
 Rates (LMM):
 
@@ -192,6 +197,7 @@ Same as `mc_price` but also returns the standard error estimate.
 | `generate_heston_paths` | `HestonModel` | `(spot_paths, var_paths)` |
 | `generate_sabr_paths` | `SABRModel` | `(forward_paths, vol_paths)` |
 | `generate_lmm_paths` | `LMMModel` | `LMMPathResult` |
+| `generate_correlated_gbm_paths` | `MultiAssetGBMModel` | `(n_paths, n_steps+1, n_assets)` |
 
 ### Payoff functions (low-level)
 
@@ -203,6 +209,8 @@ Equity:
 - `barrier_payoff(paths, option, barrier, is_up, is_knock_in, smoothing)` — manual barrier
 - `lookback_payoff(paths, option)` — floating + fixed strike
 - `variance_swap_payoff(paths, swap, annual_factor)` — mean-zero realized variance
+- `spread_option_mc_payoff(paths, option, asset1_index=0, asset2_index=1)` — for multi-asset GBM paths
+- `worst_of_basket_payoff(paths, option, initial_spots)` — for multi-asset GBM paths
 
 Rates (LMM):
 

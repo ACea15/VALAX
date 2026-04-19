@@ -138,3 +138,37 @@ model = build_lmm_model(
 - Path simulation uses log-Euler discretization for guaranteed positivity.
 - PCA-based factor reduction for efficient high-dimensional simulation.
 - Used by the Bermudan swaption pricer (Longstaff-Schwartz on LMM paths).
+
+## `MultiAssetGBMModel`
+
+$N$-asset correlated geometric Brownian motion under a single risk-neutral measure:
+
+$$dS_i(t) = (r - q_i) S_i(t)\,dt + \sigma_i S_i(t)\,dW_i(t), \qquad \langle dW_i, dW_j \rangle = \rho_{ij}\,dt$$
+
+```python
+from valax.models import MultiAssetGBMModel
+
+model = MultiAssetGBMModel(
+    vols: Float[Array, " n_assets"],           # per-asset volatilities
+    rate: Float[Array, ""],                    # single risk-free rate (scalar)
+    dividends: Float[Array, " n_assets"],      # per-asset continuous dividend yields
+    correlation: Float[Array, "n_assets n_assets"],  # symmetric, unit diagonal, PSD
+)
+```
+
+Used by the multi-asset MC recipes for `SpreadOption` (validates Margrabe / Kirk analytical) and `WorstOfBasketOption` (correlation-sensitive baskets). See the [Monte Carlo guide](../guide/monte-carlo.md#correlated-multi-asset-gbm) for a full walkthrough.
+
+**Correlation validator**:
+
+```python
+from valax.models import validate_correlation
+
+# Returns the smallest eigenvalue; negative means the matrix is not PSD.
+min_eig = validate_correlation(correlation_matrix, tol=1e-6)
+assert float(min_eig) >= -1e-6
+```
+
+**Notes**:
+
+- The Cholesky factor of `correlation` is computed inside `generate_correlated_gbm_paths`; for a fixed correlation matrix across many repricings, use `jax.jit` to amortize.
+- `jax.grad` through the `correlation` field gives per-entry correlation Greeks automatically.

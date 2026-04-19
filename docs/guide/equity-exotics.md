@@ -158,9 +158,9 @@ chooser = ChooserOption(
 
 ## Spread Option
 
-!!! success "Implemented"
-    `valax.pricing.analytic.spread.margrabe_price`, `kirk_price`, and
-    `spread_option_price`. See [theory §2.9](../theory.md#29-two-asset-correlated-bsm-and-spread-options).
+!!! success "Implemented (analytic + Monte Carlo)"
+    - Analytic: `valax.pricing.analytic.spread.margrabe_price` (exact at $K = 0$), `kirk_price` (approximation for $K \neq 0$), `spread_option_price`.
+    - Monte Carlo: via `mc_price_dispatch(SpreadOption, MultiAssetGBMModel, ...)`. See [Monte Carlo guide](monte-carlo.md) and [theory §2.9](../theory.md#29-two-asset-correlated-bsm-and-spread-options).
 
 **Market context.** Spread options pay the difference between two asset prices minus
 a fixed strike. They are ubiquitous in commodity markets (**crack spreads**: crude
@@ -214,6 +214,38 @@ price = kirk_price(
     rate=jnp.array(0.05),
 )
 ```
+
+### Monte Carlo validation
+
+The same spread option can be priced via Monte Carlo under correlated
+GBM — this is the standard cross-check for Kirk's approximation and
+the only viable approach for path-dependent spread exotics (Asian
+spreads, spread barriers, Bermudan spreads).
+
+```python
+from valax.models import MultiAssetGBMModel
+from valax.pricing.mc import mc_price_dispatch, MCConfig
+
+multi = MultiAssetGBMModel(
+    vols=jnp.array([0.35, 0.30]),
+    rate=jnp.array(0.05),
+    dividends=jnp.zeros(2),
+    correlation=jnp.array([[1.0, 0.7], [0.7, 1.0]]),
+)
+
+result = mc_price_dispatch(
+    crack_spread, multi,
+    config=MCConfig(n_paths=50_000, n_steps=50),
+    key=jax.random.PRNGKey(42),
+    spots=jnp.array([85.0, 75.0]),
+)
+
+print(f"Kirk:  {float(kirk_px):.4f}")
+print(f"MC:    {float(result.price):.4f} ± {float(result.stderr):.4f}")
+```
+
+For $K = 0$ Margrabe is exact and MC should agree to within 3 SE; for
+$K \neq 0$ Kirk has a small approximation bias that MC reveals.
 
 ---
 
@@ -301,7 +333,10 @@ autocallable = Autocallable(
 
 ## Worst-of Basket Option
 
-!!! warning "Planned"
+!!! success "Monte Carlo implemented"
+    Via `mc_price_dispatch(WorstOfBasketOption, MultiAssetGBMModel, ..., spots=...)`.
+    Analytic pricing remains on the roadmap (no tractable closed form for
+    $\geq 2$ correlated lognormals).
 
 **Market context.** Worst-of options are common building blocks in structured
 products (particularly autocallables referenced to a basket). The payoff depends
@@ -345,6 +380,61 @@ wof_put = WorstOfBasketOption(
 # Correlation matrix and spots passed to the MC pricer, not the instrument
 # See Monte Carlo guide for multi-asset simulation
 ```
+
+### Monte Carlo pricing
+
+```python
+from valax.models import MultiAssetGBMModel
+from valax.pricing.mc import mc_price_dispatch, MCConfig
+
+# 3-asset correlation matrix
+C = jnp.array([
+    [1.0, 0.6, 0.3],
+    [0.6, 1.0, 0.4],
+    [0.3, 0.4, 1.0],
+])
+multi = MultiAssetGBMModel(
+    vols=jnp.array([0.25, 0.30, 0.35]),
+    rate=jnp.array(0.05),
+    dividends=jnp.zeros(3),
+    correlation=C,
+)
+
+wof_put_3 = WorstOfBasketOption(
+    expiry=jnp.array(1.0),
+    strike=jnp.array(1.0),        # 100% ATM in return space
+    notional=jnp.array(1_000_000.0),
+    n_assets=3,
+    is_call=False,
+)
+
+result = mc_price_dispatch(
+    wof_put_3, multi,
+    config=MCConfig(n_paths=50_000, n_steps=50),
+    key=jax.random.PRNGKey(0),
+    spots=jnp.array([100.0, 100.0, 100.0]),
+)
+print(f"Worst-of put: {float(result.price):,.2f} ± {float(result.stderr):,.2f}")
+
+# Correlation-vega — valuable because the put is highly correlation-sensitive.
+def price_fn(rho):
+    model_r = MultiAssetGBMModel(
+        vols=multi.vols, rate=multi.rate, dividends=multi.dividends,
+        correlation=C.at[0, 1].set(rho).at[1, 0].set(rho),
+    )
+    return mc_price_dispatch(
+        wof_put_3, model_r,
+        config=MCConfig(n_paths=20_000, n_steps=20),
+        key=jax.random.PRNGKey(0),
+        spots=jnp.array([100.0, 100.0, 100.0]),
+    ).price
+
+dprice_drho = jax.grad(price_fn)(jnp.array(0.6))
+```
+
+For a worst-of **put**, expect `dprice/drho < 0` — more diversification
+(lower correlation) means a higher probability that at least one asset
+performs badly, making downside protection more valuable.
 
 ---
 

@@ -46,6 +46,10 @@ runs path generation + payoff + discounting, and returns an `MCResult`
 (`price`, `stderr`, `n_paths`). Use `float(result)` as a shortcut for
 `float(result.price)`.
 
+VALAX ships with **16 built-in recipes** (10 single-asset equity × GBM/Heston,
+4 rates × LMM, 2 multi-asset × `MultiAssetGBMModel`). See the coverage map
+in §2 and the built-in recipe list in the [API reference](../api/pricing.md#built-in-recipes-16).
+
 To swap the model, just pass a different one:
 
 ```python
@@ -81,17 +85,18 @@ not yet wired), 🟠 = needs a new path generator, 🔴 = needs major infra.
 
 ### Equity (single asset)
 
-| Instrument | `BlackScholesModel` | `HestonModel` | Notes |
-|-----------|:---:|:---:|---|
-| `EuropeanOption` | ✓ | ✓ | |
-| `AsianOption` | ✓ | ✓ | Arithmetic + geometric averaging |
-| `EquityBarrierOption` | ✓ | ✓ | KI/KO with sigmoid smoothing |
-| `LookbackOption` | ✓ | ✓ | Floating + fixed strike |
-| `VarianceSwap` | ✓ | ✓ | Realized variance from log-returns |
-| `AmericanOption` | 🟡 | 🟡 | LSM engine exists for rates — needs lifting |
-| `DigitalOption` | 🟡 | 🟡 | Payoff is smoothed Heaviside |
-| `SpreadOption` | 🟠 | 🟠 | Needs correlated 2-asset GBM paths |
-| `Autocallable` / `WorstOfBasket` / `Cliquet` | 🟠 | 🟠 | Need correlated multi-asset GBM + multi-observation engine |
+| Instrument | `BlackScholesModel` | `HestonModel` | `MultiAssetGBMModel` | Notes |
+|-----------|:---:|:---:|:---:|---|
+| `EuropeanOption` | ✓ | ✓ | — | |
+| `AsianOption` | ✓ | ✓ | — | Arithmetic + geometric averaging |
+| `EquityBarrierOption` | ✓ | ✓ | — | KI/KO with sigmoid smoothing |
+| `LookbackOption` | ✓ | ✓ | — | Floating + fixed strike |
+| `VarianceSwap` | ✓ | ✓ | — | Realized variance from log-returns |
+| `SpreadOption` | — | — | ✓ | Validates Margrabe (K=0) and Kirk (K≠0) analytical |
+| `WorstOfBasketOption` | — | — | ✓ | 2+ asset basket; cross-asset correlation Greeks via `jax.grad` |
+| `AmericanOption` | 🟡 | 🟡 | — | LSM engine exists for rates — needs lifting |
+| `DigitalOption` | 🟡 | 🟡 | — | Payoff is smoothed Heaviside |
+| `Autocallable` / `Cliquet` | 🟠 | 🟠 | 🟠 | Needs multi-observation / forward-start engine |
 
 ### Rates (LMM)
 
@@ -135,6 +140,7 @@ so the whole pipeline remains `jax.jit` / `jax.vmap` friendly.
 | `generate_heston_paths(model, spot, T, n_steps, n_paths, key)` | `HestonModel` | `(paths, variances)` each `(n_paths, n_steps+1)` |
 | `generate_sabr_paths(model, forward, T, n_steps, n_paths, key)` | `SABRModel` | `(forwards, vols)` each `(n_paths, n_steps+1)` |
 | `generate_lmm_paths(model, n_steps_per_period, n_paths, key)` | `LMMModel` | `LMMPathResult` with `forwards_at_fixing`, `forwards_at_tenors`, `discount_factors` |
+| `generate_correlated_gbm_paths(model, spots, T, n_steps, n_paths, key)` | `MultiAssetGBMModel` | `(n_paths, n_steps+1, n_assets)` |
 
 ### Geometric Brownian Motion
 
@@ -171,6 +177,50 @@ spot_paths, var_paths = generate_heston_paths(
 
 See [theory §2.4](../theory.md#24-heston-stochastic-volatility) for the
 Feller condition and numerical caveats near the variance boundary.
+
+### Correlated multi-asset GBM
+
+$$dS_i(t) = (r - q_i) S_i\,dt + \sigma_i S_i\,dW_i, \quad \langle dW_i, dW_j \rangle = \rho_{ij}\,dt$$
+
+Build a model with per-asset vols/dividends and a symmetric positive
+semi-definite correlation matrix:
+
+```python
+from valax.models import MultiAssetGBMModel, validate_correlation
+import jax.numpy as jnp
+
+C = jnp.array([
+    [1.0, 0.6, 0.3],
+    [0.6, 1.0, 0.4],
+    [0.3, 0.4, 1.0],
+])
+# Sanity check the correlation matrix before building the model.
+assert float(validate_correlation(C)) > 0, "C is not PSD"
+
+multi = MultiAssetGBMModel(
+    vols=jnp.array([0.25, 0.30, 0.35]),
+    rate=jnp.array(0.05),
+    dividends=jnp.zeros(3),
+    correlation=C,
+)
+
+from valax.pricing.mc import generate_correlated_gbm_paths
+paths = generate_correlated_gbm_paths(
+    multi,
+    spots=jnp.array([100.0, 100.0, 100.0]),
+    T=1.0, n_steps=50, n_paths=20_000,
+    key=jax.random.PRNGKey(0),
+)
+# paths.shape == (20_000, 51, 3)
+```
+
+Since pure GBM has a log-linear SDE, the log-Euler step is **exact** for
+any `n_steps`. Use large `n_steps` only when the payoff monitors
+intermediate observations (barriers, Asians, autocallables).
+
+See [theory §2.9](../theory.md#29-two-asset-correlated-bsm-and-spread-options)
+for the analytical spread-option formulas (Margrabe / Kirk) that the
+multi-asset MC recipes are validated against.
 
 ### SABR
 
@@ -220,6 +270,13 @@ autodiff Greeks whenever the payoff is (or is smoothed to be) continuous.
 | `barrier_payoff(paths, option, barrier, is_up, is_knock_in, smoothing)` | any | Manual barrier construction |
 | `lookback_payoff(paths, option)` | `LookbackOption` | Floating + fixed strike |
 | `variance_swap_payoff(paths, swap, annual_factor)` | `VarianceSwap` | Mean-zero realized variance estimator |
+
+### Multi-asset equity payoffs
+
+| Function | Instrument | Notes |
+|----------|-----------|-------|
+| `spread_option_mc_payoff(paths, option, asset1_index, asset2_index)` | `SpreadOption` | Payoff on $S_1(T) - S_2(T)$; `asset*_index` pick columns of a multi-asset paths array |
+| `worst_of_basket_payoff(paths, option, initial_spots)` | `WorstOfBasketOption` | Payoff on $\min_i S_i(T)/S_i(0)$; `initial_spots` normalises to return space |
 
 ### Rate payoffs (LMM)
 

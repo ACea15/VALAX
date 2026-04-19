@@ -12,6 +12,34 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Multi-asset Monte Carlo
+
+- **`MultiAssetGBMModel`** (`valax/models/multi_asset.py`): $N$-asset
+  correlated GBM under a single risk-neutral measure. Carries
+  per-asset `vols` and `dividends`, a scalar `rate`, and an
+  $n \times n$ `correlation` matrix.
+- **`validate_correlation(C, tol)`** helper: returns the minimum
+  eigenvalue of a candidate correlation matrix (symmetric + unit-diag
+  + PSD check) for pre-construction sanity.
+- **`generate_correlated_gbm_paths`** (`valax/pricing/mc/multi_asset_paths.py`):
+  exact log-Euler correlated GBM path generator using the Cholesky
+  factor of the correlation matrix. No discretization bias for pure
+  GBM regardless of `n_steps`.
+- **`spread_option_mc_payoff`** and **`worst_of_basket_payoff`**
+  (`valax/pricing/mc/payoffs.py`): per-path payoffs for spread options
+  and worst-of baskets on multi-asset paths.
+- **Two new dispatcher recipes**:
+  - `(SpreadOption, MultiAssetGBMModel)` — validates against the
+    Margrabe closed form at $K=0$ (exact within 3 SE across
+    correlations) and Kirk's approximation at $K \neq 0$.
+  - `(WorstOfBasketOption, MultiAssetGBMModel)` — correlation-sensitive
+    basket payoffs; `jax.grad` through `correlation` gives the
+    correlation Greeks.
+- Test coverage: 27 new tests (12 path-generator + 15 recipe tests)
+  covering shape, statistical convergence of empirical correlation,
+  risk-neutral drift, analytical-reference agreement, dispatcher
+  error handling, and autodiff flow.
+
 ### Added — Monte Carlo dispatcher
 
 - **Unified MC entry point** (`valax/pricing/mc/dispatch.py`):

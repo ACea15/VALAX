@@ -22,7 +22,8 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | **Portfolio** | `batch_price()` and `batch_greeks()` via vmap |
 | **Market Data** | `MarketData` container, `MarketScenario` / `ScenarioSet` for risk factor shocks |
 | **Risk** | Curve shocks (parallel, steepener, butterfly, key-rate), parametric/historical/stress scenarios, VaR, ES, sensitivity ladders with waterfall P&L |
-| **MC infrastructure** | Unified `mc_price_dispatch(instrument, model, ...)` with `(instrument, model)` → recipe registry. 14 built-in recipes covering equity (GBM/Heston) and rates (LMM). `register()` decorator for contributor extensions. See [Monte Carlo guide](guide/monte-carlo.md#2-coverage-map). |
+| **MC infrastructure** | Unified `mc_price_dispatch(instrument, model, ...)` with `(instrument, model)` → recipe registry. 16 built-in recipes covering equity (GBM/Heston), multi-asset equity (correlated GBM), and rates (LMM). `register()` decorator for contributor extensions. See [Monte Carlo guide](guide/monte-carlo.md#2-coverage-map). |
+| **Multi-asset MC** | `MultiAssetGBMModel` with per-asset vols/dividends + correlation matrix. `generate_correlated_gbm_paths` (exact log-Euler via Cholesky). Spread-option MC (validates Margrabe + Kirk analytical) and worst-of basket MC with correlation Greeks via `jax.grad`. |
 
 ### Instrument Coverage Matrix
 
