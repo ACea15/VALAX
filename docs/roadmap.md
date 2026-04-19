@@ -61,7 +61,8 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `ZeroCouponInflationSwap` | Inflation | `instruments/inflation.py` | Forward CPI projection + nominal discounting, breakeven solver |
 | `YearOnYearInflationSwap` | Inflation | `instruments/inflation.py` | YoY forward CPI ratio + nominal discounting (no convexity adjustment) |
 | `InflationCapFloor` | Inflation | `instruments/inflation.py` | Black-76 on YoY forward inflation rate |
-| `SpreadOption` | Multi-asset | `instruments/options.py` | Margrabe (K=0) and Kirk's approximation (K≠0) |
+| `SpreadOption` | Multi-asset | `instruments/options.py` | Margrabe (K=0), Kirk (K≠0), Monte Carlo via `MultiAssetGBMModel` |
+| `WorstOfBasketOption` | Multi-asset | `instruments/options.py` | Monte Carlo via `MultiAssetGBMModel` (correlation Greeks via `jax.grad`); analytical form does not exist |
 
 #### 🟠 Missing — Medium Priority (specific desks)
 
@@ -74,8 +75,7 @@ A snapshot of every instrument class relevant to production bank systems, with i
 
 | Instrument | Asset class | Complexity | Blocked by | Notes |
 |------------|-------------|------------|------------|-------|
-| `Autocallable` / Phoenix | Structured products | High | SLV model, correlated MC | Multi-hundred-billion dollar market. Path-dependent, multi-asset |
-| `WorstOfBasketOption` | Structured products | High | Correlated multi-asset MC | Correlation-sensitive, multi-asset |
+| `Autocallable` / Phoenix | Structured products | High | Multi-observation scan engine (MC-B4 below); SLV for pricing accuracy | Multi-hundred-billion dollar market. Path-dependent, multi-asset. Multi-asset paths already exist |
 | `CDOTranche` | Credit correlation | High | CDS + copula simulation | Gaussian copula, base correlation |
 | `ConvertibleBond` | Equity-credit hybrid | High | PDE or tree with credit | Equity + credit + optionality |
 | `TARF` | FX structured | High | MC with early termination | Target accrual range forward |
@@ -83,6 +83,134 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `MBS` | Securitized | Very high | Prepayment models, OAS | Very US-market-specific |
 | `CompoundOption` | Exotic | Low | BSM extension | Option on an option. Rare in practice |
 | `ChooserOption` | Exotic | Low | BSM extension | Choose call/put at a future date |
+
+---
+
+## Monte Carlo Dispatcher — Session Backlog
+
+Four near-term MC expansions that slot directly into the existing
+`mc_price_dispatch` registry. None of them require changes to the
+dispatcher itself — they are new path generators and / or `@register`
+entries plus tests.
+
+Each item lists the new code, the unlocked recipes, effort estimate,
+and blockers. Ordered by expected ROI.
+
+### MC-B1 — Hull-White short-rate MC paths
+
+**What.** A new path generator `generate_hull_white_paths(model, T, n_steps, n_paths, key)`
+producing short-rate paths plus path-wise discount factors
+$DF(0, t_k) = \exp(-\int_0^{t_k} r(s)\,ds)$. Hull-White has an affine
+conditional distribution, so the simulation can use exact
+discretization (no Euler bias).
+
+**Unlocks.**
+
+- `(FixedRateBond, HullWhiteModel)` — validates curve-discounting
+  against stochastic-rates MC.
+- `(FloatingRateBond, HullWhiteModel)` — same.
+- `(CallableBond, HullWhiteModel)` — MC cross-check for the existing HW
+  trinomial tree pricer (useful for validation and for cases where
+  tree step density is a concern).
+- `(PuttableBond, HullWhiteModel)` — same.
+- Alternative MC route for Bermudan swaptions (currently LMM-only).
+
+**Effort.** ~60 LOC generator + ~120 LOC recipes + tests.
+
+**Blockers.** None. Hull-White model and callable/puttable tree
+already exist.
+
+### MC-B2 — American / Bermudan equity via LSM
+
+**What.** Lift the Longstaff-Schwartz engine from
+`valax/pricing/mc/bermudan.py` (currently LMM-specific) into a generic
+`lsm_backward_induction(paths, exercise_indices, payoff_fn, continuation_basis)`
+that operates on any single-asset path array. Register recipes for
+early-exercise equity options.
+
+**Unlocks.**
+
+- `(AmericanOption, BlackScholesModel)` — MC alternative to the CRR
+  binomial tree; validation target.
+- `(AmericanOption, HestonModel)` — first American option pricer under
+  stochastic vol in VALAX.
+- Foundation for a new `BermudanEquityOption` instrument if one is
+  needed (the existing `AmericanOption` already covers the exercise
+  schedule case via discrete observation dates).
+
+**Effort.** ~80 LOC LSM lift + polynomial basis for equity state
+(log-spot is the natural choice) + ~100 LOC recipes + tests.
+
+**Blockers.** Minor refactor: the LMM LSM in `bermudan.py` is tightly
+coupled to the `LMMPathResult` pytree; needs a cleaner separation of
+the regression core from the tenor-aware payoff evaluation.
+
+### MC-B3 — FX Monte Carlo
+
+**What.** Add a small `FXGBMModel` (domestic rate + foreign rate + FX
+vol) and a `generate_fx_gbm_paths` wrapper that reuses
+`generate_gbm_paths` with drift $r_d - r_f$. Register recipes for FX
+instruments.
+
+**Unlocks.**
+
+- `(FXVanillaOption, FXGBMModel)` — MC validation of Garman-Kohlhagen.
+- `(FXBarrierOption, FXGBMModel)` — the *only* tractable pricing route
+  for discretely-monitored FX barriers right now; the instrument is
+  defined but has no pricer.
+- Foundation for `(QuantoOption, ...)` — needs correlated FX + asset MC
+  which leans on the multi-asset infrastructure already shipped.
+- Foundation for `(TARF, FXGBMModel)` — path-dependent early
+  termination has no closed form; MC is the only route.
+
+**Effort.** ~40 LOC `FXGBMModel` + wrapper + ~80 LOC recipes + tests.
+
+**Blockers.** Decision needed: separate `FXGBMModel` vs. reusing
+`BlackScholesModel` with a documented convention (`rate = r_d`,
+`dividend = r_f`). A wrapper model is cleaner for downstream FX
+smile / volatility-surface integration.
+
+### MC-B4 — Autocallable engine
+
+**What.** A generic "observation-date scanner" utility for
+path-dependent payoffs that need to check multiple intermediate
+observations — autocall barrier hit, coupon barrier hit, knock-in
+barrier touch. Plus a dedicated `autocallable_payoff` function
+handling the memory (phoenix) feature and partial redemption at
+autocall events.
+
+**Unlocks.**
+
+- `(Autocallable, BlackScholesModel)` — single-underlying phoenix
+  notes.
+- `(Autocallable, HestonModel)` — with stochastic vol (more realistic
+  for short-dated barriers).
+- `(Autocallable, MultiAssetGBMModel)` — basket-referenced
+  autocallables (Asian-market standard product; multi-hundred-billion
+  dollar market).
+- Building block for `Cliquet` / ratchet pricing (the observation
+  scanner generalizes).
+
+**Effort.** ~120 LOC scanner + payoff + ~100 LOC recipes + tests.
+Largest of the four, but scanner is reusable.
+
+**Blockers.** None for single-asset. The multi-asset variant is fully
+unblocked by the multi-asset MC infrastructure shipped in this
+session.
+
+### Summary table
+
+| ID | New code | Recipes added | Effort | Blocking |
+|----|----------|--------------|--------|----------|
+| MC-B1 | `generate_hull_white_paths` | 4 (bonds + callable/puttable + Bermudan alt.) | ~60 + tests | None |
+| MC-B2 | Generic LSM lift | 2 (AmericanOption × GBM/Heston) | ~80 + tests | Minor refactor of `bermudan.py` |
+| MC-B3 | `FXGBMModel` + wrapper | 2+ (FX vanilla/barrier, foundation for quanto/TARF) | ~40 + tests | Model-design decision |
+| MC-B4 | Observation scanner + autocallable payoff | 3 (Autocallable × 3 models) | ~120 + tests | None (multi-asset unblocked) |
+
+Total: ~300 LOC of new functionality + tests takes the dispatcher from
+16 recipes to **~28 recipes** covering every currently-defined
+instrument except the credit derivatives (which need a survival curve,
+tracked separately under Tier 3.4).
 
 ---
 
