@@ -29,7 +29,17 @@ from valax.curves.bootstrap import (
 from valax.curves.discount import DiscountCurve
 from valax.curves.fixings import empty_fixing_history
 from valax.curves.graph import CurveGraph
-from valax.curves.instruments import DepositRate, FRA, SwapRate
+from valax.curves.convexity import (
+    constant_convexity_adj,
+    no_convexity_adj,
+)
+from valax.curves.instruments import (
+    DepositRate,
+    FRA,
+    MoneyMarketFuture,
+    OISSwapRate,
+    SwapRate,
+)
 from valax.dates.daycounts import year_fraction, ymd_to_ordinal
 
 
@@ -250,6 +260,307 @@ class TestSwapRateResidual:
         # Sign and magnitude: residual = (rate - par) * annuity.
         expected = 0.0050 * annuity
         assert r == pytest.approx(expected, rel=1e-6)
+
+
+# ── OISSwapRate residual ─────────────────────────────────────────────
+
+
+class TestOISSwapRateResidual:
+    """OISSwapRate uses the float-leg telescoping identity, so the
+    residual is structurally identical to SwapRate in the single-curve
+    case.  These tests pin that contract and cross-check against the
+    existing :func:`ois_swap_price` pricer.
+    """
+
+    def _ois_swap_at_par(self, curve: DiscountCurve):
+        """Construct an OIS swap at the par rate implied by ``curve``."""
+        fixed_dates = jnp.array(
+            [
+                int(_make_date(2026, 1, 1)),
+                int(_make_date(2027, 1, 1)),
+                int(_make_date(2028, 1, 1)),
+                int(_make_date(2029, 1, 1)),
+                int(_make_date(2030, 1, 1)),
+            ],
+            dtype=jnp.int32,
+        )
+        starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], fixed_dates[:-1]]
+        )
+        taus = year_fraction(starts, fixed_dates, "act_360")
+        annuity = float(jnp.sum(taus * curve(fixed_dates)))
+        par_rate = float((curve(REF) - curve(fixed_dates[-1])) / annuity)
+        return (
+            OISSwapRate(
+                start_date=REF,
+                fixed_dates=fixed_dates,
+                rate=jnp.asarray(par_rate),
+                day_count="act_360",
+                index_id="USD.SOFR",
+            ),
+            fixed_dates,
+            par_rate,
+        )
+
+    def test_residual_zero_at_par_rate(self):
+        curve = _flat_continuously_compounded(0.04)
+        graph = _wrap_default(curve)
+        swap, _, _ = self._ois_swap_at_par(curve)
+        r = swap.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_residual_off_par(self):
+        """50 bp above par produces residual ≈ 0.0050 × annuity."""
+        curve = _flat_continuously_compounded(0.04)
+        graph = _wrap_default(curve)
+        swap, fixed_dates, par_rate = self._ois_swap_at_par(curve)
+        starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], fixed_dates[:-1]]
+        )
+        taus = year_fraction(starts, fixed_dates, "act_360")
+        annuity = float(jnp.sum(taus * curve(fixed_dates)))
+        off_par = OISSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            rate=jnp.asarray(par_rate + 0.0050),
+            day_count="act_360",
+            index_id="USD.SOFR",
+        )
+        r = float(off_par.residual(graph, NO_FIXINGS, REF))
+        expected = 0.0050 * annuity
+        assert r == pytest.approx(expected, rel=1e-6)
+
+    def test_curves_touched_default_and_override(self):
+        # Default sentinel id.
+        s_default = OISSwapRate(
+            start_date=REF,
+            fixed_dates=jnp.array(
+                [int(_make_date(2026, 1, 1))], dtype=jnp.int32
+            ),
+            rate=jnp.asarray(0.04),
+        )
+        assert s_default.curves_touched == ("_default_",)
+        assert s_default.index_id == "OIS"
+
+        # Multi-curve override.
+        s_named = OISSwapRate(
+            start_date=REF,
+            fixed_dates=jnp.array(
+                [int(_make_date(2026, 1, 1))], dtype=jnp.int32
+            ),
+            rate=jnp.asarray(0.04),
+            curves_touched=("USD.SOFR.OIS",),
+            index_id="USD.SOFR",
+        )
+        assert s_named.curves_touched == ("USD.SOFR.OIS",)
+        assert s_named.index_id == "USD.SOFR"
+
+    def test_cross_check_with_ois_swap_pricer(self):
+        """OISSwapRate.residual on the calibrated curve agrees with
+        :func:`ois_swap_price` divided by notional, when schedules match.
+        """
+        from valax.instruments.rates import OISSwap
+        from valax.pricing.analytic.floating import ois_swap_price
+
+        curve = _flat_continuously_compounded(0.04)
+        graph = _wrap_default(curve)
+        swap_quote, fixed_dates, par_rate = self._ois_swap_at_par(curve)
+
+        # Bump 25 bp above par so both sides have a non-trivial value.
+        bumped_quote = OISSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            rate=jnp.asarray(par_rate + 0.0025),
+            day_count="act_360",
+            index_id="USD.SOFR",
+        )
+        bumped_residual = float(
+            bumped_quote.residual(graph, NO_FIXINGS, REF)
+        )
+
+        ois_swap = OISSwap(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=fixed_dates,  # share schedule for the cross-check
+            fixed_rate=jnp.asarray(par_rate + 0.0025),
+            notional=jnp.asarray(1.0),
+            pay_fixed=True,
+            day_count="act_360",
+        )
+        # ois_swap_price returns the payer NPV: float - fixed.
+        # OISSwapRate.residual = fixed - float (rate * annuity - (DF_start - DF_end)).
+        # So they have opposite sign.
+        ois_npv = float(ois_swap_price(ois_swap, curve))
+        assert bumped_residual == pytest.approx(-ois_npv, abs=1e-10)
+
+    def test_jit_compat(self):
+        curve = _flat_continuously_compounded(0.04)
+        graph = _wrap_default(curve)
+        swap, _, _ = self._ois_swap_at_par(curve)
+
+        @jax.jit
+        def f(g):
+            return swap.residual(g, NO_FIXINGS, REF)
+
+        r = f(graph)
+        assert abs(float(r)) < 1e-10
+
+    def test_fixings_currently_ignored(self):
+        """The MVP residual ignores fixings (deferred for partially-
+        seasoned swaps).  Passing a non-empty FixingHistory must not
+        change the residual."""
+        from valax.curves.fixings import FixingHistory, FixingSeries
+
+        curve = _flat_continuously_compounded(0.04)
+        graph = _wrap_default(curve)
+        swap, _, _ = self._ois_swap_at_par(curve)
+
+        non_empty = FixingHistory(
+            indices={
+                "USD.SOFR": FixingSeries(
+                    fixing_dates=jnp.array(
+                        [int(_make_date(2024, 12, 30))], dtype=jnp.int32
+                    ),
+                    fixings=jnp.array([0.0420], dtype=jnp.float64),
+                )
+            }
+        )
+        r_empty = float(swap.residual(graph, NO_FIXINGS, REF))
+        r_with_fixings = float(swap.residual(graph, non_empty, REF))
+        assert r_with_fixings == pytest.approx(r_empty, abs=1e-12)
+
+
+# ── MoneyMarketFuture residual ───────────────────────────────────────
+
+
+class TestMoneyMarketFutureResidual:
+    """The futures residual is ``F^fut - adj - F^curve(T0, T1)``.
+    Tests cover both convexity-adjustment plug-ins shipped in
+    MC-Curves-1 and confirm JIT-compatibility.
+    """
+
+    def test_residual_zero_no_convexity(self):
+        """With ``no_convexity_adj``, residual = 0 when the curve's
+        forward equals the quoted futures rate."""
+        curve = _flat_continuously_compounded(0.05)
+        graph = _wrap_default(curve)
+        t0 = _make_date(2025, 6, 1)
+        t1 = _make_date(2025, 9, 1)
+        df0 = float(curve(t0))
+        df1 = float(curve(t1))
+        tau = float(year_fraction(t0, t1, "act_360"))
+        forward_rate_curve = (df0 / df1 - 1.0) / tau
+        future = MoneyMarketFuture(
+            start_date=t0,
+            end_date=t1,
+            futures_rate=jnp.asarray(forward_rate_curve),
+            day_count="act_360",
+            convexity_adj_fn=no_convexity_adj(),
+        )
+        r = future.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_residual_zero_with_constant_adjustment(self):
+        """With a 5 bp constant adjustment, residual = 0 when
+        ``futures_rate = curve_forward + 0.0005``."""
+        curve = _flat_continuously_compounded(0.05)
+        graph = _wrap_default(curve)
+        t0 = _make_date(2025, 6, 1)
+        t1 = _make_date(2025, 9, 1)
+        df0 = float(curve(t0))
+        df1 = float(curve(t1))
+        tau = float(year_fraction(t0, t1, "act_360"))
+        forward_rate_curve = (df0 / df1 - 1.0) / tau
+        future = MoneyMarketFuture(
+            start_date=t0,
+            end_date=t1,
+            futures_rate=jnp.asarray(forward_rate_curve + 0.0005),
+            day_count="act_360",
+            convexity_adj_fn=constant_convexity_adj(5.0),
+        )
+        r = future.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_residual_off_quote(self):
+        """5 bp above the curve's implied forward (with no adjustment)
+        gives residual = +0.0005."""
+        curve = _flat_continuously_compounded(0.05)
+        graph = _wrap_default(curve)
+        t0 = _make_date(2025, 6, 1)
+        t1 = _make_date(2025, 9, 1)
+        df0 = float(curve(t0))
+        df1 = float(curve(t1))
+        tau = float(year_fraction(t0, t1, "act_360"))
+        forward_rate_curve = (df0 / df1 - 1.0) / tau
+        future = MoneyMarketFuture(
+            start_date=t0,
+            end_date=t1,
+            futures_rate=jnp.asarray(forward_rate_curve + 0.0005),
+            day_count="act_360",
+            convexity_adj_fn=no_convexity_adj(),
+        )
+        r = float(future.residual(graph, NO_FIXINGS, REF))
+        assert r == pytest.approx(0.0005, abs=1e-10)
+
+    def test_default_adjustment_is_no_op(self):
+        """A future constructed without an explicit adjustment uses
+        ``no_convexity_adj`` (defaults applied via default_factory)."""
+        curve = _flat_continuously_compounded(0.05)
+        graph = _wrap_default(curve)
+        t0 = _make_date(2025, 6, 1)
+        t1 = _make_date(2025, 9, 1)
+        df0 = float(curve(t0))
+        df1 = float(curve(t1))
+        tau = float(year_fraction(t0, t1, "act_360"))
+        forward_rate_curve = (df0 / df1 - 1.0) / tau
+        future = MoneyMarketFuture(
+            start_date=t0,
+            end_date=t1,
+            futures_rate=jnp.asarray(forward_rate_curve),
+            day_count="act_360",
+        )  # no convexity_adj_fn specified
+        r = future.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_curves_touched_default_and_override(self):
+        f_default = MoneyMarketFuture(
+            start_date=_make_date(2025, 6, 1),
+            end_date=_make_date(2025, 9, 1),
+            futures_rate=jnp.asarray(0.05),
+        )
+        assert f_default.curves_touched == ("_default_",)
+
+        f_named = MoneyMarketFuture(
+            start_date=_make_date(2025, 6, 1),
+            end_date=_make_date(2025, 9, 1),
+            futures_rate=jnp.asarray(0.05),
+            curves_touched=("USD.SOFR.3M",),
+        )
+        assert f_named.curves_touched == ("USD.SOFR.3M",)
+
+    def test_jit_compat(self):
+        curve = _flat_continuously_compounded(0.05)
+        graph = _wrap_default(curve)
+        t0 = _make_date(2025, 6, 1)
+        t1 = _make_date(2025, 9, 1)
+        df0 = float(curve(t0))
+        df1 = float(curve(t1))
+        tau = float(year_fraction(t0, t1, "act_360"))
+        forward_rate_curve = (df0 / df1 - 1.0) / tau
+        future = MoneyMarketFuture(
+            start_date=t0,
+            end_date=t1,
+            futures_rate=jnp.asarray(forward_rate_curve + 0.0005),
+            day_count="act_360",
+            convexity_adj_fn=constant_convexity_adj(5.0),
+        )
+
+        @jax.jit
+        def f(g):
+            return future.residual(g, NO_FIXINGS, REF)
+
+        r = f(graph)
+        assert abs(float(r)) < 1e-10
 
 
 # ── Round-trip: bootstrap_sequential output reprices to zero ─────────
