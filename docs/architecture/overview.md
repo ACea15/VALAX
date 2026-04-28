@@ -86,7 +86,7 @@ valax/
 ## Data Flow
 
 ```
-Instrument (pytree)  ─┐
+Instrument (pytree)   ─┐
                        ├─→  pricing_fn()  ─→  price (scalar)
 Market Data (arrays)  ─┘        │
                                 │

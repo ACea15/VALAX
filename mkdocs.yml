@@ -36,8 +36,11 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Examples: examples.md
-  - Architecture: architecture.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Productionisation Design: architecture/production.md
   - Models & Theory: theory.md
+  - Vision: vision.md
   - Roadmap: roadmap.md
   - Benchmarks: benchmarks.md
   - User Guide:
