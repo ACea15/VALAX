@@ -4,6 +4,8 @@
 
 VALAX is a quantitative finance library built entirely on JAX and its ecosystem. It provides option pricing, fixed income analytics, and risk computation with automatic differentiation for Greeks — no finite differences needed.
 
+For the long-term direction — how VALAX is intended to be used by trading desks, asset managers, and quant researchers — see [Vision](vision.md). For time-ordered feature work, see [Roadmap](roadmap.md).
+
 ## Key Features
 
 - **Autodiff Greeks** — `jax.grad` gives exact delta, gamma, vega, vanna, volga, rho and more. Higher-order Greeks via nested differentiation.
