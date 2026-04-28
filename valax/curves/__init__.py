@@ -11,3 +11,10 @@ from valax.curves.inflation import (
     yoy_forward_rate,
     from_zc_rates,
 )
+from valax.curves.fixings import (
+    FixingSeries,
+    FixingHistory,
+    empty_fixing_history,
+)
+from valax.curves.graph import CurveGraph
+from valax.curves.bootstrap_proto import BootstrapInstrument
