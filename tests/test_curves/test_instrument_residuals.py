@@ -33,12 +33,15 @@ from valax.curves.convexity import (
     constant_convexity_adj,
     no_convexity_adj,
 )
+from valax.curves.fixings import FixingHistory, FixingSeries
 from valax.curves.instruments import (
     DepositRate,
     FRA,
+    IborSwapRate,
     MoneyMarketFuture,
     OISSwapRate,
     SwapRate,
+    TenorBasisSwap,
 )
 from valax.dates.daycounts import year_fraction, ymd_to_ordinal
 
@@ -428,6 +431,630 @@ class TestOISSwapRateResidual:
         r_empty = float(swap.residual(graph, NO_FIXINGS, REF))
         r_with_fixings = float(swap.residual(graph, non_empty, REF))
         assert r_with_fixings == pytest.approx(r_empty, abs=1e-12)
+
+
+# ── IborSwapRate residual ────────────────────────────────────────────
+
+
+class TestIborSwapRateResidual:
+    """Dual-curve IBOR swap quote.  Float leg projected from a tenor
+    forward curve; both legs discounted with an OIS curve.  Residual
+    is ``fixed_pv - float_pv`` (matches :class:`SwapRate` sign
+    convention).
+    """
+
+    @staticmethod
+    def _build_two_curve_graph(ois_rate=0.035, fwd_rate=0.040):
+        """Construct (USD.SOFR.OIS, USD.SOFR.3M) at distinct flat rates."""
+        ois = _flat_continuously_compounded(ois_rate)
+        fwd = _flat_continuously_compounded(fwd_rate)
+        return CurveGraph(
+            curves={"USD.SOFR.OIS": ois, "USD.SOFR.3M": fwd}
+        )
+
+    @staticmethod
+    def _annual_swap_schedule(years=5):
+        """Annual fixed and float schedule out to ``years`` years."""
+        dates = jnp.array(
+            [
+                int(_make_date(2025 + y + 1, 1, 1))
+                for y in range(years)
+            ],
+            dtype=jnp.int32,
+        )
+        # Fixing date for each coupon = start of that period.
+        fixing_dates = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], dates[:-1]]
+        )
+        return dates, fixing_dates
+
+    def _par_rate_dual_curve(
+        self,
+        graph,
+        fixed_dates,
+        float_dates,
+    ) -> float:
+        """Compute the par fixed rate analytically from the dual-curve
+        formula on a hand-built graph (no fixings)."""
+        ois = graph["USD.SOFR.OIS"]
+        fwd = graph["USD.SOFR.3M"]
+
+        float_starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], float_dates[:-1]]
+        )
+        float_taus = year_fraction(float_starts, float_dates, "act_360")
+        df_starts_fwd = fwd(float_starts)
+        df_ends_fwd = fwd(float_dates)
+        forwards = (df_starts_fwd / df_ends_fwd - 1.0) / float_taus
+        df_float_disc = ois(float_dates)
+        float_pv = float(jnp.sum(forwards * float_taus * df_float_disc))
+
+        fixed_starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], fixed_dates[:-1]]
+        )
+        fixed_taus = year_fraction(fixed_starts, fixed_dates, "act_360")
+        df_fixed_disc = ois(fixed_dates)
+        annuity = float(jnp.sum(fixed_taus * df_fixed_disc))
+        return float_pv / annuity
+
+    def test_residual_zero_at_par_rate(self):
+        graph = self._build_two_curve_graph()
+        fixed_dates, fixing_dates = self._annual_swap_schedule(years=5)
+        float_dates = fixed_dates  # share schedule for this test
+
+        par = self._par_rate_dual_curve(graph, fixed_dates, float_dates)
+        swap = IborSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=float_dates,
+            fixing_dates=fixing_dates,
+            rate=jnp.asarray(par),
+            fixed_day_count="act_360",
+            float_day_count="act_360",
+            curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+            index_id="USD.SOFR.3M",
+        )
+        r = swap.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_residual_off_par_matches_annuity_times_rate_diff(self):
+        """50 bp above par produces residual ≈ 0.0050 × annuity."""
+        graph = self._build_two_curve_graph()
+        fixed_dates, fixing_dates = self._annual_swap_schedule(years=5)
+        float_dates = fixed_dates
+        par = self._par_rate_dual_curve(graph, fixed_dates, float_dates)
+
+        ois = graph["USD.SOFR.OIS"]
+        fixed_starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], fixed_dates[:-1]]
+        )
+        fixed_taus = year_fraction(fixed_starts, fixed_dates, "act_360")
+        annuity = float(jnp.sum(fixed_taus * ois(fixed_dates)))
+
+        swap = IborSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=float_dates,
+            fixing_dates=fixing_dates,
+            rate=jnp.asarray(par + 0.0050),
+            fixed_day_count="act_360",
+            float_day_count="act_360",
+            curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+        )
+        r = float(swap.residual(graph, NO_FIXINGS, REF))
+        assert r == pytest.approx(0.0050 * annuity, rel=1e-6)
+
+    def test_dual_curve_reduces_to_single_when_curves_equal(self):
+        """When discount == forward curve, the dual-curve residual
+        equals the equivalent :class:`SwapRate` residual (single-curve
+        telescoping form)."""
+        curve = _flat_continuously_compounded(0.04)
+        graph = CurveGraph(curves={"_default_": curve})
+        fixed_dates, fixing_dates = self._annual_swap_schedule(years=3)
+
+        rate = jnp.asarray(0.0399)
+        swap_dual = IborSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=fixed_dates,
+            fixing_dates=fixing_dates,
+            rate=rate,
+            fixed_day_count="act_360",
+            float_day_count="act_360",
+            # Same id for both = single-curve degenerate case.
+            curves_touched=("_default_", "_default_"),
+        )
+        swap_single = SwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            rate=rate,
+            day_count="act_360",
+        )
+        r_dual = float(swap_dual.residual(graph, NO_FIXINGS, REF))
+        r_single = float(swap_single.residual(graph, NO_FIXINGS, REF))
+        assert r_dual == pytest.approx(r_single, abs=1e-12)
+
+    def test_residual_uses_forward_curve(self):
+        """The forward curve genuinely participates in the residual:
+        a swap that is at-par on graph A is off-par on graph B that
+        shares OIS but has a different forward curve."""
+        fixed_dates, fixing_dates = self._annual_swap_schedule(years=5)
+
+        graph_a = self._build_two_curve_graph(ois_rate=0.035, fwd_rate=0.040)
+        par_a = self._par_rate_dual_curve(
+            graph_a, fixed_dates, fixed_dates
+        )
+        swap = IborSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=fixed_dates,
+            fixing_dates=fixing_dates,
+            rate=jnp.asarray(par_a),
+            fixed_day_count="act_360",
+            float_day_count="act_360",
+            curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+        )
+
+        # Same OIS, different forward curve.
+        graph_b = CurveGraph(
+            curves={
+                "USD.SOFR.OIS": graph_a["USD.SOFR.OIS"],
+                "USD.SOFR.3M": _flat_continuously_compounded(0.050),
+            }
+        )
+        r_a = float(swap.residual(graph_a, NO_FIXINGS, REF))
+        r_b = float(swap.residual(graph_b, NO_FIXINGS, REF))
+        # At par on A, off par on B by ~(par_a - 5%) * annuity ≈
+        # 100 bp × ~5 years ≈ a few % of notional.
+        assert abs(r_a) < 1e-10
+        assert abs(r_b) > 1e-3
+
+    def test_off_par_residual_uses_ois_discount(self):
+        """For an off-par swap (where DF_ois doesn't cancel across the
+        legs), changing the OIS curve changes the residual.  At-par
+        swaps with identical fixed/float schedules see no OIS effect
+        because the discount factors cancel — that is a known
+        property of dual-curve par swaps, *not* a sign that OIS is
+        ignored."""
+        fixed_dates, fixing_dates = self._annual_swap_schedule(years=5)
+        graph_a = self._build_two_curve_graph(ois_rate=0.035, fwd_rate=0.040)
+        par = self._par_rate_dual_curve(graph_a, fixed_dates, fixed_dates)
+
+        # Quote 100 bp above par to make the residual depend on OIS.
+        swap = IborSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=fixed_dates,
+            fixing_dates=fixing_dates,
+            rate=jnp.asarray(par + 0.0100),
+            fixed_day_count="act_360",
+            float_day_count="act_360",
+            curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+        )
+
+        # Same forward curve, different OIS.
+        graph_b = CurveGraph(
+            curves={
+                "USD.SOFR.OIS": _flat_continuously_compounded(0.050),
+                "USD.SOFR.3M": graph_a["USD.SOFR.3M"],
+            }
+        )
+        r_a = float(swap.residual(graph_a, NO_FIXINGS, REF))
+        r_b = float(swap.residual(graph_b, NO_FIXINGS, REF))
+        # Both are non-zero (off-par); the OIS bump shifts annuity ≈
+        # exp(-0.05*5)/exp(-0.035*5) ≈ 0.93×, so r_b ≈ 0.93 × r_a.
+        # The exact ratio is not important — only that they differ.
+        assert abs(r_a) > 1e-3
+        assert abs(r_a - r_b) > 1e-4
+
+    def test_partially_seasoned_uses_fixing_for_first_coupon(self):
+        """First fixing already realised: residual differs from
+        non-fixings case by exactly the expected amount."""
+        graph = self._build_two_curve_graph()
+        fixed_dates, fixing_dates = self._annual_swap_schedule(years=5)
+        float_dates = fixed_dates
+
+        par = self._par_rate_dual_curve(graph, fixed_dates, float_dates)
+        swap = IborSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=float_dates,
+            fixing_dates=fixing_dates,
+            rate=jnp.asarray(par),
+            fixed_day_count="act_360",
+            float_day_count="act_360",
+            curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+            index_id="USD.SOFR.3M",
+        )
+
+        # Compute the projected first-coupon rate from the curve.
+        fwd = graph["USD.SOFR.3M"]
+        first_start = REF
+        first_end = float_dates[0]
+        tau_first = float(year_fraction(first_start, first_end, "act_360"))
+        df_start_fwd = float(fwd(first_start))
+        df_end_fwd = float(fwd(first_end))
+        projected_first = (df_start_fwd / df_end_fwd - 1.0) / tau_first
+
+        # Override that projection with a realised value 100 bp above.
+        realised_first = projected_first + 0.0100
+        history = FixingHistory(
+            indices={
+                "USD.SOFR.3M": FixingSeries(
+                    fixing_dates=jnp.array(
+                        [int(REF)], dtype=jnp.int32
+                    ),
+                    fixings=jnp.array([realised_first]),
+                )
+            }
+        )
+
+        # With fixings the residual changes by exactly
+        #     (projected - realised) * tau * DF_disc(first_end)
+        # because the float leg's first coupon now uses ``realised``
+        # instead of ``projected``, and the fixed leg is unchanged.
+        ois = graph["USD.SOFR.OIS"]
+        df_first_disc = float(ois(first_end))
+        expected_delta = (projected_first - realised_first) * tau_first * df_first_disc
+
+        r_no_fixings = float(swap.residual(graph, NO_FIXINGS, REF))
+        r_with_fixings = float(swap.residual(graph, history, REF))
+        assert (r_with_fixings - r_no_fixings) == pytest.approx(
+            expected_delta, abs=1e-10
+        )
+
+    def test_no_fixings_for_index_falls_back_to_projection(self):
+        """If FixingHistory contains other indices but not this one,
+        all coupons project from the curve (no override)."""
+        graph = self._build_two_curve_graph()
+        fixed_dates, fixing_dates = self._annual_swap_schedule(years=3)
+        float_dates = fixed_dates
+        par = self._par_rate_dual_curve(graph, fixed_dates, float_dates)
+        swap = IborSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=float_dates,
+            fixing_dates=fixing_dates,
+            rate=jnp.asarray(par),
+            fixed_day_count="act_360",
+            float_day_count="act_360",
+            curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+            index_id="USD.SOFR.3M",
+        )
+
+        # FixingHistory has a different index — should be ignored.
+        history = FixingHistory(
+            indices={
+                "USD.SOFR.6M": FixingSeries(
+                    fixing_dates=jnp.array(
+                        [int(REF)], dtype=jnp.int32
+                    ),
+                    fixings=jnp.array([0.10]),  # arbitrary, irrelevant
+                )
+            }
+        )
+        r_empty = float(swap.residual(graph, NO_FIXINGS, REF))
+        r_other = float(swap.residual(graph, history, REF))
+        assert r_other == pytest.approx(r_empty, abs=1e-12)
+
+    def test_curves_touched_2tuple_default_and_override(self):
+        s_default = IborSwapRate(
+            start_date=REF,
+            fixed_dates=jnp.array(
+                [int(_make_date(2026, 1, 1))], dtype=jnp.int32
+            ),
+            float_dates=jnp.array(
+                [int(_make_date(2026, 1, 1))], dtype=jnp.int32
+            ),
+            fixing_dates=jnp.array([int(REF)], dtype=jnp.int32),
+            rate=jnp.asarray(0.04),
+        )
+        assert s_default.curves_touched == (
+            "_default_",
+            "_default_",
+        )
+        assert s_default.index_id == "IBOR"
+
+        s_named = IborSwapRate(
+            start_date=REF,
+            fixed_dates=jnp.array(
+                [int(_make_date(2026, 1, 1))], dtype=jnp.int32
+            ),
+            float_dates=jnp.array(
+                [int(_make_date(2026, 1, 1))], dtype=jnp.int32
+            ),
+            fixing_dates=jnp.array([int(REF)], dtype=jnp.int32),
+            rate=jnp.asarray(0.04),
+            curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+            index_id="USD.SOFR.3M",
+        )
+        assert s_named.curves_touched == ("USD.SOFR.OIS", "USD.SOFR.3M")
+        assert s_named.index_id == "USD.SOFR.3M"
+
+    def test_jit_compat(self):
+        graph = self._build_two_curve_graph()
+        fixed_dates, fixing_dates = self._annual_swap_schedule(years=3)
+        par = self._par_rate_dual_curve(graph, fixed_dates, fixed_dates)
+        swap = IborSwapRate(
+            start_date=REF,
+            fixed_dates=fixed_dates,
+            float_dates=fixed_dates,
+            fixing_dates=fixing_dates,
+            rate=jnp.asarray(par),
+            curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+        )
+
+        @jax.jit
+        def f(g):
+            return swap.residual(g, NO_FIXINGS, REF)
+
+        r = f(graph)
+        assert abs(float(r)) < 1e-10
+
+
+# ── TenorBasisSwap residual ──────────────────────────────────────────
+
+
+class TestTenorBasisSwapResidual:
+    """Two floating legs on the same currency / different tenors,
+    discounted with a shared OIS curve, with a basis spread on one
+    leg.  Residual is ``leg_a_pv - leg_b_pv``.
+    """
+
+    @staticmethod
+    def _three_curve_graph(ois=0.035, fwd_a=0.040, fwd_b=0.042):
+        return CurveGraph(
+            curves={
+                "USD.SOFR.OIS": _flat_continuously_compounded(ois),
+                "USD.SOFR.3M": _flat_continuously_compounded(fwd_a),
+                "USD.SOFR.6M": _flat_continuously_compounded(fwd_b),
+            }
+        )
+
+    @staticmethod
+    def _annual_schedule(years=5):
+        dates = jnp.array(
+            [int(_make_date(2025 + y + 1, 1, 1)) for y in range(years)],
+            dtype=jnp.int32,
+        )
+        fixing_dates = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], dates[:-1]]
+        )
+        return dates, fixing_dates
+
+    def _par_basis_spread(
+        self, graph, dates_a, dates_b, dc_a="act_360", dc_b="act_360"
+    ) -> float:
+        """Closed-form par basis spread (added to leg A) given identical
+        OIS discounting and arbitrary forward curves."""
+        ois = graph["USD.SOFR.OIS"]
+        fwd_a = graph["USD.SOFR.3M"]
+        fwd_b = graph["USD.SOFR.6M"]
+
+        a_starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], dates_a[:-1]]
+        )
+        a_taus = year_fraction(a_starts, dates_a, dc_a)
+        a_fwds = (fwd_a(a_starts) / fwd_a(dates_a) - 1.0) / a_taus
+        df_disc_a = ois(dates_a)
+        a_pv_no_spread = float(jnp.sum(a_fwds * a_taus * df_disc_a))
+        a_annuity = float(jnp.sum(a_taus * df_disc_a))
+
+        b_starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], dates_b[:-1]]
+        )
+        b_taus = year_fraction(b_starts, dates_b, dc_b)
+        b_fwds = (fwd_b(b_starts) / fwd_b(dates_b) - 1.0) / b_taus
+        df_disc_b = ois(dates_b)
+        b_pv_no_spread = float(jnp.sum(b_fwds * b_taus * df_disc_b))
+
+        # Solve a_pv_no_spread + s_a * a_annuity = b_pv_no_spread.
+        return (b_pv_no_spread - a_pv_no_spread) / a_annuity
+
+    def test_residual_zero_at_par_basis(self):
+        graph = self._three_curve_graph()
+        dates, fixing_dates = self._annual_schedule(years=5)
+        par_spread = self._par_basis_spread(graph, dates, dates)
+        swap = TenorBasisSwap(
+            start_date=REF,
+            leg_a_dates=dates,
+            leg_a_fixing_dates=fixing_dates,
+            leg_a_index_id="USD.SOFR.3M",
+            leg_b_dates=dates,
+            leg_b_fixing_dates=fixing_dates,
+            leg_b_index_id="USD.SOFR.6M",
+            spread=jnp.asarray(par_spread),
+            spread_on_leg="a",
+            curves_touched=(
+                "USD.SOFR.OIS",
+                "USD.SOFR.3M",
+                "USD.SOFR.6M",
+            ),
+        )
+        r = swap.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_residual_off_par(self):
+        """20 bp above par adds 20 bp × annuity to the leg-A side
+        of the residual."""
+        graph = self._three_curve_graph()
+        dates, fixing_dates = self._annual_schedule(years=5)
+        par_spread = self._par_basis_spread(graph, dates, dates)
+
+        ois = graph["USD.SOFR.OIS"]
+        starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], dates[:-1]]
+        )
+        taus = year_fraction(starts, dates, "act_360")
+        annuity = float(jnp.sum(taus * ois(dates)))
+
+        swap = TenorBasisSwap(
+            start_date=REF,
+            leg_a_dates=dates,
+            leg_a_fixing_dates=fixing_dates,
+            leg_a_index_id="USD.SOFR.3M",
+            leg_b_dates=dates,
+            leg_b_fixing_dates=fixing_dates,
+            leg_b_index_id="USD.SOFR.6M",
+            spread=jnp.asarray(par_spread + 0.0020),
+            spread_on_leg="a",
+            curves_touched=(
+                "USD.SOFR.OIS",
+                "USD.SOFR.3M",
+                "USD.SOFR.6M",
+            ),
+        )
+        r = float(swap.residual(graph, NO_FIXINGS, REF))
+        # +20 bp on leg A increases leg-A PV by 0.0020 × annuity.
+        assert r == pytest.approx(0.0020 * annuity, rel=1e-6)
+
+    def test_spread_on_leg_b_flips_sign(self):
+        """The same magnitude of spread, applied to leg B instead of
+        leg A, changes the residual by the expected signed amount."""
+        graph = self._three_curve_graph()
+        dates, fixing_dates = self._annual_schedule(years=5)
+        ois = graph["USD.SOFR.OIS"]
+        starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], dates[:-1]]
+        )
+        taus = year_fraction(starts, dates, "act_360")
+        annuity = float(jnp.sum(taus * ois(dates)))
+
+        # Build a swap at "par on leg A" (residual = 0).  Then build
+        # the same swap with the spread moved to leg B (also at the
+        # par value on A — i.e., the spread is no longer at the
+        # par-on-B value): residual changes by ``-spread * annuity``
+        # because the spread leg flipped from A to B.
+        par_spread = self._par_basis_spread(graph, dates, dates)
+        swap_a = TenorBasisSwap(
+            start_date=REF,
+            leg_a_dates=dates,
+            leg_a_fixing_dates=fixing_dates,
+            leg_a_index_id="USD.SOFR.3M",
+            leg_b_dates=dates,
+            leg_b_fixing_dates=fixing_dates,
+            leg_b_index_id="USD.SOFR.6M",
+            spread=jnp.asarray(par_spread),
+            spread_on_leg="a",
+            curves_touched=(
+                "USD.SOFR.OIS",
+                "USD.SOFR.3M",
+                "USD.SOFR.6M",
+            ),
+        )
+        swap_b = TenorBasisSwap(
+            start_date=REF,
+            leg_a_dates=dates,
+            leg_a_fixing_dates=fixing_dates,
+            leg_a_index_id="USD.SOFR.3M",
+            leg_b_dates=dates,
+            leg_b_fixing_dates=fixing_dates,
+            leg_b_index_id="USD.SOFR.6M",
+            spread=jnp.asarray(par_spread),
+            spread_on_leg="b",
+            curves_touched=(
+                "USD.SOFR.OIS",
+                "USD.SOFR.3M",
+                "USD.SOFR.6M",
+            ),
+        )
+        r_a = float(swap_a.residual(graph, NO_FIXINGS, REF))
+        r_b = float(swap_b.residual(graph, NO_FIXINGS, REF))
+        # r_a - r_b = par_spread * annuity + par_spread * annuity =
+        # 2 * par_spread * annuity (A had +s on leg A; B has +s on
+        # leg B which subtracts from the residual).
+        assert r_a == pytest.approx(0.0, abs=1e-10)
+        assert (r_a - r_b) == pytest.approx(
+            2.0 * par_spread * annuity, rel=1e-6
+        )
+
+    def test_invalid_spread_on_leg_raises(self):
+        graph = self._three_curve_graph()
+        dates, fixing_dates = self._annual_schedule(years=2)
+        swap = TenorBasisSwap(
+            start_date=REF,
+            leg_a_dates=dates,
+            leg_a_fixing_dates=fixing_dates,
+            leg_a_index_id="USD.SOFR.3M",
+            leg_b_dates=dates,
+            leg_b_fixing_dates=fixing_dates,
+            leg_b_index_id="USD.SOFR.6M",
+            spread=jnp.asarray(0.0010),
+            spread_on_leg="x",  # invalid
+            curves_touched=(
+                "USD.SOFR.OIS",
+                "USD.SOFR.3M",
+                "USD.SOFR.6M",
+            ),
+        )
+        with pytest.raises(ValueError, match="spread_on_leg"):
+            swap.residual(graph, NO_FIXINGS, REF)
+
+    def test_curves_touched_3tuple_default_and_override(self):
+        dates, fixing_dates = self._annual_schedule(years=2)
+        s_default = TenorBasisSwap(
+            start_date=REF,
+            leg_a_dates=dates,
+            leg_a_fixing_dates=fixing_dates,
+            leg_b_dates=dates,
+            leg_b_fixing_dates=fixing_dates,
+            spread=jnp.asarray(0.0010),
+        )
+        assert s_default.curves_touched == (
+            "_default_",
+            "_default_",
+            "_default_",
+        )
+        assert s_default.spread_on_leg == "a"
+
+        s_named = TenorBasisSwap(
+            start_date=REF,
+            leg_a_dates=dates,
+            leg_a_fixing_dates=fixing_dates,
+            leg_a_index_id="USD.SOFR.3M",
+            leg_b_dates=dates,
+            leg_b_fixing_dates=fixing_dates,
+            leg_b_index_id="USD.SOFR.6M",
+            spread=jnp.asarray(0.0010),
+            curves_touched=(
+                "USD.SOFR.OIS",
+                "USD.SOFR.3M",
+                "USD.SOFR.6M",
+            ),
+        )
+        assert s_named.curves_touched == (
+            "USD.SOFR.OIS",
+            "USD.SOFR.3M",
+            "USD.SOFR.6M",
+        )
+
+    def test_jit_compat(self):
+        graph = self._three_curve_graph()
+        dates, fixing_dates = self._annual_schedule(years=3)
+        par_spread = self._par_basis_spread(graph, dates, dates)
+        swap = TenorBasisSwap(
+            start_date=REF,
+            leg_a_dates=dates,
+            leg_a_fixing_dates=fixing_dates,
+            leg_a_index_id="USD.SOFR.3M",
+            leg_b_dates=dates,
+            leg_b_fixing_dates=fixing_dates,
+            leg_b_index_id="USD.SOFR.6M",
+            spread=jnp.asarray(par_spread),
+            spread_on_leg="a",
+            curves_touched=(
+                "USD.SOFR.OIS",
+                "USD.SOFR.3M",
+                "USD.SOFR.6M",
+            ),
+        )
+
+        @jax.jit
+        def f(g):
+            return swap.residual(g, NO_FIXINGS, REF)
+
+        r = f(graph)
+        assert abs(float(r)) < 1e-10
 
 
 # ── MoneyMarketFuture residual ───────────────────────────────────────

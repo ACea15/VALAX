@@ -88,6 +88,76 @@ class TestFixingSeriesLookup:
         assert jnp.isnan(sofr_series.lookup(d))
 
 
+class TestFixingSeriesLookupMany:
+    def test_all_present(self, sofr_series):
+        dates = jnp.array(
+            [
+                int(ymd_to_ordinal(2025, 1, 6)),
+                int(ymd_to_ordinal(2025, 1, 21)),
+                int(ymd_to_ordinal(2025, 2, 18)),
+            ],
+            dtype=jnp.int32,
+        )
+        rates = sofr_series.lookup_many(dates)
+        expected = jnp.array([0.0436, 0.0435, 0.0431])
+        assert jnp.allclose(rates, expected, atol=1e-12)
+
+    def test_mix_of_present_and_absent_returns_nan_for_absent(
+        self, sofr_series
+    ):
+        dates = jnp.array(
+            [
+                int(ymd_to_ordinal(2025, 1, 6)),    # present
+                int(ymd_to_ordinal(2025, 1, 15)),   # absent in range
+                int(ymd_to_ordinal(2025, 2, 18)),   # present
+                int(ymd_to_ordinal(2030, 1, 1)),    # absent after
+            ],
+            dtype=jnp.int32,
+        )
+        rates = sofr_series.lookup_many(dates)
+        assert float(rates[0]) == pytest.approx(0.0436)
+        assert jnp.isnan(rates[1])
+        assert float(rates[2]) == pytest.approx(0.0431)
+        assert jnp.isnan(rates[3])
+
+    def test_jit_compatible(self, sofr_series):
+        @jax.jit
+        def f(dates):
+            return sofr_series.lookup_many(dates)
+
+        dates = jnp.array(
+            [
+                int(ymd_to_ordinal(2025, 1, 6)),
+                int(ymd_to_ordinal(2025, 1, 13)),
+            ],
+            dtype=jnp.int32,
+        )
+        rates = f(dates)
+        assert float(rates[0]) == pytest.approx(0.0436)
+        assert float(rates[1]) == pytest.approx(0.0434)
+
+
+class TestFixingHistoryLookupMany:
+    def test_known_index(self, history):
+        dates = jnp.array(
+            [
+                int(ymd_to_ordinal(2025, 1, 6)),
+                int(ymd_to_ordinal(2025, 2, 18)),
+            ],
+            dtype=jnp.int32,
+        )
+        rates = history.lookup_many("USD.SOFR", dates)
+        expected = jnp.array([0.0436, 0.0431])
+        assert jnp.allclose(rates, expected, atol=1e-12)
+
+    def test_unknown_index_raises(self, history):
+        dates = jnp.array(
+            [int(ymd_to_ordinal(2025, 1, 6))], dtype=jnp.int32
+        )
+        with pytest.raises(KeyError):
+            history.lookup_many("GBP.SONIA", dates)
+
+
 class TestFixingSeriesHasFixing:
     def test_present(self, sofr_series):
         d = jnp.asarray(int(ymd_to_ordinal(2025, 1, 13)), dtype=jnp.int32)

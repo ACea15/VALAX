@@ -80,6 +80,26 @@ class FixingSeries(eqx.Module):
         safe_idx = jnp.where(in_range, idx, 0)
         return in_range & (self.fixing_dates[safe_idx] == fixing_date)
 
+    def lookup_many(
+        self,
+        fixing_dates: Int[Array, " m"],
+    ) -> Float[Array, " m"]:
+        """Vectorised :meth:`lookup` over an array of dates.
+
+        Returns an array of the same shape as ``fixing_dates`` where
+        each entry is the realised value at that date or ``jnp.nan``
+        if absent.  Useful for instruments with multiple float coupons
+        (e.g. :class:`IborSwapRate`, :class:`TenorBasisSwap`) where a
+        per-coupon ``has_fixing`` / ``lookup`` loop would unroll into
+        N separate ``searchsorted`` calls at trace time.
+        """
+        n = self.fixing_dates.shape[0]
+        idx = jnp.searchsorted(self.fixing_dates, fixing_dates)
+        in_range = idx < n
+        safe_idx = jnp.where(in_range, idx, 0)
+        matches = in_range & (self.fixing_dates[safe_idx] == fixing_dates)
+        return jnp.where(matches, self.fixings[safe_idx], jnp.nan)
+
 
 class FixingHistory(eqx.Module):
     """Registry of fixing histories keyed by index identifier.
@@ -120,6 +140,21 @@ class FixingHistory(eqx.Module):
         """Return ``True`` iff a realised fixing exists for the (id, date) pair."""
         series = self.indices[index_id]
         return series.has_fixing(fixing_date)
+
+    def lookup_many(
+        self,
+        index_id: str,
+        fixing_dates: Int[Array, " m"],
+    ) -> Float[Array, " m"]:
+        """Vectorised :meth:`lookup` over an array of dates.
+
+        Raises :class:`KeyError` at trace time if ``index_id`` is not
+        present (configuration error); for missing dates returns
+        ``jnp.nan`` so caller code can fall back to forward projection
+        without Python-level branching.
+        """
+        series = self.indices[index_id]
+        return series.lookup_many(fixing_dates)
 
 
 def empty_fixing_history() -> FixingHistory:
