@@ -35,8 +35,11 @@ from valax.curves.convexity import (
 )
 from valax.curves.fixings import FixingHistory, FixingSeries
 from valax.curves.instruments import (
+    CrossCurrencyBasisSwap,
     DepositRate,
     FRA,
+    FXForward,
+    FXSwap,
     IborSwapRate,
     MoneyMarketFuture,
     OISSwapRate,
@@ -787,6 +790,507 @@ class TestIborSwapRateResidual:
         @jax.jit
         def f(g):
             return swap.residual(g, NO_FIXINGS, REF)
+
+        r = f(graph)
+        assert abs(float(r)) < 1e-10
+
+
+# ── FXForward residual ───────────────────────────────────────────────
+
+
+class TestFXForwardResidual:
+    """FX forward residual is the deviation from covered interest
+    rate parity.  Both DFs are evaluated at settle_date.
+    """
+
+    @staticmethod
+    def _fx_graph(usd_rate=0.035, eur_rate=0.020):
+        return CurveGraph(
+            curves={
+                "USD.SOFR.OIS": _flat_continuously_compounded(usd_rate),
+                "EUR.ESTR.OIS": _flat_continuously_compounded(eur_rate),
+            }
+        )
+
+    @staticmethod
+    def _cip_forward(
+        graph: CurveGraph, settle_date, fx_spot: float
+    ) -> float:
+        """Closed-form CIP forward rate."""
+        df_dom = float(graph["USD.SOFR.OIS"](settle_date))
+        df_for = float(graph["EUR.ESTR.OIS"](settle_date))
+        return fx_spot * df_for / df_dom
+
+    def test_residual_zero_at_cip_quote(self):
+        graph = self._fx_graph()
+        settle = _make_date(2026, 1, 1)
+        spot = 1.10  # USD per EUR
+        cip_fwd = self._cip_forward(graph, settle, spot)
+        fxf = FXForward(
+            value_date=_make_date(2025, 1, 3),
+            settle_date=settle,
+            quoted_forward=jnp.asarray(cip_fwd),
+            fx_spot=jnp.asarray(spot),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        r = fxf.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-12
+
+    def test_residual_off_quote_changes_linearly(self):
+        """Bumping the quoted forward by Δ shifts the residual by Δ."""
+        graph = self._fx_graph()
+        settle = _make_date(2026, 1, 1)
+        spot = 1.10
+        cip_fwd = self._cip_forward(graph, settle, spot)
+        fxf = FXForward(
+            value_date=_make_date(2025, 1, 3),
+            settle_date=settle,
+            quoted_forward=jnp.asarray(cip_fwd + 0.0010),  # +10 pips
+            fx_spot=jnp.asarray(spot),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        r = float(fxf.residual(graph, NO_FIXINGS, REF))
+        assert r == pytest.approx(0.0010, abs=1e-12)
+
+    def test_changing_fx_spot_breaks_cip(self):
+        """Holding the quote fixed but changing spot makes residual
+        non-zero by the expected amount."""
+        graph = self._fx_graph()
+        settle = _make_date(2026, 1, 1)
+        cip_fwd = self._cip_forward(graph, settle, 1.10)
+        fxf_bumped_spot = FXForward(
+            value_date=_make_date(2025, 1, 3),
+            settle_date=settle,
+            quoted_forward=jnp.asarray(cip_fwd),
+            fx_spot=jnp.asarray(1.20),  # bumped from 1.10
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        r = float(fxf_bumped_spot.residual(graph, NO_FIXINGS, REF))
+        # Residual = cip_fwd_at_1.10 - 1.20 * df_for/df_dom
+        #          = 1.10 * R - 1.20 * R = -0.10 * R, where R = df_for/df_dom.
+        df_dom = float(graph["USD.SOFR.OIS"](settle))
+        df_for = float(graph["EUR.ESTR.OIS"](settle))
+        expected = cip_fwd - 1.20 * df_for / df_dom
+        assert r == pytest.approx(expected, abs=1e-12)
+
+    def test_changing_curves_changes_residual(self):
+        """Holding spot and quote fixed, bumping the foreign curve
+        changes the residual by the expected amount."""
+        graph_a = self._fx_graph(usd_rate=0.035, eur_rate=0.020)
+        settle = _make_date(2026, 1, 1)
+        spot = 1.10
+        cip_fwd_a = self._cip_forward(graph_a, settle, spot)
+        fxf = FXForward(
+            value_date=_make_date(2025, 1, 3),
+            settle_date=settle,
+            quoted_forward=jnp.asarray(cip_fwd_a),
+            fx_spot=jnp.asarray(spot),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        # Same USD curve, different EUR curve.
+        graph_b = CurveGraph(
+            curves={
+                "USD.SOFR.OIS": graph_a["USD.SOFR.OIS"],
+                "EUR.ESTR.OIS": _flat_continuously_compounded(0.030),
+            }
+        )
+        r_a = float(fxf.residual(graph_a, NO_FIXINGS, REF))
+        r_b = float(fxf.residual(graph_b, NO_FIXINGS, REF))
+        assert abs(r_a) < 1e-12
+        assert abs(r_b) > 1e-4  # measurably non-zero
+
+    def test_curves_touched_default_and_override(self):
+        f_default = FXForward(
+            value_date=_make_date(2025, 1, 3),
+            settle_date=_make_date(2026, 1, 1),
+            quoted_forward=jnp.asarray(1.10),
+            fx_spot=jnp.asarray(1.10),
+        )
+        assert f_default.curves_touched == (
+            "_default_",
+            "_default_",
+        )
+
+        f_named = FXForward(
+            value_date=_make_date(2025, 1, 3),
+            settle_date=_make_date(2026, 1, 1),
+            quoted_forward=jnp.asarray(1.10),
+            fx_spot=jnp.asarray(1.10),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        assert f_named.curves_touched == (
+            "USD.SOFR.OIS",
+            "EUR.ESTR.OIS",
+        )
+
+    def test_jit_compat(self):
+        graph = self._fx_graph()
+        settle = _make_date(2026, 1, 1)
+        spot = 1.10
+        cip_fwd = self._cip_forward(graph, settle, spot)
+        fxf = FXForward(
+            value_date=_make_date(2025, 1, 3),
+            settle_date=settle,
+            quoted_forward=jnp.asarray(cip_fwd),
+            fx_spot=jnp.asarray(spot),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+
+        @jax.jit
+        def f(g):
+            return fxf.residual(g, NO_FIXINGS, REF)
+
+        r = f(graph)
+        assert abs(float(r)) < 1e-12
+
+
+# ── FXSwap residual ──────────────────────────────────────────────────
+
+
+class TestFXSwapResidual:
+    """FXSwap residual is the CIP relation between near and far legs.
+    Reduces to FXForward when ``near_date == ref_date``.
+    """
+
+    @staticmethod
+    def _fx_graph():
+        return CurveGraph(
+            curves={
+                "USD.SOFR.OIS": _flat_continuously_compounded(0.035),
+                "EUR.ESTR.OIS": _flat_continuously_compounded(0.020),
+            }
+        )
+
+    def test_residual_zero_at_cip(self):
+        graph = self._fx_graph()
+        near = _make_date(2025, 1, 3)
+        far = _make_date(2026, 1, 5)
+        near_rate = 1.10
+        df_dom_near = float(graph["USD.SOFR.OIS"](near))
+        df_for_near = float(graph["EUR.ESTR.OIS"](near))
+        df_dom_far = float(graph["USD.SOFR.OIS"](far))
+        df_for_far = float(graph["EUR.ESTR.OIS"](far))
+        # Solve far_rate * df_for_near * df_dom_far =
+        #       near_rate * df_dom_near * df_for_far for far_rate.
+        far_rate = (
+            near_rate * df_dom_near * df_for_far
+            / (df_for_near * df_dom_far)
+        )
+        swap = FXSwap(
+            near_date=near,
+            far_date=far,
+            near_rate=jnp.asarray(near_rate),
+            far_rate=jnp.asarray(far_rate),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        r = swap.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-12
+
+    def test_collapses_to_fx_forward_when_near_is_ref(self):
+        """When ``near_date == ref_date``, both near DFs equal 1 and
+        the FXSwap residual is identical to FXForward's, with
+        ``near_rate`` playing the role of ``fx_spot``."""
+        graph = self._fx_graph()
+        far = _make_date(2026, 1, 1)
+        spot = 1.10
+        df_dom_far = float(graph["USD.SOFR.OIS"](far))
+        df_for_far = float(graph["EUR.ESTR.OIS"](far))
+        cip_fwd = spot * df_for_far / df_dom_far
+
+        swap = FXSwap(
+            near_date=REF,  # near = ref → DFs at near = 1
+            far_date=far,
+            near_rate=jnp.asarray(spot),
+            far_rate=jnp.asarray(cip_fwd),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        fxf = FXForward(
+            value_date=REF,
+            settle_date=far,
+            quoted_forward=jnp.asarray(cip_fwd),
+            fx_spot=jnp.asarray(spot),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        r_swap = float(swap.residual(graph, NO_FIXINGS, REF))
+        r_fxf = float(fxf.residual(graph, NO_FIXINGS, REF))
+        assert abs(r_swap) < 1e-12
+        assert abs(r_fxf) < 1e-12
+        # Both zero — consistent.
+
+    def test_residual_off_par(self):
+        """Bumping ``far_rate`` by Δ moves residual by
+        Δ * df_for_near * df_dom_far."""
+        graph = self._fx_graph()
+        near = _make_date(2025, 1, 3)
+        far = _make_date(2026, 1, 5)
+        near_rate = 1.10
+        df_dom_near = float(graph["USD.SOFR.OIS"](near))
+        df_for_near = float(graph["EUR.ESTR.OIS"](near))
+        df_dom_far = float(graph["USD.SOFR.OIS"](far))
+        df_for_far = float(graph["EUR.ESTR.OIS"](far))
+        cip_far = (
+            near_rate * df_dom_near * df_for_far
+            / (df_for_near * df_dom_far)
+        )
+        bump = 0.0050
+        swap = FXSwap(
+            near_date=near,
+            far_date=far,
+            near_rate=jnp.asarray(near_rate),
+            far_rate=jnp.asarray(cip_far + bump),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+        r = float(swap.residual(graph, NO_FIXINGS, REF))
+        expected = bump * df_for_near * df_dom_far
+        assert r == pytest.approx(expected, abs=1e-12)
+
+    def test_jit_compat(self):
+        graph = self._fx_graph()
+        near = _make_date(2025, 1, 3)
+        far = _make_date(2026, 1, 5)
+        near_rate = 1.10
+        df_dom_near = float(graph["USD.SOFR.OIS"](near))
+        df_for_near = float(graph["EUR.ESTR.OIS"](near))
+        df_dom_far = float(graph["USD.SOFR.OIS"](far))
+        df_for_far = float(graph["EUR.ESTR.OIS"](far))
+        far_rate = (
+            near_rate * df_dom_near * df_for_far
+            / (df_for_near * df_dom_far)
+        )
+        swap = FXSwap(
+            near_date=near,
+            far_date=far,
+            near_rate=jnp.asarray(near_rate),
+            far_rate=jnp.asarray(far_rate),
+            curves_touched=("USD.SOFR.OIS", "EUR.ESTR.OIS"),
+        )
+
+        @jax.jit
+        def f(g):
+            return swap.residual(g, NO_FIXINGS, REF)
+
+        r = f(graph)
+        assert abs(float(r)) < 1e-12
+
+
+# ── CrossCurrencyBasisSwap residual ──────────────────────────────────
+
+
+class TestCrossCurrencyBasisSwapResidual:
+    """Cross-currency basis swap with MTM and constant-notional
+    variants.  Residual differs structurally between the two; both
+    are exercised against hand-built four-curve graphs.
+    """
+
+    @staticmethod
+    def _ccbs_graph(
+        usd_ois=0.040,
+        usd_fwd=0.045,
+        eur_ois=0.020,
+        eur_fwd=0.025,
+    ):
+        return CurveGraph(
+            curves={
+                "USD.SOFR.OIS": _flat_continuously_compounded(usd_ois),
+                "USD.SOFR.3M": _flat_continuously_compounded(usd_fwd),
+                "EUR.ESTR.OIS": _flat_continuously_compounded(eur_ois),
+                "EUR.EURIBOR.3M": _flat_continuously_compounded(eur_fwd),
+            }
+        )
+
+    @staticmethod
+    def _quarterly_dates(years=5):
+        """Quarterly dates from REF + 3M to REF + years*12M."""
+        dates = []
+        for q in range(1, years * 4 + 1):
+            year = 2025 + (q // 4)
+            month = (q * 3) % 12 + 1
+            if (q * 3) % 12 == 0:
+                month = 1
+                year = 2025 + (q // 4)
+            dates.append(int(_make_date(year, month, 1)))
+        return jnp.array(sorted(set(dates)), dtype=jnp.int32)
+
+    @staticmethod
+    def _annual_dates(years=5):
+        return jnp.array(
+            [int(_make_date(2025 + y + 1, 1, 1)) for y in range(years)],
+            dtype=jnp.int32,
+        )
+
+    def _build_swap(
+        self,
+        spread,
+        spread_on_leg="domestic",
+        variant="constant_notional",
+        years=5,
+    ):
+        dom_dates = self._annual_dates(years)
+        for_dates = self._annual_dates(years)
+        dom_fixing_dates = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], dom_dates[:-1]]
+        )
+        for_fixing_dates = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], for_dates[:-1]]
+        )
+        return CrossCurrencyBasisSwap(
+            start_date=REF,
+            dom_dates=dom_dates,
+            dom_fixing_dates=dom_fixing_dates,
+            for_dates=for_dates,
+            for_fixing_dates=for_fixing_dates,
+            fx_spot=jnp.asarray(1.10),
+            spread=jnp.asarray(spread),
+            dom_day_count="act_360",
+            dom_index_id="USD.SOFR.3M",
+            for_day_count="act_360",
+            for_index_id="EUR.EURIBOR.3M",
+            spread_on_leg=spread_on_leg,
+            variant=variant,
+            curves_touched=(
+                "USD.SOFR.OIS",
+                "USD.SOFR.3M",
+                "EUR.ESTR.OIS",
+                "EUR.EURIBOR.3M",
+            ),
+        )
+
+    @staticmethod
+    def _solve_par_spread(swap, graph):
+        """Newton-style: residual is linear in spread (annuity slope),
+        so par = spread - residual / (∂residual/∂spread)."""
+        # We can solve analytically: residual(s) = residual(0) + s * annuity.
+        # First evaluate at spread=0, then evaluate at spread=1 to extract
+        # the annuity slope.
+        zero_swap = eqx.tree_at(
+            lambda s: s.spread, swap, jnp.asarray(0.0)
+        )
+        one_swap = eqx.tree_at(
+            lambda s: s.spread, swap, jnp.asarray(1.0)
+        )
+        r0 = float(zero_swap.residual(graph, NO_FIXINGS, REF))
+        r1 = float(one_swap.residual(graph, NO_FIXINGS, REF))
+        slope = r1 - r0
+        return -r0 / slope
+
+    def test_constant_notional_residual_zero_at_par(self):
+        graph = self._ccbs_graph()
+        swap = self._build_swap(
+            spread=0.0, variant="constant_notional"
+        )
+        par_spread = self._solve_par_spread(swap, graph)
+        swap_at_par = eqx.tree_at(
+            lambda s: s.spread, swap, jnp.asarray(par_spread)
+        )
+        r = swap_at_par.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_mtm_residual_zero_at_par(self):
+        graph = self._ccbs_graph()
+        swap = self._build_swap(spread=0.0, variant="mtm")
+        par_spread = self._solve_par_spread(swap, graph)
+        swap_at_par = eqx.tree_at(
+            lambda s: s.spread, swap, jnp.asarray(par_spread)
+        )
+        r = swap_at_par.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_variant_distinction(self):
+        """The MTM and constant-notional variants give measurably
+        different par spreads on the same graph.  A swap at the
+        constant-notional par spread under the constant-notional
+        variant has residual ~0, but under MTM at the same numerical
+        spread the residual is non-zero (and vice versa)."""
+        graph = self._ccbs_graph()
+        cn_solve_swap = self._build_swap(
+            spread=0.0, variant="constant_notional"
+        )
+        cn_par = self._solve_par_spread(cn_solve_swap, graph)
+
+        # Construct two swaps directly with the same spread but
+        # different ``variant`` static fields.  Cannot use
+        # ``eqx.tree_at`` on a static field; must reconstruct.
+        cn_at_par = self._build_swap(
+            spread=cn_par, variant="constant_notional"
+        )
+        mtm_at_cn_par = self._build_swap(
+            spread=cn_par, variant="mtm"
+        )
+        r_cn = float(cn_at_par.residual(graph, NO_FIXINGS, REF))
+        r_mtm = float(mtm_at_cn_par.residual(graph, NO_FIXINGS, REF))
+        assert abs(r_cn) < 1e-10
+        assert abs(r_mtm) > 1e-4  # genuinely different equation
+
+    def test_off_par_residual_scales_with_spread(self):
+        """20 bp above the constant-notional par spread shifts the
+        residual by 20 bp × domestic annuity_disc."""
+        graph = self._ccbs_graph()
+        swap = self._build_swap(
+            spread=0.0, variant="constant_notional"
+        )
+        par_spread = self._solve_par_spread(swap, graph)
+
+        ois = graph["USD.SOFR.OIS"]
+        dom_dates = self._annual_dates(5)
+        starts = jnp.concatenate(
+            [jnp.asarray(REF, dtype=jnp.int32)[None], dom_dates[:-1]]
+        )
+        taus = year_fraction(starts, dom_dates, "act_360")
+        annuity_disc = float(jnp.sum(taus * ois(dom_dates)))
+
+        bumped = eqx.tree_at(
+            lambda s: s.spread,
+            swap,
+            jnp.asarray(par_spread + 0.0020),
+        )
+        r = float(bumped.residual(graph, NO_FIXINGS, REF))
+        assert r == pytest.approx(0.0020 * annuity_disc, rel=1e-6)
+
+    def test_invalid_spread_on_leg_raises(self):
+        graph = self._ccbs_graph()
+        swap = self._build_swap(
+            spread=0.001, spread_on_leg="x"
+        )  # invalid
+        with pytest.raises(ValueError, match="spread_on_leg"):
+            swap.residual(graph, NO_FIXINGS, REF)
+
+    def test_invalid_variant_raises(self):
+        graph = self._ccbs_graph()
+        swap = self._build_swap(
+            spread=0.001, variant="exotic"
+        )  # invalid
+        with pytest.raises(ValueError, match="variant"):
+            swap.residual(graph, NO_FIXINGS, REF)
+
+    def test_curves_touched_4tuple_default(self):
+        swap = CrossCurrencyBasisSwap(
+            start_date=REF,
+            dom_dates=jnp.array([int(_make_date(2026, 1, 1))], dtype=jnp.int32),
+            dom_fixing_dates=jnp.array([int(REF)], dtype=jnp.int32),
+            for_dates=jnp.array([int(_make_date(2026, 1, 1))], dtype=jnp.int32),
+            for_fixing_dates=jnp.array([int(REF)], dtype=jnp.int32),
+            fx_spot=jnp.asarray(1.10),
+        )
+        assert swap.curves_touched == (
+            "_default_",
+            "_default_",
+            "_default_",
+            "_default_",
+        )
+        assert swap.variant == "constant_notional"
+        assert swap.spread_on_leg == "domestic"
+
+    def test_jit_compat(self):
+        graph = self._ccbs_graph()
+        swap = self._build_swap(spread=0.0, variant="mtm")
+        par = self._solve_par_spread(swap, graph)
+        swap_at_par = eqx.tree_at(
+            lambda s: s.spread, swap, jnp.asarray(par)
+        )
+
+        @jax.jit
+        def f(g):
+            return swap_at_par.residual(g, NO_FIXINGS, REF)
 
         r = f(graph)
         assert abs(float(r)) < 1e-10

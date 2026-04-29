@@ -2,8 +2,11 @@
 
 from valax.curves.discount import DiscountCurve, forward_rate, zero_rate
 from valax.curves.instruments import (
+    CrossCurrencyBasisSwap,
     DepositRate,
     FRA,
+    FXForward,
+    FXSwap,
     IborSwapRate,
     MoneyMarketFuture,
     OISSwapRate,

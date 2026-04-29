@@ -44,6 +44,50 @@ from valax.dates.daycounts import year_fraction
 _DEFAULT_CURVE_ID = "_default_"
 
 
+def _floating_leg_pv(
+    graph: CurveGraph,
+    fixings: FixingHistory,
+    start_date: Int[Array, ""],
+    payment_dates: Int[Array, " n"],
+    fixing_dates: Int[Array, " n"],
+    day_count: str,
+    index_id: str,
+    discount_curve_id: str,
+    forward_curve_id: str,
+    spread_addon: Float[Array, ""],
+) -> Float[Array, ""]:
+    """Present value of a floating leg under the dual-curve framework.
+
+    Helper shared by every instrument with at least one floating leg
+    (:class:`IborSwapRate`, :class:`TenorBasisSwap`, both legs of
+    :class:`CrossCurrencyBasisSwap`).  Computes
+
+    .. math::
+        \\text{PV} = \\sum_j (F_j + s)\\,\\tau_j\\,DF_{\\text{disc}}(T_j),
+
+    where each :math:`F_j` is a realised fixing if recorded under
+    ``index_id``, else the curve-projected forward
+    :math:`(DF_{\\text{fwd}}(T_{j-1}) / DF_{\\text{fwd}}(T_j) - 1)/\\tau_j`.
+    """
+    discount_curve = graph[discount_curve_id]
+    forward_curve = graph[forward_curve_id]
+
+    starts = jnp.concatenate([start_date[None], payment_dates[:-1]])
+    taus = year_fraction(starts, payment_dates, day_count)
+    df_starts_fwd = forward_curve(starts)
+    df_ends_fwd = forward_curve(payment_dates)
+    projected = (df_starts_fwd / df_ends_fwd - 1.0) / taus
+
+    if index_id in fixings.indices:
+        realised = fixings.lookup_many(index_id, fixing_dates)
+        rates = jnp.where(jnp.isnan(realised), projected, realised)
+    else:
+        rates = projected
+
+    df_disc = discount_curve(payment_dates)
+    return jnp.sum((rates + spread_addon) * taus * df_disc)
+
+
 class DepositRate(eqx.Module):
     """Money market deposit rate quote.
 
@@ -354,49 +398,174 @@ class IborSwapRate(eqx.Module):
         projected from the forward curve.
         """
         del ref_date  # temporal selection is delegated to fixings
+        float_pv = _floating_leg_pv(
+            graph,
+            fixings,
+            self.start_date,
+            self.float_dates,
+            self.fixing_dates,
+            self.float_day_count,
+            self.index_id,
+            self.curves_touched[0],
+            self.curves_touched[1],
+            jnp.asarray(0.0),
+        )
+        # Fixed leg annuity (no spread, no fixings).
         discount_curve = graph[self.curves_touched[0]]
-        forward_curve = graph[self.curves_touched[1]]
-
-        # Float leg: project each coupon from the forward curve.
-        float_starts = jnp.concatenate(
-            [self.start_date[None], self.float_dates[:-1]]
-        )
-        float_taus = year_fraction(
-            float_starts, self.float_dates, self.float_day_count
-        )
-        df_starts_fwd = forward_curve(float_starts)
-        df_ends_fwd = forward_curve(self.float_dates)
-        projected_rates = (df_starts_fwd / df_ends_fwd - 1.0) / float_taus
-
-        # Override projected rates with realised fixings where recorded.
-        # ``index_id`` is static and ``fixings.indices`` keys are part
-        # of the pytree structure, so this branch happens at trace
-        # time and is JIT-friendly.
-        if self.index_id in fixings.indices:
-            realised = fixings.lookup_many(
-                self.index_id, self.fixing_dates
-            )
-            rates = jnp.where(
-                jnp.isnan(realised), projected_rates, realised
-            )
-        else:
-            rates = projected_rates
-
-        df_float_disc = discount_curve(self.float_dates)
-        float_pv = jnp.sum(rates * float_taus * df_float_disc)
-
-        # Fixed leg.
         fixed_starts = jnp.concatenate(
             [self.start_date[None], self.fixed_dates[:-1]]
         )
         fixed_taus = year_fraction(
             fixed_starts, self.fixed_dates, self.fixed_day_count
         )
-        df_fixed_disc = discount_curve(self.fixed_dates)
-        annuity = jnp.sum(fixed_taus * df_fixed_disc)
+        annuity = jnp.sum(fixed_taus * discount_curve(self.fixed_dates))
         fixed_pv = self.rate * annuity
-
         return fixed_pv - float_pv
+
+
+class FXForward(eqx.Module):
+    """FX forward outright quote (covered interest rate parity).
+
+    Quotes the rate at which two currencies exchange at
+    ``settle_date``.  Touches the OIS discount curves of both
+    currencies; FX spot is supplied as instrument data rather than
+    pulled from the graph (keeps the curve graph homogeneous —
+    only DiscountCurves live in it).
+
+    The residual is the deviation from covered interest rate parity
+    (theory.md §3.7):
+
+    .. math::
+        F(0, T) - S(0) \\cdot \\frac{DF_{\\text{foreign}}(T)}{DF_{\\text{domestic}}(T)} = 0.
+
+    Convention: ``fx_spot`` and ``quoted_forward`` are in units of
+    *domestic currency per unit of foreign currency*.  For a EUR/USD
+    quote of 1.10, USD is the domestic side (denominator currency in
+    the trader's mental model) and EUR is foreign; ``fx_spot = 1.10``
+    means 1.10 USD per 1 EUR.  By convention,
+    ``curves_touched[0]`` is the domestic curve and
+    ``curves_touched[1]`` is the foreign curve.
+
+    Attributes:
+        value_date: Spot value date (typically T+2 from the trade
+            date).  Stored for completeness; not consumed by the
+            residual under the standard collateralised CIP
+            assumption.
+        settle_date: Forward settlement date — the date at which
+            the exchange occurs.
+        quoted_forward: Quoted forward rate, in domestic per foreign
+            units.
+        fx_spot: Spot rate at the reference date, in the same units.
+        curves_touched: 2-tuple ``(domestic_curve_id,
+            foreign_curve_id)``.  Defaults to single-curve sentinel
+            for protocol consistency; production callers always
+            override.
+    """
+
+    value_date: Int[Array, ""]
+    settle_date: Int[Array, ""]
+    quoted_forward: Float[Array, ""]
+    fx_spot: Float[Array, ""]
+    curves_touched: tuple = eqx.field(
+        static=True,
+        default=(_DEFAULT_CURVE_ID, _DEFAULT_CURVE_ID),
+    )
+
+    def residual(
+        self,
+        graph: CurveGraph,
+        fixings: FixingHistory,
+        ref_date: Int[Array, ""],
+    ) -> Float[Array, ""]:
+        """Repricing residual: ``quoted_forward - spot * DF_for / DF_dom``.
+
+        Both DFs are evaluated at ``settle_date`` from the reference
+        date, under the standard single-asof collateralised pricing
+        assumption.  ``value_date`` is not consumed.
+        """
+        del fixings, ref_date  # CIP residual ignores both
+        domestic_curve = graph[self.curves_touched[0]]
+        foreign_curve = graph[self.curves_touched[1]]
+        df_dom = domestic_curve(self.settle_date)
+        df_for = foreign_curve(self.settle_date)
+        return self.quoted_forward - self.fx_spot * df_for / df_dom
+
+
+class FXSwap(eqx.Module):
+    """FX swap quote — simultaneous near-leg and far-leg exchange.
+
+    An FX swap is two simultaneous opposite-direction trades:
+
+    * **Near leg**: exchange at ``near_date`` at ``near_rate``
+      (typically spot).
+    * **Far leg**: reverse the exchange at ``far_date`` at
+      ``far_rate``.
+
+    Market quote is the **swap points**: ``swap_points = far_rate -
+    near_rate``.  The user supplies the absolute ``near_rate`` and
+    ``far_rate`` (the absolute rates are what the residual uses).
+
+    The CIP relation between the two legs is
+
+    .. math::
+        \\frac{F(0, T_{\\text{far}})}{F(0, T_{\\text{near}})}
+        = \\frac{DF_{\\text{for}}(T_{\\text{far}}) / DF_{\\text{dom}}(T_{\\text{far}})}
+               {DF_{\\text{for}}(T_{\\text{near}}) / DF_{\\text{dom}}(T_{\\text{near}})}.
+
+    Rearranged for the residual:
+
+    .. math::
+        \\text{far\\_rate} \\cdot DF_{\\text{for}}(T_{\\text{near}})
+        \\cdot DF_{\\text{dom}}(T_{\\text{far}})
+        \\;-\\;
+        \\text{near\\_rate} \\cdot DF_{\\text{dom}}(T_{\\text{near}})
+        \\cdot DF_{\\text{for}}(T_{\\text{far}})
+        \\;=\\; 0.
+
+    When ``near_date == ref_date`` (the spot DFs equal 1), the
+    residual collapses to :class:`FXForward`'s CIP form on the far
+    leg with ``fx_spot = near_rate``.
+
+    Attributes:
+        near_date: Near-leg value date (ordinal).
+        far_date: Far-leg value date (ordinal).
+        near_rate: Near-leg exchange rate, domestic per foreign.
+        far_rate: Far-leg exchange rate, domestic per foreign.
+        curves_touched: 2-tuple ``(domestic_curve_id,
+            foreign_curve_id)``.
+    """
+
+    near_date: Int[Array, ""]
+    far_date: Int[Array, ""]
+    near_rate: Float[Array, ""]
+    far_rate: Float[Array, ""]
+    curves_touched: tuple = eqx.field(
+        static=True,
+        default=(_DEFAULT_CURVE_ID, _DEFAULT_CURVE_ID),
+    )
+
+    def residual(
+        self,
+        graph: CurveGraph,
+        fixings: FixingHistory,
+        ref_date: Int[Array, ""],
+    ) -> Float[Array, ""]:
+        """Repricing residual: CIP relation between the two legs.
+
+        Returns zero when the curve graph satisfies covered interest
+        rate parity at both ``near_date`` and ``far_date``.
+        """
+        del fixings, ref_date
+        domestic_curve = graph[self.curves_touched[0]]
+        foreign_curve = graph[self.curves_touched[1]]
+        df_dom_near = domestic_curve(self.near_date)
+        df_for_near = foreign_curve(self.near_date)
+        df_dom_far = domestic_curve(self.far_date)
+        df_for_far = foreign_curve(self.far_date)
+        return (
+            self.far_rate * df_for_near * df_dom_far
+            - self.near_rate * df_dom_near * df_for_far
+        )
 
 
 class TenorBasisSwap(eqx.Module):
@@ -488,36 +657,6 @@ class TenorBasisSwap(eqx.Module):
         ),
     )
 
-    def _leg_pv(
-        self,
-        graph: CurveGraph,
-        fixings: FixingHistory,
-        leg_dates: Int[Array, " n"],
-        leg_fixing_dates: Int[Array, " n"],
-        leg_day_count: str,
-        leg_index_id: str,
-        leg_curve_id: str,
-        spread_addon: Float[Array, ""],
-    ) -> Float[Array, ""]:
-        """PV of one floating leg with optional basis-spread add-on."""
-        discount_curve = graph[self.curves_touched[0]]
-        forward_curve = graph[leg_curve_id]
-
-        starts = jnp.concatenate([self.start_date[None], leg_dates[:-1]])
-        taus = year_fraction(starts, leg_dates, leg_day_count)
-        df_starts_fwd = forward_curve(starts)
-        df_ends_fwd = forward_curve(leg_dates)
-        projected = (df_starts_fwd / df_ends_fwd - 1.0) / taus
-
-        if leg_index_id in fixings.indices:
-            realised = fixings.lookup_many(leg_index_id, leg_fixing_dates)
-            rates = jnp.where(jnp.isnan(realised), projected, realised)
-        else:
-            rates = projected
-
-        df_disc = discount_curve(leg_dates)
-        return jnp.sum((rates + spread_addon) * taus * df_disc)
-
     def residual(
         self,
         graph: CurveGraph,
@@ -530,38 +669,229 @@ class TenorBasisSwap(eqx.Module):
         del ref_date  # temporal selection is delegated to fixings
 
         if self.spread_on_leg == "a":
-            a_addon = self.spread
-            b_addon = jnp.asarray(0.0)
+            a_addon, b_addon = self.spread, jnp.asarray(0.0)
         elif self.spread_on_leg == "b":
-            a_addon = jnp.asarray(0.0)
-            b_addon = self.spread
+            a_addon, b_addon = jnp.asarray(0.0), self.spread
         else:
             raise ValueError(
                 f"spread_on_leg must be 'a' or 'b', got "
                 f"'{self.spread_on_leg}'"
             )
 
-        a_pv = self._leg_pv(
+        a_pv = _floating_leg_pv(
             graph,
             fixings,
+            self.start_date,
             self.leg_a_dates,
             self.leg_a_fixing_dates,
             self.leg_a_day_count,
             self.leg_a_index_id,
-            self.curves_touched[1],
+            self.curves_touched[0],   # shared discount
+            self.curves_touched[1],   # leg A forward
             a_addon,
         )
-        b_pv = self._leg_pv(
+        b_pv = _floating_leg_pv(
             graph,
             fixings,
+            self.start_date,
             self.leg_b_dates,
             self.leg_b_fixing_dates,
             self.leg_b_day_count,
             self.leg_b_index_id,
-            self.curves_touched[2],
+            self.curves_touched[0],   # shared discount
+            self.curves_touched[2],   # leg B forward
             b_addon,
         )
         return a_pv - b_pv
+
+
+class CrossCurrencyBasisSwap(eqx.Module):
+    """Cross-currency basis swap quote (CCBS) — MTM and constant-notional
+    variants.
+
+    Two floating legs in different currencies, exchanged simultaneously.
+    The basis spread is added per period to the funding-stressed leg
+    (specified via ``spread_on_leg``).  Touches up to four curves:
+    discount and forward curves in each of two currencies.
+
+    Two market-quoted variants are supported:
+
+    * ``"constant_notional"`` — Notional fixed at inception.  At
+      :math:`t = 0` the parties exchange notionals at spot
+      (:math:`N_{\\text{for}} = N_{\\text{dom}} / S(0)`); at
+      maturity the notionals are returned in their respective
+      currencies.  Under this convention, normalising
+      :math:`N_{\\text{dom}} = 1` gives the residual
+
+      .. math::
+          R_{\\text{cn}} =
+          \\big[\\text{coupon\\_pv}_{\\text{dom}} + (1 - DF_{\\text{dom}}(T_n))\\big]
+          - \\big[\\text{coupon\\_pv}_{\\text{for}} + (1 - DF_{\\text{for}}(T_n))\\big],
+
+      with the spread added to the indicated leg's coupons.  The
+      ``fx_spot`` field cancels in this normalised form (it appears
+      both as :math:`N_{\\text{for}} = N_{\\text{dom}}/S(0)` and
+      as the conversion factor from foreign-leg PV to domestic
+      units, and the two cancel).  We carry it as an explicit
+      instrument field for documentation, audit, and future
+      diagnostic use.
+
+    * ``"mtm"`` — Notional resets at every fixing date to the
+      prevailing spot rate, removing the principal-FX risk.  The
+      MTM CCBS PV-decomposition (Henrard 2014, §10.5) shows that
+      the foreign-leg PV in domestic terms simplifies to
+
+      .. math::
+          \\text{PV}^{\\text{MTM}}_{\\text{for, in dom}}
+          = N_{\\text{dom}} \\sum_j F^{\\text{for}}_j\\,\\tau_j\\,DF_{\\text{dom}}(T_j),
+
+      i.e. **discounting with the domestic OIS curve**.  The
+      foreign discount curve does *not* enter the MTM residual:
+
+      .. math::
+          R_{\\text{mtm}} =
+          \\sum_i (F^{\\text{dom}}_i + s_{\\text{dom}})\\,\\tau_i\\,DF_{\\text{dom}}(T_i)
+          - \\sum_j (F^{\\text{for}}_j + s_{\\text{for}})\\,\\tau_j\\,DF_{\\text{dom}}(T_j).
+
+      The two variants give measurably different par spreads
+      (test ``test_variant_distinction``) — they are genuinely
+      different equations.
+
+    Convention: ``curves_touched`` is a 4-tuple
+    ``(dom_discount_id, dom_forward_id, for_discount_id,
+    for_forward_id)``.
+
+    Attributes:
+        start_date: Swap effective date (ordinal).
+
+        dom_dates: Domestic-leg payment dates (ordinal, shape ``n_dom``).
+        dom_fixing_dates: Domestic-leg fixing dates (shape ``n_dom``).
+        for_dates: Foreign-leg payment dates (ordinal, shape ``n_for``).
+        for_fixing_dates: Foreign-leg fixing dates (shape ``n_for``).
+        fx_spot: Spot FX rate, in domestic per foreign units.  Stored
+            for documentation; cancels in the normalised residual
+            for both variants.
+
+        spread: Basis spread (rate units, e.g. ``-0.0050`` for −50 bp).
+        dom_day_count: Domestic-leg day count.
+        dom_index_id: Identifier for domestic-leg fixings.
+        for_day_count: Foreign-leg day count.
+        for_index_id: Identifier for foreign-leg fixings.
+        spread_on_leg: ``"domestic"`` or ``"foreign"``.
+        variant: ``"constant_notional"`` or ``"mtm"``.
+        curves_touched: 4-tuple of curve identifiers, in the order
+            ``(dom_discount, dom_forward, for_discount, for_forward)``.
+    """
+
+    # Required (array) fields.
+    start_date: Int[Array, ""]
+    dom_dates: Int[Array, " n_dom"]
+    dom_fixing_dates: Int[Array, " n_dom"]
+    for_dates: Int[Array, " n_for"]
+    for_fixing_dates: Int[Array, " n_for"]
+    fx_spot: Float[Array, ""]
+
+    # Defaulted fields.
+    spread: Float[Array, ""] = eqx.field(
+        default_factory=lambda: jnp.asarray(0.0)
+    )
+    dom_day_count: str = eqx.field(static=True, default="act_360")
+    dom_index_id: str = eqx.field(static=True, default="DOM_FLOAT")
+    for_day_count: str = eqx.field(static=True, default="act_360")
+    for_index_id: str = eqx.field(static=True, default="FOR_FLOAT")
+    spread_on_leg: str = eqx.field(static=True, default="domestic")
+    variant: str = eqx.field(static=True, default="constant_notional")
+    curves_touched: tuple = eqx.field(
+        static=True,
+        default=(
+            _DEFAULT_CURVE_ID,  # dom discount
+            _DEFAULT_CURVE_ID,  # dom forward
+            _DEFAULT_CURVE_ID,  # for discount
+            _DEFAULT_CURVE_ID,  # for forward
+        ),
+    )
+
+    def residual(
+        self,
+        graph: CurveGraph,
+        fixings: FixingHistory,
+        ref_date: Int[Array, ""],
+    ) -> Float[Array, ""]:
+        """CCBS residual; selects between MTM and constant-notional
+        per the static ``variant`` field."""
+        del ref_date  # temporal selection delegated to fixings
+
+        if self.spread_on_leg == "domestic":
+            dom_addon, for_addon = self.spread, jnp.asarray(0.0)
+        elif self.spread_on_leg == "foreign":
+            dom_addon, for_addon = jnp.asarray(0.0), self.spread
+        else:
+            raise ValueError(
+                f"spread_on_leg must be 'domestic' or 'foreign', got "
+                f"'{self.spread_on_leg}'"
+            )
+
+        dom_disc_id = self.curves_touched[0]
+        dom_fwd_id = self.curves_touched[1]
+        for_disc_id = self.curves_touched[2]
+        for_fwd_id = self.curves_touched[3]
+
+        # Domestic-leg coupons (always discounted with domestic OIS).
+        dom_coupon_pv = _floating_leg_pv(
+            graph,
+            fixings,
+            self.start_date,
+            self.dom_dates,
+            self.dom_fixing_dates,
+            self.dom_day_count,
+            self.dom_index_id,
+            dom_disc_id,
+            dom_fwd_id,
+            dom_addon,
+        )
+
+        if self.variant == "mtm":
+            # Foreign-leg coupons discounted with DOMESTIC OIS.
+            # The foreign discount curve is not used in MTM.
+            for_coupon_pv_in_dom = _floating_leg_pv(
+                graph,
+                fixings,
+                self.start_date,
+                self.for_dates,
+                self.for_fixing_dates,
+                self.for_day_count,
+                self.for_index_id,
+                dom_disc_id,   # ← key MTM detail
+                for_fwd_id,
+                for_addon,
+            )
+            return dom_coupon_pv - for_coupon_pv_in_dom
+
+        if self.variant == "constant_notional":
+            # Foreign-leg coupons discounted with FOREIGN OIS.
+            for_coupon_pv = _floating_leg_pv(
+                graph,
+                fixings,
+                self.start_date,
+                self.for_dates,
+                self.for_fixing_dates,
+                self.for_day_count,
+                self.for_index_id,
+                for_disc_id,
+                for_fwd_id,
+                for_addon,
+            )
+            df_dom_mat = graph[dom_disc_id](self.dom_dates[-1])
+            df_for_mat = graph[for_disc_id](self.for_dates[-1])
+            return (
+                (dom_coupon_pv + (1.0 - df_dom_mat))
+                - (for_coupon_pv + (1.0 - df_for_mat))
+            )
+
+        raise ValueError(
+            f"variant must be 'constant_notional' or 'mtm', got "
+            f"'{self.variant}'"
+        )
 
 
 class MoneyMarketFuture(eqx.Module):
