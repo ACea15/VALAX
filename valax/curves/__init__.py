@@ -12,6 +12,7 @@ from valax.curves.instruments import (
     OISSwapRate,
     SwapRate,
     TenorBasisSwap,
+    TurnInstrument,
 )
 from valax.curves.bootstrap import bootstrap_sequential, bootstrap_simultaneous
 from valax.curves.multi_curve import MultiCurveSet, bootstrap_multi_curve

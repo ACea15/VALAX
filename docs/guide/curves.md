@@ -396,16 +396,161 @@ pricing inflation swaps and caps/floors against a built curve, see
 
 ## 8. What is not yet implemented
 
-From the [roadmap (Tier 1.1)](../roadmap.md#11-multi-curve-bootstrapping):
+The MC-Curves-1 PR series (see [`production.md` §13](../architecture/production.md#13-phased-delivery-plan))
+shipped the `BootstrapInstrument` protocol, eleven calibration quote types
+(`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`, `IborSwapRate`,
+`MoneyMarketFuture`, `TenorBasisSwap`, `FXForward`, `FXSwap`,
+`CrossCurrencyBasisSwap`, `TurnInstrument`), and supporting infrastructure
+(`CurveGraph`, `FixingHistory`, convexity-adjustment plug-ins).  Every quote
+type a real curve build needs is now representable; what's missing is the
+*joint solver* that consumes them — that is **MC-Curves-2** (production design
+[§11.4](../architecture/production.md#114-joint-global-solver)).
 
-- **Basis curves** (e.g., 1M vs. 3M SOFR basis) as first-class pytrees.
-- **Turn-of-year jumps** and stub-period handling inside the bootstrap.
-- **Alternative interpolation methods**: linear on zero rates, cubic splines on log-DF, monotone-convex, tension splines. The log-linear baseline is stable and monotone but produces discontinuous forward rates at pillars.
-- **Constrained curves** (forward-rate positivity, calendar-spread no-arbitrage for inflation curves).
+From the [roadmap (Tier 1.1)](../roadmap.md#11-multi-curve-bootstrapping)
+and the production design, items still pending:
+
+- **Joint multi-curve Newton solver** (`bootstrap_curve_graph`) over an
+  arbitrary curve graph — MC-Curves-2.
+- **Calibration diagnostics** (per-instrument fitted-vs-quoted, RMSE, max
+  error, Jacobian condition number) — MC-Curves-3.
+- **Alternative interpolation methods**: linear on zero rates, cubic splines
+  on log-DF, monotone-convex (Hagan-West), tension splines — MC-Curves-3.
+  The log-linear baseline is stable and monotone but produces discontinuous
+  forward rates at pillars.
+- **Hull-White-derived futures convexity adjustment** — gated on the
+  short-rate-model integration with the curve build.  The plug-in framework
+  is in place ([`valax/curves/convexity.py`](../api/curves.md#convexity-adjustment-plug-ins));
+  only the closed-form factory is missing.
+- **Constrained curves** (forward-rate positivity, calendar-spread no-arbitrage
+  for inflation curves).
 
 Contributions welcome — see `CONTRIBUTING.md` at the repository root.
 
-## 9. Further reading
+## 9. Computing residuals on a hand-built graph
+
+Each `BootstrapInstrument` exposes a `residual(graph, fixings, ref_date)`
+method that returns zero when the curve graph correctly reprices the quote.
+The forthcoming joint solver
+([MC-Curves-2](../architecture/production.md#114-joint-global-solver))
+collects these residuals from a list of instruments and finds the curve graph
+that zeroes them out simultaneously.
+
+You don't need to wait for the solver to use the residual interface — you can
+construct any graph by hand and verify (or compute Greeks against) any
+instrument's residual directly.  This section walks through that workflow,
+which is exactly what the per-instrument unit tests in
+`tests/test_curves/test_instrument_residuals.py` do.
+
+### The `CurveGraph` container
+
+```python
+import jax.numpy as jnp
+from valax.curves import (
+    CurveGraph,
+    DiscountCurve,
+    OISSwapRate,
+    IborSwapRate,
+    empty_fixing_history,
+)
+from valax.dates import ymd_to_ordinal
+
+ref = ymd_to_ordinal(2025, 1, 1)
+
+# Two flat continuously-compounded curves, hand-built.
+def flat_curve(rate):
+    pillars = jnp.array([
+        int(ref),
+        int(ymd_to_ordinal(2030, 1, 1)),
+    ], dtype=jnp.int32)
+    times = (pillars - int(ref)).astype(jnp.float64) / 365.0
+    return DiscountCurve(
+        pillar_dates=pillars,
+        discount_factors=jnp.exp(-rate * times),
+        reference_date=ref,
+    )
+
+graph = CurveGraph(curves={
+    "USD.SOFR.OIS": flat_curve(0.035),
+    "USD.SOFR.3M":  flat_curve(0.040),
+})
+```
+
+### Single-curve residual
+
+```python
+fixed_dates = jnp.array([
+    int(ymd_to_ordinal(2026, 1, 1)),
+    int(ymd_to_ordinal(2027, 1, 1)),
+], dtype=jnp.int32)
+
+ois_swap = OISSwapRate(
+    start_date=ref,
+    fixed_dates=fixed_dates,
+    rate=jnp.asarray(0.035),
+    day_count="act_360",
+    curves_touched=("USD.SOFR.OIS",),
+    index_id="USD.SOFR",
+)
+
+# Compute residual against the graph.  ~1e-3 because the chosen rate
+# isn't exactly the curve's par swap rate; for an actual bootstrap run
+# the joint solver would adjust the curve until this is zero.
+r = ois_swap.residual(graph, empty_fixing_history(), ref)
+print(float(r))   # e.g. -0.0006
+```
+
+### Dual-curve residual
+
+```python
+ibor_swap = IborSwapRate(
+    start_date=ref,
+    fixed_dates=fixed_dates,
+    float_dates=fixed_dates,
+    fixing_dates=jnp.concatenate(
+        [jnp.asarray(ref, dtype=jnp.int32)[None], fixed_dates[:-1]]
+    ),
+    rate=jnp.asarray(0.040),
+    fixed_day_count="act_360",
+    float_day_count="act_360",
+    curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+    index_id="USD.SOFR.3M",
+)
+
+r = ibor_swap.residual(graph, empty_fixing_history(), ref)
+# Same residual contract: zero when the dual-curve par condition holds
+# for these two curves and this swap rate.
+```
+
+### Autodiff through the residual
+
+Because the residual is a pure JAX function, differentiating it w.r.t. the
+graph leaves or the instrument's array fields is a one-liner:
+
+```python
+import equinox as eqx
+
+# Sensitivity of the residual to each pillar of the OIS curve.
+def f(g):
+    return ibor_swap.residual(g, empty_fixing_history(), ref)
+
+grads = eqx.filter_grad(f)(graph)
+ois_pillar_sensitivities = grads.curves["USD.SOFR.OIS"].discount_factors
+```
+
+This is also the mechanism by which the joint solver's
+`optimistix.ImplicitAdjoint` produces quote-sensitivity Jacobians for free.
+The residual is the contract; everything above (sensitivities, JIT
+compilation, the eventual joint solver) composes on top of it without
+requiring any further per-instrument code.
+
+For the no-arbitrage motivation behind each residual, see
+[theory §3.7](../theory.md#37-no-arbitrage-relations-across-curves)
+(CIP, tenor basis, XCCY basis) and
+[theory §3.8](../theory.md#38-joint-multi-curve-calibration) (the
+joint residual system).  For full instrument-by-instrument signatures and
+residual equations, see [API: Bootstrap Instruments](../api/curves.md#bootstrap-instruments).
+
+## 10. Further reading
 
 - [Models & Theory §3](../theory.md#3-curve-framework) — mathematical framework: DFs, zero/forward rates, single vs. multi-curve, interpolation families, day count conventions.
 - [Fixed Income guide](fixed-income.md) — using a curve to price bonds, extract YTM, duration, KRDs.

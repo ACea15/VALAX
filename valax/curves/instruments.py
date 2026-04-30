@@ -894,6 +894,78 @@ class CrossCurrencyBasisSwap(eqx.Module):
         )
 
 
+class TurnInstrument(eqx.Module):
+    """Discrete forward-rate jump anchor for turn-of-year (or any
+    calendar discontinuity) effects.
+
+    Year-end and quarter-end liquidity strains produce visible spikes
+    in overnight rates that an otherwise smooth curve cannot capture.
+    The market resolution is to quote a **turn** instrument — the
+    expected forward rate over the short window straddling the
+    discontinuity — and to inject it as a calibration anchor.
+
+    The residual pins the curve's simply-compounded forward rate over
+    the window :math:`[T_{\\text{turn}} - \\text{days\\_before},
+    T_{\\text{turn}} + \\text{days\\_after}]` to ``jump_size``:
+
+    .. math::
+        \\frac{1}{\\tau}\\!\\left(\\frac{DF(T_-)}{DF(T_+)} - 1\\right)
+        - \\text{jump\\_size} = 0.
+
+    .. note::
+
+       Turn instruments require an interpolation method that admits
+       discontinuities for the bootstrap to converge to a sharp jump
+       at the turn date.  Log-linear-DF interpolation (VALAX's current
+       only mode) produces *piecewise-constant* forward rates between
+       pillars, so the jump can be modelled by placing two pillars
+       tightly around the turn date — the segment between them is then
+       a single isolated forward.  Genuine step-function interpolation
+       (calendar-aware, with explicit jump segments) is part of
+       MC-Curves-3.
+
+    Attributes:
+        turn_date: The date of the discontinuity (typically year-end
+            or quarter-end), as an ordinal integer.
+        jump_size: The simply-compounded forward rate over the turn
+            window, in rate units (e.g. ``0.0150`` for a 150 bp
+            year-end rate spike).
+        accrual_days_before: Days before ``turn_date`` to start the
+            window (default 1).  Static field — set at construction.
+        accrual_days_after: Days after ``turn_date`` to end the
+            window (default 1).  Static.
+        day_count: Day count convention for :math:`\\tau`.
+        curves_touched: 1-tuple naming the curve to which the jump
+            applies.  Defaults to the single-curve sentinel.
+    """
+
+    turn_date: Int[Array, ""]
+    jump_size: Float[Array, ""]
+    accrual_days_before: int = eqx.field(static=True, default=1)
+    accrual_days_after: int = eqx.field(static=True, default=1)
+    day_count: str = eqx.field(static=True, default="act_360")
+    curves_touched: tuple = eqx.field(
+        static=True, default=(_DEFAULT_CURVE_ID,)
+    )
+
+    def residual(
+        self,
+        graph: CurveGraph,
+        fixings: FixingHistory,
+        ref_date: Int[Array, ""],
+    ) -> Float[Array, ""]:
+        """Repricing residual: window forward rate − ``jump_size``."""
+        del fixings, ref_date  # turn instruments don't use either
+        curve = graph[self.curves_touched[0]]
+        t0 = self.turn_date - self.accrual_days_before
+        t1 = self.turn_date + self.accrual_days_after
+        tau = year_fraction(t0, t1, self.day_count)
+        df0 = curve(t0)
+        df1 = curve(t1)
+        window_forward = (df0 / df1 - 1.0) / tau
+        return window_forward - self.jump_size
+
+
 class MoneyMarketFuture(eqx.Module):
     """Money-market / SOFR / Euribor / short-sterling future quote.
 

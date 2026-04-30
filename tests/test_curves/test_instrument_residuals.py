@@ -45,6 +45,7 @@ from valax.curves.instruments import (
     OISSwapRate,
     SwapRate,
     TenorBasisSwap,
+    TurnInstrument,
 )
 from valax.dates.daycounts import year_fraction, ymd_to_ordinal
 
@@ -1689,6 +1690,144 @@ class TestMoneyMarketFutureResidual:
         @jax.jit
         def f(g):
             return future.residual(g, NO_FIXINGS, REF)
+
+        r = f(graph)
+        assert abs(float(r)) < 1e-10
+
+
+# ── TurnInstrument residual ──────────────────────────────────────────
+
+
+class TestTurnInstrumentResidual:
+    """Turn instruments anchor the curve's forward rate over a short
+    window straddling a calendar discontinuity (typically year-end).
+    Tests construct a curve with two pillars tightly around the turn
+    date, encoding a known forward, and verify the residual.
+    """
+
+    @staticmethod
+    def _curve_with_turn_jump(window_forward_rate: float):
+        """Build a curve with a sharp 2-day forward over Dec 31 / Jan 1
+        equal to ``window_forward_rate`` (simply-compounded), and a
+        flat ~3% surrounding forward.
+
+        The curve has pillars at:
+        - REF (DF=1)
+        - 2025-12-30 (just before the turn window)
+        - 2026-01-02 (just after the turn window)
+        - 2027-01-01 (later anchor)
+
+        The forward over [2025-12-30, 2026-01-02] (3-day window
+        containing Dec 31) is set to ``window_forward_rate``.
+        """
+        ref = REF
+        d_before = _make_date(2025, 12, 30)
+        d_after = _make_date(2026, 1, 2)
+        d_year = _make_date(2027, 1, 1)
+
+        # Surrounding 3% flat continuously-compounded curve.
+        t_before = float(d_before - int(ref)) / 365.0
+        t_year = float(d_year - int(ref)) / 365.0
+        df_before = float(jnp.exp(-0.03 * t_before))
+
+        # Force the 3-day window forward to equal the prescribed value.
+        # Simply-compounded forward over 3 days:
+        #   F = (df_before / df_after - 1) / tau
+        # => df_after = df_before / (1 + F * tau)
+        tau = float(
+            year_fraction(d_before, d_after, "act_360")
+        )  # ≈ 3/360
+        df_after = df_before / (1.0 + window_forward_rate * tau)
+
+        # Continue flat 3% from d_after onward (df at d_year extrapolated
+        # consistently with df_after).
+        t_after = float(d_after - int(ref)) / 365.0
+        delta_t = t_year - t_after
+        df_year = df_after * float(jnp.exp(-0.03 * delta_t))
+
+        pillars = jnp.array(
+            [int(ref), int(d_before), int(d_after), int(d_year)],
+            dtype=jnp.int32,
+        )
+        dfs = jnp.array(
+            [1.0, df_before, df_after, df_year], dtype=jnp.float64
+        )
+        return DiscountCurve(
+            pillar_dates=pillars,
+            discount_factors=dfs,
+            reference_date=ref,
+            day_count="act_365",
+        )
+
+    def test_residual_zero_when_curve_matches(self):
+        target = 0.0150  # 150 bp year-end spike
+        curve = self._curve_with_turn_jump(target)
+        graph = CurveGraph(curves={"USD.SOFR.OIS": curve})
+        turn = TurnInstrument(
+            turn_date=_make_date(2025, 12, 31),
+            jump_size=jnp.asarray(target),
+            accrual_days_before=1,
+            accrual_days_after=2,
+            day_count="act_360",
+            curves_touched=("USD.SOFR.OIS",),
+        )
+        r = turn.residual(graph, NO_FIXINGS, REF)
+        assert abs(float(r)) < 1e-10
+
+    def test_residual_off_quote(self):
+        """Curve encodes 150 bp; quoted jump 200 bp → residual = -50 bp."""
+        curve_value = 0.0150
+        curve = self._curve_with_turn_jump(curve_value)
+        graph = CurveGraph(curves={"USD.SOFR.OIS": curve})
+        quoted = 0.0200
+        turn = TurnInstrument(
+            turn_date=_make_date(2025, 12, 31),
+            jump_size=jnp.asarray(quoted),
+            accrual_days_before=1,
+            accrual_days_after=2,
+            day_count="act_360",
+            curves_touched=("USD.SOFR.OIS",),
+        )
+        r = float(turn.residual(graph, NO_FIXINGS, REF))
+        # residual = window_forward - quoted = curve_value - quoted = -50 bp.
+        assert r == pytest.approx(curve_value - quoted, abs=1e-10)
+
+    def test_curves_touched_default_and_override(self):
+        t_default = TurnInstrument(
+            turn_date=_make_date(2025, 12, 31),
+            jump_size=jnp.asarray(0.015),
+        )
+        assert t_default.curves_touched == ("_default_",)
+        assert t_default.accrual_days_before == 1
+        assert t_default.accrual_days_after == 1
+
+        t_named = TurnInstrument(
+            turn_date=_make_date(2025, 12, 31),
+            jump_size=jnp.asarray(0.015),
+            accrual_days_before=2,
+            accrual_days_after=3,
+            curves_touched=("USD.SOFR.OIS",),
+        )
+        assert t_named.curves_touched == ("USD.SOFR.OIS",)
+        assert t_named.accrual_days_before == 2
+        assert t_named.accrual_days_after == 3
+
+    def test_jit_compat(self):
+        target = 0.0100
+        curve = self._curve_with_turn_jump(target)
+        graph = CurveGraph(curves={"USD.SOFR.OIS": curve})
+        turn = TurnInstrument(
+            turn_date=_make_date(2025, 12, 31),
+            jump_size=jnp.asarray(target),
+            accrual_days_before=1,
+            accrual_days_after=2,
+            day_count="act_360",
+            curves_touched=("USD.SOFR.OIS",),
+        )
+
+        @jax.jit
+        def f(g):
+            return turn.residual(g, NO_FIXINGS, REF)
 
         r = f(graph)
         assert abs(float(r)) < 1e-10
