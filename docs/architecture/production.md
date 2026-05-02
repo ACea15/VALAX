@@ -1220,22 +1220,27 @@ still build single-currency two-curve setups; with them it covers
 real desks.
 
 #### MC-Curves-1 — Bootstrap instrument expansion
-*Estimated effort: ~1.5 weeks*
+*Estimated effort: ~1.5 weeks* — ✅ **SHIPPED** (commits `9607392` →
+`d6c98f7`, 7 commits, 149 tests in `tests/test_curves/`)
 
 - Define `BootstrapInstrument` protocol (§11.3) and migrate the
   existing three quote types onto it. Existing single-curve bootstrap
-  keeps working unchanged.
+  keeps working unchanged. ✅
 - New instrument types: `OISSwapRate`, `IborSwapRate` (separates
   fixed/float day counts and exposes fixings hooks),
   `MoneyMarketFuture` (with pluggable convexity adjustment),
   `TenorBasisSwap`, `FXSwap` / `FXForward`,
   `CrossCurrencyBasisSwap` (MTM and constant-notional variants),
-  `TurnInstrument`.
-- `FixingHistory` / `FixingSeries` data types.
+  `TurnInstrument`. ✅
+- `FixingHistory` / `FixingSeries` data types. ✅
+  (Plus `lookup_many` vectorised variant for multi-coupon legs.)
 - Tests: each new instrument's residual is zero on a hand-built curve
-  graph that satisfies its no-arb relation.
+  graph that satisfies its no-arb relation. ✅
 - **Deliverable:** every quote type a real curve build needs is
-  representable as a `BootstrapInstrument`.
+  representable as a `BootstrapInstrument`. ✅
+
+For the next-session handoff (state snapshot, open questions, initial
+task plan for MC-Curves-2), see [`mc-curves-2.md`](mc-curves-2.md).
 
 #### MC-Curves-2 — Joint global solver
 *Estimated effort: ~2 weeks*

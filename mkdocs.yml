@@ -39,6 +39,7 @@ nav:
   - Architecture:
       - Overview: architecture/overview.md
       - Productionisation Design: architecture/production.md
+      - "MC-Curves-2 Handoff": architecture/mc-curves-2.md
   - Models & Theory: theory.md
   - Vision: vision.md
   - Roadmap: roadmap.md
