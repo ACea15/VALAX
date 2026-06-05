@@ -23,6 +23,14 @@ from valax.curves.inflation import (
     yoy_forward_rate,
     from_zc_rates,
 )
+from valax.curves.survival import (
+    SurvivalCurve,
+    survival_probability,
+    hazard_rate,
+    piecewise_hazards,
+    from_hazard_rates,
+    from_cds_spreads,
+)
 from valax.curves.fixings import (
     FixingSeries,
     FixingHistory,

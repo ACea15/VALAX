@@ -406,3 +406,38 @@ class CrossCurrencyBasisSwap(eqx.Module):
 
     The foreign discount curve does not enter the MTM residual (Henrard 2014
     §10.5).
+
+---
+
+## SurvivalCurve
+
+Term structure of survival probabilities for a single credit entity. Mirrors `DiscountCurve` in design: log-linear interpolation between pillars (= piecewise-constant hazard rate), drop-in target for `jax.grad` to obtain per-pillar credit-delta sensitivities.
+
+### `SurvivalCurve`
+
+```python
+class SurvivalCurve(eqx.Module):
+    pillar_dates: Int[Array, "n_pillars"]
+    survival_probabilities: Float[Array, "n_pillars"]
+    reference_date: Int[Array, ""]
+    day_count: str = "act_365"
+
+    def __call__(dates) -> Float[Array, "..."]  # interpolated S(t)
+```
+
+### Constructors and helpers
+
+```python
+from_hazard_rates(reference_date, pillar_dates, hazards, day_count="act_365") -> SurvivalCurve
+from_cds_spreads(reference_date, pillar_dates, spreads, recovery_rate=0.4, day_count="act_365") -> SurvivalCurve
+```
+
+`from_hazard_rates` treats `hazards[i]` as the constant hazard on `(pillar_{i-1}, pillar_i]`. `from_cds_spreads` uses the credit-triangle `h ≈ s / (1 − R)` to bootstrap survival from a flat-spread CDS curve.
+
+```python
+survival_probability(curve, date) -> Float[Array, ""]
+hazard_rate(curve, date) -> Float[Array, ""]                # average h on [0, t]
+piecewise_hazards(curve) -> Float[Array, "n_pillars"]       # per-interval h
+```
+
+See [Risk Factors](../risk-factors.md) — Credit section — for the role of the survival curve in the wider risk-factor catalogue, and `valax.risk.shocks` for the credit-side bump primitives.
