@@ -35,3 +35,8 @@ packages = ["valax"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "arbitrage: tests that inject deliberate static-arbitrage data and assert detect-or-regularise behaviour.",
+    "golden: tests that compare against a versioned golden dataset under tests/golden/.",
+    "detects: tests that the library currently *passes* (as opposed to xfail roadmap items).",
+]
