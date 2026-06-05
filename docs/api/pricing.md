@@ -194,7 +194,7 @@ Same as `mc_price` but also returns the standard error estimate.
 | Function | Model | Output |
 |----------|-------|--------|
 | `generate_gbm_paths` | `BlackScholesModel` | `(n_paths, n_steps+1)` array |
-| `generate_heston_paths` | `HestonModel` | `(spot_paths, var_paths)` |
+| `generate_heston_paths` | `HestonModel` | `(spot_paths, var_paths)` &mdash; Andersen (2008) QE scheme |
 | `generate_sabr_paths` | `SABRModel` | `(forward_paths, vol_paths)` |
 | `generate_lmm_paths` | `LMMModel` | `LMMPathResult` |
 | `generate_correlated_gbm_paths` | `MultiAssetGBMModel` | `(n_paths, n_steps+1, n_assets)` |

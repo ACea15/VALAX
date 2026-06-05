@@ -12,6 +12,34 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — Andersen QE Heston path generator (HE-1 closure)
+
+- Replaced the diffrax Euler-with-reflection scheme in
+  ``valax/pricing/mc/paths.py::generate_heston_paths`` with
+  Andersen's (2008) Quadratic-Exponential algorithm, implemented
+  directly on ``jax.lax.scan``. The variance is sampled by exact
+  two-moment matching with a quadratic-vs-exponential switch at
+  ``ψ_c = 1.5``; the log-spot uses Andersen's central discretisation
+  with trapezoidal weights ``γ₁ = γ₂ = 0.5``. The function signature
+  is unchanged, so all 16 MC recipes and downstream callers pick up
+  the improvement transparently.
+- Eliminates the ``O(1/sqrt(n_steps))`` bias the old scheme exhibited
+  when the variance process spent time at the absorbing boundary —
+  i.e. whenever Feller's condition ``2·κ·θ > ξ²`` was violated, which
+  is the common case for single-expiry SABR-style Heston
+  calibrations. ``TestHestonQLCalibratesVALAXReprices`` flipped from
+  ``xfail @ 6 SE / n_steps=500`` to ``pass @ 3 SE / n_steps=100``.
+- Unblocked the Stage-3 chain test
+  ``tests/test_quantlib_comparison/test_exotic_on_heston_surface_ql.py``
+  (previously ``pytest.mark.skip`` with HE-1 reason). It is now a
+  shared-surface Heston Asian chain test: QL calibrates Heston to a
+  SABR-generated smile, VALAX adopts the fitted parameters, both
+  engines MC-price an arithmetic Asian call on the *same* calibrated
+  surface, and the means agree to ``3 · combined_stderr`` across 3
+  seeds × 3 moneynesses (9 tests, all green on first run).
+- Net suite delta vs. Sprint 4: **2009 → 2021 passing**,
+  ``xfailed`` 7 → 6, ``skipped`` 3 → 2, total runtime down ≈28%.
+
 ### Added — QuantLib Validation Pyramid (three-stage parametric sweep)
 
 A three-stage validation campaign that converts the existing

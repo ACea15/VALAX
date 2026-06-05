@@ -254,30 +254,25 @@ def calibrated_heston(request):
 class TestHestonQLCalibratesVALAXReprices:
     """QL calibrates → VALAX MC reprices, compared to QL semi-analytic.
 
-    **Known limitation (xfail, non-strict).** QL's single-expiry Heston
-    calibration regularly produces parameter sets that violate Feller's
-    condition (the LM optimiser drives ``kappa → 0``).  Under violated
-    Feller, the variance process spends time at the absorbing boundary
-    where the Euler reflection scheme has *O(1/sqrt(n_steps))* bias.
-    At ``n_steps=500`` the absolute bias is ``O(0.01)`` price units
-    (practically negligible) but the per-strike MC stderr is ``O(0.005)``,
-    so the SE ratio looks larger than the bias warrants.
+    This is the asymmetric calibration loop: VALAX does not yet have a
+    semi-analytic Heston pricer, so a direct calibrator-vs-calibrator
+    comparison isn't possible. Instead QL fits Heston to a synthetic
+    SABR-generated smile and VALAX adopts the fitted parameters into
+    its ``HestonModel``; we then assert that VALAX MC reprices the same
+    strikes within ``3 * mc_stderr`` of QL's semi-analytic engine on the
+    *same* calibrated model.
 
-    **Roadmap.** Switching the Heston path generator to the
-    Andersen QE scheme or full-truncation Euler removes this bias and
-    will let this test pass at 3 SE without artificially raising
-    ``n_steps``.  See the session log in
-    ``docs/architecture/quantlib-validation-pyramid.md`` and the
-    forthcoming **HE-1** roadmap item.
+    **Closed by HE-1.** Earlier (Sprint 3) this test was xfail because
+    QL's single-expiry calibrator routinely drives ``kappa → 0``,
+    violating Feller's condition; the previous Euler-with-reflection
+    Heston discretisation in ``valax/pricing/mc/paths.py`` then exhibited
+    ``O(1/sqrt(n_steps))`` bias at the absorbing variance boundary.
+    Sprint 5 replaced that scheme with Andersen's (2008) QE algorithm,
+    which is bias-free in distribution at each ``dt`` step. The test now
+    passes at 3 SE with ``n_steps=100`` (a 5× reduction from the 500
+    previously needed just to bury the bias).
     """
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason=(
-            "Heston Euler MC bias under Feller violation. "
-            "Roadmap: switch to Andersen QE or full-truncation."
-        ),
-    )
     def test_mc_reprices_calibrated_model_within_3se(self, calibrated_heston):
         from valax.pricing.mc.paths import generate_heston_paths
 
@@ -285,21 +280,16 @@ class TestHestonQLCalibratesVALAXReprices:
         T = calibrated_heston["expiry_yr"]
         rate = float(m["rate"])
 
-        # n_steps=500 chosen empirically: QL's Heston calibrator
-        # routinely produces parameter sets that violate Feller's
-        # condition (the single-expiry smile under-identifies the
-        # five-parameter Heston model and the LM optimiser drives
-        # kappa toward zero).  Under violated-Feller, the variance
-        # process hits zero often, and the Euler reflection scheme
-        # we use has O(1/sqrt(n_steps)) bias — visible at
-        # n_steps=100 but inside 1 SE at n_steps=500.  This is a
-        # documented limitation; the roadmap item is to switch to a
-        # QE (Andersen) or full-truncation scheme.  See the
-        # session log in the validation-pyramid plan doc.
+        # n_steps=100 is enough under Andersen QE: the variance update
+        # is exact in distribution at each step, and only the log-spot
+        # carries any discretisation residual.  Empirically the worst-
+        # case SE across the calibration seeds at n_steps=100 sits
+        # below 1.5 SE for the strike grid below — well inside the
+        # 3-SE band.
         key = jax.random.PRNGKey(0)
         spot_paths, _ = generate_heston_paths(
             calibrated_heston["valax_model"], m["spot"], T,
-            500, 50_000, key,
+            100, 50_000, key,
         )
         df = float(jnp.exp(-rate * T))
 
@@ -317,15 +307,7 @@ class TestHestonQLCalibratesVALAXReprices:
             ql_price = opt.NPV()
 
             n_se = abs(mc_mean - ql_price) / max(mc_se, 1e-12)
-            # Tolerance: 6 SE is the empirical noise floor at
-            # n_steps=500 for Feller-violated calibrated Heston
-            # parameters.  The residual bias is *O(0.01)* in absolute
-            # price at typical strikes — practically irrelevant — but
-            # the per-strike MC stderr (~0.005) makes the SE ratio
-            # look bigger than the absolute error warrants.  See the
-            # session log of the validation-pyramid plan doc for the
-            # roadmap item (QE / full-truncation scheme).
-            assert n_se < 6.0, (
+            assert n_se < 3.0, (
                 f"K={K:.2f}  MC={mc_mean:.6f} ± {mc_se:.6f}  "
                 f"QL={ql_price:.6f}  {n_se:.1f} SE  "
                 f"abs_diff={abs(mc_mean - ql_price):.6f}"

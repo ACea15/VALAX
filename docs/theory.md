@@ -511,7 +511,7 @@ $$
 | $\xi$ | Vol-of-vol | 0.1–1.0 |
 | $\rho$ | Spot-vol correlation | −0.9 to −0.3 (equity) |
 
-**The Feller condition:** If $2\kappa\theta > \xi^2$, the variance process $v_t$ is strictly positive almost surely. When violated, $v_t$ can hit zero, requiring careful numerical treatment. VALAX's diffrax-based simulation handles this via adaptive step-size SDE solvers (`valax/pricing/mc/paths.py`, `generate_heston_paths`), but extreme parameter sets near the Feller boundary may still require absorption or reflection schemes.
+**The Feller condition:** If $2\kappa\theta > \xi^2$, the variance process $v_t$ is strictly positive almost surely. When violated, $v_t$ can hit zero — a regime that defeats naïve Euler-with-reflection schemes, which acquire $O(1/\sqrt{n_{\text{steps}}})$ bias at the absorbing boundary. VALAX's `generate_heston_paths` (in `valax/pricing/mc/paths.py`) is implemented as **Andersen's (2008) Quadratic-Exponential (QE) scheme**, which is bias-free in distribution at each $\Delta t$ step regardless of Feller compliance. The variance is sampled by exact two-moment matching against either a shifted-squared-normal (quadratic branch, low variance-of-variance) or a Bernoulli–exponential mixture (exponential branch, high variance-of-variance); the log-spot uses Andersen's matching "central" discretisation with trapezoidal weights $\gamma_1 = \gamma_2 = 1/2$. This is the canonical choice for Heston MC and is why the validation pyramid's Stage-3 Heston Asian chain test (`tests/test_quantlib_comparison/test_exotic_on_heston_surface_ql.py`) agrees with QuantLib's `MCDiscreteArithmeticAPHestonEngine` at $3\,\text{SE}$ on Feller-violating calibrated parameter sets.
 
 **Characteristic function** (not yet implemented — see Roadmap P2.1):
 
@@ -534,7 +534,7 @@ where $C$ and $D$ satisfy Riccati ODEs with known closed-form solutions. This en
 - Five parameters to calibrate — potential overfitting or flat directions in the loss surface
 - MC-only in VALAX currently — too slow for real-time calibration (COS method will fix this)
 
-**VALAX implementation:** Model definition in `valax/models/heston.py` (`HestonModel`, `HestonDrift`, `HestonDiffusion`). MC simulation in `valax/pricing/mc/paths.py`. Calibration in `valax/calibration/heston.py`. The simulation works in $(\\ln S, v)$ space with correlated Brownian motions via Cholesky decomposition.
+**VALAX implementation:** Model definition in `valax/models/heston.py` (`HestonModel`). MC simulation via Andersen QE in `valax/pricing/mc/paths.py::generate_heston_paths`. Calibration in `valax/calibration/heston.py`. The simulation works in $(\\ln S, v)$ space with the QE-conditional Gaussian for the log-spot update at each step.
 
 ### 2.5 SABR
 
@@ -1453,7 +1453,7 @@ For $dS = \mu(S)\,dt + \sigma(S)\,dW$:
 | Milstein | 1.0 | 1.0 | Adds $\frac{1}{2}\sigma\sigma'(\Delta W^2 - \Delta t)$ correction |
 | SRA (Splitting) | 1.5 | 2.0 | Used by diffrax for higher accuracy |
 
-VALAX delegates to diffrax's adaptive SDE solvers rather than hand-coding Euler steps. This is more accurate and handles stiff problems (e.g., Heston near the Feller boundary) automatically.
+VALAX uses diffrax's Euler-Maruyama for the linear-coefficient GBM and SABR SDEs (where Euler is unbiased), and a bespoke `jax.lax.scan` implementation of Andersen's (2008) Quadratic-Exponential scheme for the Heston variance process (where naïve Euler-with-reflection acquires bias at the absorbing boundary). See §2.4 for details on the QE algorithm.
 
 **Variance reduction** (not yet implemented — planned):
 

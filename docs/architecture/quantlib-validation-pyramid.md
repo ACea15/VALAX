@@ -423,6 +423,59 @@ Up from 913 passing before this work:
 SABR European chain green; Heston Asian and cap strip placeholders
 gated on HE-1 + a small convenience helper).
 
+### Sprint 5 — HE-1 closure (Andersen QE Heston scheme)
+
+**Result: 2021 passed · 2 skipped · 6 xfailed in 5:57.** Net +12
+passing tests vs. end of Sprint 4 (was 2009 / 3 / 7 / 2 xpass / 8:10);
+one xfail closed (HE-1); one of two Stage-3 placeholders unblocked;
+total runtime down ≈28% (the old test inflated `n_steps=500` purely to
+bury the Euler bias).
+
+**Algorithm chosen.** Andersen (2008) Quadratic-Exponential — the
+canonical choice for Heston MC. Full truncation was the lighter
+alternative but loses an order of accuracy and was empirically
+unnecessary. Implementation in `valax/pricing/mc/paths.py` is ~75
+lines (vs. the ~150 LOC budget); the variance is sampled by
+quadratic-vs-exponential moment matching with switch at `ψ_c = 1.5`,
+and the log-spot uses Andersen's central discretisation with
+trapezoidal weights `γ₁ = γ₂ = 0.5`. Implemented directly on
+`jax.lax.scan` (diffrax was dropped for Heston — its `Euler`
+integrator was the bias source and there's no diffrax solver that
+implements QE).
+
+**Before-vs-after on the previously xfailed seeds** (each fitted
+Heston had `2κθ − ξ² ≪ 0`, e.g. seed=20260101: `κ=0.0000, θ=0.0292,
+ξ=0.8123` ⇒ Feller = −0.66):
+
+| seed | `n_steps` | Euler reflection (Sprint 3) | Andersen QE (Sprint 5) |
+|---|---|---|---|
+| 20260101 | 100 | ~4–6 SE off QL | **0.81 SE** |
+| 20260101 | 500 | ~0.8 SE (bias buried) | — |
+| 20260102 | 100 | xfail | **0.97 SE** |
+| 20260103 | 100 | xfail | **0.49 SE** |
+
+**Tests flipped from xfail to pass:**
+
+- `tests/test_quantlib_comparison/test_heston_ql.py::TestHestonQLCalibratesVALAXReprices::test_mc_reprices_calibrated_model_within_3se` — xfail dropped, `n_steps` reduced 500→100, tolerance tightened 6 SE → 3 SE.
+
+**Test placeholder unblocked:**
+
+- `tests/test_quantlib_comparison/test_exotic_on_heston_surface_ql.py` — implemented as Stage 3.B chain test: SABR truth → QL calibrates Heston → VALAX adopts → both engines MC-price an arithmetic Asian call (12 monthly fixings) on the *same* surface. 9 tests across 3 seeds × 3 moneynesses, all passing at 3 SE on the first run. QL uses `MCDiscreteArithmeticAPHestonEngine`; VALAX uses `generate_heston_paths` (QE) + `asian_option_payoff`.
+
+**Still skipped:** `test_cap_strip_on_caplet_vols_ql.py` — needs the
+`build_sabr_caplet_surface` convenience helper. Untouched by Sprint 5.
+
+**Documentation updates:**
+
+- `docs/roadmap.md` HE-1 entry moved to "Done (Sprint 5)" with
+  before/after metrics.
+- `docs/theory.md` §2.4 rewritten to describe Andersen QE instead of
+  the diffrax Euler-with-reflection scheme; §5.3 SDE table footnote
+  updated.
+- `CHANGELOG.md` `[Unreleased]` gains a new section for HE-1.
+- This document gains the Sprint 5 entry above and an updated
+  sign-off block below.
+
 ---
 
 ## 10. Cross-references

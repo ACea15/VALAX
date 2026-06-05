@@ -116,35 +116,35 @@ pricing chain.
 
 ## Heston MC — Session Backlog
 
-### HE-1 — Andersen QE or full-truncation Euler for Heston paths
+### HE-1 — Andersen QE Heston scheme &nbsp;✅ &nbsp;*Done (Sprint 5)*
 
-**What.** Replace the reflection-scheme Euler in
-`valax/pricing/mc/paths.py::generate_heston_paths` with either
-Andersen's Quadratic-Exponential (QE) scheme or the full-truncation
-Euler. Both eliminate the `O(1/sqrt(n_steps))` bias the current
-scheme exhibits when the variance process hits the absorbing
-boundary.
+**What was done.** Replaced the diffrax Euler-with-reflection scheme
+in `valax/pricing/mc/paths.py::generate_heston_paths` with Andersen's
+(2008) Quadratic-Exponential algorithm, implemented directly with
+`jax.lax.scan`. The variance update is exact in distribution at each
+step (quadratic-vs-exponential switch at `ψ_c = 1.5`); the log-spot
+uses Andersen's central discretisation with trapezoidal weights
+`γ₁ = γ₂ = 0.5`. The function signature is unchanged, so all callers
+pick up the improvement transparently.
 
 **Surfaced by.** The Stage-2 asymmetric calibration test
 `tests/test_quantlib_comparison/test_heston_ql.py::TestHestonQLCalibratesVALAXReprices`
 (see [QuantLib Validation Pyramid](architecture/quantlib-validation-pyramid.md#sprint-3--stage-2-complete)).
-QL's single-expiry Heston calibration routinely produces
-Feller-violating parameter sets; under those, VALAX MC overprices
-deep-ITM calls by a few bp absolute (4–7 MC stderrs at `n_steps=500`).
+QL's single-expiry Heston calibration routinely produced
+Feller-violating parameter sets (`kappa → 0`); under those, the
+old VALAX MC overpriced deep-ITM calls by a few bp absolute (4–7 MC
+stderrs at `n_steps=500`).
 
-**Unlocks.**
-- The asymmetric Heston test flips from `xfail` to `pass` at 3 SE.
-- Any production use of Heston where calibrated parameters straddle
-  the Feller boundary becomes safe.
-- A semi-analytic Heston pricer (Carr-Madan / Lewis FFT) becomes a
-  natural follow-up once the MC reference is trustworthy.
+**Result.** The xfail Heston-Asian test flipped to passing at 3 SE
+with `n_steps=100` — a 5× reduction from the 500 that the Euler-with-
+reflection scheme needed just to bury the bias. The previously skipped
+Stage-3 chain test `test_exotic_on_heston_surface_ql.py` (Heston Asian
+on calibrated surface) is now enabled and green across all
+seed × moneyness combinations on the first run.
 
-**Effort.** ~150 LOC plus regression tests. QE is the most
-literature-blessed choice; full truncation is simpler but slightly
-less accurate.
-
-**Blockers.** None — replacement of a single function inside an
-existing module.
+**Follow-up unlocked.** A semi-analytic Heston pricer (Carr-Madan /
+Lewis FFT) — the MC reference is now trustworthy enough to bench it
+against.
 
 ## Arbitrage Detection — Session Backlog
 
