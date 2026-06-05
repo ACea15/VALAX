@@ -12,6 +12,67 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — QuantLib Validation Pyramid (three-stage parametric sweep)
+
+A three-stage validation campaign that converts the existing
+fixed-scenario `tests/test_quantlib_comparison/` files into a
+parametric sweep, then adds calibration-agreement and chain-validation
+stages. Every assertion is driven by a synthetic-market sample
+(``valax.market.sample_scalar_market`` / ``sample_nss_curve`` /
+``sample_sabr_params`` / ``sample_heston_params``) under a per-test
+``SeedRegistry``, so each test runs across N seeds rather than one
+hardcoded case.
+
+- **Shared adapter module** ``tests/test_quantlib_comparison/_ql_adapters.py``
+  centralises every VALAX→QuantLib convention translation. Notably
+  ``snap_expiry_to_days`` aligns the continuous year-fraction VALAX
+  expiry to QuantLib's integer-day expiry — without this, even the
+  trivial BS comparison fails at ``1e-10``.
+- **Stage 1 — Pricer parametric sweep (836 tests).** All seven
+  existing comparison files wrapped in 10–20-seed loops. Files
+  touched: ``test_european_options_ql.py`` (140), ``test_pde_lattice_ql.py``
+  (100), ``test_sabr_ql.py`` (26), ``test_fixed_income_ql.py`` (220),
+  ``test_heston_ql.py`` (30), ``test_monte_carlo_ql.py`` (60),
+  ``test_risk_greeks_ql.py`` (240).
+- **Stage 2 — Calibration agreement (200 tests).** New:
+  - ``test_curve_bootstrap_ql.py`` — VALAX ``bootstrap_sequential`` and
+    QL ``PiecewiseLogLinearDiscount`` agree to ``abs<1e-10`` on
+    discount factors at off-pillar dates, across 20 seeds × 8
+    checked dates.
+  - ``test_sabr_calibration_ql.py`` — fitted smiles agree to ``0.0 bp``
+    (max disagreement empirically) on a dense extrapolated strike
+    grid. Required QL flags: ``vegaWeighted=False`` and
+    ``allowExtrapolation=True`` — convention drifts that the single-
+    scenario tests had hidden.
+  - ``test_heston_ql.py::TestHestonQLCalibratesVALAXReprices`` — QL
+    calibrates Heston, VALAX MC reprices. Surfaces a real bias under
+    Feller-violating calibrated parameters; flipped to ``xfail`` with
+    a roadmap reference (**HE-1**) rather than fudged tolerance.
+- **Stage 3 — Chain validation (60 tests + 2 placeholders).** New:
+  - ``test_exotics_on_sabr_surface_ql.py`` — shared-surface chain
+    pattern: QL calibrates SABR, VALAX adopts parameters, both
+    engines BS-price European calls reading vol from the *same*
+    surface. Vols agree to ``1e-12``, prices to ``1e-10``.
+  - ``test_exotic_on_heston_surface_ql.py`` — skipped, blocked by
+    HE-1. Re-enables once Andersen QE lands.
+  - ``test_cap_strip_on_caplet_vols_ql.py`` — skipped, needs a
+    ``build_sabr_caplet_surface`` convenience helper.
+- **Persistent plan document**
+  ``docs/architecture/quantlib-validation-pyramid.md`` — full
+  three-stage plan with per-sprint session log, tolerance policy,
+  triage rules, and acceptance criteria. Survives the session in
+  which it was written.
+- **mkdocs nav** updated with the plan doc under Architecture.
+- **roadmap.md** updated:
+  - New row in *Current State* for the validation pyramid.
+  - New **HE-series backlog** with HE-1 (Andersen QE / full-
+    truncation Heston discretisation) — the single new roadmap item
+    surfaced by the sweep.
+- **Test count**: **+1096 passing tests** (913 → 2009), one
+  documented xfail (HE-1), two xpasses (HE-1 only fires on
+  Feller-violating draws), two new documented skips (Stage 3
+  placeholders).
+
 ### Added — Synthetic market data, reproducibility & arbitrage stress tests
 
 - **`valax.market.synthetic`** subpackage: end-to-end generators that

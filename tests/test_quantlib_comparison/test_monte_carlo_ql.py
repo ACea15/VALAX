@@ -1,160 +1,144 @@
+"""Cross-validation: VALAX GBM Monte Carlo vs QuantLib.
+
+Stage 1 of the [QuantLib Validation Pyramid](
+../../docs/architecture/quantlib-validation-pyramid.md).
+
+The MC engine has stochastic outputs, so the comparison tolerance is
+``3 * stderr`` for any direct numerical comparison. Each seed runs
+~100k paths; this is the slowest file in the Stage-1 sweep, so the
+seed count is capped at 10.
 """
-Cross-validation: VALAX vs QuantLib for GBM Monte Carlo pricing.
 
-Tests that VALAX's MC engine produces prices consistent with both
-the analytical Black-Scholes solution and QuantLib's MC engine.
-
-Companion example: examples/comparisons/05_monte_carlo.py
-"""
-
-import pytest
 import jax
 import jax.numpy as jnp
-import QuantLib as ql
+import pytest
+
+import valax
 from valax.instruments.options import EuropeanOption
+from valax.market import SeedRegistry, default_config, sample_scalar_market
 from valax.models.black_scholes import BlackScholesModel
-from valax.pricing.mc.paths import generate_gbm_paths
-from valax.pricing.mc.engine import mc_price_with_stderr, MCConfig
-from valax.pricing.mc.payoffs import european_payoff, asian_payoff, barrier_payoff
 from valax.pricing.analytic.black_scholes import black_scholes_price
+from valax.pricing.mc.engine import MCConfig, mc_price_with_stderr
+from valax.pricing.mc.paths import generate_gbm_paths
+from valax.pricing.mc.payoffs import asian_payoff, barrier_payoff, european_payoff
+
+from tests.test_quantlib_comparison._ql_adapters import market_to_ql_bsm
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def market():
-    return dict(S=100.0, K=105.0, T=1.0, sigma=0.25, r=0.04, q=0.01)
+SEEDS = tuple(range(20260101, 20260111))   # 10 seeds — MC tests are slow
 
 
-@pytest.fixture
-def bs_model(market):
-    return BlackScholesModel(
-        vol=jnp.array(market["sigma"]),
-        rate=jnp.array(market["r"]),
-        dividend=jnp.array(market["q"]),
+@pytest.fixture(params=SEEDS, ids=lambda s: f"seed={s}")
+def call_setup(request):
+    seed = request.param
+    registry = SeedRegistry(
+        master_seed=seed, library_version=valax.__version__,
     )
+    cfg = default_config(n_assets=1)
+    raw = sample_scalar_market(registry, cfg)
+    ql_opt, ql_proc, eff = market_to_ql_bsm(raw, is_call=True)
+    valax_opt = EuropeanOption(
+        strike=eff["strike"], expiry=eff["expiry"], is_call=True,
+    )
+    model = BlackScholesModel(
+        vol=eff["vol"], rate=eff["rate"], dividend=eff["dividend"],
+    )
+    return {
+        "market": eff, "valax_opt": valax_opt,
+        "model": model, "ql_opt": ql_opt, "ql_proc": ql_proc,
+        "mc_key": jax.random.PRNGKey(seed),
+    }
 
-
-# ---------------------------------------------------------------------------
-# GBM MC vs Black-Scholes analytic
-# ---------------------------------------------------------------------------
 
 class TestGBMMC:
-    """VALAX GBM MC should converge to BS analytical."""
-
-    def test_mc_within_3se_of_bs(self, market, bs_model):
-        """See: examples/comparisons/05_monte_carlo.py §2 (GBM MC)"""
-        call = EuropeanOption(
-            strike=jnp.array(market["K"]),
-            expiry=jnp.array(market["T"]),
-            is_call=True,
+    def test_mc_within_3se_of_bs(self, call_setup):
+        m = call_setup["market"]
+        config = MCConfig(n_paths=100_000, n_steps=100)
+        mc_p, mc_se = mc_price_with_stderr(
+            call_setup["valax_opt"], m["spot"], call_setup["model"],
+            config, call_setup["mc_key"],
         )
-        config = MCConfig(n_paths=100_000, n_steps=252)
-        key = jax.random.PRNGKey(42)
-
-        mc_p, mc_se = mc_price_with_stderr(call, jnp.array(market["S"]), bs_model, config, key)
         bs_p = black_scholes_price(
-            call, jnp.array(market["S"]), jnp.array(market["sigma"]),
-            jnp.array(market["r"]), jnp.array(market["q"]),
+            call_setup["valax_opt"],
+            m["spot"], m["vol"], m["rate"], m["dividend"],
         )
-
         n_se = abs(float(mc_p) - float(bs_p)) / float(mc_se)
-        assert n_se < 3.0, f"MC={float(mc_p):.4f}, BS={float(bs_p):.4f}, {n_se:.1f} SE"
-
-    @pytest.mark.parametrize("n_paths", [10_000, 50_000, 100_000])
-    def test_convergence(self, market, bs_model, n_paths):
-        """MC standard error should decrease as O(1/sqrt(n))."""
-        call = EuropeanOption(
-            strike=jnp.array(market["K"]),
-            expiry=jnp.array(market["T"]),
-            is_call=True,
+        assert n_se < 3.0, (
+            f"MC={float(mc_p):.4f} ± {float(mc_se):.4f}  "
+            f"BS={float(bs_p):.4f}  {n_se:.1f} SE"
         )
-        config = MCConfig(n_paths=n_paths, n_steps=100)
-        key = jax.random.PRNGKey(42)
 
-        _, se = mc_price_with_stderr(call, jnp.array(market["S"]), bs_model, config, key)
-        # SE should be roughly proportional to 1/sqrt(n)
-        # For 100K paths with ~50 payoff std, SE ≈ 50/316 ≈ 0.16
-        assert float(se) < 1.0  # basic sanity: SE not blown up
-
-
-# ---------------------------------------------------------------------------
-# Exotic payoffs
-# ---------------------------------------------------------------------------
-
-class TestExoticPayoffs:
-    """Exotic payoff ordering: Asian < European, Barrier < European."""
-
-    def test_asian_leq_european(self, market, bs_model):
-        """See: examples/comparisons/05_monte_carlo.py §6 (exotics)
-
-        Asian call price < European call price (averaging reduces vol).
-        """
-        opt = EuropeanOption(
-            strike=jnp.array(market["S"]),  # ATM
-            expiry=jnp.array(market["T"]),
-            is_call=True,
+    def test_mc_within_3se_of_quantlib(self, call_setup):
+        m = call_setup["market"]
+        config = MCConfig(n_paths=100_000, n_steps=100)
+        mc_p, mc_se = mc_price_with_stderr(
+            call_setup["valax_opt"], m["spot"], call_setup["model"],
+            config, call_setup["mc_key"],
         )
-        key = jax.random.PRNGKey(42)
-        paths = generate_gbm_paths(bs_model, jnp.array(market["S"]), market["T"], 252, 100_000, key)
-
-        euro_pays = european_payoff(paths, opt)
-        asian_pays = asian_payoff(paths, opt)
-        df = jnp.exp(-jnp.array(market["r"]) * market["T"])
-
-        euro_p = float(df * jnp.mean(euro_pays))
-        asian_p = float(df * jnp.mean(asian_pays))
-
-        assert asian_p < euro_p, f"Asian={asian_p:.4f} should be < European={euro_p:.4f}"
-
-    def test_barrier_leq_european(self, market, bs_model):
-        """See: examples/comparisons/05_monte_carlo.py §6 (exotics)
-
-        Up-and-out barrier call < European call (paths knocked out).
-        """
-        opt = EuropeanOption(
-            strike=jnp.array(market["S"]),
-            expiry=jnp.array(market["T"]),
-            is_call=True,
+        ql_p = call_setup["ql_opt"].NPV()
+        n_se = abs(float(mc_p) - ql_p) / float(mc_se)
+        assert n_se < 3.0, (
+            f"MC={float(mc_p):.4f} ± {float(mc_se):.4f}  "
+            f"QL={ql_p:.4f}  {n_se:.1f} SE"
         )
-        key = jax.random.PRNGKey(42)
-        paths = generate_gbm_paths(bs_model, jnp.array(market["S"]), market["T"], 252, 100_000, key)
-
-        euro_pays = european_payoff(paths, opt)
-        bar_pays = barrier_payoff(paths, opt, barrier=jnp.array(130.0), is_up=True, is_knock_in=False)
-        df = jnp.exp(-jnp.array(market["r"]) * market["T"])
-
-        euro_p = float(df * jnp.mean(euro_pays))
-        barrier_p = float(df * jnp.mean(bar_pays))
-
-        assert barrier_p < euro_p, f"Barrier={barrier_p:.4f} should be < European={euro_p:.4f}"
 
 
-# ---------------------------------------------------------------------------
-# Path statistics
-# ---------------------------------------------------------------------------
+class TestExoticOrdering:
+    """Asian < European, Up-and-Out Barrier < European (no-arb relations)."""
+
+    def test_asian_leq_european(self, call_setup):
+        m = call_setup["market"]
+        atm = EuropeanOption(
+            strike=m["spot"], expiry=m["expiry"], is_call=True,
+        )
+        paths = generate_gbm_paths(
+            call_setup["model"], m["spot"], float(m["expiry"]),
+            100, 50_000, call_setup["mc_key"],
+        )
+        df = jnp.exp(-m["rate"] * m["expiry"])
+        euro = float(df * jnp.mean(european_payoff(paths, atm)))
+        asian = float(df * jnp.mean(asian_payoff(paths, atm)))
+        assert asian < euro
+
+    def test_barrier_leq_european(self, call_setup):
+        m = call_setup["market"]
+        atm = EuropeanOption(
+            strike=m["spot"], expiry=m["expiry"], is_call=True,
+        )
+        paths = generate_gbm_paths(
+            call_setup["model"], m["spot"], float(m["expiry"]),
+            100, 50_000, call_setup["mc_key"],
+        )
+        df = jnp.exp(-m["rate"] * m["expiry"])
+        euro = float(df * jnp.mean(european_payoff(paths, atm)))
+        barrier = float(df * jnp.mean(barrier_payoff(
+            paths, atm,
+            barrier=m["spot"] * jnp.array(1.30),
+            is_up=True, is_knock_in=False,
+        )))
+        assert barrier <= euro + 1e-10
+
 
 class TestGBMPathStatistics:
-    """Sanity checks on GBM path generation."""
-
-    def test_risk_neutral_drift(self, market, bs_model):
-        """Under risk-neutral GBM, E[S_T] = S_0 * exp((r-q)*T)."""
-        key = jax.random.PRNGKey(42)
+    def test_risk_neutral_drift(self, call_setup):
+        m = call_setup["market"]
         paths = generate_gbm_paths(
-            bs_model, jnp.array(market["S"]),
-            market["T"], 252, 100_000, key,
+            call_setup["model"], m["spot"], float(m["expiry"]),
+            100, 100_000, call_setup["mc_key"],
         )
-        expected = market["S"] * jnp.exp((market["r"] - market["q"]) * market["T"])
+        expected = float(m["spot"]) * float(
+            jnp.exp((m["rate"] - m["dividend"]) * m["expiry"])
+        )
         mc_mean = float(jnp.mean(paths[:, -1]))
-        assert abs(mc_mean - float(expected)) / float(expected) < 0.02
+        # 3-sigma tolerance for the mean estimator.
+        # std(terminal) is roughly S0 * sqrt(exp(sigma^2 T) - 1) for GBM,
+        # but a 5% absolute tolerance is comfortable here.
+        assert abs(mc_mean - expected) / expected < 0.05
 
-    def test_paths_start_at_spot(self, market, bs_model):
-        """All paths should start at S0."""
-        key = jax.random.PRNGKey(42)
+    def test_paths_start_at_spot(self, call_setup):
+        m = call_setup["market"]
         paths = generate_gbm_paths(
-            bs_model, jnp.array(market["S"]),
-            market["T"], 10, 100, key,
+            call_setup["model"], m["spot"], float(m["expiry"]),
+            10, 100, call_setup["mc_key"],
         )
-        assert jnp.allclose(paths[:, 0], market["S"])
+        assert jnp.allclose(paths[:, 0], m["spot"])

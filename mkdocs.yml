@@ -40,6 +40,7 @@ nav:
       - Overview: architecture/overview.md
       - Productionisation Design: architecture/production.md
       - "MC-Curves-2 Handoff": architecture/mc-curves-2.md
+      - "QuantLib Validation Pyramid": architecture/quantlib-validation-pyramid.md
   - Models & Theory: theory.md
   - "Risk: End-to-End": risk-overview.md
   - Risk Factors: risk-factors.md

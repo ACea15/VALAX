@@ -87,6 +87,65 @@ A snapshot of every instrument class relevant to production bank systems, with i
 
 ---
 
+## QuantLib Validation Pyramid
+
+A three-stage validation campaign that converts the existing
+fixed-scenario `tests/test_quantlib_comparison/` files into a
+parametric sweep, then adds calibration-agreement and chain-validation
+stages. Drives every assertion through the synthetic-market generator
+so each test runs across ~10–20 seeds rather than one hardcoded case.
+
+**Detailed plan and session log:**
+[Architecture → QuantLib Validation Pyramid](architecture/quantlib-validation-pyramid.md).
+
+Stages:
+
+1. **Pricer parametric sweep** — wrap the 7 existing comparison files
+   in `@pytest.mark.parametrize("seed", range(20))`. Catches convention
+   drift in pricers across the parameter space.
+2. **Calibration agreement** — curve bootstrap, SABR smile fit, and
+   QL-calibrates-VALAX-reprices Heston. Comparison is in observable
+   space (DFs, smiles, prices), never parameter space.
+3. **Chain validation** — calibrated surface flows through VALAX and
+   QL pricers; tests the quote→surface→exotic pipeline that desks
+   actually run.
+
+**Estimated effort:** ~3 days end-to-end. **Expected output:**
+~1000 sampled markets agreeing with QuantLib at every stage of the
+pricing chain.
+
+## Heston MC — Session Backlog
+
+### HE-1 — Andersen QE or full-truncation Euler for Heston paths
+
+**What.** Replace the reflection-scheme Euler in
+`valax/pricing/mc/paths.py::generate_heston_paths` with either
+Andersen's Quadratic-Exponential (QE) scheme or the full-truncation
+Euler. Both eliminate the `O(1/sqrt(n_steps))` bias the current
+scheme exhibits when the variance process hits the absorbing
+boundary.
+
+**Surfaced by.** The Stage-2 asymmetric calibration test
+`tests/test_quantlib_comparison/test_heston_ql.py::TestHestonQLCalibratesVALAXReprices`
+(see [QuantLib Validation Pyramid](architecture/quantlib-validation-pyramid.md#sprint-3--stage-2-complete)).
+QL's single-expiry Heston calibration routinely produces
+Feller-violating parameter sets; under those, VALAX MC overprices
+deep-ITM calls by a few bp absolute (4–7 MC stderrs at `n_steps=500`).
+
+**Unlocks.**
+- The asymmetric Heston test flips from `xfail` to `pass` at 3 SE.
+- Any production use of Heston where calibrated parameters straddle
+  the Feller boundary becomes safe.
+- A semi-analytic Heston pricer (Carr-Madan / Lewis FFT) becomes a
+  natural follow-up once the MC reference is trustworthy.
+
+**Effort.** ~150 LOC plus regression tests. QE is the most
+literature-blessed choice; full truncation is simpler but slightly
+less accurate.
+
+**Blockers.** None — replacement of a single function inside an
+existing module.
+
 ## Arbitrage Detection — Session Backlog
 
 Five small, well-scoped detectors that turn `@pytest.mark.xfail(strict=True)`
