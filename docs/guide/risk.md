@@ -471,3 +471,352 @@ for scenario in scenarios:
 ```
 
 This pattern is natural for end-of-day P&L explain: compute the ladder at the close, then attribute P&L to each risk factor's daily move.
+
+---
+
+## P&L Vectors: Predict vs Actual
+
+Every risk metric in VALAX — VaR, ES, backtests, the FRTB PLA test — reduces to a single primitive: a **P&L vector** of length $N$, with one entry per scenario or per historical day. Once you have the vector, the metrics are just sample statistics.
+
+For the theoretical framing of HPL / RTPL / APL and why these three series are kept separate, see [Models & Theory § 7.5](../theory.md#75-pl-vectors-hypothetical-risk-theoretical-actual).
+
+### Hypothetical P&L (full revaluation)
+
+`hypothetical_pnl_vector` reprices the portfolio under every scenario via `jax.vmap`:
+
+```python
+from valax.risk import hypothetical_pnl_vector
+
+hpl = hypothetical_pnl_vector(pricing_fn, instruments, base_market, scenarios)
+# hpl.shape == (n_scenarios,)
+```
+
+This is identical to `portfolio_pnl` — the alias exists so risk-engine code reads consistently when both HPL and RTPL vectors appear side by side.
+
+### Risk-theoretical P&L (ladder-based prediction)
+
+`risk_theoretical_pnl_vector` is the vectorised version of the waterfall: one precomputed ladder, $N$ cheap arithmetic contractions:
+
+```python
+from valax.risk import compute_ladder, risk_theoretical_pnl_vector
+
+ladder = compute_ladder(pricing_fn, instruments, base_market)
+rtpl = risk_theoretical_pnl_vector(ladder, scenarios, base_market)
+# rtpl.shape == (n_scenarios,)
+```
+
+For a 10 000-scenario VaR run on an option-heavy portfolio, RTPL is typically two to three orders of magnitude cheaper than HPL because the expensive call is the ladder build, not the per-scenario evaluation.
+
+### Comparing both at once
+
+`explained_unexplained_vector` returns the matched HPL/RTPL pair plus the per-scenario unexplained residual:
+
+```python
+from valax.risk import explained_unexplained_vector
+
+report = explained_unexplained_vector(
+    pricing_fn, instruments, base_market, scenarios,
+)
+report["rtpl"]         # shape (n_scenarios,) — ladder prediction
+report["hpl"]          # shape (n_scenarios,) — full-revaluation
+report["unexplained"]  # shape (n_scenarios,) — hpl - rtpl
+```
+
+The unexplained vector is a direct diagnostic: a large or systematically biased unexplained means the second-order ladder is missing something (third-order convexity, missing risk factors, or a scenario regime the ladder was not built for).
+
+### From P&L vector to VaR/ES
+
+Both HPL and RTPL vectors plug straight into the existing risk measures:
+
+```python
+from valax.risk import value_at_risk, expected_shortfall
+
+var_hpl = value_at_risk(hpl, confidence=0.99)
+es_hpl  = expected_shortfall(hpl, confidence=0.99)
+
+var_rtpl = value_at_risk(rtpl, confidence=0.99)
+es_rtpl  = expected_shortfall(rtpl, confidence=0.99)
+```
+
+The difference `var_rtpl - var_hpl` is the **model-induced VaR bias**: how much your risk engine's Taylor approximation under- or over-states the tail. For well-hedged portfolios it should be near zero.
+
+---
+
+## VaR Backtesting
+
+A VaR forecast is only as good as its track record. The Basel framework requires 99% one-day VaR to be backtested on a rolling 250-day window, with capital multipliers driven by the breach count. VALAX provides the standard Kupiec, Christoffersen, and traffic-light tools in `valax/risk/backtesting.py`.
+
+For the underlying statistics, see [Models & Theory § 7.6](../theory.md#76-var-backtesting).
+
+### Counting breaches
+
+A breach occurs on a day where the realised loss exceeds that day's VaR forecast:
+
+```python
+import jax.numpy as jnp
+from valax.risk import var_breaches
+
+# Both vectors have shape (n_days,):
+#   actual_pnl[t] is realised one-day P&L (negative = loss)
+#   var_forecast[t] is that morning's VaR forecast (positive number = loss threshold)
+breaches = var_breaches(actual_pnl, var_forecast)
+# breaches.shape == (n_days,), boolean
+n_breaches = int(jnp.sum(breaches))
+```
+
+### Kupiec proportion-of-failures (POF)
+
+Tests whether the *count* of breaches is consistent with the VaR confidence level:
+
+```python
+from valax.risk import kupiec_pof
+
+result = kupiec_pof(breaches, confidence=0.99)
+result["n"]          # number of observation days
+result["x"]          # number of breaches
+result["lr_uc"]      # likelihood-ratio statistic, χ²₁ under H₀
+result["p_value"]    # right-tail p-value
+```
+
+Reject the model at the 5% level if `lr_uc > 3.84` (or equivalently `p_value < 0.05`).
+
+### Christoffersen independence and conditional coverage
+
+Detects *clustering* of breaches (a model that breaches twice in a week then never again):
+
+```python
+from valax.risk import christoffersen_independence, christoffersen_conditional_coverage
+
+ind = christoffersen_independence(breaches)
+ind["lr_ind"]        # χ²₁ statistic, tests pi_01 = pi_11
+ind["p_value"]
+
+cc = christoffersen_conditional_coverage(breaches, confidence=0.99)
+cc["lr_cc"]          # χ²₂ — joint test of correct rate AND independence
+cc["p_value"]
+```
+
+### Basel traffic light
+
+The regulatory zoning is just a count-based lookup on the cumulative binomial:
+
+```python
+from valax.risk import basel_traffic_light
+
+zone = basel_traffic_light(n_breaches=n_breaches, n_obs=250, confidence=0.99)
+# zone in {"green", "yellow", "red"}
+```
+
+For a 250-day window at 99% VaR: 0–4 breaches green, 5–9 yellow, ≥10 red — the multiplier on capital scales accordingly.
+
+---
+
+## FRTB P&L Attribution Test
+
+The FRTB Internal Models Approach requires a second daily validation on top of the VaR backtest: each desk must demonstrate that its **risk-theoretical P&L (RTPL)** tracks its **hypothetical P&L (HPL)** in both rank order (Spearman) and distribution (Kolmogorov–Smirnov). Failing the PLA test forces the desk off internal models and onto the (usually more punitive) standardized approach.
+
+For the regulatory background and threshold derivation, see [Models & Theory § 7.7](../theory.md#77-frtb-pl-attribution-test).
+
+### Spearman rank correlation
+
+```python
+from valax.risk import pla_spearman
+
+rho = pla_spearman(rtpl_series, hpl_series)
+# rho is a scalar in [-1, 1]
+```
+
+Tests monotonic agreement: do RTPL and HPL produce the same ordering of best-to-worst days?
+
+### Kolmogorov–Smirnov statistic
+
+```python
+from valax.risk import pla_ks, ks_statistic
+
+D = pla_ks(rtpl_series, hpl_series)
+# D is the max distance between empirical CDFs in [0, 1]
+```
+
+`ks_statistic(x, y)` is the underlying two-sample KS computation, exposed for general use.
+
+### Traffic-light zone
+
+```python
+from valax.risk import pla_traffic_light
+
+zone = pla_traffic_light(spearman=rho, ks_stat=D, n_obs=len(rtpl_series))
+# zone in {"green", "amber", "red"}
+```
+
+The zone applies the BCBS d558 thresholds: green if Spearman ≥ 0.80 *and* KS $p$-value ≥ 0.264; red if either Spearman < 0.70 or KS $p$-value < 0.055; amber otherwise.
+
+### End-to-end PLA workflow
+
+Putting the pieces together: compute the ladder once, build both vectors over the same scenario set (the 250-day historical window), and read the test outputs:
+
+```python
+import jax.numpy as jnp
+from valax.risk import (
+    compute_ladder,
+    risk_theoretical_pnl_vector,
+    hypothetical_pnl_vector,
+    pla_spearman,
+    pla_ks,
+    pla_traffic_light,
+)
+
+# scenarios: 250-day historical ScenarioSet
+ladder = compute_ladder(pricing_fn, instruments, base_market)
+rtpl   = risk_theoretical_pnl_vector(ladder, scenarios, base_market)
+hpl    = hypothetical_pnl_vector(pricing_fn, instruments, base_market, scenarios)
+
+rho = pla_spearman(rtpl, hpl)
+D   = pla_ks(rtpl, hpl)
+zone = pla_traffic_light(rho, D, n_obs=rtpl.shape[0])
+print(f"Spearman={float(rho):.3f}, KS={float(D):.3f}, zone={zone}")
+```
+
+If the zone is red, inspect the unexplained vector first — large systematic residuals point to missing risk factors or third-order convexity that the ladder doesn't capture.
+
+---
+
+## Risk Bucketing
+
+Raw autodiff sensitivities live in the *finest* possible factor space — one DV01 per pillar, one vega per asset, one credit delta per hazard pillar. For reporting, regulatory capital, and stable VaR, every desk re-expresses the same risk in coarser coordinates:
+
+- **Regulatory bucketing** (FRTB SBA, ISDA SIMM) — standard tenor vertices, equity sectors, credit rating buckets.
+- **Trader-friendly bucketing** — "short / belly / wings" on a curve, "tech / energy / financials" on equities.
+- **Factor reduction** — PCA scores (level / slope / curvature) for well-conditioned VaR on a 30-pillar curve.
+- **Parametric vol bucketing** — push grid-vol sensitivities into SABR or SVI parameter space via the calibration Jacobian.
+
+VALAX provides two transformation families in `valax/risk/bucketing.py`. They share the same matrix algebra, but they correspond to two different mental models and are named accordingly. See [Models & Theory § 7.8](../theory.md#78-risk-bucketing-linear-and-jacobian-transformations) for the derivation.
+
+### Linear aggregation: `BucketMap`
+
+A `BucketMap` is a thin wrapper around an aggregation matrix `A` of shape `(n_buckets, n_factors)`:
+
+```python
+from valax.risk import BucketMap, aggregate, pushforward_scenario, aggregate_covariance
+import jax.numpy as jnp
+
+# Map 4 pillars → 2 buckets (short / long)
+A = jnp.array([
+    [1.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 1.0],
+])
+rate_bm = BucketMap(matrix=A, bucket_labels=("short", "long"))
+
+# Bucket a DV01 ladder
+bucket_dv01 = aggregate(rate_bm, ladder.delta_rate)         # shape (2,)
+
+# Push a bucket-level shock back to raw factors (the dual operation)
+bucket_shock = jnp.array([0.0010, 0.0025])                  # +10 bp / +25 bp
+raw_shock = pushforward_scenario(rate_bm, bucket_shock)     # shape (4,)
+
+# Aggregate a 4×4 covariance to a 2×2 bucket covariance
+bucket_cov = aggregate_covariance(rate_bm, raw_cov)
+```
+
+`pushforward_scenario` is the *dual* of `aggregate`: it is the unique factor shock that makes the bucket P&L equal to the raw P&L. Use it when you have a stress defined in bucket terms (e.g. "+10 bp on the short tenor") and need to apply it via `apply_scenario` / `portfolio_pnl`.
+
+### Standard bucket builders
+
+```python
+from valax.risk import tenor_bucket_map, equal_weight_bucket_map
+
+# FRTB-style tenor vertices with indicator weights
+pillar_times = jnp.array([0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0])
+frtb_vertices = jnp.array([1.0, 5.0, 30.0])  # short, belly, long
+rate_bm = tenor_bucket_map(pillar_times, frtb_vertices, weight="indicator")
+
+# Linear (piecewise-linear) splitting — smooth re-binning
+rate_bm_smooth = tenor_bucket_map(pillar_times, frtb_vertices, weight="linear")
+
+# Sector / currency / rating bucketing
+sector_bm = equal_weight_bucket_map(
+    group_membership=(0, 0, 1, 1, 0),    # 5 stocks → 2 sectors
+    n_buckets=2,
+    bucket_labels=("tech", "energy"),
+)
+```
+
+### Jacobian reparameterization
+
+When the new factors are a smooth (possibly nonlinear) function of the raw factors — PCA scores, level/slope/curvature, SVI/SABR parameters — `BucketMap` is not the right abstraction. Use a Jacobian instead:
+
+```python
+from valax.risk import (
+    pushforward_sensitivities,
+    pullback_shocks,
+    reparameterize_covariance,
+    jacobian_from_fn,
+    level_slope_curvature_jacobian,
+    pca_jacobian,
+)
+
+# Hand-built level / slope / curvature factors (fixed Jacobian)
+J = level_slope_curvature_jacobian(pillar_times)  # (n_pillars, 3)
+lsc_delta = pushforward_sensitivities(J, ladder.delta_rate)  # 3 numbers
+
+# PCA on 250 days of curve returns → top 3 components
+J_pca, eigvals, frac_explained = pca_jacobian(
+    curve_returns,        # shape (250, n_pillars)
+    n_components=3,
+)
+pca_delta = pushforward_sensitivities(J_pca, ladder.delta_rate)
+pca_cov = reparameterize_covariance(J_pca, raw_cov)
+
+# Stress scenario in PCA space: +1 std on level only
+pca_shock = jnp.array([1.0, 0.0, 0.0]) * jnp.sqrt(eigvals)
+raw_shock_from_pca = pullback_shocks(J_pca, pca_shock)
+```
+
+For nonlinear reparameterizations (e.g. an SVI vol-grid function), build the Jacobian on-the-fly via autodiff:
+
+```python
+def svi_to_grid(svi_params):
+    # svi_params -> vol[grid_strike, expiry] reconstruction
+    return svi_vol_function(svi_params, strikes, expiries).flatten()
+
+J = jacobian_from_fn(svi_to_grid, svi_params_base)
+# Now J is the autodiff Jacobian; push grid-vega through it.
+svi_param_vega = pushforward_sensitivities(J, raw_grid_vega)
+```
+
+### Bucketing a full sensitivity ladder
+
+`bucket_sensitivity_ladder` applies independent bucket maps to every component of a `SensitivityLadder`, including bilateral aggregation of the cross-gamma blocks:
+
+```python
+from valax.risk import compute_ladder, bucket_sensitivity_ladder
+
+ladder = compute_ladder(pricing_fn, instruments, base_market)
+
+bucketed = bucket_sensitivity_ladder(
+    ladder,
+    rate_bucket=rate_bm,        # bucket pillar dimension
+    spot_bucket=sector_bm,      # bucket asset dimension
+    # vol_bucket / div_bucket: omitted ⇒ left at full granularity
+)
+
+bucketed.delta_rate          # (n_rate_buckets,)
+bucketed.delta_spot          # (n_spot_buckets,)
+bucketed.cross_spot_rate     # (n_spot_buckets, n_rate_buckets) — bilaterally bucketed
+bucketed.rate_bucket_labels  # human-readable bucket names
+```
+
+The bucketed ladder is itself a pytree — it can be fed back into `waterfall_pnl`-style arithmetic when paired with bucket-level scenarios.
+
+### When to use which
+
+| Goal | Use |
+|---|---|
+| Sum DV01s into FRTB tenor vertices | `tenor_bucket_map` + `aggregate` |
+| Aggregate equity Greeks by sector | `equal_weight_bucket_map` + `aggregate` |
+| Apply a bucket-level stress to raw factors | `pushforward_scenario` |
+| Project a 30 × 30 covariance to a 10 × 10 regulatory covariance | `aggregate_covariance` |
+| Yield-curve PCA factors (level/slope/curvature from data) | `pca_jacobian` + `pushforward_sensitivities` |
+| Hand-picked level/slope/curvature | `level_slope_curvature_jacobian` + `pushforward_sensitivities` |
+| SABR/SVI parameter Greeks from grid Greeks | `jacobian_from_fn` + `pushforward_sensitivities` |
+| Stress in bucket / PC coords, evaluate raw P&L | `pushforward_scenario` (linear) or `pullback_shocks` (Jacobian) |
+| Variance-reduced parametric VaR on a sparse factor set | `pca_jacobian` + `reparameterize_covariance` |
