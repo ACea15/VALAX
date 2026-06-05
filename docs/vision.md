@@ -4,6 +4,8 @@ This document captures the long-term ambition for VALAX: the kinds of workflows 
 
 It is **not** a feature list (see [`roadmap.md`](roadmap.md) for time-ordered tasks and tier breakdowns), and it is **not** a structural design (see [`architecture/production.md`](architecture/production.md) for the data model, layering, and phased delivery plan). It is the **why** that the roadmap and the architecture documents serve. It is deliberately untimed: it should still read true after several roadmap tiers have shipped.
 
+For the *architectural* why — what is actually hard about quant systems at scale, why VALAX makes the design choices it does, and what it deliberately leaves out of scope — see [Design Rationale](design-rationale.md).
+
 VALAX today is a pricing kernel — option pricers, curve bootstrapping, autodiff Greeks, vmap portfolio risk. The destination described here is a **differentiable valuation, risk, and research engine** usable end-to-end by trading desks, asset managers, and quant researchers.
 
 ---

@@ -4,7 +4,13 @@
 
 VALAX is a quantitative finance library built entirely on JAX and its ecosystem. It provides option pricing, fixed income analytics, and risk computation with automatic differentiation for Greeks — no finite differences needed.
 
-For the long-term direction — how VALAX is intended to be used by trading desks, asset managers, and quant researchers — see [Vision](vision.md). For time-ordered feature work, see [Roadmap](roadmap.md).
+For the long-term direction — how VALAX is intended to be used by trading desks, asset managers, and quant researchers — see [Vision](vision.md). For time-ordered feature work, see [Roadmap](roadmap.md). For the architectural logic that ties them together — what is actually hard about quant systems at scale and which pieces of that hardness VALAX is built to attack — see [Design Rationale](design-rationale.md).
+
+## Why this exists
+
+The hardest part of building a bank-scale quant system isn't the maths in any individual component — it's keeping ~500 mutually-aware components consistent over twenty years while every one of them is being changed by a different team under regulatory pressure. VALAX is designed to drive the *internal* consistency cost as close to zero as a modern language and accelerator stack will allow, so a firm's quant budget can be spent on the consistency problems that genuinely require humans (reference data, model governance, regulatory approval) instead of the ones that don't (bump frameworks drifting out of sync with pricers, snapshot reconciliation between front-office and risk, audit replay).
+
+The full argument — what actually sinks bank programmes, which choices in the library are targeted at which pain points, and what VALAX deliberately does *not* fix — is in [Design Rationale](design-rationale.md).
 
 ## Key Features
 

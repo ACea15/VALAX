@@ -43,6 +43,7 @@ nav:
   - Models & Theory: theory.md
   - "Risk: End-to-End": risk-overview.md
   - Risk Factors: risk-factors.md
+  - Design Rationale: design-rationale.md
   - Vision: vision.md
   - Roadmap: roadmap.md
   - Benchmarks: benchmarks.md
@@ -65,6 +66,8 @@ nav:
       - Calibration: guide/calibration.md
       - Volatility Surfaces: guide/vol-surfaces.md
       - Risk & Scenarios: guide/risk.md
+      - Synthetic Market Data: guide/synthetic_market.md
+      - Reproducibility & Arbitrage Tests: guide/reproducibility_and_arbitrage_tests.md
   - API Reference:
       - Instruments: api/instruments.md
       - Pricing: api/pricing.md
@@ -75,3 +78,4 @@ nav:
       - Calibration: api/calibration.md
       - Surfaces: api/surfaces.md
       - Risk: api/risk.md
+      - Market Data: api/market.md

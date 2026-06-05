@@ -21,6 +21,8 @@ python examples/01_equity_options.py
 | [`04_rates_derivatives.py`](#rates-derivatives) | Caps, floors, swaps, swaptions | Caplet pricing (Black-76 + Bachelier), cap strips, swap NPV and par rates, swaption pricing, rate Greeks |
 | [`05_monte_carlo.py`](#monte-carlo) | GBM, Heston, SABR paths, exotics | Path generation, convergence analysis, Asian and barrier options, Heston smile extraction |
 | [`06_pde_and_lattice.py`](#pde-and-lattice) | Crank-Nicolson, binomial trees | PDE grid convergence, CRR trees, American vs European puts, early exercise premium, method comparison |
+| [`07_synthetic_market.py`](#synthetic-market) | Synthetic generators, basket pricing, market tapes | Reproducible market state via `SeedRegistry`, multi-asset snapshot + correlation, batched analytic pricing, 5-step market evolution |
+| [`08_end_to_end_workflow.py`](#end-to-end-workflow) | Stages 1 → 6, calibration on synthetic, arbitrage injection | Ground-truth SABR → noisy smile → calibration to within the noise floor; portfolio pricing + autodiff Greeks; deliberate calendar-arb injection demonstrating the xfail backlog |
 
 ---
 
@@ -157,3 +159,54 @@ Highlights:
 - **CRR binomial tree** — European and American exercise
 - **Early exercise premium** — American put premium increases with moneyness
 - **Method comparison** — all three methods (analytic, PDE, lattice) converge to the same price and Greeks
+
+---
+
+## Synthetic Market
+
+**`examples/07_synthetic_market.py`** — Generate a complete market snapshot from scratch and price a small basket.  No external data required.
+
+```python
+from valax.market import (
+    SeedRegistry, SyntheticMarketConfig,
+    sample_market_with_correlation, sample_option_portfolio,
+    evolve_market, OptionPortfolioSpec,
+)
+
+registry = SeedRegistry(master_seed=20260101, library_version=valax.__version__)
+cfg = SyntheticMarketConfig(n_assets=4)
+md, corr = sample_market_with_correlation(registry, cfg)        # snapshot + corr
+port = sample_option_portfolio(registry, md,
+                                OptionPortfolioSpec(n_per_asset=5))
+prices = batch_price(black_scholes_price, *port["calls"], ...)
+tape = evolve_market(registry, md, dates, corr)                 # 5-step path
+```
+
+Highlights:
+
+- **Reproducible by design** — every random draw routed through `SeedRegistry.key(name)`; bumping `version=` is the only non-renaming way to change a stream's bytes.
+- **Canonical types** — generators emit `MarketData`, `DiscountCurve`, `EuropeanOption`, and a correlation matrix that the rest of the library accepts unchanged.
+- **Tape generation** — `evolve_market` produces a stacked `MarketData` whose `spots` carries a leading `n_dates` axis.
+
+---
+
+## End-to-End Workflow
+
+**`examples/08_end_to_end_workflow.py`** — The full six-stage workflow from synthetic ground truth to calibration, pricing, and arbitrage stress testing.  This is the script that demonstrates the **non-tautological calibration check**: the SABR fit residual lands at the injected observation noise floor, proving the calibrator is bottlenecked by data quality, not optimiser convergence.
+
+```python
+sabr_truth   = sample_sabr_params(registry, cfg)                  # Stage 1
+smile_noisy  = synthesize_sabr_smile(registry, sabr_truth, F, T,
+                                      strikes, vol_bp_noise=15)   # Stage 2
+sabr_fit, _  = calibrate_sabr(strikes, smile_noisy, F, T,
+                              fixed_beta=sabr_truth.beta)         # Stage 3
+port         = sample_option_portfolio(registry, md, spec)        # Stage 4
+prices       = batch_price(black_scholes_price, *port["calls"]...) # Stage 5
+bad_w, diag  = inject_calendar_arb(w_clean, i=1, j=3)             # Stage 6
+```
+
+Highlights:
+
+- **Non-tautological calibration check** — the fit RMSE is compared against the *empirical* noise RMSE on the same draw; a passing test means the optimiser is at the noise floor, not that "calibrating SABR on SABR-generated data recovers SABR" (which would only test the optimiser).
+- **Closed loop in one script** — every stage uses outputs of the previous, so any inconsistency surfaces immediately.
+- **Arbitrage backlog reporting** — Stage 6 deliberately breaks a vector of total variances and prints the diagnosis the library *would* raise once detection lands.  The corresponding xfail tests turn green the day a detector is added.

@@ -12,6 +12,96 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Synthetic market data, reproducibility & arbitrage stress tests
+
+- **`valax.market.synthetic`** subpackage: end-to-end generators that
+  drive every component of the library without any external data
+  source. Six-stage workflow (ground-truth world → noisy observations
+  → calibration → portfolio → pricing → risk) with one module per
+  stage:
+  - `config.py` — `SyntheticMarketConfig` (`eqx.Module`, fully static).
+  - `seeds.py` — `SeedRegistry(master_seed, library_version)` with
+    deterministic `key(name, version)` derivation via SHA-256-stable
+    folds. Replaces ad-hoc `jax.random.PRNGKey(42)` sprinkled across
+    tests.
+  - `curves.py` — `flat_discount_curve`, `sample_flat_curve`,
+    `sample_nss_curve`, `sample_discount_curve`. Fills the gap that
+    `valax.curves` has no flat-curve helper; NSS sampler clips DFs to
+    `(0, 1]` for safety.
+  - `correlations.py` — `sample_correlation`, `block_correlation`,
+    `sample_correlation_from_config` with PSD reprojection.
+  - `scalars.py` — `sample_scalar_market` (single-asset / single-option
+    draw matching the inputs to `examples/comparisons/01_european_options.py`).
+  - `snapshots.py` — `sample_market_data` and
+    `sample_market_with_correlation` producing canonical `MarketData`.
+  - `model_params.py` — ground-truth samplers for `BlackScholesModel`,
+    `HestonModel` (Feller-respecting), `SABRModel`, `HullWhiteModel`,
+    `MultiAssetGBMModel`. Used to test **calibrators**, not pricers.
+  - `observations.py` — `synthesize_sabr_smile`,
+    `synthesize_price_strip`, `synthesize_curve_quotes` (turn clean
+    truth into noisy desk-style quotes).
+  - `portfolio.py` — `sample_option_portfolio` (split call/put
+    stacked-pytree returns to respect the static `is_call` field),
+    `sample_swap_portfolio`.
+  - `paths.py` — `evolve_market` producing a stacked `MarketData`
+    tape via correlated GBM.
+  - `scenarios.py` — `sample_scenario_set` matching the existing
+    `ScenarioSet` shape.
+  - `arbitrage.py` — eight injectors (`inject_non_psd_correlation`,
+    `inject_butterfly_arb`, `inject_non_convex_smile`,
+    `inject_calendar_arb`, `inject_pcp_violation`,
+    `inject_negative_density`, `inject_inconsistent_bootstrap_quotes`,
+    `inject_basket_variance_violation`) each returning
+    `(perturbed, ArbDiagnosis)`.
+- **Reserved exception types** in `valax/core/diagnostics.py`:
+  `ArbitrageError` (base) plus `NonPSDCorrelationError`,
+  `ButterflyArbError`, `CalendarArbError`, `PutCallParityError`,
+  `NonConvexSmileError`, `InconsistentQuotesError`. Not raised by the
+  library yet; the test suite's `xfail` set is the public backlog of
+  detectors to add.
+- **Golden-dataset harness** in `tests/golden/`: versioned `.npz`
+  artifacts indexed by `tests/golden/golden_manifest.json`,
+  `assert_matches_golden(name, value, *, version, rtol, atol)`
+  helper, `REGEN_GOLDEN=1` regeneration switch, and
+  `scripts/regen_goldens.py` entry point.
+- **Test infrastructure**:
+  - `tests/conftest.py` with `master_seed`, `seed_registry`,
+    `default_synth_cfg`, `library_version` fixtures
+    (`VALAX_MASTER_SEED` env var override).
+  - 93 new tests under `tests/test_market/` — structural (curves,
+    correlations, snapshots, paths, model params, observations,
+    portfolio), arbitrage injection + detect-or-regularise handling,
+    end-to-end non-tautological patterns, calibration-residual
+    closed loops, and the golden harness itself.
+  - 5 `@pytest.mark.xfail(strict=True)` items in
+    `test_arbitrage_handling.py` are the public, machine-readable
+    backlog of missing safety checks.
+- **Closed-loop validation patterns** (deliberately
+  non-tautological; replaces "calibrate X on data from X, recover
+  X's parameters"):
+  - Pricer × implied-vol round-trip.
+  - Analytic vs Monte Carlo cross-engine consistency within 3·stderr.
+  - Autodiff vs central-finite-difference Greeks.
+  - NSS curve self-consistency at off-pillar dates.
+  - SABR smile-residual within 1.5× injected observation noise.
+  - Bootstrap non-self-roundtrip: NSS truth → quotes at *non-NSS*
+    tenors → bootstrap → off-pillar zero-rate recovery within an
+    interpolation tolerance.
+- **Examples**:
+  - `examples/07_synthetic_market.py` — snapshot, basket pricing,
+    5-step market tape.
+  - `examples/08_end_to_end_workflow.py` — full Stages 1 → 6
+    walkthrough ending with a deliberate calendar-arb injection.
+- **Public surface** re-exported from `valax.market` so user code
+  reads `from valax.market import sample_market_data, SeedRegistry`
+  without reaching into the submodule.
+- **Pytest markers** registered: `arbitrage`, `golden`, `detects`.
+- **Documentation**: new guide pages
+  `docs/guide/synthetic_market.md` and
+  `docs/guide/reproducibility_and_arbitrage_tests.md`; new API
+  reference `docs/api/market.md`; mkdocs nav updated; org-mode
+  mirrors regenerated via `scripts/md2org.sh`.
+
 ### Added — Multi-asset Monte Carlo
 
 - **`MultiAssetGBMModel`** (`valax/models/multi_asset.py`): $N$-asset

@@ -20,7 +20,8 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | **Dates** | Act/360, Act/365, Act/Act, 30/360; ordinal-based date arithmetic; coupon schedule generation |
 | **Calibration** | SABR and Heston calibration with LM, BFGS, and Optax solvers; parameter constraint transforms |
 | **Portfolio** | `batch_price()` and `batch_greeks()` via vmap |
-| **Market Data** | `MarketData` container, `MarketScenario` / `ScenarioSet` for risk factor shocks |
+| **Market Data** | `MarketData` container, `MarketScenario` / `ScenarioSet` for risk factor shocks; full synthetic-data subpackage (`valax.market.synthetic`) covering Stages 1–6 of the workflow — `SyntheticMarketConfig`, `SeedRegistry`, NSS / flat curve samplers, random PSD correlation matrices, ground-truth model parameters, noisy observation layer, option / swap portfolio samplers, correlated-GBM market tapes, scenario sets, and deliberate arbitrage injectors |
+| **Testing infrastructure** | Versioned golden-dataset harness (`tests/golden/`, `assert_matches_golden`, `REGEN_GOLDEN=1` regeneration); shared `SeedRegistry` fixture; pytest markers `arbitrage` / `golden` / `detects`; non-tautological closed-loop tests (pricer × implied-vol roundtrip, analytic vs MC within 3·stderr, autodiff vs finite-difference Greeks, NSS curve self-consistency, SABR calibration at the observation-noise floor, bootstrap roundtrip on off-pillar dates); reserved arbitrage exception types in `valax.core.diagnostics`; `@pytest.mark.xfail` backlog of missing safety checks (see [Arbitrage Detection — Session Backlog](#arbitrage-detection--session-backlog)) |
 | **Risk** | Curve shocks (parallel, steepener, butterfly, key-rate), parametric/historical/stress scenarios, VaR, ES, sensitivity ladders with waterfall P&L |
 | **MC infrastructure** | Unified `mc_price_dispatch(instrument, model, ...)` with `(instrument, model)` → recipe registry. 16 built-in recipes covering equity (GBM/Heston), multi-asset equity (correlated GBM), and rates (LMM). `register()` decorator for contributor extensions. See [Monte Carlo guide](guide/monte-carlo.md#2-coverage-map). |
 | **Multi-asset MC** | `MultiAssetGBMModel` with per-asset vols/dividends + correlation matrix. `generate_correlated_gbm_paths` (exact log-Euler via Cholesky). Spread-option MC (validates Margrabe + Kirk analytical) and worst-of basket MC with correlation Greeks via `jax.grad`. |
@@ -83,6 +84,109 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `MBS` | Securitized | Very high | Prepayment models, OAS | Very US-market-specific |
 | `CompoundOption` | Exotic | Low | BSM extension | Option on an option. Rare in practice |
 | `ChooserOption` | Exotic | Low | BSM extension | Choose call/put at a future date |
+
+---
+
+## Arbitrage Detection — Session Backlog
+
+Five small, well-scoped detectors that turn `@pytest.mark.xfail(strict=True)`
+items in `tests/test_market/test_arbitrage_handling.py` into passing
+assertions. Each item has a fixed test waiting for it to flip green —
+removing one xfail is a real engineering deliverable.
+
+The infrastructure (`valax.core.diagnostics` reserved exception types,
+`valax.market.synthetic.arbitrage` injectors with parameterised severity,
+`ArbDiagnosis` objects) is already in place; only the consumer-side
+checks are missing.
+
+### ARB-1 — Non-PSD correlation in `MultiAssetGBMModel.__init__`
+
+**What.** Call `validate_correlation` inside the model's construction
+path and raise `NonPSDCorrelationError` when `min_eig < -tol`.
+
+**Unlocks.** Two existing xfail tests:
+`TestNonPSDCorrelation::test_model_constructor_should_raise`,
+`TestNonPSDCorrelation::test_paths_should_raise_on_non_psd`.
+
+**Effort.** ~15 LOC + a kwarg `validate: bool = True` so JIT call sites
+that need to skip the check can.
+
+**Blockers.** None.
+
+### ARB-2 — Basket-variance overshoot in correlation matrix construction
+
+**What.** Reject any constructor input where an off-diagonal entry
+falls outside `[-1, 1]`. Strictly tighter than ARB-1 (the eigenvalue
+check catches this indirectly, but a structural check raises with a
+clearer error).
+
+**Unlocks.**
+`TestBasketVarianceViolation::test_constructor_should_raise_automatically`.
+
+**Effort.** ~10 LOC, share with ARB-1.
+
+**Blockers.** None.
+
+### ARB-3 — Calendar-spread arbitrage in `SVIVolSurface`
+
+**What.** On surface construction (or via an explicit
+`is_arbitrage_free()` checker), verify that total implied variance
+`w(k, T)` is non-decreasing in `T` at every log-moneyness, and raise
+`CalendarArbError` otherwise.
+
+**Unlocks.**
+`TestCalendarArbitrage::test_surface_constructor_should_reject`.
+
+**Effort.** ~30 LOC plus a slice-loop helper.
+
+**Blockers.** Decision on whether the check is enforced at
+construction or only via an opt-in method (probably opt-in: existing
+fits may produce slightly arbitrageable surfaces under noise).
+
+### ARB-4 — Put-call parity checker for quoted strips
+
+**What.** A standalone validator `assert_put_call_parity(calls, puts,
+spot, strikes, expiry, df_factor)` that raises `PutCallParityError`
+when `|C − P − (S·e^{−qT} − K·e^{−rT})|` exceeds a tolerance.
+
+**Unlocks.**
+`TestPutCallParity::test_quote_validator_should_reject`.
+
+**Effort.** ~25 LOC + a smoke test on injected and clean data.
+
+**Blockers.** None.
+
+### ARB-5 — Butterfly arbitrage on a strike grid
+
+**What.** Detect `d²C/dK² < 0` from a discrete strike grid of call
+prices and raise `ButterflyArbError`. Two flavours needed: from a vol
+smile (Hagan / SVI / SABR converted to call prices) and from a raw
+price grid.
+
+**Unlocks.** No xfail today — this is the *first* tier where the
+arbitrage injector exists (`inject_butterfly_arb`,
+`inject_non_convex_smile`, `inject_negative_density`) but the test
+file has no consumer because no detector exists to be called.
+Landing this detector lets us write the test cases at the same time.
+
+**Effort.** ~40 LOC + tests.
+
+**Blockers.** Requires a stable spec for "what does the detector
+operate on": vol grid, price grid, or both. Resolving that is the
+first thing to do before coding.
+
+### ARB-6 (stretch) — Inconsistent-quote rejection in bootstrap
+
+**What.** After `bootstrap_simultaneous` returns, verify that every
+input instrument reprices to within a quote-noise tolerance, and
+raise `InconsistentQuotesError` on the worst offender if any.
+
+**Unlocks.** No xfail today (this is also greenfield).
+
+**Effort.** ~20 LOC inside `valax/curves/bootstrap.py`.
+
+**Blockers.** Picking the right per-instrument tolerance; defer until
+ARB-1..5 are in to avoid scope creep.
 
 ---
 

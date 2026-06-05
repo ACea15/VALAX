@@ -144,6 +144,52 @@ american_price = binomial_price(
 print(f"American Put: {american_price:.4f}")
 ```
 
+### Test with Synthetic Data
+
+VALAX ships a complete synthetic-market generator so any component can
+be exercised end-to-end without an external data source. Every random
+draw goes through a `SeedRegistry`, so the same `(master_seed,
+library_version)` produces identical numbers on any machine.
+
+```python
+import jax.numpy as jnp
+import valax
+from valax.market import (
+    SeedRegistry, SyntheticMarketConfig,
+    sample_market_with_correlation, sample_option_portfolio,
+    OptionPortfolioSpec,
+)
+from valax.portfolio import batch_price
+from valax.pricing.analytic import black_scholes_price
+
+registry = SeedRegistry(master_seed=20260101,
+                        library_version=valax.__version__)
+cfg = SyntheticMarketConfig(n_assets=3)
+
+# Stage 1: ground truth (snapshot + correlation)
+md, corr = sample_market_with_correlation(registry, cfg)
+
+# Stage 4: portfolio
+port = sample_option_portfolio(registry, md,
+                                OptionPortfolioSpec(n_per_asset=4,
+                                                    call_probability=1.0))
+calls, idx = port["calls"]
+
+# Stage 5: batched analytic pricing
+n = calls.strike.shape[0]
+prices = batch_price(
+    black_scholes_price, calls,
+    md.spots[idx], md.vols[idx],
+    jnp.full((n,), 0.03), md.dividends[idx],
+)
+print(f"portfolio PV: {float(jnp.sum(prices)):.4f}")
+```
+
+See [User Guide → Synthetic Market Data](guide/synthetic_market.md) for
+the full six-stage workflow (calibration on noisy quotes, market tapes,
+risk scenarios, arbitrage stress tests) and [`examples/08_end_to_end_workflow.py`](examples.md#end-to-end-workflow)
+for the runnable counterpart.
+
 ## Running Tests
 
 ```bash
@@ -155,4 +201,11 @@ pytest tests/test_pricing/test_black_scholes.py -v
 
 # Single test
 pytest tests/test_greeks/test_autodiff.py::TestBSAnalyticalGreeks::test_delta -v
+
+# Just the synthetic market / arbitrage / golden suites
+pytest tests/test_market/ -v
+pytest -m arbitrage tests/
+
+# Regenerate golden datasets after an intentional numerical change
+REGEN_GOLDEN=1 python scripts/regen_goldens.py
 ```
