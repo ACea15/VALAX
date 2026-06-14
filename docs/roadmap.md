@@ -13,8 +13,8 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | Area | What We Have |
 |------|-------------|
 | **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSCapFloor`, `RangeAccrual`, `CallableBond`, `PuttableBond`, `ZeroCouponInflationSwap`, `YearOnYearInflationSwap`, `InflationCapFloor`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
-| **Models** | Black-Scholes, Heston (MC), SABR (analytic + MC), LMM (MC with PCA factors), **Hull-White** (analytic ZCB, trinomial tree) |
-| **Pricing** | Black-Scholes, Black-76, Bachelier analytic; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree; **Hull-White trinomial tree** (callable/puttable bonds) |
+| **Models** | Black-Scholes, **Heston (MC + Fang-Oosterlee COS semi-analytic)**, SABR (analytic + MC), LMM (MC with PCA factors), Hull-White (analytic ZCB, trinomial tree) |
+| **Pricing** | Black-Scholes, Black-76, Bachelier analytic; **Heston Fang-Oosterlee COS**; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree; Hull-White trinomial tree (callable/puttable bonds) |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
 | **Curves** | `DiscountCurve` with log-linear interpolation, flat extrapolation |
 | **Dates** | Act/360, Act/365, Act/Act, 30/360; ordinal-based date arithmetic; coupon schedule generation |
@@ -145,6 +145,40 @@ seed × moneyness combinations on the first run.
 **Follow-up unlocked.** A semi-analytic Heston pricer (Carr-Madan /
 Lewis FFT) — the MC reference is now trustworthy enough to bench it
 against.
+
+### HE-2 — Heston Fang-Oosterlee COS pricer &nbsp;✅ &nbsp;*Done*
+
+**What was done.** Shipped `heston_cos_price` in
+`valax/pricing/analytic/heston.py` using the Lord-Kahl (2010) "Little
+Trap" characteristic function and the Fang-Oosterlee (2008) COS
+expansion of the log-moneyness density. Call and put payoff cosine
+coefficients are computed directly (not via put-call parity), the
+truncation interval is set from closed-form Heston cumulants
+(FO eq. 33), and defaults `N = 160, L = 12` carry < 1e-7 absolute
+error in the typical equity moneyness range of 0.85–1.15.
+
+**Validation.** Three independent gates:
+
+1. `tests/test_pricing/test_heston_cos.py` — 24 self-contained checks
+   (sanity, parity, BSM-near-limit, truncation convergence, autodiff
+   vs central FD on all 5 model parameters, JIT/vmap, golden).
+2. `tests/test_quantlib_comparison/test_heston_ql.py::TestHestonCOSvsQL`
+   — direct analytic-vs-analytic comparison to QuantLib's
+   `AnalyticHestonEngine` across 5 seeds × 5 moneynesses × call/put.
+   All 50 pass at < 5e-7 absolute tolerance.
+3. `tests/test_quantlib_comparison/test_heston_ql.py::TestHestonCOSvsMC`
+   — closes the open HE-1 follow-up: the Andersen-QE MC sits inside
+   3 standard errors of COS at every strike (25/25).
+
+**Calibration unlock.** `calibrate_heston` (which had been waiting on
+a real pricer since shipping) is now wired to COS end-to-end in
+`tests/test_calibration/test_heston_calibration.py::test_roundtrip_real_cos_pricer`
+— LM recovers all 5 Heston parameters to floating-point precision on
+noise-free synthetic data (max reprice residual < 1e-10).
+
+**Follow-up still open.** Carr-Madan / Lewis FFT pricer as an
+independent analytic cross-check; multi-expiry surface calibration
+objective (paired with SSVI under Tier 1.2).
 
 ## Arbitrage Detection — Session Backlog
 
@@ -400,7 +434,7 @@ These unlock entire asset classes and bring pricing to the speed and accuracy re
 
 | # | Task | Why It's Critical | Tier Ref |
 |---|------|-------------------|----------|
-| **P2.1** | **Heston Semi-Analytic (COS / Fourier)** | MC-only Heston is ~1000x too slow for real-time pricing and calibration loops. The COS method gives microsecond pricing — essential for any equity desk. | 2.2 |
+| **P2.1** | ~~**Heston Semi-Analytic (COS / Fourier)**~~ ✅ **Fang-Oosterlee COS implemented** | Lord-Kahl "Little Trap" characteristic function + Fang-Oosterlee (2008) COS expansion with closed-form Heston cumulants. Agrees with QuantLib's `AnalyticHestonEngine` to < 5e-7 absolute across the seed × moneyness × call/put grid. End-to-end Heston calibration roundtrip recovers all 5 parameters to floating-point precision on noise-free synthetic data. | 2.2 |
 | **P2.2** | **Local Volatility + SLV** | Local vol (Dupire) is the *minimum* standard for exotic equity pricing. SLV (Heston + leverage function) is the actual industry standard. Without this, no structured products desk can use VALAX. | 2.3, 2.4 |
 | **P2.3** | **FX Derivatives (Garman-Kohlhagen, Barriers, Delta Conventions)** | FX is one of the largest derivatives markets with unique conventions (delta-space quoting). Unlocks an entire asset class. | 3.3 |
 | **P2.4** | **Credit Derivatives (CDS, Survival Curves)** | Survival curves are a prerequisite for XVA (CVA). CDS pricing and hazard rate bootstrapping are foundational. Unlocks credit trading and the entire XVA workstream. | 3.4 |
@@ -554,12 +588,14 @@ New stochastic models that unlock entire product categories.
 
 ### 2.2 Heston Semi-Analytic Pricing
 
-- [ ] **Characteristic function** for Heston model
-- [ ] **COS method** (Fang-Oosterlee) for option pricing from characteristic function
+- [x] **Characteristic function** for Heston model — Lord-Kahl "Little Trap" form in `valax/pricing/analytic/heston.py`, branch-cut-safe for all expiries and admissible `rho`
+- [x] **COS method** (Fang-Oosterlee) for option pricing from characteristic function — direct call/put payoff coefficients, cumulant-based truncation
 - [ ] **Fourier inversion** (Carr-Madan / Lewis) as alternative
-- [ ] **Calibration to vol surface** using semi-analytic pricing (fast enough for optimizer loop)
+- [x] **Calibration to vol surface** using semi-analytic pricing — `calibrate_heston` now drives a real COS pricer in microseconds per evaluation; LM recovers all 5 parameters to floating-point precision on noise-free synthetic data
 
 **Why:** MC-only Heston is too slow for calibration and real-time pricing. Semi-analytic methods give prices in microseconds.
+
+**Status:** Shipped (this session). `heston_cos_price(option, spot, rate, dividend, model, *, N=160, L=12.0)` in `valax/pricing/analytic/heston.py`, re-exported from `valax.pricing.analytic`. Agrees with QuantLib's `AnalyticHestonEngine` to < 5e-7 absolute across the synthetic-market seed × moneyness × call/put grid (50/50 passing) and the Andersen-QE MC sits inside 3 standard errors of COS at every strike. See test suite at `tests/test_pricing/test_heston_cos.py` and `tests/test_quantlib_comparison/test_heston_ql.py::TestHestonCOSvsQL`. Carr-Madan/Lewis remain as a follow-up for parity-style benchmarking.
 
 **Approach:** Implement the Heston characteristic function as a pure JAX function. COS method is matrix operations — naturally JAX-friendly. `vmap` over strikes for the full smile in one call.
 

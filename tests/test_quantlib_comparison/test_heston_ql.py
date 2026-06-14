@@ -28,6 +28,8 @@ from valax.market import (
     sample_scalar_market,
 )
 from valax.pricing.mc.paths import generate_heston_paths
+from valax.pricing.analytic.heston import heston_cos_price
+from valax.instruments.options import EuropeanOption
 
 from tests.test_quantlib_comparison._ql_adapters import (
     DEFAULT_QL_DATE,
@@ -115,6 +117,98 @@ class TestHestonMCvsAnalytic:
         assert n_se < 3.0, (
             f"K/F={moneyness:.2f} MC={mc_price:.4f} ± {mc_se:.4f}  "
             f"QL={ql_price:.4f}  {n_se:.1f} SE"
+        )
+
+
+class TestHestonCOSvsQL:
+    """VALAX Fang-Oosterlee COS Heston pricer vs QuantLib AnalyticHestonEngine.
+
+    Direct analytic-vs-analytic comparison (no MC sampling). The
+    tolerance is set at ``5e-7`` absolute: QL's AnalyticHestonEngine
+    uses Lewis-representation Gauss-Laguerre quadrature accurate to
+    ~1e-12, while our COS at default ``(N=160, L=12)`` carries a tail-
+    truncation residual on the order of 1e-7 at moneyness 0.85/1.15
+    under Heston parameter ranges sampled by the synthetic-market
+    generator.  Tighter agreement is achievable by bumping ``L`` and
+    ``N``; the defaults are tuned for typical equity strike grids.
+    """
+
+    @pytest.mark.parametrize(
+        "moneyness", [0.85, 0.95, 1.0, 1.05, 1.15],
+    )
+    @pytest.mark.parametrize("is_call", [True, False])
+    def test_cos_matches_ql_analytic(self, heston_setup, moneyness, is_call):
+        m = heston_setup["market"]
+        model = heston_setup["model"]
+        spot_f = float(m["spot"])
+        K = spot_f * moneyness
+        T = float(m["expiry"])
+
+        cos_price = float(heston_cos_price(
+            EuropeanOption(
+                strike=jnp.array(K),
+                expiry=jnp.array(T),
+                is_call=is_call,
+            ),
+            jnp.array(spot_f),
+            m["rate"], m["dividend"], model,
+        ))
+
+        ql_payoff = ql.PlainVanillaPayoff(
+            ql.Option.Call if is_call else ql.Option.Put, K,
+        )
+        opt = ql.VanillaOption(
+            ql_payoff,
+            ql.EuropeanExercise(heston_setup["maturity"]),
+        )
+        opt.setPricingEngine(heston_setup["ql_engine"])
+        ql_price = opt.NPV()
+
+        assert abs(cos_price - ql_price) < 5e-7, (
+            f"K/F={moneyness:.2f} is_call={is_call} "
+            f"COS={cos_price:.10f}  QL={ql_price:.10f}  "
+            f"diff={cos_price - ql_price:.2e}"
+        )
+
+
+class TestHestonCOSvsMC:
+    """Closes the HE-1 follow-up: bench the Andersen-QE MC against COS.
+
+    With the Heston MC now exact-in-distribution per variance step,
+    the COS analytic is the cheapest trustworthy reference for cross-
+    validation.  The MC price must agree with COS within ``3 *
+    mc_stderr`` at every strike.
+    """
+
+    @pytest.mark.parametrize(
+        "moneyness", [0.85, 0.95, 1.0, 1.05, 1.15],
+    )
+    def test_qe_mc_within_3se_of_cos(self, heston_setup, moneyness):
+        m = heston_setup["market"]
+        model = heston_setup["model"]
+        spot_f = float(m["spot"])
+        K = spot_f * moneyness
+        T = float(m["expiry"])
+
+        cos_price = float(heston_cos_price(
+            EuropeanOption(
+                strike=jnp.array(K),
+                expiry=jnp.array(T),
+                is_call=True,
+            ),
+            jnp.array(spot_f),
+            m["rate"], m["dividend"], model,
+        ))
+
+        mc_price, mc_se = _mc_call_price(
+            heston_setup["spot_paths"], K,
+            float(m["rate"]), T,
+        )
+
+        n_se = abs(mc_price - cos_price) / max(mc_se, 1e-12)
+        assert n_se < 3.0, (
+            f"K/F={moneyness:.2f}  MC={mc_price:.6f} ± {mc_se:.6f}  "
+            f"COS={cos_price:.6f}  {n_se:.2f} SE"
         )
 
 

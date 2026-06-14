@@ -25,6 +25,7 @@ from valax.pricing.analytic.swaptions import (
     swaption_price_bachelier,
 )
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_price
+from valax.pricing.analytic.heston import heston_cos_price
 from valax.pricing.analytic.fx import (
     fx_forward_rate,
     fx_forward_price,
