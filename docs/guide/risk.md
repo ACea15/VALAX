@@ -10,7 +10,9 @@ Before the financial crisis, the industry used a single yield curve for both **d
 
 Under this single-curve framework, the discount factor to time $t$ and the forward rate between $t_1$ and $t_2$ are derived from the same set of zero rates:
 
-$$DF(t) = e^{-r(t) \cdot t}, \quad F(t_1, t_2) = \frac{DF(t_1)/DF(t_2) - 1}{\tau(t_1, t_2)}$$
+$$
+DF(t) = e^{-r(t) \cdot t}, \quad F(t_1, t_2) = \frac{DF(t_1)/DF(t_2) - 1}{\tau(t_1, t_2)}
+$$
 
 One curve, built from deposits, FRAs, and swaps against the same index. Simple.
 

@@ -32,6 +32,12 @@ Stage 6  Risk          ←  Stage 5  Pricing & Greeks  ←  Stage 4  Portfolio
 A worked example walking all six stages lives in
 `examples/08_end_to_end_workflow.py`.
 
+!!! tip "Prefer a narrative tutorial?"
+    The [Rates End-to-End Tutorial](tutorial-rates.md) walks the same six
+    stages on rates products — synthetic NSS curve, noisy par-rate quotes,
+    bootstrap, validation, IRS + swaption pricing, and autodiff DV01 — with
+    inline commentary on the modelling assumptions at each step.
+
 ## Quick start
 
 ```python

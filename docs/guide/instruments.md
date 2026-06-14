@@ -45,36 +45,58 @@ documented on the corresponding pricing pages:
 
 ## Summary Table
 
-The table below summarizes every instrument covered across the VALAX docs.
+The table below summarises every instrument covered across the VALAX docs.
 
-| Asset Class | Instrument | Pricing Method | Module |
-|-------------|-----------|---------------|--------|
-| **Credit** | CDS | Survival curve + discounting | `valax.instruments.credit` (planned) |
-| **Credit** | CDO Tranche | Gaussian copula (base correlation) | `valax.instruments.credit` (planned) |
-| **Fixed Income** | ZeroCouponBond, FixedRateBond | Discounted cashflows + YTM/duration/convexity | `valax.instruments.bonds` |
-| **Fixed Income** | Floating Rate Bond | Forward curve projection | `valax.instruments.bonds` |
-| **Fixed Income** | Callable Bond | Hull-White trinomial tree + OAS | `valax.instruments.bonds` |
-| **Fixed Income** | Puttable Bond | Hull-White trinomial tree | `valax.instruments.bonds` |
-| **Fixed Income** | Convertible Bond | Equity-credit PDE (planned) | `valax.instruments.bonds` |
-| **Inflation** | ZCIS | Inflation forward curve | `valax.instruments.inflation` |
-| **Inflation** | YYIS | Forward-ratio baseline (convexity adj. planned) | `valax.instruments.inflation` |
-| **Inflation** | Inflation Cap/Floor | Black-76 on YoY forward | `valax.instruments.inflation` |
-| **Equity** | European, American, Barrier, Asian, Lookback | BSM / PDE / Lattice / MC | `valax.instruments.options` |
-| **Equity** | Variance Swap | Analytic BSM + MC realized variance | `valax.instruments.options` |
-| **Equity** | Spread Option | Margrabe (K=0) / Kirk (K≠0) | `valax.instruments.options` |
-| **Equity exotics (planned)** | Digital, Compound, Chooser, Autocallable, Worst-of, Cliquet | BSM ext. / MC / SLV MC | `valax.instruments.options` |
-| **FX** | Forward | Covered interest rate parity | `valax.instruments.fx` |
-| **FX** | Vanilla Option | Garman-Kohlhagen + 3 delta conventions | `valax.instruments.fx` |
-| **FX** | Barrier | Instrument defined; analytic pricing planned | `valax.instruments.fx` |
-| **FX (planned)** | Quanto, TARF, FX Swap | Modified GK / MC / Discounted cashflows | `valax.instruments.fx` |
-| **Rates** | Caplet, Cap, Floor, Swaption | Black-76 / Bachelier | `valax.instruments.rates` |
-| **Rates** | IRS, Bermudan Swaption | Analytic / LSM on LMM paths | `valax.instruments.rates` |
-| **Rates** | OIS Swap | Telescoping single-curve | `valax.instruments.rates` |
-| **Rates** | Cross-Currency Swap | Two-curve + FX, par basis solver | `valax.instruments.rates` |
-| **Rates** | Total Return Swap | Self-financing reduction | `valax.instruments.rates` |
-| **Rates** | CMS Swap | Forward par swap rate (convexity adj. planned) | `valax.instruments.rates` |
-| **Rates** | CMS Cap/Floor | Black-76 on forward CMS rate | `valax.instruments.rates` |
-| **Rates** | Range Accrual | Black-76 digital replication (snapshot) | `valax.instruments.rates` |
+**Legend.** ✅ Implemented end-to-end (instrument + pricer + tests). 🟡 Instrument
+pytree is defined and importable from `valax.instruments`, but the corresponding
+pricing function is on the roadmap. Every row's *instrument data class* exists
+today — the *Status / Notes* column tracks the **pricer**.
+
+| Asset Class | Instrument | Pricing Method | Module | Status / Notes |
+|-------------|-----------|----------------|--------|----------------|
+| **Credit** | `CDS` | Survival curve + discounting | `valax.instruments.credit` | 🟡 Instrument ✅; pricer planned (roadmap P2.4 — prerequisite for CVA) |
+| **Credit** | `CDOTranche` | Gaussian copula (base correlation) | `valax.instruments.credit` | 🟡 Instrument ✅; pricer planned (P2.4) |
+| **Fixed Income** | `ZeroCouponBond`, `FixedRateBond` | Discounted cashflows + YTM / duration / convexity | `valax.instruments.bonds` | ✅ `pricing.analytic.bonds` |
+| **Fixed Income** | `FloatingRateBond` | Forward-curve projection + discounting | `valax.instruments.bonds` | ✅ `pricing.analytic.floating` |
+| **Fixed Income** | `CallableBond` | Hull-White trinomial tree + OAS | `valax.instruments.bonds` | ✅ HW tree pricer (`pricing.lattice.hull_white_tree`); 🟡 OAS curve-shift solver on roadmap |
+| **Fixed Income** | `PuttableBond` | Hull-White trinomial tree | `valax.instruments.bonds` | ✅ `pricing.lattice.hull_white_tree` |
+| **Fixed Income** | `ConvertibleBond` | Equity–credit PDE | `valax.instruments.bonds` | 🟡 Instrument ✅; pricer planned |
+| **Inflation** | `ZeroCouponInflationSwap` (ZCIS) | Inflation forward curve | `valax.instruments.inflation` | ✅ `pricing.analytic.inflation` |
+| **Inflation** | `YearOnYearInflationSwap` (YYIS) | Forward-ratio baseline | `valax.instruments.inflation` | ✅ Baseline implemented; 🟡 convexity adjustment planned (currently treated as zero) |
+| **Inflation** | `InflationCapFloor` | Black-76 on YoY forward | `valax.instruments.inflation` | ✅ `pricing.analytic.inflation` |
+| **Equity** | `EuropeanOption` | Black-Scholes-Merton (closed form) | `valax.instruments.options` | ✅ `pricing.analytic.black_scholes` |
+| **Equity** | `AmericanOption` | CRR binomial / Crank-Nicolson PDE | `valax.instruments.options` | ✅ `pricing.lattice.binomial`, `pricing.pde.solvers` |
+| **Equity** | `EquityBarrierOption`, `AsianOption`, `LookbackOption` | Monte Carlo on GBM paths | `valax.instruments.options` | ✅ `pricing.mc.payoffs` + `pricing.mc.recipes` |
+| **Equity** | `VarianceSwap` | Analytic BSM fair strike + MC realised variance | `valax.instruments.options` | ✅ `pricing.analytic.variance_swap` + MC |
+| **Equity** | `SpreadOption` | Margrabe ($K=0$) / Kirk ($K\neq 0$) | `valax.instruments.options` | ✅ `pricing.analytic.spread` |
+| **Equity** | `WorstOfBasketOption` | Monte Carlo (multi-asset) | `valax.instruments.options` | ✅ `pricing.mc.recipes._worst_of_basket_multi_asset` |
+| **Equity** | `DigitalOption` | Black-Scholes closed form (cash- or asset-or-nothing) | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
+| **Equity** | `CompoundOption` | Geske closed form / BSM extension | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
+| **Equity** | `ChooserOption` | Put-call symmetry on a synthetic option | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
+| **Equity** | `Autocallable` | MC on local-vol / SLV paths | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
+| **Equity** | `Cliquet` | MC on forward-starting BSM / SLV paths | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
+| **FX** | `FXForward` | Covered interest-rate parity (CIP) | `valax.instruments.fx` | ✅ `pricing.analytic.fx` |
+| **FX** | `FXVanillaOption` | Garman-Kohlhagen + 3 delta conventions | `valax.instruments.fx` | ✅ `pricing.analytic.fx` (incl. strike↔delta inverter) |
+| **FX** | `FXBarrierOption` | Reiner-Rubinstein closed form (analytic) | `valax.instruments.fx` | 🟡 Instrument ✅; analytic pricer planned (MC works today via generic GBM recipe) |
+| **FX** | `QuantoOption` | Modified Garman-Kohlhagen (quanto drift adj.) | `valax.instruments.fx` | 🟡 Instrument ✅; pricer planned |
+| **FX** | `TARF` | Monte Carlo path simulation | `valax.instruments.fx` | 🟡 Instrument ✅; pricer planned |
+| **FX** | `FXSwap` | Discounted near + far leg cashflows | `valax.instruments.fx` | 🟡 Instrument ✅; pricer planned |
+| **Rates** | `Caplet`, `Cap` (Floor via `is_cap=False` flag) | Black-76 / Bachelier | `valax.instruments.rates` | ✅ `pricing.analytic.caplets` (floors share the same pricer) |
+| **Rates** | `Swaption` (European) | Black-76 / Bachelier on forward swap rate | `valax.instruments.rates` | ✅ `pricing.analytic.swaptions` |
+| **Rates** | `InterestRateSwap` (IRS) | Discounted fixed leg + projected floating leg | `valax.instruments.rates` | ✅ `pricing.analytic.swaptions` (`swap_price`) |
+| **Rates** | `BermudanSwaption` | Longstaff-Schwartz on LMM paths | `valax.instruments.rates` | ✅ `pricing.mc.bermudan` |
+| **Rates** | `OISSwap` | Telescoping single-curve identity | `valax.instruments.rates` | ✅ `pricing.analytic.floating` |
+| **Rates** | `CrossCurrencySwap` | Two-curve + FX, par-basis solver | `valax.instruments.rates` | ✅ `pricing.analytic.rates_exotics` |
+| **Rates** | `TotalReturnSwap` | Self-financing reduction to underlying | `valax.instruments.rates` | ✅ `pricing.analytic.rates_exotics` |
+| **Rates** | `CMSSwap` | Forward par swap rate | `valax.instruments.rates` | ✅ Baseline implemented; 🟡 convexity adjustment planned |
+| **Rates** | `CMSCapFloor` | Black-76 on forward CMS rate | `valax.instruments.rates` | ✅ `pricing.analytic.rates_exotics` |
+| **Rates** | `RangeAccrual` | Black-76 digital replication (snapshot) | `valax.instruments.rates` | ✅ `pricing.analytic.rates_exotics` (single-fixing snapshot; term-structure version planned) |
+
+!!! info "How to read the status column"
+    The 🟡 rows mean you can `import` the instrument, construct it as a pytree,
+    and use it as data in your own pipelines — but calling the corresponding
+    `*_price()` function will raise `NotImplementedError` until the pricer
+    lands. See the [Roadmap](../roadmap.md) for delivery order.
 
 !!! tip
     All instruments in this guide are **fully compatible** with JAX transformations.

@@ -49,6 +49,7 @@ nav:
   - Roadmap: roadmap.md
   - Benchmarks: benchmarks.md
   - User Guide:
+      - "Tutorial — Rates End-to-End": guide/tutorial-rates.md
       - Instruments Overview: guide/instruments.md
       - Analytical Pricing: guide/analytical.md
       - Yield Curves & Bootstrapping: guide/curves.md
