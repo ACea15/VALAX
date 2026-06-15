@@ -13,8 +13,8 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | Area | What We Have |
 |------|-------------|
 | **Instruments** | `EuropeanOption`, `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSCapFloor`, `RangeAccrual`, `CallableBond`, `PuttableBond`, `ZeroCouponInflationSwap`, `YearOnYearInflationSwap`, `InflationCapFloor`, `FXForward`, `FXVanillaOption`, `FXBarrierOption` |
-| **Models** | Black-Scholes, **Heston (MC + Fang-Oosterlee COS semi-analytic)**, SABR (analytic + MC), LMM (MC with PCA factors), Hull-White (analytic ZCB, trinomial tree) |
-| **Pricing** | Black-Scholes, Black-76, Bachelier analytic; **Heston Fang-Oosterlee COS**; Monte Carlo (GBM, Heston, SABR, LMM); Crank-Nicolson PDE; CRR binomial tree; Hull-White trinomial tree (callable/puttable bonds) |
+| **Models** | Black-Scholes, **Heston (MC + Fang-Oosterlee COS semi-analytic)**, SABR (analytic + MC), LMM (MC with PCA factors), Hull-White (analytic ZCB, trinomial tree), **Local Volatility (Dupire from SVI/SABR/Grid surfaces + MC)** |
+| **Pricing** | Black-Scholes, Black-76, Bachelier analytic; **Heston Fang-Oosterlee COS**; **Dupire local vol (Gatheral IV-space)**; Monte Carlo (GBM, Heston, SABR, **Local Vol**, LMM); Crank-Nicolson PDE; CRR binomial tree; Hull-White trinomial tree (callable/puttable bonds) |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
 | **Curves** | `DiscountCurve` with log-linear interpolation, flat extrapolation |
 | **Dates** | Act/360, Act/365, Act/Act, 30/360; ordinal-based date arithmetic; coupon schedule generation |
@@ -179,6 +179,107 @@ noise-free synthetic data (max reprice residual < 1e-10).
 **Follow-up still open.** Carr-Madan / Lewis FFT pricer as an
 independent analytic cross-check; multi-expiry surface calibration
 objective (paired with SSVI under Tier 1.2).
+
+## Local Volatility — Session Backlog
+
+### LV-1 — Dupire local vol + Local-Vol MC &nbsp;✅ &nbsp;*Done*
+
+**What was done.** Closed Tier 2.3 items 1 & 2 (Dupire extraction and
+Local Vol MC simulation) as a single coherent slab. Three new modules:
+
+* `valax/pricing/analytic/dupire.py` — Gatheral IV-space Dupire formula
+  in total variance `w = σ²·T`. Uses `jax.grad` for `∂_k w`, `∂_{kk} w`,
+  `∂_T w` directly through the surface's `total_variance` method —
+  no finite differences anywhere. Numerator clamped at zero (calendar-
+  arb floating-point noise); denominator left unclamped so butterfly
+  arbitrage in the input surface surfaces as NaN (intentional
+  diagnostic). Module-level `RuntimeError` if `jax_enable_x64` is off
+  (Dupire's 2nd derivatives are precision-sensitive).
+* `valax/models/local_vol.py` — `LocalVolModel(eqx.Module)` carrying a
+  duck-typed surface + scalar rate/dividend. Factory
+  `from_flat_rate(...)`. The model is intentionally minimal — no
+  precomputed leverage grid; `σ_loc` is recomputed from the surface
+  on demand so autodiff flows through surface params (SVI a/b/ρ/m/σ)
+  into MC prices cleanly.
+* `valax/pricing/mc/local_vol_paths.py` — `generate_local_vol_paths`
+  using `jax.lax.scan` over time with log-Euler + Itô correction. Per-
+  step Dupire evaluation `vmap`-ed across paths. **Midpoint-in-time σ**
+  evaluation (`t_n + 0.5·dt`) — chosen over left-endpoint because (a)
+  it avoids the `T → 0` singularity of Dupire's `1/w` terms, and (b)
+  it gives a half-order weak-error improvement at no extra cost.
+
+**Substrate changes** (made together so the LV PR does not leak
+abstractions):
+
+* `valax/surfaces/_interp.py` — factored out a reusable `bilinear_2d`
+  utility from the hand-rolled bilinear inside `GridVolSurface`. Same
+  numerics, single test surface; preps the ground for SLV's leverage
+  grid.
+* `total_variance(log_moneyness, expiry)` protocol method added to
+  `SVIVolSurface`, `SABRVolSurface`, and `GridVolSurface`. Duck-typed
+  Dupire input; identity `total_variance(log(K/F_T), T) == σ_IV(K,T)²·T`
+  preserved exactly.
+* `SVIVolSurface.__call__` and `.total_variance` now extrapolate
+  linearly in `T` through the origin below the first slice (constant
+  IV in the `T → 0⁺` limit) rather than flat-extrapolating `w` (which
+  diverged IV and zeroed `∂_T w`). Fixes the Dupire-at-short-T case.
+* `heston_cos_price` rate/dividend args now default to `None` and fall
+  back to `model.rate`/`model.dividend`. Backward compatible — closes
+  the cross-API footgun flagged at the end of HE-2.
+
+**Validation.** Three independent gates:
+
+1. `tests/test_pricing/test_dupire.py` — 35 unit checks (parametrised):
+   flat-SVI ≡ constant σ to 1e-10 at every probe, autodiff vs central
+   FD on SVI `a`/`b`/`ρ` to 1e-4 relative, butterfly-violation NaN
+   diagnostic, x64 guard, JIT/vmap, surface-protocol coverage for all
+   three surface types, golden 5×5 canonical Dupire grid pinned at
+   `tests/golden/v1/dupire_canonical_grid.npz`.
+2. `tests/test_pricing/test_local_vol_paths.py` — 14 unit checks
+   covering output shape, initial condition, BSM reprice in the flat
+   limit (3·stderr) across moneyness × call/put, the **headline
+   Dupire-consistency gate** (4-seed × 100k × 500-step LV MC reprices
+   the input SVI surface to < 20 bp absolute IV on all 5 strikes),
+   1/√N MC convergence, ATM delta finiteness via `jax.grad`, JIT and
+   vmap. Golden ATM price pinned at `tests/golden/v1/local_vol_mc_canonical.npz`.
+3. `tests/test_quantlib_comparison/test_dupire_ql.py` — 6 cross-checks
+   against `ql.LocalVolSurface` and `ql.AnalyticEuropeanEngine` in
+   the flat-IV limit (5 (σ, K/F, T) probes at 1e-6 tolerance + 1 LV MC
+   reprice at 3·stderr). Non-flat smile QL cross-check is deliberately
+   skipped — see test docstring; QL interpolates total variance
+   bilinearly while VALAX's grid interpolates IV bilinearly, so a
+   non-flat smile gate would test interpolation conventions, not
+   Dupire kernel quality. The SVI-self-consistency gate above is the
+   right smile validation.
+
+**Dispatcher integration.** `engine.py::mc_price`, `engine.py::mc_price_with_stderr`,
+and `recipes.py::_equity_paths` all carry a new `isinstance(model,
+LocalVolModel)` branch. Five MC recipes registered for `LocalVolModel`
+(European, Asian, EquityBarrier, Lookback, VarianceSwap) — barrier is
+the canonical exotic where local vol differs materially from BSM.
+
+**Calibration unlock.** SLV's two-pass calibration (Heston → vanillas;
+particle method → leverage `L(S,t)`) sits directly on top of this
+substrate. The COS pricer + Heston calibrator from HE-2 supply pass 1;
+the LV MC paths from LV-1 supply the particle method's path generator
+for pass 2. No further pricing-layer work is needed before SLV.
+
+**Follow-up still open.**
+
+* **Milstein scheme for LV MC** — would reduce the weak bias from
+  `O(dt)` to `O(dt^{3/2})` and let us tighten the Dupire-consistency
+  gate from 20 bp to 5 bp at the same MC budget. Requires one
+  `jax.grad(σ_loc, k)` per step, vmapped across paths. Empirically
+  verified during LV-1 development that the bias floor is currently
+  ~10 bp at 200k × 500 (4-seed averaged) — Milstein attacks this
+  directly.
+* **Local vol PDE** pricing (Tier 2.3 item 3) — Fokker-Planck forward
+  on a `(S, t)` grid. Deferred; MC suffices for SLV.
+* **Forward-curve term structure** — `LocalVolModel.forward_curve` is
+  currently fixed to `S₀·exp((r-q)·t)`. A `Callable[[t], F(t)]` field
+  would unlock surfaces calibrated against term-structured rates /
+  dividends. Trivial extension once needed.
+* **SLV** (Tier 2.4) — natural next session.
 
 ## Arbitrage Detection — Session Backlog
 
@@ -435,7 +536,7 @@ These unlock entire asset classes and bring pricing to the speed and accuracy re
 | # | Task | Why It's Critical | Tier Ref |
 |---|------|-------------------|----------|
 | **P2.1** | ~~**Heston Semi-Analytic (COS / Fourier)**~~ ✅ **Fang-Oosterlee COS implemented** | Lord-Kahl "Little Trap" characteristic function + Fang-Oosterlee (2008) COS expansion with closed-form Heston cumulants. Agrees with QuantLib's `AnalyticHestonEngine` to < 5e-7 absolute across the seed × moneyness × call/put grid. End-to-end Heston calibration roundtrip recovers all 5 parameters to floating-point precision on noise-free synthetic data. | 2.2 |
-| **P2.2** | **Local Volatility + SLV** | Local vol (Dupire) is the *minimum* standard for exotic equity pricing. SLV (Heston + leverage function) is the actual industry standard. Without this, no structured products desk can use VALAX. | 2.3, 2.4 |
+| **P2.2** | **Local Volatility + SLV** &nbsp;⏳ *LV done, SLV next* | Dupire local vol + LV MC shipped under Tier 2.3 (see backlog **LV-1**). SLV (Tier 2.4) is the natural next session — leverage function calibration sits on top of the LV substrate via a particle-method MC inner loop. | 2.3, 2.4 |
 | **P2.3** | **FX Derivatives (Garman-Kohlhagen, Barriers, Delta Conventions)** | FX is one of the largest derivatives markets with unique conventions (delta-space quoting). Unlocks an entire asset class. | 3.3 |
 | **P2.4** | **Credit Derivatives (CDS, Survival Curves)** | Survival curves are a prerequisite for XVA (CVA). CDS pricing and hazard rate bootstrapping are foundational. Unlocks credit trading and the entire XVA workstream. | 3.4 |
 
@@ -537,7 +638,7 @@ These are foundational pieces that block almost everything else. They should be 
 - [x] **SVI parametric fitting** — `SVIVolSurface` with Gatheral's SVI parameterization and LM calibration
 - [ ] **SSVI** — global arbitrage-free parameterization (Gatheral-Jacquier)
 - [ ] **Sticky-strike vs sticky-delta** conventions
-- [ ] **Local vol extraction** from implied vol surface (Dupire formula)
+- [x] **Local vol extraction** from implied vol surface (Dupire formula) — shipped under LV-1
 
 **Why:** Every option product needs a vol surface. Scalar vol is a toy assumption.
 
@@ -601,13 +702,13 @@ New stochastic models that unlock entire product categories.
 
 ### 2.3 Local Volatility
 
-- [ ] **Dupire local vol** extraction from implied vol surface
-- [ ] **Local vol MC simulation** via diffrax
+- [x] **Dupire local vol** extraction from implied vol surface — shipped in `valax/pricing/analytic/dupire.py` (Gatheral IV-space form, autodiff through `SVIVolSurface`). See backlog item **LV-1** below.
+- [x] **Local vol MC simulation** — shipped in `valax/pricing/mc/local_vol_paths.py` (`jax.lax.scan` + log-Euler with midpoint-in-time σ). Hooked into the unified MC dispatcher for `EuropeanOption`, `AsianOption`, `EquityBarrierOption`, `LookbackOption`, `VarianceSwap`.
 - [ ] **Local vol PDE** pricing (Fokker-Planck or backward Kolmogorov)
 
 **Why:** Local vol is the standard model for exotic equity derivatives. It matches the entire vol surface by construction.
 
-**Approach:** Dupire formula involves derivatives of the implied vol surface — autodiff through the surface pytree. Simulation via diffrax with state-dependent diffusion.
+**Approach:** Dupire formula involves derivatives of the implied vol surface — autodiff through the surface pytree. Simulation via `lax.scan` with state-dependent diffusion.
 
 ### 2.4 Stochastic-Local Volatility (SLV)
 

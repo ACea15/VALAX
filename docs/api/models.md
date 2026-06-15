@@ -68,6 +68,43 @@ model = SABRModel(
 - All parameters are differentiable — Greeks via `jax.grad` work through the full SABR → Black-76 chain.
 - Calibration via `calibrate_sabr` in `valax.calibration`.
 
+## `LocalVolModel`
+
+Dupire local volatility — a state- and time-dependent diffusion calibrated to fit the entire vanilla surface by construction:
+
+$$dS = (r - q) S\, dt + \sigma_{\text{loc}}(S, t)\, S\, dW$$
+
+where $\sigma_{\text{loc}}$ is extracted on demand from an implied vol surface via Gatheral's IV-space Dupire formula (see [theory §4.4](../theory.md#44-local-volatility-dupire) and the [`dupire_local_vol`](pricing.md#dupire_local_vol) entry).
+
+```python
+from valax.models import LocalVolModel
+from valax.surfaces import SVIVolSurface
+
+model = LocalVolModel(
+    surface: eqx.Module,             # any object exposing total_variance(k, T)
+    rate: Float[Array, ""],          # risk-free rate
+    dividend: Float[Array, ""],      # continuous dividend yield
+)
+
+# Convenience factory with scalar / Python-float coercion:
+model = LocalVolModel.from_flat_rate(
+    surface,
+    rate=0.03,
+    dividend=0.01,
+)
+```
+
+**The surface protocol.** Any object with a `total_variance(log_moneyness, expiry) -> Float[Array, ""]` method satisfies the duck-typed contract. `SVIVolSurface`, `SABRVolSurface`, and `GridVolSurface` all comply — see [`api/surfaces.md`](surfaces.md). The model intentionally does **not** store a precomputed leverage / local-vol grid: $\sigma_{\text{loc}}$ is recomputed from the surface on every path step, so `jax.grad` flows directly from MC prices into surface parameters (SVI $a$, $b$, $\rho$, $m$, $\sigma$ per slice) for vega-bucketed risk attribution and SLV calibration.
+
+**Forward curve.** The implicit forward is $F(t) = S_0\,e^{(r - q)t}$ — a deterministic-rate equity forward. Term-structured rates and dividends are a planned extension via a `forward_curve: Callable` field (see backlog LV-1 follow-ups in the roadmap).
+
+**Notes**:
+
+- Requires `jax_enable_x64=True` (enforced at the Dupire layer — Dupire's second derivatives of total variance are precision-sensitive). `valax/__init__.py` enables x64 globally on import.
+- Path generator: `generate_local_vol_paths` in `valax.pricing.mc` (`lax.scan` + log-Euler with **midpoint-in-time σ**). See [theory §4.4](../theory.md#44-local-volatility-dupire) for why midpoint and not left-endpoint.
+- MC dispatcher recipes registered for `EuropeanOption`, `AsianOption`, `EquityBarrierOption`, `LookbackOption`, `VarianceSwap` — barrier is the canonical exotic where LV differs materially from BSM.
+- All surface parameters remain differentiable through the model — `jax.grad` of a LV MC price w.r.t. `model.surface.a_vec` gives a vector of per-slice variance-level sensitivities for free.
+
 ## `HullWhiteModel`
 
 Hull-White one-factor short-rate model (extended Vasicek):

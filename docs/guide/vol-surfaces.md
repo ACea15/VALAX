@@ -168,3 +168,114 @@ d_price_d_alpha = jax.grad(price_with_alphas)(surface.alphas)
 strikes = jnp.linspace(80.0, 120.0, 50)
 smile = jax.vmap(lambda K: surface(K, jnp.array(0.5)))(strikes)
 ```
+
+## Using a Surface as a Dupire Input
+
+Beyond `surface(K, T) → σ_IV`, all three surface types expose
+
+```python
+surface.total_variance(log_moneyness, expiry) -> Float[Array, ""]
+```
+
+returning total variance $w(k, T) = \sigma_{\text{IV}}^2 \cdot T$ directly.
+This is the duck-typed input expected by
+[`dupire_local_vol`](../api/pricing.md#dupire_local_vol) and (in due course)
+by SLV's leverage-function calibration. The consistency identity
+
+```python
+surface.total_variance(jnp.log(K / F_T), T) == surface(K, T) ** 2 * T
+```
+
+holds to machine precision.
+
+### Which surface to pick
+
+| Use case | Recommended surface | Why |
+|---|---|---|
+| Dupire local vol extraction | **`SVIVolSurface`** | $w(k)$ is closed-form $C^\infty$ in $k$; `jax.grad` gives exact $\partial w / \partial k$ and $\partial^2 w / \partial k^2$. |
+| SLV (later) | `SVIVolSurface` | Same reasons; differentiability also flows through to leverage-grid calibration. |
+| Quick prototyping on broker quotes | `GridVolSurface` (in log-moneyness) | No calibration needed; bilinear interpolation. |
+| Rates desks | `SABRVolSurface` | Industry standard for swaption cubes. |
+
+`SABRVolSurface.total_variance` works but uses Hagan's asymptotic IV
+formula internally — at extreme strikes the resulting "local vol" is a
+measurement of the expansion's residual rather than a clean market signal.
+
+### End-to-end: SVI → Dupire → Local-vol MC
+
+The Dupire-consistency loop is the canonical sanity check that the
+extraction is plumbed correctly. Calibrate SVI to a market smile, wrap it
+in a `LocalVolModel`, run LV MC, and reprice the input smile — the result
+should match the input to within a few tens of basis points at typical
+MC budgets.
+
+```python
+import jax, jax.numpy as jnp
+from valax.surfaces import calibrate_svi_surface
+from valax.models import LocalVolModel
+from valax.pricing.mc import generate_local_vol_paths
+from valax.instruments import EuropeanOption
+from valax.pricing.analytic.black_scholes import black_scholes_implied_vol
+
+# 1. Calibrate SVI to a market smile (or surface)
+svi = calibrate_svi_surface(
+    strikes_per_expiry=[strikes_3m, strikes_6m, strikes_1y],
+    market_vols_per_expiry=[vols_3m, vols_6m, vols_1y],
+    forwards=jnp.array([100.0, 100.5, 101.0]),
+    expiries=jnp.array([0.25, 0.5, 1.0]),
+)
+
+# 2. Wrap in a local-vol model
+model = LocalVolModel.from_flat_rate(svi, rate=0.03, dividend=0.01)
+
+# 3. Simulate
+paths = generate_local_vol_paths(
+    model, spot=jnp.array(100.0),
+    T=1.0, n_steps=500, n_paths=100_000,
+    key=jax.random.PRNGKey(20260101),
+)
+
+# 4. Reprice the input smile via MC → implied vol → compare
+strikes = jnp.array([90.0, 95.0, 100.0, 105.0, 110.0])
+df = jnp.exp(-0.03 * 1.0)
+for K in strikes:
+    payoff = jnp.maximum(paths[:, -1] - K, 0.0)
+    mc_price = df * jnp.mean(payoff)
+    opt = EuropeanOption(strike=K, expiry=jnp.array(1.0), is_call=True)
+    iv_mc = black_scholes_implied_vol(
+        opt, jnp.array(100.0),
+        jnp.array(0.03), jnp.array(0.01), mc_price,
+    )
+    iv_market = svi(K, jnp.array(1.0))
+    diff_bp = float(jnp.abs(iv_mc - iv_market)) * 1e4
+    print(f"K={float(K):5.0f}  market={float(iv_market):.4f}  mc={float(iv_mc):.4f}  diff={diff_bp:.1f} bp")
+```
+
+Single-seed runs at this size show ~15–30 bp worst-case noise; the
+[Dupire-consistency gate](monte-carlo.md#local-volatility) averages 4
+seeds to hit < 20 bp. See [theory §4.4](../theory.md#44-local-volatility-dupire)
+for the full discussion of MC bias floors and the Milstein scheme as
+the path to sub-5-bp accuracy.
+
+### Vega-bucketed Greeks through the LV pipeline
+
+Because every leaf of the surface pytree is differentiable, `jax.grad`
+of a LV MC price w.r.t. SVI parameters gives a vector of per-slice,
+per-parameter sensitivities for free:
+
+```python
+def lv_mc_price(svi_params: SVIVolSurface, key):
+    model = LocalVolModel.from_flat_rate(svi_params, rate=0.03, dividend=0.01)
+    paths = generate_local_vol_paths(
+        model, jnp.array(100.0), 1.0, 500, 100_000, key,
+    )
+    payoff = jnp.maximum(paths[:, -1] - 100.0, 0.0)
+    return jnp.exp(-0.03 * 1.0) * jnp.mean(payoff)
+
+# Sensitivity to the variance level (a) at each calibrated expiry
+sens_a = jax.grad(lambda a: lv_mc_price(
+    eqx.tree_at(lambda s: s.a_vec, svi, a),
+    jax.random.PRNGKey(42),
+))(svi.a_vec)
+# shape (n_expiries,) — vega-bucketed by expiry slice
+```

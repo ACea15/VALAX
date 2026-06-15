@@ -85,18 +85,18 @@ not yet wired), 🟠 = needs a new path generator, 🔴 = needs major infra.
 
 ### Equity (single asset)
 
-| Instrument | `BlackScholesModel` | `HestonModel` | `MultiAssetGBMModel` | Notes |
-|-----------|:---:|:---:|:---:|---|
-| `EuropeanOption` | ✓ | ✓ | — | |
-| `AsianOption` | ✓ | ✓ | — | Arithmetic + geometric averaging |
-| `EquityBarrierOption` | ✓ | ✓ | — | KI/KO with sigmoid smoothing |
-| `LookbackOption` | ✓ | ✓ | — | Floating + fixed strike |
-| `VarianceSwap` | ✓ | ✓ | — | Realized variance from log-returns |
-| `SpreadOption` | — | — | ✓ | Validates Margrabe (K=0) and Kirk (K≠0) analytical |
-| `WorstOfBasketOption` | — | — | ✓ | 2+ asset basket; cross-asset correlation Greeks via `jax.grad` |
-| `AmericanOption` | 🟡 | 🟡 | — | LSM engine exists for rates — needs lifting |
-| `DigitalOption` | 🟡 | 🟡 | — | Payoff is smoothed Heaviside |
-| `Autocallable` / `Cliquet` | 🟠 | 🟠 | 🟠 | Needs multi-observation / forward-start engine |
+| Instrument | `BlackScholesModel` | `HestonModel` | `LocalVolModel` | `MultiAssetGBMModel` | Notes |
+|-----------|:---:|:---:|:---:|:---:|---|
+| `EuropeanOption` | ✓ | ✓ | ✓ | — | |
+| `AsianOption` | ✓ | ✓ | ✓ | — | Arithmetic + geometric averaging |
+| `EquityBarrierOption` | ✓ | ✓ | ✓ | — | KI/KO with sigmoid smoothing; LV is the canonical model when smile shape at the barrier matters |
+| `LookbackOption` | ✓ | ✓ | ✓ | — | Floating + fixed strike |
+| `VarianceSwap` | ✓ | ✓ | ✓ | — | Realized variance from log-returns |
+| `SpreadOption` | — | — | — | ✓ | Validates Margrabe (K=0) and Kirk (K≠0) analytical |
+| `WorstOfBasketOption` | — | — | — | ✓ | 2+ asset basket; cross-asset correlation Greeks via `jax.grad` |
+| `AmericanOption` | 🟡 | 🟡 | 🟡 | — | LSM engine exists for rates — needs lifting |
+| `DigitalOption` | 🟡 | 🟡 | 🟡 | — | Payoff is smoothed Heaviside |
+| `Autocallable` / `Cliquet` | 🟠 | 🟠 | 🟠 | 🟠 | Needs multi-observation / forward-start engine |
 
 ### Rates (LMM)
 
@@ -141,6 +141,7 @@ so the whole pipeline remains `jax.jit` / `jax.vmap` friendly.
 | `generate_sabr_paths(model, forward, T, n_steps, n_paths, key)` | `SABRModel` | `(forwards, vols)` each `(n_paths, n_steps+1)` |
 | `generate_lmm_paths(model, n_steps_per_period, n_paths, key)` | `LMMModel` | `LMMPathResult` with `forwards_at_fixing`, `forwards_at_tenors`, `discount_factors` |
 | `generate_correlated_gbm_paths(model, spots, T, n_steps, n_paths, key)` | `MultiAssetGBMModel` | `(n_paths, n_steps+1, n_assets)` |
+| `generate_local_vol_paths(model, spot, T, n_steps, n_paths, key)` | `LocalVolModel` | `(n_paths, n_steps+1)` |
 
 ### Geometric Brownian Motion
 
@@ -177,6 +178,63 @@ spot_paths, var_paths = generate_heston_paths(
 
 See [theory §2.4](../theory.md#24-heston-stochastic-volatility) for the
 Feller condition and numerical caveats near the variance boundary.
+
+### Local volatility
+
+$$dS = (r - q) S\, dt + \sigma_{\text{loc}}(S, t)\, S\, dW$$
+
+where $\sigma_{\text{loc}}$ is recomputed from a calibrated implied-vol surface
+at every path step via Gatheral's IV-space Dupire formula (see
+[theory §4.4](../theory.md#44-local-volatility-dupire)). The model itself
+carries no precomputed grid; autodiff flows from MC prices straight into the
+surface parameters.
+
+```python
+import jax, jax.numpy as jnp
+from valax.surfaces import calibrate_svi_surface
+from valax.models import LocalVolModel
+from valax.pricing.mc import generate_local_vol_paths
+
+# 1. Build (or calibrate) an implied-vol surface
+svi = calibrate_svi_surface(
+    strikes_per_expiry=[...],     # market data
+    market_vols_per_expiry=[...],
+    forwards=jnp.array([...]),
+    expiries=jnp.array([...]),
+)
+
+# 2. Wrap it in a LocalVolModel
+model = LocalVolModel.from_flat_rate(svi, rate=0.03, dividend=0.01)
+
+# 3. Simulate
+paths = generate_local_vol_paths(
+    model,
+    spot=jnp.array(100.0),
+    T=1.0, n_steps=500, n_paths=100_000,
+    key=jax.random.PRNGKey(0),
+)
+# paths.shape == (100_000, 501); paths[:, 0] == 100.0
+```
+
+**Scheme.** `jax.lax.scan` over time with log-Euler and Itô correction:
+$\ln S_{t_{n+1}} = \ln S_{t_n} + (r - q - \tfrac{1}{2}\sigma_n^2)\,\Delta t + \sigma_n\sqrt{\Delta t}\,Z_n$,
+where $\sigma_n = \sigma_{\text{loc}}\!\big(S_{t_n},\,t_n + \tfrac{1}{2}\Delta t\big)$ —
+**midpoint in time**, *not* left endpoint. The midpoint convention avoids
+querying Dupire at $T = 0$ (where the $1/w$ terms in the denominator
+diverge) and gives a better weak-error constant than left-endpoint Euler.
+See [theory §4.4](../theory.md#44-local-volatility-dupire) for the full
+discussion of bias floors and the Milstein follow-up.
+
+**Surface choice.** `SVIVolSurface` is the recommended Dupire input —
+closed-form $w(k, T)$ gives exact derivatives via `jax.grad`. `SABRVolSurface`
+and `GridVolSurface` also satisfy the protocol but typically give noisier
+local-vol estimates at extreme strikes.
+
+**Dupire-consistency gate.** SVI → Dupire → LV MC reprices the input vanilla
+IV grid to < 20 bp absolute IV (4 seeds × 100k paths × 500 steps; see
+`tests/test_pricing/test_local_vol_paths.py::TestDupireConsistency`).
+The headline gate to remember: a typical LV MC budget gives you smile
+reprice accuracy of a few tens of basis points, not single-digit.
 
 ### Correlated multi-asset GBM
 

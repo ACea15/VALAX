@@ -26,6 +26,10 @@ from valax.pricing.analytic.swaptions import (
 )
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_price
 from valax.pricing.analytic.heston import heston_cos_price
+from valax.pricing.analytic.dupire import (
+    dupire_local_vol,
+    dupire_local_vol_from_strike,
+)
 from valax.pricing.analytic.fx import (
     fx_forward_rate,
     fx_forward_price,

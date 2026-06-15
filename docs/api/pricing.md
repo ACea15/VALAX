@@ -37,6 +37,33 @@ black_scholes_implied_vol(option, spot, rate, dividend, market_price,
 
 Newton-Raphson implied volatility using autodiff vega.
 
+### `heston_cos_price`
+
+```python
+heston_cos_price(option, spot,
+                 rate=None, dividend=None,
+                 model: HestonModel = ...,
+                 *, N=160, L=12.0) -> Float[Array, ""]
+```
+
+Semi-analytic Heston European option price via the Fang-Oosterlee (2008) COS expansion with the Lord-Kahl "Little Trap" characteristic function. Call and put payoff coefficients are computed directly (not via put-call parity) for sharper accuracy at deep OTM strikes; the truncation interval is set from closed-form Heston cumulants. `rate` and `dividend` default to `model.rate` / `model.dividend` when `None` — pass explicit values to reprice the same fitted model under a stressed discount curve. Defaults `N=160, L=12` give < 1e-7 absolute error in moneyness range 0.85–1.15; deep wings benefit from `L=18, N=256`. Agrees with QuantLib's `AnalyticHestonEngine` to < 5e-7 across the validation grid. See [theory §2.4](../theory.md#24-heston-stochastic-volatility) for the characteristic function and `valax/pricing/analytic/heston.py` for the implementation.
+
+### `dupire_local_vol`
+
+```python
+dupire_local_vol(surface, log_moneyness, expiry) -> Float[Array, ""]
+```
+
+Local volatility $\sigma_{\text{loc}}(k, T)$ extracted from an implied vol surface via Gatheral's IV-space form of the Dupire formula. The `surface` argument is duck-typed — any object exposing `total_variance(k, T) -> Float[Array, ""]` works (all three VALAX surfaces qualify). All three partial derivatives of total variance are evaluated via `jax.grad` directly on the surface — no finite differences. Requires `jax_enable_x64=True` (enforced; enabled by default in `valax/__init__.py`). See [theory §4.4](../theory.md#44-local-volatility-dupire) and `valax/pricing/analytic/dupire.py`.
+
+### `dupire_local_vol_from_strike`
+
+```python
+dupire_local_vol_from_strike(surface, strike, expiry, forward) -> Float[Array, ""]
+```
+
+Ergonomic wrapper around `dupire_local_vol` that converts an absolute strike to log-moneyness internally: `k = jnp.log(strike / forward)`. For a deterministic-rate equity, `forward = spot * jnp.exp((rate - dividend) * expiry)`.
+
 ### Bond Pricing
 
 #### `zero_coupon_bond_price`

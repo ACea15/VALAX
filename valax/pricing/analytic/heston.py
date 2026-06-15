@@ -221,9 +221,9 @@ def _cos_payoff_coeffs(
 def heston_cos_price(
     option: EuropeanOption,
     spot: Float[Array, ""],
-    rate: Float[Array, ""],
-    dividend: Float[Array, ""],
-    model: HestonModel,
+    rate: Float[Array, ""] | None = None,
+    dividend: Float[Array, ""] | None = None,
+    model: HestonModel | None = None,
     *,
     N: int = 160,
     L: float = 12.0,
@@ -234,14 +234,15 @@ def heston_cos_price(
         option: European option contract (``strike``, ``expiry``,
             static ``is_call``).
         spot: Current underlying price.
-        rate: Risk-free rate (continuously compounded). Overrides
-            ``model.rate`` so the same fitted model can be repriced under
-            different discount curves.
-        dividend: Continuous dividend yield. Overrides ``model.dividend``
-            for the same reason.
+        rate: Risk-free rate (continuously compounded). If ``None``,
+            falls back to ``model.rate``. Pass an explicit value to
+            override the model's curve (e.g. for repricing the same
+            fitted model under a stressed discount curve).
+        dividend: Continuous dividend yield. If ``None``, falls back
+            to ``model.dividend``.
         model: Heston parameters (``v0``, ``kappa``, ``theta``, ``xi``,
-            ``rho``). ``model.rate`` / ``model.dividend`` are *not*
-            consulted by this function — pass them explicitly.
+            ``rho``, plus ``rate`` / ``dividend`` carried for default
+            fall-back). Required.
         N: Number of cosine basis terms. Default 160 gives ``< 1e-10``
             truncation error on standard equity Heston parameters and
             costs ~160 complex exp evaluations per call.
@@ -259,7 +260,18 @@ def heston_cos_price(
         - For a put the COS expansion uses the put-payoff coefficients
           directly rather than put-call parity, which is strictly more
           accurate for deep OTM puts.
+        - Backward-compat note: prior versions required ``rate`` and
+          ``dividend`` as positional non-default args. Existing call
+          sites that pass them positionally continue to work; new call
+          sites can omit them and the model's own values are used.
     """
+    if model is None:
+        raise TypeError("heston_cos_price: `model` is required")
+    if rate is None:
+        rate = model.rate
+    if dividend is None:
+        dividend = model.dividend
+
     strike = option.strike
     T = option.expiry
     mu = rate - dividend

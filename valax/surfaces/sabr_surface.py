@@ -58,6 +58,31 @@ class SABRVolSurface(eqx.Module):
         model = SABRModel(alpha=alpha, beta=beta, rho=rho, nu=nu)
         return sabr_implied_vol(model, forward, strike, expiry)
 
+    def total_variance(
+        self,
+        log_moneyness: Float[Array, ""],
+        expiry: Float[Array, ""],
+    ) -> Float[Array, ""]:
+        """Total variance ``w(k, T)`` for Dupire / SLV consumers.
+
+        Consistent with ``__call__`` via the identity
+
+            total_variance(log(K / F_T), T) == __call__(K, T) ** 2 * T,
+
+        where ``F_T = interp(T, expiries, forwards)``.
+
+        Args:
+            log_moneyness: ``k = log(K / F_T)``.
+            expiry: Year fraction.
+
+        Returns:
+            Scalar total variance ``w = sigma_IV^2 * T``.
+        """
+        forward_q = jnp.interp(expiry, self.expiries, self.forwards)
+        strike = forward_q * jnp.exp(log_moneyness)
+        iv = self.__call__(strike, expiry)
+        return iv * iv * expiry
+
 
 def calibrate_sabr_surface(
     strikes_per_expiry: list[Float[Array, " n_k"]],

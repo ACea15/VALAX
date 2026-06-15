@@ -69,6 +69,7 @@ from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
 from valax.models.lmm import LMMModel
+from valax.models.local_vol import LocalVolModel
 from valax.models.multi_asset import MultiAssetGBMModel
 from valax.pricing.mc.bermudan import LSMConfig, bermudan_swaption_lsm
 from valax.pricing.mc.dispatch import (
@@ -78,6 +79,7 @@ from valax.pricing.mc.dispatch import (
     register,
 )
 from valax.pricing.mc.lmm_paths import generate_lmm_paths
+from valax.pricing.mc.local_vol_paths import generate_local_vol_paths
 from valax.pricing.mc.multi_asset_paths import generate_correlated_gbm_paths
 from valax.pricing.mc.paths import generate_gbm_paths, generate_heston_paths
 from valax.pricing.mc.payoffs import (
@@ -115,6 +117,10 @@ def _equity_paths(
     """
     if isinstance(model, HestonModel):
         paths, _ = generate_heston_paths(
+            model, spot, T, config.n_steps, config.n_paths, key,
+        )
+    elif isinstance(model, LocalVolModel):
+        paths = generate_local_vol_paths(
             model, spot, T, config.n_steps, config.n_paths, key,
         )
     else:
@@ -174,6 +180,18 @@ def _european_heston(
     return _equity_recipe(european_payoff, instrument, model, config, key, spot)
 
 
+@register(EuropeanOption, LocalVolModel)
+def _european_localvol(
+    *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
+) -> MCResult:
+    """European option under Dupire local volatility.
+
+    Required market args:
+        spot: Current spot price.
+    """
+    return _equity_recipe(european_payoff, instrument, model, config, key, spot)
+
+
 @register(AsianOption, BlackScholesModel)
 def _asian_bsm(
     *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
@@ -187,6 +205,14 @@ def _asian_heston(
     *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
 ) -> MCResult:
     """Arithmetic/geometric Asian option under Heston."""
+    return _equity_recipe(asian_option_payoff, instrument, model, config, key, spot)
+
+
+@register(AsianOption, LocalVolModel)
+def _asian_localvol(
+    *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
+) -> MCResult:
+    """Arithmetic/geometric Asian option under Dupire local volatility."""
     return _equity_recipe(asian_option_payoff, instrument, model, config, key, spot)
 
 
@@ -210,6 +236,19 @@ def _barrier_heston(
     return _equity_recipe(equity_barrier_payoff, instrument, model, config, key, spot)
 
 
+@register(EquityBarrierOption, LocalVolModel)
+def _barrier_localvol(
+    *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
+) -> MCResult:
+    """Knock-in/out equity barrier option under Dupire local volatility.
+
+    Barrier options are the canonical exotic where local vol differs
+    materially from constant-vol BSM — the vol smile at the barrier
+    matters.
+    """
+    return _equity_recipe(equity_barrier_payoff, instrument, model, config, key, spot)
+
+
 @register(LookbackOption, BlackScholesModel)
 def _lookback_bsm(
     *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
@@ -223,6 +262,14 @@ def _lookback_heston(
     *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
 ) -> MCResult:
     """Floating- or fixed-strike lookback under Heston."""
+    return _equity_recipe(lookback_payoff, instrument, model, config, key, spot)
+
+
+@register(LookbackOption, LocalVolModel)
+def _lookback_localvol(
+    *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
+) -> MCResult:
+    """Floating- or fixed-strike lookback under Dupire local volatility."""
     return _equity_recipe(lookback_payoff, instrument, model, config, key, spot)
 
 
@@ -262,6 +309,26 @@ def _varswap_heston(
     **kwargs,
 ) -> MCResult:
     """Variance swap under Heston."""
+    T = instrument.expiry
+    paths, rate = _equity_paths(model, spot, T, config, key)
+    cashflows = variance_swap_payoff(paths, instrument, annual_factor)
+    df = jnp.exp(-rate * T)
+    price, stderr = discounted_mean_and_stderr(cashflows, df, config.n_paths)
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(VarianceSwap, LocalVolModel)
+def _varswap_localvol(
+    *,
+    instrument,
+    model,
+    config,
+    key,
+    spot: Float[Array, ""],
+    annual_factor: Float[Array, ""] = jnp.array(252.0),
+    **kwargs,
+) -> MCResult:
+    """Variance swap under Dupire local volatility."""
     T = instrument.expiry
     paths, rate = _equity_paths(model, spot, T, config, key)
     cashflows = variance_swap_payoff(paths, instrument, annual_factor)

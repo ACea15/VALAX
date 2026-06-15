@@ -14,6 +14,8 @@ from jax import Array
 from valax.instruments.options import EuropeanOption
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
+from valax.models.local_vol import LocalVolModel
+from valax.pricing.mc.local_vol_paths import generate_local_vol_paths
 from valax.pricing.mc.paths import generate_gbm_paths, generate_heston_paths
 from valax.pricing.mc.payoffs import european_payoff
 
@@ -55,6 +57,11 @@ def mc_price(
             model, spot, T, config.n_steps, config.n_paths, key
         )
         rate = model.rate
+    elif isinstance(model, LocalVolModel):
+        paths = generate_local_vol_paths(
+            model, spot, T, config.n_steps, config.n_paths, key
+        )
+        rate = model.rate
     else:
         paths = generate_gbm_paths(
             model, spot, T, config.n_steps, config.n_paths, key
@@ -83,6 +90,11 @@ def mc_price_with_stderr(
 
     if isinstance(model, HestonModel):
         paths, _ = generate_heston_paths(
+            model, spot, T, config.n_steps, config.n_paths, key
+        )
+        rate = model.rate
+    elif isinstance(model, LocalVolModel):
+        paths = generate_local_vol_paths(
             model, spot, T, config.n_steps, config.n_paths, key
         )
         rate = model.rate

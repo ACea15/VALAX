@@ -144,10 +144,61 @@ class SVIVolSurface(eqx.Module):
             self.m_vec, self.sigma_vec, self.forwards,
         )
 
-        # Interpolate total variance in expiry
-        w = jnp.interp(expiry, self.expiries, w_vec)
+        # Interpolate total variance in expiry. Below the first slice
+        # we extrapolate linearly through the origin so that implied
+        # vol stays constant (matches the first-slice IV) as T → 0,
+        # rather than diverging. This also keeps ∂w/∂T positive for
+        # Dupire below the first slice. Above the last slice we keep
+        # ``jnp.interp``'s flat-w extrapolation.
+        w_interior = jnp.interp(expiry, self.expiries, w_vec)
+        w_below = w_vec[0] * expiry / self.expiries[0]
+        w = jnp.where(expiry < self.expiries[0], w_below, w_interior)
         w = jnp.maximum(w, 1e-10)
         return jnp.sqrt(w / expiry)
+
+    def total_variance(
+        self,
+        log_moneyness: Float[Array, ""],
+        expiry: Float[Array, ""],
+    ) -> Float[Array, ""]:
+        """Total variance ``w(k, T)`` for Dupire / SLV consumers.
+
+        Consistent with ``__call__`` via the identity
+
+            total_variance(log(K / F_T), T) == __call__(K, T) ** 2 * T,
+
+        where ``F_T = interp(T, expiries, forwards)``. Concretely we
+        convert ``k`` back to an absolute strike using the
+        query-expiry forward, then evaluate each slice's SVI total
+        variance at that slice's own log-moneyness and linearly
+        interpolate across expiries.
+
+        Args:
+            log_moneyness: ``k = log(K / F_T)`` for the query expiry.
+            expiry: Year fraction.
+
+        Returns:
+            Scalar total variance ``w = sigma_IV^2 * T``, clamped at
+            ``1e-10`` for numerical safety (matches ``__call__``).
+        """
+        forward_q = jnp.interp(expiry, self.expiries, self.forwards)
+        strike = forward_q * jnp.exp(log_moneyness)
+
+        def _w_at_slice(a, b, rho, m, sigma, fwd_slice):
+            k_slice = jnp.log(strike / fwd_slice)
+            params = SVISlice(a=a, b=b, rho=rho, m=m, sigma=sigma)
+            return svi_total_variance(params, k_slice)
+
+        w_vec = jax.vmap(_w_at_slice)(
+            self.a_vec, self.b_vec, self.rho_vec,
+            self.m_vec, self.sigma_vec, self.forwards,
+        )
+        # Linear-in-T extrapolation through the origin below the first
+        # slice (constant IV in the T → 0 limit). Matches ``__call__``.
+        w_interior = jnp.interp(expiry, self.expiries, w_vec)
+        w_below = w_vec[0] * expiry / self.expiries[0]
+        w = jnp.where(expiry < self.expiries[0], w_below, w_interior)
+        return jnp.maximum(w, 1e-10)
 
 
 def calibrate_svi_slice(

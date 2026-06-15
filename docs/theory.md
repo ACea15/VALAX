@@ -1339,29 +1339,62 @@ SSVI (Surface SVI) by Gatheral and Jacquier enforces calendar-spread arbitrage g
 
 ### 4.4 Local Volatility (Dupire)
 
-**Concept:** Local volatility $\sigma_{\text{loc}}(S, t)$ is the unique deterministic volatility function such that:
+**Definition.** Local volatility $\sigma_{\text{loc}}(S, t)$ is the *unique deterministic* volatility function such that the diffusion
 
 $$
-dS_t = (r - q)S_t\,dt + \sigma_{\text{loc}}(S_t, t)\,S_t\,dW_t
+dS_t = (r - q)\,S_t\,dt + \sigma_{\text{loc}}(S_t, t)\,S_t\,dW_t
 $$
 
-matches all European option prices observed in the market.
+matches every European call price observed in the market. Uniqueness is the Dupire–Derman–Kani existence theorem: any model whose risk-neutral marginals reproduce the vanilla surface must produce the *same* $\sigma_{\text{loc}}$.
 
-**Dupire's formula** extracts local vol from the implied vol surface:
+**Two equivalent extraction formulas.** Dupire's original derivation gave the *price-space* form
 
 $$
-\sigma_{\text{loc}}^2(K, T) = \frac{\frac{\partial C}{\partial T} + (r-q)K\frac{\partial C}{\partial K} + qC}{\frac{1}{2}K^2\frac{\partial^2 C}{\partial K^2}}
+\sigma_{\text{loc}}^2(K, T) \;=\; \frac{\dfrac{\partial C}{\partial T} + (r - q)\,K\,\dfrac{\partial C}{\partial K} + q\,C}{\dfrac{1}{2}\,K^2\,\dfrac{\partial^2 C}{\partial K^2}}.
 $$
 
-**Why it matters:** Local vol is the *minimum-complexity model* that fits the entire vol surface. Any model that matches all European option prices must produce the same local vol surface. This makes it the baseline for exotic pricing.
+Equivalently, working in total implied variance $w(k, T) = \sigma_{\text{IV}}^2(k, T)\,T$ as a function of log-moneyness $k = \ln(K / F(T))$ (Gatheral 2006), one gets the *IV-space* form
 
-**Limitations:**
+$$
+\sigma_{\text{loc}}^2(k, T) \;=\; \frac{\dfrac{\partial w}{\partial T}}{1 - \dfrac{k}{w}\,\dfrac{\partial w}{\partial k} + \dfrac{1}{4}\left(-\dfrac{1}{4} - \dfrac{1}{w} + \dfrac{k^2}{w^2}\right)\!\left(\dfrac{\partial w}{\partial k}\right)^{\!2} + \dfrac{1}{2}\,\dfrac{\partial^2 w}{\partial k^2}}.
+$$
 
-- Smile dynamics are wrong: local vol predicts that the smile flattens as spot moves (sticky local vol), whereas the market smile tends to follow spot (closer to sticky strike)
-- This leads to underpricing of forward-starting and barrier options
-- Production systems use SLV (stochastic-local vol) to combine local vol's surface-matching with stochastic vol's realistic dynamics
+VALAX uses the second form. The arithmetic is identical, but the IV-space form has three structural advantages for an autodiff library:
 
-**VALAX status:** Not yet implemented. Dupire's formula requires $\partial C/\partial T$ and $\partial^2 C/\partial K^2$ — both obtainable via `jax.grad` through the vol surface and pricing function. This makes VALAX particularly well-suited for local vol extraction (see Roadmap P2.2).
+1. **Smooth source data.** A calibrated `SVIVolSurface` gives $w(k, T)$ as a closed-form $C^{\infty}$ function of $k$. Its three partial derivatives are exact via `jax.grad`. The price-space form needs $\partial^2 C / \partial K^2$, which on any discrete strike grid is numerically two finite differences deep — noisy and prone to amplifying arbitrage violations.
+2. **Arbitrage diagnostic.** The denominator above equals exactly the no-arbitrage "g-function" of Gatheral & Jacquier (2014); a non-positive value at $(k, T)$ is a butterfly-arbitrage violation in the input surface. We let it propagate as NaN rather than clamping, so a malformed surface fails loudly.
+3. **Differentiability through surface parameters.** $\partial \sigma_{\text{loc}}^2 / \partial \text{(SVI } a, b, \rho, m, \sigma\text{)}$ is one more `jax.grad` away — useful for risk attribution and SLV calibration (see §4.5).
+
+**Why the IV-space derivation works.** Substitute $C = C_{\text{BS}}(K, T;\,\sigma_{\text{IV}}(K, T))$ into the price-space Dupire formula and apply the chain rule. The BS price derivatives in $(K, T)$ combine with the implied-vol derivatives in a way that, after reparameterising $K \to k$ and $\sigma_{\text{IV}} \to w$, telescopes to the formula above. The full derivation is in Gatheral (2006, §1.4–1.5).
+
+**Numerical truncation interval is not needed.** Unlike Fourier-inversion pricers (Heston COS), Dupire extraction is purely *local* in $(k, T)$ — one evaluation of $w$ and three of its derivatives. There is no series to truncate, no integral to discretise. The only numerical care points are:
+
+- **Short-maturity boundary.** Standard SVI surfaces flat-extrapolate $w$ below the first calibrated expiry, making $\partial w / \partial T = 0$ and $\sigma_{\text{loc}} = 0$. VALAX's `SVIVolSurface` instead extrapolates $w$ linearly through the origin — i.e. holds implied vol constant as $T \to 0^{+}$, which makes $\partial w / \partial T$ positive and the formula well-posed at the boundary.
+- **Precision.** Second derivatives of $w$ in `f32` lose ~3 significant digits near ATM. The Dupire entry point raises `RuntimeError` if `jax_enable_x64` is off; `valax/__init__.py` enables it library-wide by default.
+
+**Monte Carlo simulation under the extracted surface.** Once $\sigma_{\text{loc}}$ is callable, simulation is a state- and time-dependent log-Euler scheme:
+
+$$
+\ln S_{t_{n+1}} = \ln S_{t_n} + \!\left(r - q - \tfrac{1}{2}\sigma_n^2\right)\!\Delta t + \sigma_n\sqrt{\Delta t}\,Z_n,
+\qquad Z_n \sim \mathcal{N}(0, 1),
+$$
+
+where $\sigma_n = \sigma_{\text{loc}}\!\big(S_{t_n},\, t_n + \tfrac{1}{2}\Delta t\big)$ — evaluated at the **midpoint** in time rather than the left endpoint. This single choice does two things at once:
+
+1. It avoids querying $\sigma_{\text{loc}}$ at $T = 0$, where the IV-space formula's $1/w$ terms diverge.
+2. It cancels the leading time-direction contribution to the Euler weak-order-1 bias, so the residual bias on a vanilla call is empirically ~10 bp absolute IV at $\Delta t = 1/500$ rather than ~25 bp for left-endpoint Euler at the same step count.
+
+The variance correction $-\tfrac{1}{2}\sigma_n^2 \Delta t$ is *not* the same as Andersen's "central" $K_3, K_4$ scheme for Heston — for local vol the spot SDE has no exchangeable variance-process term to absorb into algebraic constants, so the Itô correction is paid in full each step. A Milstein correction $+\tfrac{1}{2}\sigma_n\,(\partial \sigma_{\text{loc}} / \partial k)\,\Delta t\,(Z_n^2 - 1)$ would tighten the weak bias from $O(\Delta t)$ to $O(\Delta t^{3/2})$ at the cost of one `jax.grad` per step; the LV-1 backlog entry tracks this follow-up.
+
+**Why local vol matters.** It is the *minimum-complexity model* that reprices the entire vanilla surface by construction. For exotic pricing on equity desks it is the default fallback when calibration of a parametric model (Heston, SABR) leaves a residual smile error larger than the bid-ask. The Dupire surface is also the input to SLV's leverage-function calibration (§4.5 in the roadmap, not yet shipped) — the leverage $L(S, t)$ that turns Heston into a smile-matching SLV is defined as $L^2 = \sigma_{\text{Dupire}}^2 / \mathbb{E}[V_t \mid S_t = S]$, with the expectation computed by a particle-method MC over LV paths.
+
+**Limitations.**
+
+- **Smile dynamics are wrong.** Local vol predicts that as spot moves, the implied-vol smile *flattens* (the so-called sticky-local-vol regime). Empirically, equity index smiles move closer to *sticky-strike* — the smile shape stays roughly fixed in $K$-space. The mismatch shows up as a model-vs-market dynamic-hedge P&L on forward-starting payoffs.
+- **Forward smile.** Forward-starting and cliquet structures depend on conditional forward smile $\sigma_{\text{IV}}(K, T_2 \mid S_{T_1})$, which under local vol collapses to a near-flat shape independent of $S_{T_1}$ — empirically wrong, and barrier options inherit a similar systematic underpricing.
+- **Production systems use SLV.** Stochastic-local volatility combines the surface-matching of local vol with the realistic dynamics of stochastic vol — the industry standard for exotic equity pricing since roughly 2010. VALAX's SLV substrate is in place (the Dupire extractor here plus the LV MC paths are the two prerequisites); the leverage-function calibration is the remaining piece, tracked under Roadmap Tier 2.4.
+
+**VALAX implementation.** Dupire extraction in `valax/pricing/analytic/dupire.py` (`dupire_local_vol`, `dupire_local_vol_from_strike`). Model wrapper in `valax/models/local_vol.py` (`LocalVolModel`, with a duck-typed `total_variance(k, T)` surface protocol satisfied by all three surface types). MC simulation in `valax/pricing/mc/local_vol_paths.py` (`generate_local_vol_paths`, `jax.lax.scan` over time with midpoint-σ log-Euler). Recipes for European, Asian, equity-barrier, lookback, and variance-swap payoffs are registered against `LocalVolModel` in the unified `mc_price_dispatch`. The validation gates pinned in the test suite are (i) flat-SVI → constant $\sigma_{\text{loc}}$ to $10^{-10}$, (ii) flat-vol LV MC → Black-Scholes at $3\sigma$, (iii) **SVI → Dupire → LV MC reprices the input vanilla IV grid to < 20 bp absolute** at 4 seeds × 100k paths × 500 steps (the headline Dupire-consistency gate), and (iv) QuantLib `LocalVolSurface` flat-limit cross-check to $10^{-6}$.
 
 ---
 
