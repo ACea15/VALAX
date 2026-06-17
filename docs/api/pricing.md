@@ -225,6 +225,7 @@ Same as `mc_price` but also returns the standard error estimate.
 | `generate_sabr_paths` | `SABRModel` | `(forward_paths, vol_paths)` |
 | `generate_lmm_paths` | `LMMModel` | `LMMPathResult` |
 | `generate_correlated_gbm_paths` | `MultiAssetGBMModel` | `(n_paths, n_steps+1, n_assets)` |
+| `generate_local_vol_paths` | `LocalVolModel` | `(n_paths, n_steps+1)` &mdash; `lax.scan` + log-Euler with midpoint-in-time σ. ``scheme="midpoint_euler"`` (default) or ``scheme="milstein"`` (opt-in, ~2× cost, helps strong-order accuracy for path-statistics-sensitive analyses; no measurable benefit on vanilla repricing). |
 
 ### Payoff functions (low-level)
 

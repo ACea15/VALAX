@@ -1384,7 +1384,15 @@ where $\sigma_n = \sigma_{\text{loc}}\!\big(S_{t_n},\, t_n + \tfrac{1}{2}\Delta 
 1. It avoids querying $\sigma_{\text{loc}}$ at $T = 0$, where the IV-space formula's $1/w$ terms diverge.
 2. It cancels the leading time-direction contribution to the Euler weak-order-1 bias, so the residual bias on a vanilla call is empirically ~10 bp absolute IV at $\Delta t = 1/500$ rather than ~25 bp for left-endpoint Euler at the same step count.
 
-The variance correction $-\tfrac{1}{2}\sigma_n^2 \Delta t$ is *not* the same as Andersen's "central" $K_3, K_4$ scheme for Heston — for local vol the spot SDE has no exchangeable variance-process term to absorb into algebraic constants, so the Itô correction is paid in full each step. A Milstein correction $+\tfrac{1}{2}\sigma_n\,(\partial \sigma_{\text{loc}} / \partial k)\,\Delta t\,(Z_n^2 - 1)$ would tighten the weak bias from $O(\Delta t)$ to $O(\Delta t^{3/2})$ at the cost of one `jax.grad` per step; the LV-1 backlog entry tracks this follow-up.
+The variance correction $-\tfrac{1}{2}\sigma_n^2 \Delta t$ is *not* the same as Andersen's "central" $K_3, K_4$ scheme for Heston — for local vol the spot SDE has no exchangeable variance-process term to absorb into algebraic constants, so the Itô correction is paid in full each step.
+
+**Milstein scheme (opt-in).** VALAX additionally exposes a strong-order-1 Milstein step via `scheme="milstein"` on `generate_local_vol_paths`. The Milstein correction adds
+
+$$
++\tfrac{1}{2}\,\sigma_n\,\big(\partial \sigma_{\text{loc}} / \partial k\big)\,\Delta t\,\big(Z_n^2 - 1\big),
+$$
+
+where $\partial \sigma_{\text{loc}} / \partial k$ is evaluated at $(S_{t_n}, t_n + \tfrac{1}{2}\Delta t)$ via `jax.value_and_grad`, doubling per-step compute. This is **strong-order-1** (Euler is strong-order-0.5) but **weak-order-1** — the same as Euler. In practice this means Milstein has lower path-wise (sample-by-sample) error but the *expectations* it computes — option prices — converge at the same asymptotic rate. Empirically on a moderate equity skew with 4 seeds × 100k paths × {100–1000} steps, Milstein and midpoint-Euler give indistinguishable vanilla-reprice bp errors (both in the 5–25 bp range, MC-noise-dominated). The default is midpoint-Euler because it is cheaper for no measurable accuracy loss on vanilla and SLV-calibration use cases; opt in to Milstein when the binding constraint is *path-wise* accuracy — realized variance, quadratic-variation-style payoffs, or research into the path-distribution structure of the SDE. To tighten the vanilla-reprice gate below the MC-noise floor, use variance reduction (control variates) rather than a higher-order scheme.
 
 **Why local vol matters.** It is the *minimum-complexity model* that reprices the entire vanilla surface by construction. For exotic pricing on equity desks it is the default fallback when calibration of a parametric model (Heston, SABR) leaves a residual smile error larger than the bid-ask. The Dupire surface is also the input to SLV's leverage-function calibration (§4.5 in the roadmap, not yet shipped) — the leverage $L(S, t)$ that turns Heston into a smile-matching SLV is defined as $L^2 = \sigma_{\text{Dupire}}^2 / \mathbb{E}[V_t \mid S_t = S]$, with the expectation computed by a particle-method MC over LV paths.
 

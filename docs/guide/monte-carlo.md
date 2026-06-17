@@ -222,8 +222,24 @@ where $\sigma_n = \sigma_{\text{loc}}\!\big(S_{t_n},\,t_n + \tfrac{1}{2}\Delta t
 **midpoint in time**, *not* left endpoint. The midpoint convention avoids
 querying Dupire at $T = 0$ (where the $1/w$ terms in the denominator
 diverge) and gives a better weak-error constant than left-endpoint Euler.
-See [theory §4.4](../theory.md#44-local-volatility-dupire) for the full
-discussion of bias floors and the Milstein follow-up.
+
+**Scheme selection.** `generate_local_vol_paths` exposes a
+`scheme=` kwarg (forwarded as `lv_scheme=` through the unified
+dispatcher) with two options:
+
+| Scheme | Weak order | Strong order | Per-step cost | When to use |
+|---|:---:|:---:|:---:|---|
+| `"midpoint_euler"` (default) | 1 | 0.5 | 1× | Vanilla / smile pricing, SLV calibration — the typical case |
+| `"milstein"` (opt-in) | 1 | 1.0 | ~2× | Realized-variance pricing, path-statistics analysis, any payoff sensitive to *strong* (path-wise) accuracy |
+
+Empirically, both schemes give indistinguishable vanilla-reprice
+accuracy at typical MC budgets (the noise floor dominates the
+constant-factor improvement). The default is Euler because it is
+cheaper for no measurable accuracy loss on the common case. See the
+[`generate_local_vol_paths`](../api/pricing.md#generate_local_vol_paths)
+module docstring for the full empirical sweep and
+[theory §4.4](../theory.md#44-local-volatility-dupire) for the weak-
+vs strong-order discussion.
 
 **Surface choice.** `SVIVolSurface` is the recommended Dupire input —
 closed-form $w(k, T)$ gives exact derivatives via `jax.grad`. `SABRVolSurface`

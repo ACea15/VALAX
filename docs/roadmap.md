@@ -266,20 +266,104 @@ for pass 2. No further pricing-layer work is needed before SLV.
 
 **Follow-up still open.**
 
-* **Milstein scheme for LV MC** — would reduce the weak bias from
-  `O(dt)` to `O(dt^{3/2})` and let us tighten the Dupire-consistency
-  gate from 20 bp to 5 bp at the same MC budget. Requires one
-  `jax.grad(σ_loc, k)` per step, vmapped across paths. Empirically
-  verified during LV-1 development that the bias floor is currently
-  ~10 bp at 200k × 500 (4-seed averaged) — Milstein attacks this
-  directly.
+* ~~**Milstein scheme for LV MC**~~ ✅ *Shipped under LV-2 below as an
+  opt-in scheme; empirically does **not** tighten the vanilla-reprice
+  gate at typical MC budgets (weak-order equality with Euler hides the
+  improvement behind the MC noise floor). Useful for path-statistics-
+  sensitive payoffs; default scheme remains midpoint-Euler.*
 * **Local vol PDE** pricing (Tier 2.3 item 3) — Fokker-Planck forward
   on a `(S, t)` grid. Deferred; MC suffices for SLV.
 * **Forward-curve term structure** — `LocalVolModel.forward_curve` is
   currently fixed to `S₀·exp((r-q)·t)`. A `Callable[[t], F(t)]` field
   would unlock surfaces calibrated against term-structured rates /
   dividends. Trivial extension once needed.
+* **Variance reduction for LV MC** — the empirical bias floor on
+  vanilla repricing is set by Monte-Carlo noise, not discretisation.
+  A BSM control variate at a reference vol (subtracting the MC BSM
+  price and adding back the analytic BSM expectation) would deliver
+  the 5-bp Dupire-consistency gate that the Milstein attempt under
+  LV-2 could not. Tracked as a future LV-3 item if needed before SLV
+  calibration tightens the requirement.
 * **SLV** (Tier 2.4) — natural next session.
+
+### LV-2 — Milstein scheme as opt-in path generator &nbsp;✅ &nbsp;*Done (honest scope)*
+
+**What was done.** Added a `scheme: Literal["midpoint_euler",
+"milstein"] = "midpoint_euler"` keyword-only argument to
+`generate_local_vol_paths`, plumbed through the unified
+`mc_price_dispatch` as the namespaced `lv_scheme` market argument.
+Both schemes share the midpoint-in-time σ; Milstein adds the
+strong-order-1 correction $+\tfrac{1}{2}\sigma_n(\partial\sigma_{\text{loc}}/\partial k)\Delta t(Z_n^2 - 1)$
+via `jax.value_and_grad(dupire_local_vol, argnums=0)` vmapped across
+paths.
+
+**The honest empirical finding.** The LV-1 backlog premise — "Milstein
+would tighten the vanilla-reprice gate from 20 bp to 5 bp at the same
+MC budget" — turned out to be wrong. Both schemes have weak-order 1
+(Milstein only improves the *strong* order), so for vanilla
+expectations they converge at the same asymptotic rate, with only a
+constant-factor difference. At typical MC budgets (4 seeds × 100k
+paths × {100–1000} steps on a moderate equity skew), the MC noise
+floor is ~10–20 bp and washes out the constant-factor improvement:
+
+| `n_steps` | midpoint-Euler max bp | Milstein max bp |
+|:---:|:---:|:---:|
+| 100  |  6.6 | 11.9 |
+| 200  |  5.9 |  9.6 |
+| 500  | 18.8 | 20.1 |
+| 1000 | 13.5 | 14.2 |
+
+The non-monotonic `n_steps` profile (errors don't shrink with more
+steps) is the signature of noise-dominated rather than bias-dominated
+error. Both schemes produce statistically-indistinguishable vanilla
+prices at this budget; Milstein pays 2× per-step compute (one extra
+`jax.grad`) for no measurable benefit on European, Asian, and other
+expectation-style payoffs.
+
+**Where Milstein *does* help.** Paired-seed comparison on a down-and-
+out call shows Milstein's bias is reliably smaller than Euler's at
+coarse `n_steps` — the strong-order improvement surfaces on path-
+distribution-sensitive payoffs. Empirically on 8 paired seeds at
+`n_steps=200` the average paired difference (Euler − Milstein) is
+`+0.0081 ± 0.0044` (paired t-stat 5.25 — highly significant). Pinned
+in `tests/test_pricing/test_local_vol_paths.py::TestSchemeComparison`.
+
+**Validation.** 5 new tests in
+`tests/test_pricing/test_local_vol_paths.py`:
+
+* `TestSchemeOptIn::test_milstein_runs_and_returns_finite` — both
+  schemes produce finite paths of the right shape.
+* `TestSchemeOptIn::test_milstein_differs_from_euler_at_same_key` —
+  same PRNG key, different scheme ⇒ paths differ by the Milstein
+  correction (sanity).
+* `TestSchemeOptIn::test_invalid_scheme_raises_value_error` —
+  validation error on a bad scheme name.
+* `TestSchemeOptIn::test_dispatcher_routes_lv_scheme_kwarg` —
+  `mc_price_dispatch` with `lv_scheme="milstein"` correctly threads
+  through the recipe layer.
+* `TestSchemeComparison::test_milstein_paired_bias_no_worse_than_euler_on_barrier`
+  — the path-statistics-sensitive comparison described above.
+
+**Default stays midpoint-Euler.** Documented in the module docstring,
+the `generate_local_vol_paths` signature docstring, the API reference
+(`docs/api/pricing.md`), the user guide
+(`docs/guide/monte-carlo.md`), and the theory section
+(`docs/theory.md §4.4`). Cross-links flow consistently from each
+entry point to the empirical sweep table.
+
+**Why ship anyway.** Three reasons:
+
+1. The opt-in mechanism is needed downstream — barrier-sensitive
+   exotics under LV, and (eventually) SLV's particle-method
+   calibration may want strong-order accuracy in regimes where it
+   matters.
+2. The scheme infrastructure (`scheme=` kwarg, dispatcher plumbing)
+   establishes the pattern for future MC schemes (e.g. predictor-
+   corrector, jump-adapted) without churning the public API.
+3. Honest documentation of what *doesn't* work is itself valuable —
+   future contributors will not waste effort re-attempting the
+   Milstein-tightens-vanilla-gate path that LV-1 originally
+   anticipated.
 
 ## Arbitrage Detection — Session Backlog
 

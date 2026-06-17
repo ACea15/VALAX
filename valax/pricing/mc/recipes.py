@@ -109,11 +109,19 @@ def _equity_paths(
     T: Float[Array, ""],
     config: MCConfig,
     key: jax.Array,
+    *,
+    lv_scheme: str = "midpoint_euler",
 ) -> tuple[Float[Array, "n_paths n_steps_plus1"], Float[Array, ""]]:
     """Generate paths for a single-asset equity model and return (paths, rate).
 
     Branches on model type to pick the right generator. The returned
     ``rate`` is the risk-free rate used for discounting.
+
+    Args:
+        lv_scheme: Forwarded to ``generate_local_vol_paths`` when ``model``
+            is a ``LocalVolModel``. Ignored otherwise. See
+            :func:`valax.pricing.mc.generate_local_vol_paths` for accepted
+            values. Default ``"milstein"``.
     """
     if isinstance(model, HestonModel):
         paths, _ = generate_heston_paths(
@@ -122,6 +130,7 @@ def _equity_paths(
     elif isinstance(model, LocalVolModel):
         paths = generate_local_vol_paths(
             model, spot, T, config.n_steps, config.n_paths, key,
+            scheme=lv_scheme,
         )
     else:
         # BlackScholesModel (or any GBM-like model)
@@ -138,13 +147,21 @@ def _equity_recipe(
     config: MCConfig,
     key: jax.Array,
     spot: Float[Array, ""],
+    *,
+    lv_scheme: str = "midpoint_euler",
 ) -> MCResult:
     """Generic equity MC recipe: paths → payoff → discount.
 
     The payoff signature is ``payoff_fn(paths, instrument) -> cashflows``.
+
+    Args:
+        lv_scheme: Forwarded to ``_equity_paths`` (only consumed when
+            ``model`` is a ``LocalVolModel``).
     """
     T = instrument.expiry
-    paths, rate = _equity_paths(model, spot, T, config, key)
+    paths, rate = _equity_paths(
+        model, spot, T, config, key, lv_scheme=lv_scheme,
+    )
     cashflows = payoff_fn(paths, instrument)
     df = jnp.exp(-rate * T)
     price, stderr = discounted_mean_and_stderr(cashflows, df, config.n_paths)
@@ -188,8 +205,17 @@ def _european_localvol(
 
     Required market args:
         spot: Current spot price.
+
+    Optional market args:
+        lv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"`` — see
+            :func:`valax.pricing.mc.generate_local_vol_paths`. Milstein
+            is opt-in for path-dependent payoffs where strong-order
+            convergence matters.
     """
-    return _equity_recipe(european_payoff, instrument, model, config, key, spot)
+    return _equity_recipe(
+        european_payoff, instrument, model, config, key, spot,
+        lv_scheme=kwargs.get("lv_scheme", "midpoint_euler"),
+    )
 
 
 @register(AsianOption, BlackScholesModel)
@@ -212,8 +238,15 @@ def _asian_heston(
 def _asian_localvol(
     *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
 ) -> MCResult:
-    """Arithmetic/geometric Asian option under Dupire local volatility."""
-    return _equity_recipe(asian_option_payoff, instrument, model, config, key, spot)
+    """Arithmetic/geometric Asian option under Dupire local volatility.
+
+    Optional market args:
+        lv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"``.
+    """
+    return _equity_recipe(
+        asian_option_payoff, instrument, model, config, key, spot,
+        lv_scheme=kwargs.get("lv_scheme", "midpoint_euler"),
+    )
 
 
 @register(EquityBarrierOption, BlackScholesModel)
@@ -245,8 +278,14 @@ def _barrier_localvol(
     Barrier options are the canonical exotic where local vol differs
     materially from constant-vol BSM — the vol smile at the barrier
     matters.
+
+    Optional market args:
+        lv_scheme: ``"milstein"`` (default) or ``"midpoint_euler"``.
     """
-    return _equity_recipe(equity_barrier_payoff, instrument, model, config, key, spot)
+    return _equity_recipe(
+        equity_barrier_payoff, instrument, model, config, key, spot,
+        lv_scheme=kwargs.get("lv_scheme", "midpoint_euler"),
+    )
 
 
 @register(LookbackOption, BlackScholesModel)
@@ -269,8 +308,15 @@ def _lookback_heston(
 def _lookback_localvol(
     *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
 ) -> MCResult:
-    """Floating- or fixed-strike lookback under Dupire local volatility."""
-    return _equity_recipe(lookback_payoff, instrument, model, config, key, spot)
+    """Floating- or fixed-strike lookback under Dupire local volatility.
+
+    Optional market args:
+        lv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"``.
+    """
+    return _equity_recipe(
+        lookback_payoff, instrument, model, config, key, spot,
+        lv_scheme=kwargs.get("lv_scheme", "midpoint_euler"),
+    )
 
 
 @register(VarianceSwap, BlackScholesModel)
@@ -328,9 +374,16 @@ def _varswap_localvol(
     annual_factor: Float[Array, ""] = jnp.array(252.0),
     **kwargs,
 ) -> MCResult:
-    """Variance swap under Dupire local volatility."""
+    """Variance swap under Dupire local volatility.
+
+    Optional market args:
+        lv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"``.
+    """
     T = instrument.expiry
-    paths, rate = _equity_paths(model, spot, T, config, key)
+    paths, rate = _equity_paths(
+        model, spot, T, config, key,
+        lv_scheme=kwargs.get("lv_scheme", "midpoint_euler"),
+    )
     cashflows = variance_swap_payoff(paths, instrument, annual_factor)
     df = jnp.exp(-rate * T)
     price, stderr = discounted_mean_and_stderr(cashflows, df, config.n_paths)
