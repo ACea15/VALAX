@@ -154,6 +154,8 @@ If you are extending VALAX, the design rationale above implies a small set of ac
 
 1. **Every pricing function must be `jax.grad`-able.** If you need a workaround (`stop_gradient`, finite-difference fallback), the Greek consistency property in §3 breaks and the change should not land.
 2. **Every domain type must be an `equinox.Module` pytree.** Anything that does not flatten / unflatten under `jax.tree_util` is incompatible with `vmap` across scenarios and instruments — i.e. with the compound-effect claim in §4.
+
+The catalogue of JAX idioms VALAX uses to satisfy these invariants — static trace-time dispatch (Python `if` / `isinstance` / `eqx.field(static=True)`), the double-where autodiff-safety pattern, JIT cache semantics, autodiff-through-autodiff composition — is documented in [JAX Patterns in VALAX](architecture/jax-patterns.md), with every pattern anchored on a real file:line in the codebase.
 3. **No global state, no caches that survive between calls, no observer pattern.** Determinism is by construction; any leak of state means yesterday's risk run might not replay tomorrow.
 4. **Dates inside traced code are integer ordinals.** `datetime.date` may appear at the user-facing boundary and only there.
 5. **No `scipy` inside JIT-traced code.** Use `optimistix` / `lineax` / `jax.scipy`. Otherwise the trader-hot-path / batch-risk equivalence in §4 silently breaks.

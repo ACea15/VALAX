@@ -171,7 +171,11 @@ def generate_local_vol_paths(
         return log_S - (log_spot + mu * t)
 
     # Static dispatch on scheme — chosen at trace time, the unused
-    # closure is not compiled.
+    # closure is not compiled. See ``docs/architecture/jax-patterns.md``
+    # §2.1 for the rationale: ``scheme`` is a concrete Python string at
+    # the call site, the ``if`` runs in pure Python before tracing
+    # starts, and only the selected ``step`` closure enters the
+    # ``lax.scan`` body and the XLA graph.
     if scheme == "midpoint_euler":
         # σ_loc only — no derivative needed.
         def _sigma_at_paths(log_S, t):

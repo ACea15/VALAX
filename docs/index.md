@@ -61,6 +61,8 @@ Traditional quant libraries compute Greeks via finite differences (bump-and-repr
 
 This means every pricing function — analytical, Monte Carlo, PDE, or lattice — automatically supports Greeks with no additional code.
 
+For the JAX idioms VALAX relies on — static trace-time dispatch, the double-where autodiff-safety pattern, `eqx.field(static=True)` semantics, JIT cache keys, autodiff-through-autodiff — see [JAX Patterns in VALAX](architecture/jax-patterns.md). Every pattern is anchored on a real file:line in the codebase so the doc and the implementation stay in sync.
+
 ## Examples
 
 Runnable Python scripts in `examples/` demonstrate the full library with synthetic market data. Each file uses `# %%` cell markers for interactive IDE execution.
