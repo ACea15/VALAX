@@ -68,6 +68,7 @@ nav:
       - Binomial Trees: guide/lattice.md
       - Calibration: guide/calibration.md
       - Volatility Surfaces: guide/vol-surfaces.md
+      - Stochastic-Local Volatility: guide/slv.md
       - Risk & Scenarios: guide/risk.md
       - Synthetic Market Data: guide/synthetic_market.md
       - Reproducibility & Arbitrage Tests: guide/reproducibility_and_arbitrage_tests.md

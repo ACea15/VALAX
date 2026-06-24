@@ -48,7 +48,7 @@ runs path generation + payoff + discounting, and returns an `MCResult`
 
 VALAX ships with **16 built-in recipes** (10 single-asset equity × GBM/Heston,
 4 rates × LMM, 2 multi-asset × `MultiAssetGBMModel`). See the coverage map
-in §2 and the built-in recipe list in the [API reference](../api/pricing.md#built-in-recipes-16).
+in §2 and the built-in recipe list in the [API reference](../api/pricing.md#built-in-recipes-21).
 
 To swap the model, just pass a different one:
 
@@ -85,18 +85,18 @@ not yet wired), 🟠 = needs a new path generator, 🔴 = needs major infra.
 
 ### Equity (single asset)
 
-| Instrument | `BlackScholesModel` | `HestonModel` | `LocalVolModel` | `MultiAssetGBMModel` | Notes |
-|-----------|:---:|:---:|:---:|:---:|---|
-| `EuropeanOption` | ✓ | ✓ | ✓ | — | |
-| `AsianOption` | ✓ | ✓ | ✓ | — | Arithmetic + geometric averaging |
-| `EquityBarrierOption` | ✓ | ✓ | ✓ | — | KI/KO with sigmoid smoothing; LV is the canonical model when smile shape at the barrier matters |
-| `LookbackOption` | ✓ | ✓ | ✓ | — | Floating + fixed strike |
-| `VarianceSwap` | ✓ | ✓ | ✓ | — | Realized variance from log-returns |
-| `SpreadOption` | — | — | — | ✓ | Validates Margrabe (K=0) and Kirk (K≠0) analytical |
-| `WorstOfBasketOption` | — | — | — | ✓ | 2+ asset basket; cross-asset correlation Greeks via `jax.grad` |
-| `AmericanOption` | 🟡 | 🟡 | 🟡 | — | LSM engine exists for rates — needs lifting |
-| `DigitalOption` | 🟡 | 🟡 | 🟡 | — | Payoff is smoothed Heaviside |
-| `Autocallable` / `Cliquet` | 🟠 | 🟠 | 🟠 | 🟠 | Needs multi-observation / forward-start engine |
+| Instrument | `BlackScholesModel` | `HestonModel` | `LocalVolModel` | `SLVModel` | `MultiAssetGBMModel` | Notes |
+|-----------|:---:|:---:|:---:|:---:|:---:|---|
+| `EuropeanOption` | ✓ | ✓ | ✓ | ✓ | — | |
+| `AsianOption` | ✓ | ✓ | ✓ | ✓ | — | Arithmetic + geometric averaging |
+| `EquityBarrierOption` | ✓ | ✓ | ✓ | ✓ | — | KI/KO with sigmoid smoothing; LV/SLV is the canonical model when smile shape at the barrier matters |
+| `LookbackOption` | ✓ | ✓ | ✓ | ✓ | — | Floating + fixed strike |
+| `VarianceSwap` | ✓ | ✓ | ✓ | ✓ | — | Realized variance from log-returns |
+| `SpreadOption` | — | — | — | — | ✓ | Validates Margrabe (K=0) and Kirk (K≠0) analytical |
+| `WorstOfBasketOption` | — | — | — | — | ✓ | 2+ asset basket; cross-asset correlation Greeks via `jax.grad` |
+| `AmericanOption` | 🟡 | 🟡 | 🟡 | 🟡 | — | LSM engine exists for rates — needs lifting |
+| `DigitalOption` | 🟡 | 🟡 | 🟡 | 🟡 | — | Payoff is smoothed Heaviside |
+| `Autocallable` / `Cliquet` | 🟠 | 🟠 | 🟠 | 🟠 | 🟠 | Needs multi-observation / forward-start engine — SLV is the natural model once the recipe is wired |
 
 ### Rates (LMM)
 
@@ -142,6 +142,7 @@ so the whole pipeline remains `jax.jit` / `jax.vmap` friendly.
 | `generate_lmm_paths(model, n_steps_per_period, n_paths, key)` | `LMMModel` | `LMMPathResult` with `forwards_at_fixing`, `forwards_at_tenors`, `discount_factors` |
 | `generate_correlated_gbm_paths(model, spots, T, n_steps, n_paths, key)` | `MultiAssetGBMModel` | `(n_paths, n_steps+1, n_assets)` |
 | `generate_local_vol_paths(model, spot, T, n_steps, n_paths, key)` | `LocalVolModel` | `(n_paths, n_steps+1)` |
+| `generate_slv_paths(model, spot, T, n_steps, n_paths, key)` | `SLVModel` | `(spot_paths, var_paths)` each `(n_paths, n_steps+1)` |
 
 ### Geometric Brownian Motion
 
@@ -251,6 +252,75 @@ IV grid to < 20 bp absolute IV (4 seeds × 100k paths × 500 steps; see
 `tests/test_pricing/test_local_vol_paths.py::TestDupireConsistency`).
 The headline gate to remember: a typical LV MC budget gives you smile
 reprice accuracy of a few tens of basis points, not single-digit.
+
+### Stochastic-local volatility
+
+$$
+\begin{aligned}
+\frac{dS_t}{S_t} &= (r - q)\,dt \;+\; L(k_t, t)\,\sqrt{V_t}\,dW_1, \\
+dV_t &= \kappa(\theta - V_t)\,dt \;+\; \xi\,\sqrt{V_t}\,dW_2, \\
+\langle dW_1, dW_2 \rangle &= \rho\,dt, \qquad k_t = \log(S_t / F(t)).
+\end{aligned}
+$$
+
+SLV combines Heston's stochastic-volatility backbone with a calibrated
+deterministic leverage function `L(k, t)` chosen so that the SLV
+marginals reproduce a target implied-vol surface by Markovian
+projection. It is the industry standard for exotic equity options
+where (i) vanillas must reprice exactly **and** (ii) the payoff is
+sensitive to how the smile evolves forward in time — autocallables,
+forward-starting options, cliquets, vol-of-vol payoffs.
+
+```python
+import jax, jax.numpy as jnp
+from valax.calibration import calibrate_slv_leverage
+from valax.models import SLVModel
+from valax.pricing.mc import generate_slv_paths
+
+# Build the leverage grid (pass 2 of the two-pass calibration).
+leverage = calibrate_slv_leverage(
+    heston_calibrated, svi_surface, spot=jnp.array(100.0),
+    log_moneyness_grid=jnp.linspace(-0.25, 0.25, 11),
+    time_grid=jnp.linspace(0.05, 2.0, 10),
+    n_paths=10_000, key=jax.random.PRNGKey(0),
+    method="kernel", n_iterations=2, ridge=1e-3,
+)
+slv = SLVModel.from_heston_and_leverage(heston_calibrated, svi_surface, leverage)
+
+# Simulate.
+S, V = generate_slv_paths(
+    slv, spot=jnp.array(100.0), T=1.0,
+    n_steps=200, n_paths=50_000,
+    key=jax.random.PRNGKey(1),
+)
+# S.shape == V.shape == (50_000, 201); both legs returned.
+```
+
+**Scheme.** Variance leg uses Andersen-QE (exact in distribution at
+each `dt`, same as `generate_heston_paths`). Log-spot leg is
+selectable via `scheme=` (forwarded as `slv_scheme=` through the
+unified dispatcher):
+
+| Scheme | Weak order | Strong order | Per-step cost | When to use |
+|---|:---:|:---:|:---:|---|
+| `"midpoint_euler"` (default) | 1 | 0.5 | 1× | Vanillas, smile pricing — the typical case |
+| `"milstein"` (opt-in) | 1 | 1.0 | ~2× | Path-dependent payoffs (barriers, lookbacks, cliquets) |
+
+**Correlation.** `Z_1 = ρ·Z_v + √(1−ρ²)·Z_⊥` where `Z_v` is the
+standard normal driving the QE quadratic branch. Exact when QE is on
+the quadratic branch (the typical case for equity-grade parameters);
+approximate on the exponential branch (matches QuantLib's
+`HestonSLVProcess` convention).
+
+**Dupire-consistency gate.** SVI → calibrate L → SLV MC reprices the
+input vanilla IV grid to **< 250 bp absolute IV** at moderate budgets
+(10k particles for calibration, 50k paths × 200 steps × 4 seeds for
+pricing; see `tests/test_pricing/test_slv_paths.py::TestDupireConsistency`).
+This is roughly an order of magnitude looser than LV-1's 20 bp gate —
+sub-100 bp accuracy is achievable with Fokker-Planck PDE calibration
+(roadmap item SLV-2) rather than the particle method. See the
+[SLV guide](slv.md#limitations-and-known-approximations) for the
+calibration-accuracy ceiling discussion.
 
 ### Correlated multi-asset GBM
 

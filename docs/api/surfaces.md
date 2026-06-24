@@ -10,7 +10,7 @@ All three surface types additionally expose
 surface.total_variance(log_moneyness, expiry) -> Float[Array, ""]
 ```
 
-returning total implied variance $w(k, T) = \sigma_{\text{IV}}^2(k, T) \cdot T$ as a function of log-moneyness $k = \ln(K / F(T))$. This is the duck-typed input expected by [`dupire_local_vol`](pricing.md#dupire_local_vol) and (in due course) by SLV's leverage-function calibration. The consistency identity
+returning total implied variance $w(k, T) = \sigma_{\text{IV}}^2(k, T) \cdot T$ as a function of log-moneyness $k = \ln(K / F(T))$. This is the duck-typed input expected by [`dupire_local_vol`](pricing.md#dupire_local_vol) and by SLV's leverage-function calibration ([`calibrate_slv_leverage`](calibration.md#calibrate_slv_leverage)). The consistency identity
 
 ```python
 surface.total_variance(jnp.log(K / F_T), T)  ==  surface(K, T) ** 2 * T
@@ -137,3 +137,36 @@ calibrate_svi_surface(strikes_per_expiry, market_vols_per_expiry,
 ```
 
 Fits each expiry slice independently.
+
+---
+
+## Leverage Grid (SLV)
+
+### `LeverageGrid`
+
+```python
+class LeverageGrid(eqx.Module):
+    log_moneyness_grid: Float[Array, "n_k"]   # sorted, ascending
+    time_grid:          Float[Array, "n_t"]   # sorted, ascending (> 0)
+    values:             Float[Array, "n_t n_k"]
+```
+
+The leverage function $L(k, t)$ tabulated on a fixed $(k, t)$ grid. Stored with the same `(n_t, n_k)` (y outer, x inner) convention as `GridVolSurface.vols`. The instance is callable:
+
+```python
+L_at_kt = leverage(log_moneyness, time)   # bilinear, flat extrapolation
+```
+
+Interpolation is delegated to the project-wide `bilinear_2d` helper. Only `values` is differentiable; the grid axes are static interpolation scaffolding. `jax.grad` through `values` flows correctly into per-node leverage sensitivities, which is what the calibration routine consumes internally.
+
+Use `LeverageGrid.flat(...)` to build an `L ≡ value` constant grid — the pure-Heston-limit warm start for `calibrate_slv_leverage` and a useful Heston-limit reduction-test fixture:
+
+```python
+leverage = LeverageGrid.flat(
+    log_moneyness_grid=jnp.linspace(-0.30, 0.30, 11),
+    time_grid=jnp.linspace(0.05, 2.0, 10),
+    value=1.0,   # L ≡ 1 reduces SLV SDE to pure Heston
+)
+```
+
+See the [SLV guide](../guide/slv.md) for the role of the leverage function in the Markovian-projection-based two-pass SLV calibration, and [`calibrate_slv_leverage`](calibration.md#calibrate_slv_leverage) for the populating routine.

@@ -40,6 +40,7 @@ from valax.pricing.mc.sabr_paths import generate_sabr_paths
 from valax.pricing.mc.lmm_paths import LMMPathResult, generate_lmm_paths
 from valax.pricing.mc.multi_asset_paths import generate_correlated_gbm_paths
 from valax.pricing.mc.local_vol_paths import generate_local_vol_paths
+from valax.pricing.mc.slv_paths import generate_slv_paths
 
 # Payoff functions
 from valax.pricing.mc.payoffs import (
@@ -80,6 +81,7 @@ __all__ = [
     "generate_lmm_paths",
     "generate_correlated_gbm_paths",
     "generate_local_vol_paths",
+    "generate_slv_paths",
     "LMMPathResult",
     # Payoffs
     "european_payoff",

@@ -287,7 +287,10 @@ At each **observation date** $t_k$ ($k = 1, \ldots, n$):
 No closed-form solution exists. Autocallables require **Monte Carlo simulation**
 with path monitoring at all observation dates (and continuous monitoring for the
 knock-in barrier if specified). Stochastic local volatility (SLV) models are
-preferred for accurate barrier pricing.
+preferred for accurate barrier pricing — VALAX's [`SLVModel`](slv.md) is
+shipped and registered with the unified MC dispatcher; the structured-payoff
+recipe that consumes it is the remaining piece (tracked as SLV-3 in the
+roadmap).
 
 See [Monte Carlo](monte-carlo.md) for the simulation engine.
 
@@ -469,7 +472,10 @@ the beginning of the period. The value depends on the implied volatility for eac
 - Local volatility surface curvature
 
 Standard Black-Scholes with flat vol significantly misprices cliquets. **Local
-volatility** or **stochastic local volatility (SLV)** models are required.
+volatility** or **stochastic local volatility (SLV)** models are required —
+both are shipped (see the [SLV guide](slv.md)); the forward-starting
+structured-payoff recipe to wire them into `mc_price_dispatch` for `Cliquet`
+is tracked as SLV-3 in the roadmap.
 
 ### Code Example
 

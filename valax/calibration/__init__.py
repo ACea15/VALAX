@@ -14,3 +14,4 @@ from valax.calibration.transforms import (
 from valax.calibration.loss import vol_residuals, price_residuals, weighted_sse
 from valax.calibration.sabr import calibrate_sabr
 from valax.calibration.heston import calibrate_heston
+from valax.calibration.slv import calibrate_slv, calibrate_slv_leverage

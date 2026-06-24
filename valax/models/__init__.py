@@ -14,3 +14,4 @@ from valax.models.multi_asset import MultiAssetGBMModel, validate_correlation
 from valax.models.sabr import SABRModel
 from valax.models.hull_white import HullWhiteModel
 from valax.models.local_vol import LocalVolModel
+from valax.models.slv import SLVModel

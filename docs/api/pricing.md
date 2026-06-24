@@ -176,9 +176,9 @@ registered_recipes() -> list[tuple[str, str]]
 
 Sorted list of `(instrument_name, model_name)` for every registered recipe. Useful for introspection.
 
-### Built-in recipes (16)
+### Built-in recipes (21)
 
-Single-asset equity (each combo with `BlackScholesModel` and `HestonModel`):
+Single-asset equity (each combo with `BlackScholesModel`, `HestonModel`, `LocalVolModel`, and `SLVModel`):
 
 - `(EuropeanOption, ...)`
 - `(AsianOption, ...)`
@@ -226,6 +226,7 @@ Same as `mc_price` but also returns the standard error estimate.
 | `generate_lmm_paths` | `LMMModel` | `LMMPathResult` |
 | `generate_correlated_gbm_paths` | `MultiAssetGBMModel` | `(n_paths, n_steps+1, n_assets)` |
 | `generate_local_vol_paths` | `LocalVolModel` | `(n_paths, n_steps+1)` &mdash; `lax.scan` + log-Euler with midpoint-in-time σ. ``scheme="midpoint_euler"`` (default) or ``scheme="milstein"`` (opt-in, ~2× cost, helps strong-order accuracy for path-statistics-sensitive analyses; no measurable benefit on vanilla repricing). |
+| `generate_slv_paths` | `SLVModel` | `(spot_paths, var_paths)` each `(n_paths, n_steps+1)` &mdash; Andersen-QE variance leg + log-Euler/Milstein log-spot leg with midpoint-in-time `L`. ``scheme="midpoint_euler"`` (default) or ``scheme="milstein"`` (opt-in). Spot/variance correlation via $Z_1 = \rho Z_v + \sqrt{1-\rho^2} Z_\perp$ — exact on the QE quadratic branch (typical case), approximate on the exponential branch. |
 
 ### Payoff functions (low-level)
 

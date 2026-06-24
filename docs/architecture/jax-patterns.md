@@ -65,7 +65,7 @@ the API.
 The most direct form. A keyword argument is a Python string (or Python int /
 bool); the Python interpreter runs the `if` before tracing starts.
 
-**Example.** `valax/pricing/mc/local_vol_paths.py:179,197`:
+**Example.** `valax/pricing/mc/local_vol_paths.py:179,197` (the same pattern recurs in `valax/pricing/mc/slv_paths.py:184` for SLV scheme dispatch):
 
 ```python
 def generate_local_vol_paths(model, spot, T, n_steps, n_paths, key,

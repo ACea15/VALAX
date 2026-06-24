@@ -73,8 +73,8 @@ today — the *Status / Notes* column tracks the **pricer**.
 | **Equity** | `DigitalOption` | Black-Scholes closed form (cash- or asset-or-nothing) | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
 | **Equity** | `CompoundOption` | Geske closed form / BSM extension | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
 | **Equity** | `ChooserOption` | Put-call symmetry on a synthetic option | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
-| **Equity** | `Autocallable` | MC on local-vol / SLV paths | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
-| **Equity** | `Cliquet` | MC on forward-starting BSM / SLV paths | `valax.instruments.options` | 🟡 Instrument ✅; pricer planned |
+| **Equity** | `Autocallable` | MC on local-vol / SLV paths | `valax.instruments.options` | 🟡 Instrument ✅; SLV model + MC ✅ (see [SLV guide](slv.md)); structured-payoff recipe planned |
+| **Equity** | `Cliquet` | MC on forward-starting BSM / SLV paths | `valax.instruments.options` | 🟡 Instrument ✅; SLV model + MC ✅; forward-start recipe planned |
 | **FX** | `FXForward` | Covered interest-rate parity (CIP) | `valax.instruments.fx` | ✅ `pricing.analytic.fx` |
 | **FX** | `FXVanillaOption` | Garman-Kohlhagen + 3 delta conventions | `valax.instruments.fx` | ✅ `pricing.analytic.fx` (incl. strike↔delta inverter) |
 | **FX** | `FXBarrierOption` | Reiner-Rubinstein closed form (analytic) | `valax.instruments.fx` | 🟡 Instrument ✅; analytic pricer planned (MC works today via generic GBM recipe) |

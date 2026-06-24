@@ -108,7 +108,7 @@ The roadmap is bank-flavoured, but the same engine serves a buy-side audience na
 | LDI / pension liability hedging | Inflation curves, key-rate durations, swap pricing | Already done |
 | Convertible arbitrage | Convertible bond pricer, equity-credit hybrid PDE | 3.8 |
 | Vol arbitrage / dispersion | Multi-asset MC, variance swaps, correlation Greeks | Already done |
-| Structured product evaluation (buy-side) | Autocallable / phoenix pricing under SLV | 3.6 + 2.4 |
+| Structured product evaluation (buy-side) | Autocallable / phoenix pricing under SLV | SLV model + MC ✅ (Tier 2.4, see [SLV guide](guide/slv.md)); autocallable / phoenix structured-payoff recipe planned (Tier 3.6) |
 | Tail-hedge programs | Barrier options, lookbacks, jump-diffusion | 3.6 + 2.5 |
 | Systematic credit | CDS, survival curves, tranche correlation | 3.4 |
 | Macro / rates RV | Multi-curve graph, swaptions, CMS spreads, Bermudans | P1, 2.1, 3.7 |

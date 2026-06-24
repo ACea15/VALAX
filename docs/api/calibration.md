@@ -44,6 +44,61 @@ fitted_model, solution = calibrate_heston(
 
 The `pricing_fn` must have signature `(model, strike, spot, rate, dividend, expiry) -> price`.
 
+## `calibrate_slv_leverage`
+
+Pass-2 calibration of the SLV leverage function $L(k, t)$ via Markovian projection of the SLV SDE onto Dupire local volatility. The conditional expectation $\mathbb{E}[V_t \mid k_t = k]$ is estimated from a simulated particle swarm; the calibrated $L$ satisfies $L^2(k, t)\,\mathbb{E}[V_t \mid k_t = k] = \sigma_{\mathrm{Dupire}}^2(k, t)$ by construction. See [theory §4.5](../theory.md#45-stochastic-local-volatility) and the [SLV guide](../guide/slv.md) for the mathematics.
+
+```python
+from valax.calibration import calibrate_slv_leverage
+
+leverage = calibrate_slv_leverage(
+    heston:              HestonModel,                # pass-1 calibrated Heston
+    surface,                                          # any total_variance(k,T) surface
+    spot:                Float[Array, ""],
+    log_moneyness_grid:  Float[Array, "n_k"],        # sorted, ascending
+    time_grid:           Float[Array, "n_t"],        # sorted, ascending (> 0)
+    n_paths:             int,
+    key:                 jax.Array,
+    *,
+    method:              Literal["particle", "kernel"] = "particle",
+    n_iterations:        int = 1,                    # outer fixed-point iterations
+    bandwidth:           float | Callable | None = None,   # default: Silverman per slice
+    ridge:               float = 1e-3,               # used only for method="kernel"
+    L_max:               float = 5.0,
+    L_min:               float = 0.05,
+) -> LeverageGrid
+```
+
+`method="particle"` uses pure Nadaraya-Watson; `method="kernel"` adds a Tikhonov ridge that biases the estimator toward the empirical particle mean in low-density regions (smoother tails, mildly biased centre). `n_iterations=1` recovers the classical one-shot Guyon-Henry-Labordère (2012) particle method; `n_iterations ≥ 2` re-simulates the swarm under the previous-iteration leverage and rebuilds the grid for tighter self-consistency.
+
+## `calibrate_slv`
+
+End-to-end two-pass SLV calibration. Wraps `calibrate_heston` (Pass 1) and `calibrate_slv_leverage` (Pass 2) into one call returning a fully-built `SLVModel`.
+
+```python
+from valax.calibration import calibrate_slv
+
+slv_model = calibrate_slv(
+    # Pass 1 args (forwarded to calibrate_heston):
+    strikes:               Float[Array, " n"],
+    market_prices:         Float[Array, " n"],
+    spot, rate, dividend, expiry, pricing_fn,
+    # Pass 2 args (forwarded to calibrate_slv_leverage):
+    surface,
+    log_moneyness_grid, time_grid, n_paths, key,
+    *,
+    method:                Literal["particle", "kernel"] = "particle",
+    n_iterations:          int = 1,
+    bandwidth:             float | Callable | None = None,
+    ridge:                 float = 1e-3,
+    heston_initial_guess:  HestonModel | None = None,
+    heston_solver:         str = "levenberg_marquardt",
+    heston_max_steps:      int = 512,
+) -> SLVModel
+```
+
+See the [SLV guide](../guide/slv.md) for a worked end-to-end example and discussion of estimator choice / convergence behaviour.
+
 ## Transforms
 
 Reparametrization utilities for mapping constrained parameters to unconstrained space.

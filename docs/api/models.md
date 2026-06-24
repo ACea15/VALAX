@@ -105,6 +105,48 @@ model = LocalVolModel.from_flat_rate(
 - MC dispatcher recipes registered for `EuropeanOption`, `AsianOption`, `EquityBarrierOption`, `LookbackOption`, `VarianceSwap` — barrier is the canonical exotic where LV differs materially from BSM.
 - All surface parameters remain differentiable through the model — `jax.grad` of a LV MC price w.r.t. `model.surface.a_vec` gives a vector of per-slice variance-level sensitivities for free.
 
+## `SLVModel`
+
+Stochastic-Local Volatility — Heston stochastic vol times a calibrated leverage function `L(k, t)`, with the leverage chosen so that the SLV marginals reproduce a calibrated implied-vol surface by Markovian projection:
+
+$$\frac{dS_t}{S_t} = (r - q)\,dt + L(k_t, t)\,\sqrt{V_t}\,dW_1, \qquad dV_t = \kappa(\theta - V_t)\,dt + \xi\,\sqrt{V_t}\,dW_2, \qquad \langle dW_1, dW_2 \rangle = \rho\,dt,$$
+
+with `k_t = log(S_t / F(t))`. The leverage function is calibrated in pass 2 of the SLV calibration (see [`calibrate_slv_leverage`](calibration.md#calibrate_slv_leverage)). See [theory §4.5](../theory.md#45-stochastic-local-volatility) and the [SLV guide](../guide/slv.md) for the underlying mathematics and end-to-end recipe.
+
+```python
+from valax.models import SLVModel
+from valax.surfaces import LeverageGrid, SVIVolSurface
+
+model = SLVModel(
+    v0:       Float[Array, ""],       # Heston initial variance
+    kappa:    Float[Array, ""],       # mean-reversion speed
+    theta:    Float[Array, ""],       # long-run variance
+    xi:       Float[Array, ""],       # vol of vol
+    rho:      Float[Array, ""],       # spot/vol correlation
+    rate:     Float[Array, ""],       # risk-free rate
+    dividend: Float[Array, ""],       # continuous dividend yield
+    surface:  eqx.Module,             # implied-vol surface (duck-typed
+                                       # via total_variance(k, T))
+    leverage: LeverageGrid,           # calibrated leverage L(k, t)
+)
+
+# Convenience factory — copies the Heston block field-by-field, asserts
+# jax_enable_x64=True, and attaches the surface and calibrated leverage.
+model = SLVModel.from_heston_and_leverage(
+    heston:   HestonModel,            # pass-1 calibrated Heston
+    surface:  SVIVolSurface,          # the calibration target
+    leverage: LeverageGrid,           # pass-2 calibration output
+)
+```
+
+**Notes**
+
+- The path generator `generate_slv_paths` never queries the `surface` field — only `calibrate_slv_leverage` does. The surface is kept on the model so the leverage can be re-calibrated against the same target without external bookkeeping.
+- Requires `jax_enable_x64=True` (enforced at construction). `valax/__init__.py` enables x64 globally on import.
+- MC dispatcher recipes registered for `EuropeanOption`, `AsianOption`, `EquityBarrierOption`, `LookbackOption`, `VarianceSwap` — same set as LV-1. Forward `slv_scheme=` (`"midpoint_euler"` default, `"milstein"` opt-in) via `mc_price_dispatch`.
+- All fields are differentiable through the pytree. `jax.grad` w.r.t. `model.leverage.values` gives node-level leverage sensitivities; `jax.grad` w.r.t. `model.surface.a_vec` / `b_vec` / etc. flows through the (re)calibration if you wrap it.
+- See the [SLV guide](../guide/slv.md) for the two-pass calibration walkthrough and the [Limitations and known approximations](../guide/slv.md#limitations-and-known-approximations) section for the QE-coupling approximation and calibration-accuracy ceiling.
+
 ## `HullWhiteModel`
 
 Hull-White one-factor short-rate model (extended Vasicek):

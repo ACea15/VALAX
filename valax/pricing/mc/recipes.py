@@ -71,6 +71,7 @@ from valax.models.heston import HestonModel
 from valax.models.lmm import LMMModel
 from valax.models.local_vol import LocalVolModel
 from valax.models.multi_asset import MultiAssetGBMModel
+from valax.models.slv import SLVModel
 from valax.pricing.mc.bermudan import LSMConfig, bermudan_swaption_lsm
 from valax.pricing.mc.dispatch import (
     MCConfig,
@@ -82,6 +83,7 @@ from valax.pricing.mc.lmm_paths import generate_lmm_paths
 from valax.pricing.mc.local_vol_paths import generate_local_vol_paths
 from valax.pricing.mc.multi_asset_paths import generate_correlated_gbm_paths
 from valax.pricing.mc.paths import generate_gbm_paths, generate_heston_paths
+from valax.pricing.mc.slv_paths import generate_slv_paths
 from valax.pricing.mc.payoffs import (
     asian_option_payoff,
     equity_barrier_payoff,
@@ -111,6 +113,7 @@ def _equity_paths(
     key: jax.Array,
     *,
     lv_scheme: str = "midpoint_euler",
+    slv_scheme: str = "midpoint_euler",
 ) -> tuple[Float[Array, "n_paths n_steps_plus1"], Float[Array, ""]]:
     """Generate paths for a single-asset equity model and return (paths, rate).
 
@@ -121,11 +124,20 @@ def _equity_paths(
         lv_scheme: Forwarded to ``generate_local_vol_paths`` when ``model``
             is a ``LocalVolModel``. Ignored otherwise. See
             :func:`valax.pricing.mc.generate_local_vol_paths` for accepted
-            values. Default ``"milstein"``.
+            values. Default ``"midpoint_euler"``.
+        slv_scheme: Forwarded to ``generate_slv_paths`` when ``model``
+            is an ``SLVModel``. Ignored otherwise. See
+            :func:`valax.pricing.mc.generate_slv_paths` for accepted
+            values. Default ``"midpoint_euler"``.
     """
     if isinstance(model, HestonModel):
         paths, _ = generate_heston_paths(
             model, spot, T, config.n_steps, config.n_paths, key,
+        )
+    elif isinstance(model, SLVModel):
+        paths, _ = generate_slv_paths(
+            model, spot, T, config.n_steps, config.n_paths, key,
+            scheme=slv_scheme,
         )
     elif isinstance(model, LocalVolModel):
         paths = generate_local_vol_paths(
@@ -149,6 +161,7 @@ def _equity_recipe(
     spot: Float[Array, ""],
     *,
     lv_scheme: str = "midpoint_euler",
+    slv_scheme: str = "midpoint_euler",
 ) -> MCResult:
     """Generic equity MC recipe: paths → payoff → discount.
 
@@ -157,10 +170,14 @@ def _equity_recipe(
     Args:
         lv_scheme: Forwarded to ``_equity_paths`` (only consumed when
             ``model`` is a ``LocalVolModel``).
+        slv_scheme: Forwarded to ``_equity_paths`` (only consumed when
+            ``model`` is an ``SLVModel``).
     """
     T = instrument.expiry
     paths, rate = _equity_paths(
-        model, spot, T, config, key, lv_scheme=lv_scheme,
+        model, spot, T, config, key,
+        lv_scheme=lv_scheme,
+        slv_scheme=slv_scheme,
     )
     cashflows = payoff_fn(paths, instrument)
     df = jnp.exp(-rate * T)
@@ -218,6 +235,25 @@ def _european_localvol(
     )
 
 
+@register(EuropeanOption, SLVModel)
+def _european_slv(
+    *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
+) -> MCResult:
+    """European option under Stochastic-Local Volatility.
+
+    Required market args:
+        spot: Current spot price.
+
+    Optional market args:
+        slv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"`` —
+            see :func:`valax.pricing.mc.generate_slv_paths`.
+    """
+    return _equity_recipe(
+        european_payoff, instrument, model, config, key, spot,
+        slv_scheme=kwargs.get("slv_scheme", "midpoint_euler"),
+    )
+
+
 @register(AsianOption, BlackScholesModel)
 def _asian_bsm(
     *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
@@ -246,6 +282,21 @@ def _asian_localvol(
     return _equity_recipe(
         asian_option_payoff, instrument, model, config, key, spot,
         lv_scheme=kwargs.get("lv_scheme", "midpoint_euler"),
+    )
+
+
+@register(AsianOption, SLVModel)
+def _asian_slv(
+    *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
+) -> MCResult:
+    """Arithmetic/geometric Asian option under Stochastic-Local Volatility.
+
+    Optional market args:
+        slv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"``.
+    """
+    return _equity_recipe(
+        asian_option_payoff, instrument, model, config, key, spot,
+        slv_scheme=kwargs.get("slv_scheme", "midpoint_euler"),
     )
 
 
@@ -288,6 +339,27 @@ def _barrier_localvol(
     )
 
 
+@register(EquityBarrierOption, SLVModel)
+def _barrier_slv(
+    *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
+) -> MCResult:
+    """Knock-in/out equity barrier option under Stochastic-Local Volatility.
+
+    SLV is the workhorse model for barriers when both the smile *and*
+    the forward-skew dynamics matter (e.g., reverse knock-outs near
+    the barrier). For pure-vanilla repricing LV and SLV agree by
+    construction; the SLV/LV difference appears in path-dependent
+    payoffs.
+
+    Optional market args:
+        slv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"``.
+    """
+    return _equity_recipe(
+        equity_barrier_payoff, instrument, model, config, key, spot,
+        slv_scheme=kwargs.get("slv_scheme", "midpoint_euler"),
+    )
+
+
 @register(LookbackOption, BlackScholesModel)
 def _lookback_bsm(
     *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
@@ -316,6 +388,21 @@ def _lookback_localvol(
     return _equity_recipe(
         lookback_payoff, instrument, model, config, key, spot,
         lv_scheme=kwargs.get("lv_scheme", "midpoint_euler"),
+    )
+
+
+@register(LookbackOption, SLVModel)
+def _lookback_slv(
+    *, instrument, model, config, key, spot: Float[Array, ""], **kwargs,
+) -> MCResult:
+    """Floating- or fixed-strike lookback under Stochastic-Local Volatility.
+
+    Optional market args:
+        slv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"``.
+    """
+    return _equity_recipe(
+        lookback_payoff, instrument, model, config, key, spot,
+        slv_scheme=kwargs.get("slv_scheme", "midpoint_euler"),
     )
 
 
@@ -383,6 +470,36 @@ def _varswap_localvol(
     paths, rate = _equity_paths(
         model, spot, T, config, key,
         lv_scheme=kwargs.get("lv_scheme", "midpoint_euler"),
+    )
+    cashflows = variance_swap_payoff(paths, instrument, annual_factor)
+    df = jnp.exp(-rate * T)
+    price, stderr = discounted_mean_and_stderr(cashflows, df, config.n_paths)
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(VarianceSwap, SLVModel)
+def _varswap_slv(
+    *,
+    instrument,
+    model,
+    config,
+    key,
+    spot: Float[Array, ""],
+    annual_factor: Float[Array, ""] = jnp.array(252.0),
+    **kwargs,
+) -> MCResult:
+    """Variance swap under Stochastic-Local Volatility.
+
+    Realised variance is computed from path log-returns. By default the
+    observation frequency is taken to be ``annual_factor = 252`` (daily).
+
+    Optional market args:
+        slv_scheme: ``"midpoint_euler"`` (default) or ``"milstein"``.
+    """
+    T = instrument.expiry
+    paths, rate = _equity_paths(
+        model, spot, T, config, key,
+        slv_scheme=kwargs.get("slv_scheme", "midpoint_euler"),
     )
     cashflows = variance_swap_payoff(paths, instrument, annual_factor)
     df = jnp.exp(-rate * T)

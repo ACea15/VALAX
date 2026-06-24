@@ -30,5 +30,16 @@
     "sha256": "b94950609402fca90eef92b6342cce323bf121d70248ca440f9d9dd25fe82ca1",
     "shape": [],
     "version": 1
+  },
+  "slv_mc_canonical": {
+    "dtype": "float64",
+    "jax_version": "0.9.2",
+    "library_version": "0.1.0",
+    "master_seed": -1,
+    "sha256": "6dfa99e8d104dee45bc09ebf81ab3d7e4b8002b91c6805662168cfe35f8bfe63",
+    "shape": [
+      2
+    ],
+    "version": 1
   }
 }
