@@ -1,6 +1,6 @@
 # VALAX
 
-A quantitative finance valuation engine built entirely on [JAX](https://github.com/jax-ml/jax).
+A quantitative finance valuation and risk engine built entirely on [JAX](https://github.com/jax-ml/jax).
 
 VALAX takes a functional approach to derivatives pricing: instruments are data-only pytrees, pricing is done by pure functions, and Greeks come from automatic differentiation — not finite differences.
 

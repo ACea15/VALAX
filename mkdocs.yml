@@ -70,6 +70,7 @@ nav:
       - Volatility Surfaces: guide/vol-surfaces.md
       - Stochastic-Local Volatility: guide/slv.md
       - Risk & Scenarios: guide/risk.md
+      - "PCA Curve Shocks (Rates)": guide/pca-rates.md
       - Synthetic Market Data: guide/synthetic_market.md
       - Reproducibility & Arbitrage Tests: guide/reproducibility_and_arbitrage_tests.md
   - API Reference:

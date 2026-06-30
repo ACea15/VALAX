@@ -398,6 +398,17 @@ pca_jacobian(returns, n_components, center=True) -> (J, eigvals, frac_explained)
 
 `tenor_bucket_map` with `weight="indicator"` produces the standard FRTB / SIMM nearest-vertex bucketing; with `weight="linear"` it gives a smooth piecewise-linear re-binning. `equal_weight_bucket_map` is the canonical "one-of-N" sector / currency / rating assignment. `level_slope_curvature_jacobian` produces a fixed 3-column Jacobian; `pca_jacobian` produces a data-driven one with orthonormal columns, sorted by decreasing eigenvalue.
 
+### Rates-PCA workflow
+
+```python
+fit_rates_pca(returns, pillar_times, n_components=3,
+              center=True, sign_convention="positive_level") -> RatesFactorModel
+zero_rate_returns_from_snapshots(curves, query_dates) -> Float[Array, "n_obs n_pillars"]
+pca_curve_shock(curve, jacobian, pc_scores) -> DiscountCurve
+```
+
+`RatesFactorModel` is the typed end-to-end wrapper over `pca_jacobian` for yield-curve risk: it carries `pillar_times`, `jacobian`, `eigenvalues`, and `fraction_explained`, and exposes `shock_curve(curve, scores)` and `scenario(scores, n_assets)` methods that plug straight into `apply_scenario` / `pnl_attribution`. `zero_rate_returns_from_snapshots` builds the input matrix from a stack of `DiscountCurve` snapshots. `pca_curve_shock` is the underlying single-call shock primitive — `model.shock_curve` is a thin wrapper around it. See the [PCA Curve Shocks guide](../guide/pca-rates.md) for the end-to-end pattern.
+
 ### `bucket_sensitivity_ladder`
 
 ```python

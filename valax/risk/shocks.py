@@ -7,7 +7,7 @@ repricing gives sensitivities to the shock magnitudes themselves.
 The module groups primitives by factor category:
 
 - **IR (single curve)**: ``bump_curve_zero_rates``, ``parallel_shift``,
-  ``key_rate_bump``.
+  ``key_rate_bump``, ``pca_curve_shock``.
 - **IR (multi-curve)**: ``bump_discount_curve``, ``bump_forward_curve``,
   ``parallel_basis_shift``.
 - **Credit**: ``bump_hazard_rates``, ``parallel_credit_spread_shift``,
@@ -80,6 +80,41 @@ def key_rate_bump(
     n = curve.pillar_dates.shape[0]
     bumps = jnp.zeros(n).at[pillar_index].set(bump)
     return bump_curve_zero_rates(curve, bumps)
+
+
+def pca_curve_shock(
+    curve: DiscountCurve,
+    jacobian: Float[Array, "n_pillars n_components"],
+    pc_scores: Float[Array, " n_components"],
+) -> DiscountCurve:
+    """Apply a PCA factor-score shock to a discount curve.
+
+    Reconstructs per-pillar zero-rate bumps as ``J @ pc_scores`` and
+    forwards to :func:`bump_curve_zero_rates`.  ``jacobian`` is the
+    orthonormal loading matrix returned by
+    :func:`valax.risk.bucketing.pca_jacobian` (column ``k`` = the
+    ``k``-th principal component); ``pc_scores`` is the score vector
+    in component space — e.g. ``jnp.array([1.0, 0.0, 0.0])`` for a
+    one-sigma move along PC1 once the scores are pre-multiplied by
+    ``sqrt(eigenvalues)``.
+
+    The ``jacobian.shape[0]`` and ``curve.pillar_dates.shape[0]`` must
+    match; the linear algebra does not check this.
+
+    For the typed end-to-end workflow that builds the Jacobian, packages
+    its diagnostics, and integrates with :class:`~valax.market.scenario.MarketScenario`,
+    see :class:`valax.curves.factors.RatesFactorModel`.
+
+    Args:
+        curve: Base discount curve.
+        jacobian: ``(n_pillars, n_components)`` loading matrix.
+        pc_scores: Length-``n_components`` PC-score vector.
+
+    Returns:
+        A new shocked :class:`DiscountCurve`.
+    """
+    rate_shocks = jacobian @ pc_scores
+    return bump_curve_zero_rates(curve, rate_shocks)
 
 
 # ── Full scenario application ────────────────────────────────────────

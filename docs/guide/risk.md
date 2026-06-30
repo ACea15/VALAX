@@ -342,7 +342,7 @@ A real bank VaR system tracks thousands to tens of thousands of risk factors. Th
 
 Nobody runs VaR on 10,000 raw factors with a full covariance matrix — it would be rank-deficient (you rarely have 10,000 independent daily observations). Industry uses dimensionality reduction:
 
-- **PCA on yield curves.** The first 3 principal components (level, slope, curvature) explain ~95-99% of yield curve variance. Instead of shocking 20 pillar rates independently, shock 3-5 PC scores and reconstruct pillar moves. This is both more stable and more interpretable.
+- **PCA on yield curves.** The first 3 principal components (level, slope, curvature) explain ~95-99% of yield curve variance. Instead of shocking 20 pillar rates independently, shock 3-5 PC scores and reconstruct pillar moves. This is both more stable and more interpretable. See the [PCA Curve Shocks guide](pca-rates.md) for the end-to-end VALAX workflow.
 - **Factor models for equities.** Decompose returns into systematic factors (market, sector, style) plus idiosyncratic. Shock the systematic factors jointly, add independent idiosyncratic noise. This is the Barra/Axioma approach.
 - **Filtered historical simulation.** Weight recent observations more heavily (EWMA), or fit a GARCH model to each factor and standardize returns before drawing scenarios. This captures volatility clustering without inflating the factor count.
 

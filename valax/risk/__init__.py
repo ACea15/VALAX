@@ -15,6 +15,7 @@ from valax.risk.shocks import (
     bump_curve_zero_rates,
     parallel_shift,
     key_rate_bump,
+    pca_curve_shock,
     # Multi-curve basis shocks
     bump_discount_curve,
     bump_forward_curve,
@@ -80,4 +81,9 @@ from valax.risk.bucketing import (
     level_slope_curvature_jacobian,
     pca_jacobian,
     bucket_sensitivity_ladder,
+)
+from valax.risk.factors import (
+    RatesFactorModel,
+    fit_rates_pca,
+    zero_rate_returns_from_snapshots,
 )
