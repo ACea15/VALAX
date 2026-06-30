@@ -30,14 +30,13 @@ forward terms:
   where ``V`` is the option premium in domestic terms.  Used when
   the premium is paid in foreign currency (the norm for most EM pairs).
 
-References
-----------
-- Garman, M. and Kohlhagen, S. (1983). "Foreign currency option values."
-  *Journal of International Money and Finance*.
-- Clark, I. (2011). *Foreign Exchange Option Pricing: A Practitioner's
-  Guide*. Wiley.
-- Reiswich, D. and Wystup, U. (2010). "FX Volatility Smile Construction."
-  *Wilmott*.
+References:
+    - Garman, M. and Kohlhagen, S. (1983). "Foreign currency option
+      values." *Journal of International Money and Finance*.
+    - Clark, I. (2011). *Foreign Exchange Option Pricing: A
+      Practitioner's Guide*. Wiley.
+    - Reiswich, D. and Wystup, U. (2010). "FX Volatility Smile
+      Construction." *Wilmott*.
 """
 
 import jax

@@ -11,12 +11,13 @@ are more expensive due to skew.  The BSM formulas here provide the
 constant-vol baseline; smile-consistent pricing requires numerical
 integration over the vol surface (not yet implemented).
 
-References
-----------
-- Demeterfi, K. et al. (1999). "More Than You Ever Wanted to Know About
-  Volatility Swaps." Goldman Sachs Quantitative Strategies Research Notes.
-- Carr, P. and Madan, D. (1998). "Towards a Theory of Volatility Trading."
-  *Volatility: New Estimation Techniques for Pricing Derivatives*, Risk Books.
+References:
+    - Demeterfi, K. et al. (1999). "More Than You Ever Wanted to Know
+      About Volatility Swaps." Goldman Sachs Quantitative Strategies
+      Research Notes.
+    - Carr, P. and Madan, D. (1998). "Towards a Theory of Volatility
+      Trading." *Volatility: New Estimation Techniques for Pricing
+      Derivatives*, Risk Books.
 """
 
 import jax.numpy as jnp

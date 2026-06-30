@@ -54,13 +54,11 @@ empirical ``k`` standard deviation at each time slice,
 Pass an explicit ``bandwidth=`` scalar (or callable
 ``bandwidth(t_i, k_particles) -> h``) to override.
 
-References
-----------
-
-* Guyon, J., & Henry-Labordère, P. (2012). "Being Particular About
-  Calibration." Risk, January.
-* Henry-Labordère, P. (2009). Analysis, Geometry, and Modeling in
-  Finance. CRC. (Ch. 12 on SLV.)
+References:
+    - Guyon, J., & Henry-Labordère, P. (2012). "Being Particular About
+      Calibration." Risk, January.
+    - Henry-Labordère, P. (2009). Analysis, Geometry, and Modeling in
+      Finance. CRC. (Ch. 12 on SLV.)
 """
 
 from __future__ import annotations

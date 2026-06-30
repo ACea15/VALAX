@@ -13,11 +13,10 @@ process spends time near the absorbing boundary — i.e. when Feller's
 condition ``2·kappa·theta > xi²`` is violated, which is the common
 case for single-expiry SABR-style calibrations of Heston.
 
-Reference
----------
-Andersen, L. (2008). "Simple and Efficient Simulation of the Heston
-Stochastic Volatility Model." Journal of Computational Finance, 11(3),
-pp. 1–42.
+References:
+    Andersen, L. (2008). "Simple and Efficient Simulation of the Heston
+    Stochastic Volatility Model." Journal of Computational Finance,
+    11(3), pp. 1–42.
 """
 
 import jax
@@ -89,34 +88,29 @@ def generate_heston_paths(
     condition is violated, which is the regime the previous Euler-with-
     reflection scheme had ``O(1/sqrt(n_steps))`` bias in.
 
-    Parameters
-    ----------
-    model : HestonModel
-        Carries ``v0, kappa, theta, xi, rho, rate, dividend``.
-    spot : Float[Array, ""]
-        Initial spot ``S_0``.
-    T : float
-        Horizon in years (the same time unit as ``model.rate``).
-    n_steps : int
-        Number of discretisation steps. The QE scheme is exact in
-        distribution for the variance at each step, but the log-spot
-        update is only conditionally Gaussian, so a moderate
-        ``n_steps`` (e.g. 50–100 per year) is still recommended.
-    n_paths : int
-        Number of independent paths.
-    key : jax.Array
-        PRNGKey driving all three Gaussian / uniform draws per step.
+    Args:
+        model: Heston model carrying ``v0, kappa, theta, xi, rho, rate,
+            dividend``.
+        spot: Initial spot ``S_0``.
+        T: Horizon in years (the same time unit as ``model.rate``).
+        n_steps: Number of discretisation steps. The QE scheme is exact
+            in distribution for the variance at each step, but the
+            log-spot update is only conditionally Gaussian, so a
+            moderate ``n_steps`` (e.g. 50–100 per year) is still
+            recommended.
+        n_paths: Number of independent paths.
+        key: PRNGKey driving all three Gaussian / uniform draws per
+            step.
 
-    Returns
-    -------
-    spot_paths, var_paths : tuple of shape ``(n_paths, n_steps+1)`` each.
-        Include the initial state at column 0.
+    Returns:
+        Tuple ``(spot_paths, var_paths)``, each of shape
+        ``(n_paths, n_steps+1)`` and including the initial state at
+        column 0.
 
-    Reference
-    ---------
-    Andersen, L. (2008). "Simple and Efficient Simulation of the Heston
-    Stochastic Volatility Model." Journal of Computational Finance,
-    11(3), pp. 1–42.
+    References:
+        Andersen, L. (2008). "Simple and Efficient Simulation of the
+        Heston Stochastic Volatility Model." Journal of Computational
+        Finance, 11(3), pp. 1–42.
     """
     # ── Tunable scheme constants (set to Andersen's recommended defaults).
     psi_c = 1.5
