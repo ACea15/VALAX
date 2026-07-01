@@ -35,13 +35,10 @@ from jaxtyping import Float, Int
 from jax import Array
 
 from valax.curves.discount import DiscountCurve
-from valax.curves.fixings import FixingHistory, empty_fixing_history
-from valax.curves.graph import CurveGraph
+from valax.curves.fixings import FixingHistory
+from valax.curves.graph import _DEFAULT_CURVE_ID
 from valax.curves.instruments import DepositRate, FRA, SwapRate
 from valax.dates.daycounts import year_fraction
-
-
-_DEFAULT_CURVE_ID = "_default_"
 
 
 # ── Sequential bootstrap ─────────────────────────────────────────────
@@ -219,19 +216,22 @@ def bootstrap_simultaneous(
 ) -> DiscountCurve:
     """Build a discount curve by solving all pillar DFs simultaneously.
 
-    Uses ``optimistix.root_find`` to find the log-DFs that make every
-    instrument reprice to par.  The system must be square: one
-    instrument per pillar.
+    Since MC-Curves-2, this is a thin wrapper over
+    :func:`valax.curves.bootstrap_graph.bootstrap_curve_graph` — the
+    one-curve degenerate case of the joint multi-curve solver.  The
+    public signature is preserved for backwards compatibility; new
+    code should call the joint solver directly.
 
     Working in log-DF space guarantees positive discount factors
-    throughout the iteration and matches the log-linear interpolation
-    of :class:`DiscountCurve`.
+    throughout the Newton iteration and matches the log-linear
+    interpolation of :class:`DiscountCurve`.
 
     Each instrument is asked for its residual via the
     :class:`BootstrapInstrument` protocol — the solver is agnostic to
-    instrument type.  New instrument types only need to implement
-    ``residual(graph, fixings, ref_date)``; no edits to this file are
-    required.
+    instrument type.  Instruments using the sentinel curve identifier
+    ``"_default_"`` (the default for the classic
+    :class:`DepositRate`/:class:`FRA`/:class:`SwapRate` quote types)
+    are routed correctly without any user-visible change.
 
     Args:
         reference_date: Valuation date (ordinal).
@@ -252,6 +252,11 @@ def bootstrap_simultaneous(
         A :class:`DiscountCurve` with the specified pillars plus
         ``DF = 1`` at the reference date.
     """
+    # Deferred import breaks a would-be cycle
+    # (bootstrap_graph → bootstrap_proto → graph → discount → daycounts).
+    from valax.curves.bootstrap_graph import bootstrap_curve_graph
+    from valax.curves.graph import CurveSpec
+
     n = pillar_dates.shape[0]
     if len(instruments) != n:
         raise ValueError(
@@ -259,58 +264,28 @@ def bootstrap_simultaneous(
             f"instruments for {n} pillars."
         )
 
-    if fixings is None:
-        fixings = empty_fixing_history()
+    ref_i32 = jnp.asarray(reference_date, dtype=jnp.int32)
+    pillars_i32 = jnp.asarray(pillar_dates, dtype=jnp.int32)
 
-    if initial_guess is None:
-        pillar_times = year_fraction(reference_date, pillar_dates, day_count)
-        initial_guess = -0.04 * pillar_times  # log-DF for ~4% flat
-
-    if solver is None:
-        solver = optx.Newton(rtol=1e-10, atol=1e-10)
-
-    def residual_fn(log_dfs, args):
-        ref, pillars, instruments_inner, dc, fixings_inner = args
-        all_dates = jnp.concatenate([ref[None], pillars])
-        all_dfs = jnp.concatenate([jnp.ones(1), jnp.exp(log_dfs)])
-        curve = DiscountCurve(
-            pillar_dates=all_dates.astype(jnp.int32),
-            discount_factors=all_dfs,
-            reference_date=ref.astype(jnp.int32),
-            day_count=dc,
-        )
-        # Single-curve bootstrap: wrap the in-progress curve in a graph
-        # keyed by the sentinel id that the classic instrument types
-        # default to.  Multi-curve users (MC-Curves-2+) drive the joint
-        # solver directly and never enter this path.
-        graph = CurveGraph(curves={_DEFAULT_CURVE_ID: curve})
-        ref_int = ref.astype(jnp.int32)
-        return jnp.stack(
-            [
-                inst.residual(graph, fixings_inner, ref_int)
-                for inst in instruments_inner
-            ]
-        )
-
-    args = (
-        jnp.asarray(reference_date, dtype=jnp.float64),
-        jnp.asarray(pillar_dates, dtype=jnp.float64),
-        instruments,
-        day_count,
-        fixings,
-    )
-
-    sol = optx.root_find(
-        residual_fn, solver, initial_guess, args=args, max_steps=max_steps,
-    )
-
-    log_dfs = sol.value
-    all_dates = jnp.concatenate([reference_date[None], pillar_dates])
-    all_dfs = jnp.concatenate([jnp.ones(1), jnp.exp(log_dfs)])
-
-    return DiscountCurve(
-        pillar_dates=all_dates.astype(jnp.int32),
-        discount_factors=all_dfs,
-        reference_date=jnp.asarray(reference_date, dtype=jnp.int32),
+    spec = CurveSpec(
+        curve_id=_DEFAULT_CURVE_ID,
+        currency="XXX",  # unused for the sentinel curve; XXX = no currency
+        pillar_dates=pillars_i32,
+        interp="log_linear_df",
         day_count=day_count,
     )
+
+    init: dict | None = None
+    if initial_guess is not None:
+        init = {_DEFAULT_CURVE_ID: jnp.asarray(initial_guess)}
+
+    graph, _ = bootstrap_curve_graph(
+        ref_i32,
+        [spec],
+        instruments,
+        fixings=fixings,
+        solver=solver,
+        initial_guess=init,
+        max_steps=max_steps,
+    )
+    return graph[_DEFAULT_CURVE_ID]

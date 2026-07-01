@@ -6,7 +6,21 @@ forward rate projection.
 
 The dual-curve bootstrap first builds the OIS discount curve, then
 bootstraps each forward curve using the OIS curve for discounting.
+
+.. deprecated:: MC-Curves-2
+    :func:`bootstrap_multi_curve` and :class:`MultiCurveSet` are
+    superseded by
+    :func:`valax.curves.bootstrap_graph.bootstrap_curve_graph` and
+    :class:`~valax.curves.graph.CurveGraph`.  The joint solver handles
+    every quote type (tenor-basis, cross-currency, futures, …) that
+    the sequential dual-curve pipeline cannot.  A ``DeprecationWarning``
+    is emitted on every call.  The internals of this module are kept
+    intact for the deprecation cycle so existing user code and tests
+    continue to work; a hard removal is scheduled for a future minor
+    release once callers have migrated.
 """
+
+import warnings
 
 import jax.numpy as jnp
 import equinox as eqx
@@ -67,7 +81,22 @@ def bootstrap_multi_curve(
 
     Returns:
         A ``MultiCurveSet`` with the discount curve and all forward curves.
+
+    .. deprecated:: MC-Curves-2
+        Use :func:`valax.curves.bootstrap_graph.bootstrap_curve_graph`
+        instead.  The joint solver handles tenor-basis, futures,
+        cross-currency, and every other quote type from MC-Curves-1;
+        this sequential dual-curve wrapper cannot.
     """
+    warnings.warn(
+        "bootstrap_multi_curve is deprecated (MC-Curves-2): use "
+        "valax.curves.bootstrap_curve_graph for multi-curve builds. "
+        "The joint solver handles tenor-basis, futures, cross-currency, "
+        "and every other quote type this sequential wrapper cannot.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     # Step 1: Build OIS discount curve (sequential — straightforward)
     discount_curve = bootstrap_sequential(
         reference_date, discount_instruments, day_count,

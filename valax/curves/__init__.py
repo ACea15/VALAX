@@ -15,6 +15,11 @@ from valax.curves.instruments import (
     TurnInstrument,
 )
 from valax.curves.bootstrap import bootstrap_sequential, bootstrap_simultaneous
+from valax.curves.bootstrap_graph import (
+    CurveBuildDiagnostics,
+    bootstrap_curve_graph,
+    quote_jacobian,
+)
 from valax.curves.multi_curve import MultiCurveSet, bootstrap_multi_curve
 from valax.curves.inflation import (
     InflationCurve,
@@ -36,7 +41,7 @@ from valax.curves.fixings import (
     FixingHistory,
     empty_fixing_history,
 )
-from valax.curves.graph import CurveGraph
+from valax.curves.graph import CurveGraph, CurveSpec
 from valax.curves.bootstrap_proto import BootstrapInstrument
 from valax.curves.convexity import (
     ConvexityAdjFn,

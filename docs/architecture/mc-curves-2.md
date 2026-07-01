@@ -1,16 +1,71 @@
-# MC-Curves-2 — Joint Multi-Curve Solver (Next Session Handoff)
+# MC-Curves-2 — Joint Multi-Curve Solver (Session Handoff — Shipped)
 
-> **Status:** Queued — ready to start.
+> **Status:** ✅ **Shipped.**  See close-out below.
 > **Predecessor:** [MC-Curves-1](production.md#mc-curves-1-bootstrap-instrument-expansion)
 > shipped (commits `9607392` → `d6c98f7`).
-> **Estimated effort:** ~2 weeks.
-> **Reading time before starting:** ~30 min.
+> **Successor:** MC-Curves-3 (diagnostics, alternative interpolation,
+> CSA, HW convexity) — see [`production.md` §11.7, §11.11](production.md#117-interpolation-variants).
 
-This document is a **session-handoff note** — a self-contained briefing
-that lets the next session resume MC-Curves-2 without re-deriving
-context from scratch. It is not part of the architecture canon
-(`production.md` §11 is); it is a working artefact that becomes
-obsolete the moment MC-Curves-2 lands.
+## Close-out (MC-Curves-2 shipped)
+
+Resolved design questions (see §3 below for original text):
+
+* **Q8 (curve-id alphabet)** — Locked as
+  `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]`, enforced by
+  `valax.curves.graph._CURVE_ID_RE` on every `CurveSpec` (sentinel
+  `_default_` grandfathered).
+* **Q10 (single-curve bootstrap retention)** — `bootstrap_sequential`
+  kept as pedagogy; `bootstrap_simultaneous` migrated to a thin
+  wrapper over `bootstrap_curve_graph` with a synthetic
+  `CurveSpec(curve_id="_default_")`.
+* **Q11 (interpolation)** — `CurveSpec.interp = "log_linear_df"` is
+  the only supported mode in MC-Curves-2; monotone-convex / tension /
+  linear-zero variants deferred to MC-Curves-3.
+
+Shipped deliverables (see §4 task table below):
+
+* Task 1 — `CurveSpec` in `valax/curves/graph.py`.
+* Task 2 — `bootstrap_curve_graph` + `CurveBuildDiagnostics` in
+  `valax/curves/bootstrap_graph.py`.
+* Task 3 — `quote_jacobian` in the same module.
+* Task 4 — `bootstrap_simultaneous` migrated to the joint solver;
+  `bootstrap_multi_curve` emits `DeprecationWarning` (its internals
+  are retained for the deprecation cycle; full removal deferred to
+  MC-Curves-2b since the old sequential dual-curve interpretation of
+  `SwapRate` does not compose cleanly with the classic single-curve
+  residual).
+* Task 5 — Tests: `tests/test_curves/test_bootstrap_graph.py`
+  (single-curve degeneracy, dual-curve OIS+3M, three-curve
+  tenor-basis, four-curve EUR/USD via CCBS, gradient flow through
+  ImplicitAdjoint, validation errors), and
+  `tests/test_curves/test_quote_jacobian.py` (FD vs autodiff, shape,
+  by-switch chain-rule consistency).
+* Task 6 — Docs: `docs/guide/curves.md` §5 rewritten around the joint
+  solver; `docs/api/curves.md` gains a Joint Solver section covering
+  `CurveSpec`, `bootstrap_curve_graph`, `CurveBuildDiagnostics`, and
+  `quote_jacobian`; `docs/roadmap.md` §1.1 ticks joint-solver,
+  basis-curve, and cross-currency items; `docs/architecture/production.md`
+  §11.3 freezes the curve-id alphabet.
+
+Follow-ups (queued):
+
+* **MC-Curves-2b** — Rewrite `bootstrap_multi_curve` internals over
+  the joint solver (semantic-preserving migration of the dual-curve
+  `SwapRate` interpretation) and remove the legacy code path.
+* **MC-Curves-3** — Extended diagnostics, monotone-convex
+  interpolation, Hull-White futures convexity, CSA / collateralised
+  discounting, business-day calendars.
+
+The remainder of this document is preserved verbatim as the original
+handoff note.
+
+---
+
+This document was originally a **session-handoff note** — a
+self-contained briefing that lets the next session resume MC-Curves-2
+without re-deriving context from scratch. It is not part of the
+architecture canon (`production.md` §11 is); it is a working artefact
+kept for historical context now that MC-Curves-2 has shipped.
 
 ---
 

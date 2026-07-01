@@ -808,7 +808,46 @@ of this document. They form a parallel workstream, planned in §13 as
 
 The current `MultiCurveSet` is a fixed two-tier shape:
 `discount_curve + forward_curves: dict[str, DiscountCurve]`. We
-replace it with an open **curve graph** keyed by identifier:
+replace it with an open **curve graph** keyed by identifier.
+
+#### Curve-id alphabet (frozen, MC-Curves-2)
+
+The curve identifier alphabet is the specialisation of §3.1 to
+interest-rate curves and is **locked** as of MC-Curves-2:
+
+```
+<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]
+```
+
+* `CCY` — ISO 4217 currency code, three uppercase letters
+  (`USD`, `EUR`, `GBP`, `JPY`, `CHF`, `AUD`, `CAD`, `NZD`, ...).
+* `INDEX` — reference index name, uppercase alphanumerics and
+  underscore (`SOFR`, `ESTR`, `EURIBOR`, `SONIA`, `TONA`, `LIBOR`, ...).
+* `TENOR` — either the literal `OIS` (denoting the overnight-index
+  discount role) or a numeric tenor label (`1M`, `3M`, `6M`, `12M`).
+* `QUALIFIER` — optional free-form ASCII (`FIXINGS`, `CLEAN`, ...) for
+  auxiliary artefacts (fixings histories, cleaned variants).
+
+The regex enforced in code (`valax.curves.graph._CURVE_ID_RE`) is:
+
+```
+^[A-Z]{3}\.[A-Z][A-Z0-9_]*\.(OIS|\d+[DWMY])(\.[A-Za-z0-9_]+)?$
+```
+
+with an additional grandfathered exception for the sentinel
+identifier `_default_`, which the pre-MC-Curves-2 single-curve
+bootstrap path emits.
+
+Partitioning contract (used by the workflow layer):
+
+* `TENOR == "OIS"` → discount-curve role (`MarketState.discount_curves`).
+* `TENOR` in the tenor set → forward-projection-curve role
+  (`MarketState.forward_curves`).
+
+This partitioning is the *only* semantic rule attached to the
+alphabet; every other layer treats identifiers as opaque strings.
+
+
 
 ```python
 # valax/curves/graph.py  (NEW)

@@ -871,16 +871,21 @@ These are foundational pieces that block almost everything else. They should be 
 
 - [x] **Sequential bootstrap** from deposits, FRAs, and par swap rates — analytic solve per pillar
 - [x] **Simultaneous bootstrap** via `optimistix.root_find` (Newton) in log-DF space — handles overlapping instruments
-- [x] **Multi-curve framework** — `MultiCurveSet` with OIS discount curve + tenor-specific forward curves, dual-curve swap bootstrap
+- [x] **Multi-curve framework** — `MultiCurveSet` with OIS discount curve + tenor-specific forward curves, dual-curve swap bootstrap (**deprecated in MC-Curves-2**; superseded by `bootstrap_curve_graph`)
+- [x] **Joint multi-curve Newton solver** (MC-Curves-2) — `bootstrap_curve_graph` over an arbitrary `CurveGraph`, plus `CurveSpec`, `CurveBuildDiagnostics`, and the implicit-adjoint `quote_jacobian` helper
+- [x] **Basis curve** support (e.g., 1M vs 3M SOFR basis) — via `TenorBasisSwap` inside the joint solver
+- [x] **Cross-currency graph** — `CrossCurrencyBasisSwap` + `FXForward` inside the joint solver (EUR-USD four-curve build verified)
 - [x] **Jacobian of discount factors w.r.t. input rates** via autodiff (free with JAX, verified in tests)
-- [ ] **Basis curve** support (e.g., 1M vs 3M SOFR basis)
-- [ ] **Turn-of-year effects** and stub handling
+- [ ] **Turn-of-year effects** and stub handling (`TurnInstrument` quote type shipped; genuine step-function interpolation deferred to MC-Curves-3)
+- [ ] **Alternative interpolation modes** on `CurveSpec.interp` — linear-zero, monotone-convex (Hagan-West), tension spline (MC-Curves-3)
+- [ ] **Hull-White futures convexity** (`hull_white_convexity_adj`) — plug-in framework in place, closed-form factory pending
+- [ ] **CSA / collateralised discounting** and FX-implied foreign-currency-collateralised discount curves
 
 **Why:** Every rates product needs proper forward curves. Manual pillar specification doesn't scale.
 
 **Approach:** Root-finding via `optimistix.root_find` on the system of bootstrapping equations. Each instrument (deposit, swap) provides one equation. The curve is a pytree — autodiff gives the Jacobian for free.
 
-**Status:** Core bootstrapping implemented in `valax/curves/bootstrap.py` and `valax/curves/multi_curve.py`. Bootstrap instrument pytrees (`DepositRate`, `FRA`, `SwapRate`) in `valax/curves/instruments.py`. Both sequential and simultaneous methods produce `DiscountCurve` objects compatible with all existing pricing functions. Dual-curve bootstrap supports OIS discounting with separate forward projection curves.
+**Status:** MC-Curves-2 shipped — the joint multi-curve Newton solver `valax.curves.bootstrap_curve_graph` and its declarative `CurveSpec` interface live in `valax/curves/bootstrap_graph.py`. Eleven quote-type pytrees (`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`, `IborSwapRate`, `MoneyMarketFuture`, `TenorBasisSwap`, `FXForward`, `FXSwap`, `CrossCurrencyBasisSwap`, `TurnInstrument`) live in `valax/curves/instruments.py`. Tenor-basis and cross-currency joint solves are verified end-to-end in `tests/test_curves/test_bootstrap_graph.py`. The pre-MC-Curves-2 sequential `bootstrap_multi_curve` is retained for one deprecation cycle. `quote_jacobian` exposes the implicit-adjoint quote-sensitivity Jacobian.
 
 ### 1.2 Volatility Surface Construction
 

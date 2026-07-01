@@ -139,7 +139,93 @@ A flat, identifier-keyed registry of discount curves. Lookup via `graph[curve_id
 membership via `curve_id in graph`. JAX-pytree native — `jax.tree_util` traverses
 the dict values; string keys are static metadata. Single-curve callers use
 the sentinel id `"_default_"`; multi-curve callers use semantic identifiers
-like `"USD.SOFR.OIS"`, `"EUR.EURIBOR.6M"`.
+like `"USD.SOFR.OIS"`, `"EUR.EURIBOR.6M"` (see [`CurveSpec`](#curvespec)).
+
+### `CurveSpec`
+
+Static, declarative description of one curve to be bootstrapped by
+[`bootstrap_curve_graph`](#bootstrap_curve_graph).
+
+```python
+class CurveSpec(eqx.Module):
+    curve_id:     str                       # static; e.g. "USD.SOFR.OIS"
+    currency:     str                       # static; e.g. "USD"
+    pillar_dates: Int[Array, " n"]
+    interp:       str = "log_linear_df"     # static
+    day_count:    str = "act_365"           # static
+```
+
+`curve_id` is validated on construction against the frozen alphabet
+`<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]` (see
+[`production.md` §11.3](../architecture/production.md#113-curve-graph-data-model));
+the sentinel `"_default_"` is grandfathered for the single-curve
+`bootstrap_simultaneous` path. `interp` currently accepts only
+`"log_linear_df"`; monotone-convex and tension-spline variants are queued for
+MC-Curves-3.
+
+### `bootstrap_curve_graph`
+
+Joint multi-curve Newton solver — the central deliverable of MC-Curves-2.
+Concatenates the log-DFs of every curve in the graph into one state vector,
+zeros every instrument's residual simultaneously via `optimistix.Newton`, and
+supports `jax.grad` through the calibrated graph via
+`optimistix.ImplicitAdjoint`.
+
+```python
+def bootstrap_curve_graph(
+    reference_date: Int[Array, ""],
+    curve_specs:    Sequence[CurveSpec],
+    instruments:    Sequence[BootstrapInstrument],
+    *,
+    fixings:        FixingHistory | None = None,
+    solver:         optx.AbstractRootFinder | None = None,
+    initial_guess:  Mapping[str, Float[Array, " n"]] | None = None,
+    max_steps:      int = 256,
+) -> tuple[CurveGraph, CurveBuildDiagnostics]: ...
+```
+
+The residual system must be square: `len(instruments)` must equal the sum of
+`spec.pillar_dates.shape[0]` across all specs. Every instrument's
+`curves_touched` entries must reference a spec in `curve_specs`; otherwise
+`ValueError` is raised at build time.
+
+### `CurveBuildDiagnostics`
+
+```python
+class CurveBuildDiagnostics(eqx.Module):
+    residuals:        Float[Array, " n_instruments"]
+    max_abs_residual: Float[Array, ""]
+    n_steps:          Int[Array, ""]
+    converged:        bool
+```
+
+Minimal calibration report emitted alongside the calibrated `CurveGraph`.
+Extended (per-instrument fitted-vs-quoted table, Jacobian condition number,
+timing) in MC-Curves-3.
+
+### `quote_jacobian`
+
+Convenience wrapper around `jax.jacrev` over `bootstrap_curve_graph`:
+
+```python
+def quote_jacobian(
+    reference_date: Int[Array, ""],
+    curve_specs:    Sequence[CurveSpec],
+    instruments:    Sequence[BootstrapInstrument],
+    *,
+    by:             str = "log_df",       # "log_df" | "df" | "zero_rate"
+    fixings:        FixingHistory | None = None,
+    solver:         optx.AbstractRootFinder | None = None,
+    max_steps:      int = 256,
+) -> Float[Array, "n_pillars_total n_quotes"]: ...
+```
+
+Rows are laid out per curve in the order of `curve_specs`; within each curve,
+one row per pillar. Columns follow the order of `instruments`. Uses
+implicit-adjoint so the cost is one linear solve per column regardless of
+Newton iteration count. Each instrument must expose a `.rate` attribute (the
+classic quote types do); extended-quote coverage (`.spread`,
+`.futures_rate`, `.quoted_forward`) is a MC-Curves-3 refinement.
 
 ### `FixingSeries` / `FixingHistory`
 

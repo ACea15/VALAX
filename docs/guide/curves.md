@@ -238,73 +238,168 @@ here.
 Post-2008, single-curve discounting is dead. A EUR/USD fixed-income desk now
 runs:
 
-- **OIS discount curve** (SOFR for USD, €STR for EUR) — used to discount every cashflow.
-- **Tenor-specific forward curves** (3M SOFR, 6M EURIBOR, ...) — used to project forward rates for floating coupons.
+- **OIS discount curves** (SOFR for USD, €STR for EUR) — used to discount every
+  cashflow under CSA.
+- **Tenor-specific forward curves** (3M SOFR, 6M EURIBOR, ...) — used to project
+  forward rates for floating coupons.
+- **Cross-currency links** (FX forwards, CCBS) — tying the two currencies
+  together.
 
 Under a CSA with daily collateral, the OIS rate is the funding rate for
 discounted cashflows, so OIS discounting is the **arbitrage-free** choice.
 See [theory §3.2](../theory.md#32-single-curve-vs-multi-curve-framework).
 
-VALAX's `MultiCurveSet` holds one discount curve plus a dict of forward
-curves keyed by tenor label:
+The MC-Curves-2 API is
+[`bootstrap_curve_graph`](../api/curves.md#bootstrap_curve_graph): a **joint
+Newton solve** over the concatenated log-DFs of every curve in the graph.
+This replaces the older sequential `bootstrap_multi_curve` (see [§5.4
+Deprecated path](#54-deprecated-path-bootstrap_multi_curve) below) — and
+crucially handles cases the sequential pipeline **could not**: tenor-basis
+swaps (3M-vs-6M), cross-currency basis swaps, FX forwards on the short end,
+and futures convexity in one go.
+
+### 5.1 Curve-id alphabet
+
+Every curve in the graph has a string identifier following the frozen
+alphabet (see [`production.md` §11.3](../architecture/production.md#113-curve-graph-data-model)):
+
+```
+<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]
+```
+
+- `CCY` — ISO-4217 currency code (`USD`, `EUR`, `GBP`, `JPY`, ...).
+- `INDEX` — reference index name (`SOFR`, `ESTR`, `EURIBOR`, `SONIA`, ...).
+- `TENOR` — either the literal `OIS` (discount role) or a numeric tenor
+  label (`1M`, `3M`, `6M`, `12M`, `1Y`, ...).
+- `QUALIFIER` — optional (`FIXINGS`, `CLEAN`, ...).
+
+`CurveSpec` validates identifiers against this pattern on construction.
+
+### 5.2 A dual-curve USD SOFR build
 
 ```python
-from valax.curves.multi_curve import bootstrap_multi_curve
+import jax.numpy as jnp
+from valax.curves import (
+    CurveSpec, DepositRate, IborSwapRate, bootstrap_curve_graph,
+)
+from valax.dates.daycounts import ymd_to_ordinal
 
-# OIS short end + OIS par swaps.
-ois_instruments = [
-    DepositRate(ref, ymd_to_ordinal(2025, 2, 1), jnp.array(0.0415), "act_360"),
-    DepositRate(ref, ymd_to_ordinal(2025, 4, 1), jnp.array(0.0410), "act_360"),
-    SwapRate(ref, generate_schedule(2026, 1, 1, 2030, 1, 1, frequency=4),
-             jnp.array(0.0385), "act_360"),
-    SwapRate(ref, generate_schedule(2026, 1, 1, 2035, 1, 1, frequency=4),
-             jnp.array(0.0395), "act_360"),
-]
+ref = ymd_to_ordinal(2025, 1, 1)
 
-# 3M SOFR forward curve instruments.
-sofr3m_instruments = [
-    DepositRate(ref, ymd_to_ordinal(2025, 4, 1), jnp.array(0.0440), "act_360"),
-    FRA(ymd_to_ordinal(2025, 4, 1), ymd_to_ordinal(2025, 7, 1),
-        jnp.array(0.0435), "act_360"),
-    SwapRate(ref, generate_schedule(2026, 1, 1, 2030, 1, 1, frequency=4),
-             jnp.array(0.0405), "act_360"),  # 3M SOFR swap par
-]
-
-# Optionally: 6M EURIBOR forward curve instruments.
-# euribor6m_instruments = [...]
-
-multi = bootstrap_multi_curve(
-    reference_date=ref,
-    discount_instruments=ois_instruments,
-    forward_instruments={
-        "3M": sofr3m_instruments,
-        # "6M": euribor6m_instruments,
-    },
+# 1) Declare the two curves we want to build.
+ois_spec = CurveSpec(
+    curve_id="USD.SOFR.OIS", currency="USD",
+    pillar_dates=jnp.array([
+        ymd_to_ordinal(2026, 1, 1),
+        ymd_to_ordinal(2027, 1, 1),
+    ], dtype=jnp.int32),
+    day_count="act_365",
+)
+fwd_spec = CurveSpec(
+    curve_id="USD.SOFR.3M", currency="USD",
+    pillar_dates=jnp.array([
+        ymd_to_ordinal(2026, 1, 1),
+        ymd_to_ordinal(2027, 1, 1),
+    ], dtype=jnp.int32),
     day_count="act_365",
 )
 
-# Use it:
-ois = multi.discount_curve
-fwd_3m = multi.forward_curves["3M"]
+# 2) OIS side: two deposits anchoring the discount curve.
+ois_deps = [
+    DepositRate(
+        start_date=ref, end_date=ymd_to_ordinal(2026, 1, 1),
+        rate=jnp.array(0.040), day_count="act_365",
+        curves_touched=("USD.SOFR.OIS",),
+    ),
+    DepositRate(
+        start_date=ref, end_date=ymd_to_ordinal(2027, 1, 1),
+        rate=jnp.array(0.042), day_count="act_365",
+        curves_touched=("USD.SOFR.OIS",),
+    ),
+]
 
-# Price a 3M SOFR swap: project forwards with fwd_3m, discount with ois.
+# 3) 3M-projection side: two IBOR par swaps.  Each has a *dual-curve*
+#    residual — OIS discount + 3M projection — that couples both
+#    curves.  The joint solver handles that natively.
+ibor_1y = IborSwapRate(
+    start_date=ref,
+    fixed_dates=jnp.array([ymd_to_ordinal(2026, 1, 1)], dtype=jnp.int32),
+    float_dates=quarterly_dates_to(ymd_to_ordinal(2026, 1, 1)),
+    fixing_dates=fixing_dates_from(float_dates),
+    rate=jnp.array(0.045),
+    curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+    index_id="USD.SOFR.3M",
+)
+ibor_2y = IborSwapRate(...)  # analogous for 2Y
+
+# 4) One joint Newton solve — every residual zeroed simultaneously.
+graph, diagnostics = bootstrap_curve_graph(
+    reference_date=ref,
+    curve_specs=[ois_spec, fwd_spec],
+    instruments=ois_deps + [ibor_1y, ibor_2y],
+)
+
+assert diagnostics.converged
+assert float(diagnostics.max_abs_residual) < 1e-10
+
+ois_curve = graph["USD.SOFR.OIS"]
+fwd_curve = graph["USD.SOFR.3M"]
 ```
 
-### What the dual-curve bootstrap does
+The system is well-determined when `len(instruments) == sum(spec.pillar_dates.shape[0])`;
+`bootstrap_curve_graph` raises `ValueError` otherwise. Each instrument
+carries a static `curves_touched: tuple[str, ...]` naming the curves whose
+DFs enter its residual — the solver dispatches by asking every instrument
+for its own residual and never `isinstance`-checks.
 
-For each forward curve:
+### 5.3 What used to be impossible
 
-1. **Deposits and FRAs** are bootstrapped sequentially (their DF formula is independent of the discount curve).
-2. **Swaps** are bootstrapped via a simultaneous Newton solve, where the par swap condition is the **dual-curve** version:
+`bootstrap_multi_curve` could only build **one forward curve at a time**,
+sequentially after the OIS curve. Two structural cases were unreachable:
 
-$$
-\sum_{i=1}^{n} \left(\frac{DF_{\text{fwd}}(T_{i-1})}{DF_{\text{fwd}}(T_i)} - 1\right) DF_{\text{ois}}(T_i) \;=\; r_{\text{swap}} \sum_{i=1}^{n} \tau_i\,DF_{\text{ois}}(T_i)
-$$
+**Tenor-basis stripping** (3M vs 6M SOFR).  A [`TenorBasisSwap`](../api/curves.md#tenorbasisswap-three-curve)
+constrains both forward curves *simultaneously*; no ordering of one-curve
+solves gives the right answer. In the joint solver this is one more
+instrument in the list, touching three curves.
 
-Forward rates come from the forward curve; discounting comes from the OIS
-curve. The single-curve identity $PV_{\text{float}} = DF(\text{start}) - DF(\text{end})$
-**does not hold** here — forward projection and discounting are no longer the
-same curve.
+**Cross-currency joint solve** (EUR-USD).  A [`CrossCurrencyBasisSwap`](../api/curves.md#crosscurrencybasisswap-ccbs)
+touches four curves at once (both OIS + both forwards). Combined with an
+FXForward on the short end, the four-curve graph closes with residuals
+≤ 1e-10 in a single Newton solve — see
+[`tests/test_curves/test_bootstrap_graph.py`](https://github.com/acea/VALAX/blob/main/tests/test_curves/test_bootstrap_graph.py)
+for a working four-curve example.
+
+### 5.4 Deprecated path: `bootstrap_multi_curve`
+
+`bootstrap_multi_curve` (and its return type `MultiCurveSet`) is retained for
+one deprecation cycle so existing user code continues to work.  It emits a
+`DeprecationWarning` on every call.  New code should call
+`bootstrap_curve_graph` directly. The forthcoming MC-Curves-2b workstream will
+remove the legacy path entirely once callers have migrated.
+
+### 5.5 Quote-sensitivity Jacobian
+
+Because the Newton solve is wrapped by `optimistix.ImplicitAdjoint`,
+`jax.grad` and `jax.jacrev` flow through the calibrated graph in **one linear
+solve** per output, independent of Newton iteration count. The convenience
+wrapper [`quote_jacobian`](../api/curves.md#quote_jacobian) exposes this:
+
+```python
+from valax.curves import quote_jacobian
+
+# ∂DF / ∂(quote rate) for every pillar × every quote.
+J = quote_jacobian(
+    reference_date=ref,
+    curve_specs=[ois_spec, fwd_spec],
+    instruments=ois_deps + [ibor_1y, ibor_2y],
+    by="df",           # or "log_df" or "zero_rate"
+)
+# J.shape == (n_pillars_total, n_quotes)
+```
+
+This is the matrix a rates desk uses to hedge curve risk with liquid
+instruments. Cheap via autodiff, prohibitively expensive via finite
+differences.
 
 ## 6. Autodiff: key-rate durations on the bootstrapped curve
 
@@ -396,33 +491,42 @@ pricing inflation swaps and caps/floors against a built curve, see
 
 ## 8. What is not yet implemented
 
-The MC-Curves-1 PR series (see [`production.md` §13](../architecture/production.md#13-phased-delivery-plan))
-shipped the `BootstrapInstrument` protocol, eleven calibration quote types
-(`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`, `IborSwapRate`,
-`MoneyMarketFuture`, `TenorBasisSwap`, `FXForward`, `FXSwap`,
+The MC-Curves-1 PR series shipped the `BootstrapInstrument` protocol, eleven
+calibration quote types (`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`,
+`IborSwapRate`, `MoneyMarketFuture`, `TenorBasisSwap`, `FXForward`, `FXSwap`,
 `CrossCurrencyBasisSwap`, `TurnInstrument`), and supporting infrastructure
-(`CurveGraph`, `FixingHistory`, convexity-adjustment plug-ins).  Every quote
-type a real curve build needs is now representable; what's missing is the
-*joint solver* that consumes them — that is **MC-Curves-2** (production design
-[§11.4](../architecture/production.md#114-joint-global-solver)).
+(`CurveGraph`, `FixingHistory`, convexity-adjustment plug-ins).
+
+The MC-Curves-2 PR series (see [`production.md` §11.4](../architecture/production.md#114-joint-global-solver))
+shipped the joint multi-curve Newton solver
+[`bootstrap_curve_graph`](../api/curves.md#bootstrap_curve_graph), the
+declarative curve descriptor `CurveSpec`, the implicit-adjoint quote-Jacobian
+helper [`quote_jacobian`](../api/curves.md#quote_jacobian), and the
+`CurveBuildDiagnostics` container.  The pre-MC-Curves-2 sequential
+`bootstrap_multi_curve` is retained for one deprecation cycle and emits a
+`DeprecationWarning` on every call.
 
 From the [roadmap (Tier 1.1)](../roadmap.md#11-multi-curve-bootstrapping)
-and the production design, items still pending:
+and the production design, items still pending (MC-Curves-3+):
 
-- **Joint multi-curve Newton solver** (`bootstrap_curve_graph`) over an
-  arbitrary curve graph — MC-Curves-2.
-- **Calibration diagnostics** (per-instrument fitted-vs-quoted, RMSE, max
-  error, Jacobian condition number) — MC-Curves-3.
+- **Extended calibration diagnostics** (per-instrument fitted-vs-quoted table,
+  RMSE, Jacobian condition number).  The MVP `CurveBuildDiagnostics` today
+  ships `residuals`, `max_abs_residual`, `n_steps`, `converged`.
 - **Alternative interpolation methods**: linear on zero rates, cubic splines
-  on log-DF, monotone-convex (Hagan-West), tension splines — MC-Curves-3.
-  The log-linear baseline is stable and monotone but produces discontinuous
-  forward rates at pillars.
+  on log-DF, monotone-convex (Hagan-West), tension splines.  The log-linear
+  baseline is stable and monotone but produces discontinuous forward rates at
+  pillars; `CurveSpec.interp` is already the dispatch site.
 - **Hull-White-derived futures convexity adjustment** — gated on the
   short-rate-model integration with the curve build.  The plug-in framework
   is in place ([`valax/curves/convexity.py`](../api/curves.md#convexity-adjustment-plug-ins));
   only the closed-form factory is missing.
-- **Constrained curves** (forward-rate positivity, calendar-spread no-arbitrage
-  for inflation curves).
+- **CSA / collateralised discounting** — currency-of-collateral selection and
+  FX-implied foreign-currency-collateralised discount curves.  Design note
+  still to be written.
+- **Business-day calendars, holidays, roll conventions** — schedules today
+  ignore holidays entirely.
+- **Constrained curves** (forward-rate positivity, calendar-spread
+  no-arbitrage for inflation curves).
 
 Contributions welcome — see `CONTRIBUTING.md` at the repository root.
 
