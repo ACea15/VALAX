@@ -54,6 +54,7 @@ nav:
       - Instruments Overview: guide/instruments.md
       - Analytical Pricing: guide/analytical.md
       - Yield Curves & Bootstrapping: guide/curves.md
+      - Why Multi-Curve?: guide/why-multicurve.md
       - Fixed Income: guide/fixed-income.md
       - Callable/Puttable/FRN/Convertible Bonds: guide/callable-bonds.md
       - Short-Rate Models: guide/short-rate.md

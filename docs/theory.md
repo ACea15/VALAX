@@ -850,6 +850,11 @@ where $\tau$ is the day count fraction (see Section 3.4).
 
 ### 3.2 Single-Curve vs. Multi-Curve Framework
 
+> **Motivation, in prose.** For a narrative walkthrough of *why* the
+> multi-curve framework exists and what breaks under the single-curve
+> assumption, see [`why-multicurve.md`](guide/why-multicurve.md).
+> This section is the arbitrage-theoretic derivation of the same story.
+
 **Pre-2008 (single-curve):** One curve did everything. A 3M LIBOR swap curve was bootstrapped from deposits and swaps, then used for both discounting and forward rate projection. The implicit assumption: interbank lending is risk-free.
 
 **Post-2008 (multi-curve):** The credit crisis revealed that LIBOR tenors carry different credit/liquidity premia. A 3M rate is *not* three compounded 1M rates — the basis spread between them can be 20+ bps.
@@ -1114,6 +1119,11 @@ The XCCY basis is the calibration instrument that ties two currencies' curves to
 **Why these matter for the bootstrap.** Each identity above has a *quoted* market instrument — FX forward, tenor basis swap, cross-currency basis swap — whose residual involves *more than one curve*. No sequential single-curve bootstrap can satisfy them. The next subsection extends the bootstrap framework to a joint multi-curve solve.
 
 ### 3.8 Joint Multi-Curve Calibration
+
+> **See also.** [`why-multicurve.md`](guide/why-multicurve.md) tells
+> the same story without the linear-algebra: which instruments
+> couple which curves, and why no ordering of one-curve solves can
+> honour a tenor-basis or cross-currency quote.
 
 Section 3.3 described the single-curve bootstrap as a square root-finding system $\mathbf{R}(\mathbf{x}) = \mathbf{0}$, where $\mathbf{x} = (\ln DF_1, \ldots, \ln DF_N)$ and each residual $R_i$ is the repricing error of one instrument. The multi-curve generalisation stacks all per-curve log-DF vectors into one global state vector and runs one Newton iteration over the lot.
 

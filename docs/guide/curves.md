@@ -235,6 +235,14 @@ here.
 
 ## 5. Multi-curve bootstrap
 
+> **Why this section exists.** For the end-to-end narrative of *why*
+> VALAX ships a whole multi-curve solver instead of a single discount
+> curve — what breaks in 2008, which instruments couple which curves,
+> and why sequential bootstraps cannot represent tenor-basis or
+> cross-currency constraints — see
+> [`why-multicurve.md`](why-multicurve.md). This section covers the
+> API and a worked example.
+
 Post-2008, single-curve discounting is dead. A EUR/USD fixed-income desk now
 runs:
 
