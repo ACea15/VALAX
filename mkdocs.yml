@@ -1,7 +1,7 @@
 site_name: VALAX
 site_description: JAX-native quantitative finance valuation engine
 site_url: https://acea.github.io/valax/
-repo_url: https://github.com/acea/valax
+repo_url: https://github.com/ACea15/VALAX
 edit_uri: edit/main/docs/
 
 theme:

@@ -1,9 +1,36 @@
-name: Deploy Docs
+name: Docs
+
+# Trigger the workflow only when files that actually affect the rendered
+# site change.  Since VALAX does not use mkdocstrings or any other
+# Python-driven doc generation, changes under ``valax/`` never alter the
+# built site and would only waste CI minutes.
+#
+# The site content depends solely on:
+#   * everything under ``docs/`` (page sources),
+#   * ``mkdocs.yml`` (nav, theme, extensions),
+#   * ``pyproject.toml`` (the ``[docs]`` extras version pin — a
+#     mkdocs-material bump can break the build),
+#   * this workflow file itself.
+#
+# On ``push`` to ``main`` we build **and** deploy; on ``pull_request``
+# we build with ``--strict`` only, so anchor mismatches and broken
+# cross-references are caught before merge.
 
 on:
   push:
     branches:
       - main
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'pyproject.toml'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'pyproject.toml'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 permissions:
@@ -39,12 +66,17 @@ jobs:
         run: mkdocs build --strict
 
       - name: Upload Pages artifact
+        # Only upload on push-to-main; on PRs we just want the strict
+        # build check, not a deploy.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
     needs: build
+    # Skip the deploy job entirely on PRs and non-main pushes.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
