@@ -1001,7 +1001,7 @@ where $P^R(0, T)$ is the real-curve discount factor. This is a **Fisher-identity
 The ZCIS is the liquid benchmark of the inflation market — it defines the curve. One party pays a fixed rate compounded over the maturity; the counterparty pays the realized CPI ratio. Both settle as a **single cashflow at maturity**:
 
 $$
-\text{PV}^{\text{fix}} = N\,DF^N(T)\left[(1 + K)^T - 1\right]
+\text{PV}^{\text{fix}} = N\,DF^N(T)\left[(1 + K)^T - 1\right]  
 $$
 
 $$
@@ -1620,7 +1620,7 @@ $$
 **Connection to PDE:** The binomial tree is mathematically equivalent to an **explicit finite difference scheme** for the Black-Scholes PDE on a $(t, \ln S)$ grid. The CRR parameters correspond to specific grid spacings. This explains why trees and PDE methods give the same answer.
 
 **When to use:** American/Bermudan options on a single underlying (natural backward induction). Pedagogically clear. Limited to low dimensions (multi-asset trees have exponential node growth).
-
+ 
 **VALAX implementation:** `valax/pricing/lattice/binomial.py` (`binomial_price`). Supports European and American exercise. Uses `jax.lax.scan` for backward induction. Greeks via `jax.grad` through the entire tree computation.
 
 ---

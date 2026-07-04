@@ -36,6 +36,12 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - "Where VALAX Fits": landscape.md
+  - Applications:
+      - Overview: applications/index.md
+      - "Market Risk & Model Validation": applications/market-risk.md
+      - "Quant Research": applications/quant-research.md
+      - "Treasury & ALM": applications/treasury.md
+      - "Regulatory: FRTB & CCAR": applications/regulatory.md
   - Examples: examples.md
   - Architecture:
       - Overview: architecture/overview.md
