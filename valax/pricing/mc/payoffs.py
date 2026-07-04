@@ -23,7 +23,23 @@ def european_payoff(
     paths: Float[Array, "n_paths n_steps"],
     option: EuropeanOption,
 ) -> Float[Array, " n_paths"]:
-    """European option payoff: max(S_T - K, 0) for call."""
+    r"""European option terminal payoff.
+
+    Uses only the terminal spot ``S_T = paths[:, -1]``:
+
+    .. math::
+
+        \text{call: } \max(S_T - K,\, 0), \quad
+        \text{put: } \max(K - S_T,\, 0)
+
+    Args:
+        paths: Simulated price paths, shape ``(n_paths, n_steps)``.
+        option: European option instrument (uses ``strike`` and
+            ``is_call``).
+
+    Returns:
+        Per-path terminal payoff, shape ``(n_paths,)``.
+    """
     terminal = paths[:, -1]
     if option.is_call:
         return jnp.maximum(terminal - option.strike, 0.0)
@@ -35,7 +51,30 @@ def asian_payoff(
     paths: Float[Array, "n_paths n_steps"],
     option: EuropeanOption,
 ) -> Float[Array, " n_paths"]:
-    """Arithmetic Asian option payoff based on average price."""
+    r"""Arithmetic Asian option payoff on the path average.
+
+    Averages over all path steps excluding the initial spot
+    (``paths[:, 1:]``):
+
+    .. math::
+
+        \bar{S} = \frac{1}{n-1} \sum_{i=1}^{n-1} S_{t_i}, \quad
+        \text{call: } \max(\bar{S} - K,\, 0)
+
+    Note:
+        Prefer :func:`asian_option_payoff` for new code — it takes an
+        :class:`AsianOption` instrument and supports geometric
+        averaging. This function is kept for backwards compatibility
+        with call-sites that construct a :class:`EuropeanOption`.
+
+    Args:
+        paths: Simulated price paths, shape ``(n_paths, n_steps)``.
+        option: European option instrument reused for its ``strike`` and
+            ``is_call`` fields.
+
+    Returns:
+        Per-path payoff, shape ``(n_paths,)``.
+    """
     avg_price = jnp.mean(paths[:, 1:], axis=1)  # exclude initial spot
     if option.is_call:
         return jnp.maximum(avg_price - option.strike, 0.0)
@@ -51,15 +90,28 @@ def barrier_payoff(
     is_knock_in: bool,
     smoothing: float = 0.0,
 ) -> Float[Array, " n_paths"]:
-    """Barrier option payoff with optional smoothing for differentiability.
+    r"""Barrier option payoff with optional smoothing for differentiability.
+
+    Hits the barrier by tracking the path extremum (max for up-barriers,
+    min for down-barriers). When ``smoothing > 0`` the indicator is
+    replaced by a sigmoid so pathwise Greeks stay well-defined near the
+    barrier level.
 
     Args:
-        paths: Simulated price paths.
-        option: Underlying European option.
-        barrier: Barrier level.
-        is_up: True for up barrier, False for down barrier.
-        is_knock_in: True for knock-in, False for knock-out.
-        smoothing: Width of sigmoid smoothing (0 = hard barrier).
+        paths: Simulated price paths, shape ``(n_paths, n_steps)``.
+        option: Underlying European option (uses ``strike``, ``is_call``).
+        barrier: Barrier level as a scalar JAX array.
+        is_up: ``True`` for up barriers (activated when the path max
+            crosses ``barrier``), ``False`` for down barriers.
+        is_knock_in: ``True`` for knock-in (payoff paid only if barrier
+            is hit), ``False`` for knock-out.
+        smoothing: Width of sigmoid smoothing on the barrier indicator.
+            ``0.0`` gives a hard (non-differentiable) barrier; small
+            positive values give a smooth indicator suitable for
+            pathwise Greeks.
+
+    Returns:
+        Per-path payoff, shape ``(n_paths,)``.
     """
     terminal = paths[:, -1]
 

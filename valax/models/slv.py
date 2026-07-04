@@ -90,7 +90,7 @@ class SLVModel(eqx.Module):
     @classmethod
     def from_heston_and_leverage(
         cls,
-        heston,
+        heston: "HestonModel",
         surface: eqx.Module,
         leverage: eqx.Module,
     ) -> "SLVModel":
@@ -102,6 +102,9 @@ class SLVModel(eqx.Module):
             surface: The implied-vol surface used as the Dupire target
                 for the leverage calibration.
             leverage: The ``LeverageGrid`` from pass-2 calibration.
+
+        Returns:
+            A fully-built ``SLVModel``.
         """
         _check_x64()
         return cls(

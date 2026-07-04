@@ -170,9 +170,10 @@ def inject_calendar_arb(
     Args:
         total_variances: ``w(T_k) = sigma(T_k)^2 * T_k`` at a fixed
             log-moneyness, sorted by ``T_k`` ascending.
-        i, j: Indices to swap (must satisfy ``i < j``).  Swapping a
-            larger-T entry into an earlier-T slot makes ``w`` no longer
-            monotone non-decreasing.
+        i: Lower expiry index (must satisfy ``i < j``). Swapping a
+            larger-T entry into an earlier-T slot makes ``w`` no
+            longer monotone non-decreasing.
+        j: Upper expiry index (must satisfy ``i < j``).
 
     Returns:
         Tuple ``(perturbed, diagnosis)``.
@@ -289,7 +290,8 @@ def inject_basket_variance_violation(
 
     Args:
         correlation: Valid correlation matrix.
-        weight_index_i, weight_index_j: Off-diagonal entry to set.
+        weight_index_i: Row index of the off-diagonal entry to set.
+        weight_index_j: Column index of the off-diagonal entry to set.
         new_value: Value to insert (default 1.5 — clearly invalid).
 
     Returns:

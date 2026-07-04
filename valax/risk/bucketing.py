@@ -367,15 +367,14 @@ def pca_jacobian(
             decomposing.
 
     Returns:
-        ``(jacobian, eigenvalues, fraction_explained)``:
-
-        - ``jacobian``: ``(n_factors, n_components)`` orthonormal columns.
-          Push raw sensitivities through with
-          :func:`pushforward_sensitivities`.
-        - ``eigenvalues``: top ``n_components`` eigenvalues of the
-          sample covariance.
-        - ``fraction_explained``: scalar in [0, 1] — the fraction of
-          *total* variance captured by the retained components.
+        Triple ``(jacobian, eigenvalues, fraction_explained)``.
+        ``jacobian`` has shape ``(n_factors, n_components)`` with
+        orthonormal columns and should be pushed through by
+        :func:`pushforward_sensitivities`. ``eigenvalues`` is the top
+        ``n_components`` eigenvalues of the sample covariance.
+        ``fraction_explained`` is a scalar in ``[0, 1]`` giving the
+        fraction of total variance captured by the retained
+        components.
     """
     X = jnp.asarray(returns)
     if center:
@@ -440,7 +439,7 @@ def _identity_bucket_map(n: int) -> BucketMap:
 
 
 def bucket_sensitivity_ladder(
-    ladder,
+    ladder: "SensitivityLadder",
     *,
     rate_bucket: BucketMap | None = None,
     spot_bucket: BucketMap | None = None,
@@ -465,8 +464,12 @@ def bucket_sensitivity_ladder(
 
     Args:
         ladder: Source :class:`SensitivityLadder`.
-        rate_bucket, spot_bucket, vol_bucket, div_bucket: Optional
-            per-category :class:`BucketMap` objects.
+        rate_bucket: Optional :class:`BucketMap` for the rate axis.
+        spot_bucket: Optional :class:`BucketMap` for the spot axis
+            (also used for ``gamma_spot`` and ``vanna``).
+        vol_bucket: Optional :class:`BucketMap` for the vol axis
+            (also used for ``volga``).
+        div_bucket: Optional :class:`BucketMap` for the dividend axis.
 
     Returns:
         A :class:`BucketedLadder` in bucket coordinates.

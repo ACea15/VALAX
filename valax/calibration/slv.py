@@ -63,7 +63,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 import jax
 import jax.numpy as jnp
@@ -206,7 +206,7 @@ def _propagate_one_step(
 
 def calibrate_slv_leverage(
     heston: HestonModel,
-    surface,
+    surface: Any,
     spot: Float[Array, ""],
     log_moneyness_grid: Float[Array, " n_k"],
     time_grid: Float[Array, " n_t"],
@@ -247,9 +247,9 @@ def calibrate_slv_leverage(
             ``(t, k_particles) -> h`` to override.
         ridge: Ridge regulariser for ``method="kernel"``. Ignored when
             ``method="particle"``.
-        L_max, L_min: Clipping bounds on ``L`` to prevent runaway
-            values when the kernel density is degenerate in a region
-            with strong skew. Defaults give ample headroom.
+        L_max: Upper clip on ``L`` to prevent runaway values when the
+            kernel density is degenerate in a region with strong skew.
+        L_min: Lower clip on ``L`` (same rationale as ``L_max``).
 
     Returns:
         A :class:`LeverageGrid` ``L`` of shape
@@ -378,7 +378,7 @@ def calibrate_slv(
     dividend: Float[Array, ""],
     expiry: Float[Array, ""],
     pricing_fn: Callable,
-    surface,
+    surface: Any,
     log_moneyness_grid: Float[Array, " n_k"],
     time_grid: Float[Array, " n_t"],
     n_paths: int,
@@ -398,12 +398,25 @@ def calibrate_slv(
     Pass 2: ``calibrate_slv_leverage`` against the Dupire surface.
 
     Args:
-        strikes, market_prices, spot, rate, dividend, expiry,
-            pricing_fn, heston_initial_guess, heston_solver,
-            heston_max_steps: Forwarded to ``calibrate_heston``.
-        surface, log_moneyness_grid, time_grid, n_paths, key, method,
-            n_iterations, bandwidth, ridge: Forwarded to
-            ``calibrate_slv_leverage``.
+        strikes: Forwarded to ``calibrate_heston``.
+        market_prices: Forwarded to ``calibrate_heston``.
+        spot: Forwarded to both passes.
+        rate: Forwarded to ``calibrate_heston``.
+        dividend: Forwarded to ``calibrate_heston``.
+        expiry: Forwarded to ``calibrate_heston``.
+        pricing_fn: Forwarded to ``calibrate_heston``.
+        surface: Forwarded to ``calibrate_slv_leverage``.
+        log_moneyness_grid: Forwarded to ``calibrate_slv_leverage``.
+        time_grid: Forwarded to ``calibrate_slv_leverage``.
+        n_paths: Forwarded to ``calibrate_slv_leverage``.
+        key: Forwarded to ``calibrate_slv_leverage``.
+        method: Forwarded to ``calibrate_slv_leverage``.
+        n_iterations: Forwarded to ``calibrate_slv_leverage``.
+        bandwidth: Forwarded to ``calibrate_slv_leverage``.
+        ridge: Forwarded to ``calibrate_slv_leverage``.
+        heston_initial_guess: Forwarded to ``calibrate_heston``.
+        heston_solver: Forwarded to ``calibrate_heston``.
+        heston_max_steps: Forwarded to ``calibrate_heston``.
 
     Returns:
         A calibrated :class:`SLVModel`.

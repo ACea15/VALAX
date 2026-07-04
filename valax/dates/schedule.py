@@ -27,8 +27,12 @@ def generate_schedule(
     from maturity, which is standard for bond schedules.
 
     Args:
-        start_year, start_month, start_day: Issue/settlement date.
-        end_year, end_month, end_day: Maturity date.
+        start_year: Year of the issue/settlement date.
+        start_month: Month of the issue/settlement date (1-12).
+        start_day: Day of the issue/settlement date (1-31).
+        end_year: Year of the maturity date.
+        end_month: Month of the maturity date (1-12).
+        end_day: Day of the maturity date (1-31).
         frequency: Coupons per year (1=annual, 2=semi, 4=quarterly).
 
     Returns:

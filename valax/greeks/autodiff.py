@@ -41,7 +41,7 @@ def greek(
     pricing_fn: Callable,
     name: str,
     instrument: eqx.Module,
-    *market_args,
+    *market_args: Float[Array, ""],
 ) -> Float[Array, ""]:
     """Compute a single named Greek via autodiff.
 
@@ -75,7 +75,7 @@ def greek(
 def _theta(
     pricing_fn: Callable,
     instrument: eqx.Module,
-    *market_args,
+    *market_args: Float[Array, ""],
     dt: float = 1.0 / 365.0,
 ) -> Float[Array, ""]:
     """Theta via finite difference on expiry.
@@ -95,7 +95,7 @@ def _theta(
 def greeks(
     pricing_fn: Callable,
     instrument: eqx.Module,
-    *market_args,
+    *market_args: Float[Array, ""],
 ) -> dict[str, Float[Array, ""]]:
     """Compute price and all standard Greeks at once.
 

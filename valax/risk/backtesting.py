@@ -386,8 +386,12 @@ def pla_traffic_light(
         spearman: Spearman rank correlation between RTPL and HPL.
         ks_stat: Two-sample KS distance between RTPL and HPL.
         n_obs: Sample size (per series) used to compute the KS p-value.
-        spearman_green / spearman_amber: Spearman thresholds.
-        ks_green_p / ks_amber_p: KS p-value thresholds.
+        spearman_green: Spearman threshold for the green zone.
+        spearman_amber: Spearman threshold for the amber zone (below
+            this the zone is red).
+        ks_green_p: KS p-value threshold for the green zone.
+        ks_amber_p: KS p-value threshold for the amber zone (below
+            this the zone is red).
 
     Returns:
         ``"green"``, ``"amber"`` or ``"red"``.

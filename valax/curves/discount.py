@@ -57,9 +57,22 @@ def forward_rate(
     start: Int[Array, ""],
     end: Int[Array, ""],
 ) -> Float[Array, ""]:
-    """Simply-compounded forward rate between two dates.
+    r"""Simply-compounded forward rate between two dates.
 
-    F(t1, t2) = (DF(t1)/DF(t2) - 1) / tau(t1, t2)
+    .. math::
+
+        F(t_1, t_2) = \frac{1}{\tau(t_1, t_2)}
+            \left(\frac{DF(t_1)}{DF(t_2)} - 1\right)
+
+    Args:
+        curve: Discount curve providing ``DF(t)`` via interpolation.
+        start: Start date of the forward period (ordinal).
+        end: End date of the forward period (ordinal). Must be strictly
+            after ``start`` so that ``tau > 0``.
+
+    Returns:
+        Simply-compounded forward rate under the curve's day-count
+        convention, as a scalar JAX array.
     """
     df_start = curve(start)
     df_end = curve(end)
@@ -71,9 +84,20 @@ def zero_rate(
     curve: DiscountCurve,
     date: Int[Array, ""],
 ) -> Float[Array, ""]:
-    """Continuously-compounded zero rate to a given date.
+    r"""Continuously-compounded zero rate to a given date.
 
-    r(t) = -ln(DF(t)) / tau(ref, t)
+    .. math::
+
+        r(t) = -\frac{\ln DF(t)}{\tau(t_\mathrm{ref}, t)}
+
+    Args:
+        curve: Discount curve providing ``DF(t)`` via interpolation.
+        date: Target date (ordinal). Must be strictly after
+            ``curve.reference_date`` so that ``tau > 0``.
+
+    Returns:
+        Continuously-compounded zero rate under the curve's day-count
+        convention, as a scalar JAX array.
     """
     df = curve(date)
     tau = year_fraction(curve.reference_date, date, curve.day_count)

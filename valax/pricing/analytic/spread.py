@@ -217,11 +217,14 @@ def spread_option_price(
 
     Args:
         option: Spread option instrument.
-        s1, s2: Spot prices of the two assets.
-        vol1, vol2: Volatilities.
-        rho: Correlation.
+        s1: Spot price of asset 1.
+        s2: Spot price of asset 2.
+        vol1: Volatility of asset 1.
+        vol2: Volatility of asset 2.
+        rho: Correlation between the two Brownian drivers.
         rate: Risk-free rate.
-        q1, q2: Continuous dividend yields.
+        q1: Continuous dividend yield of asset 1.
+        q2: Continuous dividend yield of asset 2.
 
     Returns:
         Option price.
