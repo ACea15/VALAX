@@ -2,7 +2,7 @@
 
 The classic Litterman–Scheinkman result is that the first three principal components of historical yield-curve returns explain ≥95% of pillar variance and admit a clean interpretation: **level**, **slope**, and **curvature**. VALAX exposes that workflow as `valax.risk.factors.RatesFactorModel`, which sits on top of the generic [`pca_jacobian`](../api/risk.md) primitive and plugs into the standard [`apply_scenario`](../api/risk.md) / [`pnl_attribution`](../api/risk.md) machinery.
 
-For the underlying math see [Models & Theory § 7.8](../theory.md). For the runnable end-to-end example see [`examples/09_pca_rates_pnl.py`](https://github.com/acea/valax/blob/main/examples/09_pca_rates_pnl.py).
+For the underlying math see [Models & Theory § 7.8](../theory.md). For the runnable end-to-end example see [`examples/09_pca_rates_pnl.py`](https://github.com/ACea15/VALAX/blob/main/examples/09_pca_rates_pnl.py).
 
 ---
 

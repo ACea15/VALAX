@@ -415,5 +415,5 @@ hardcoded case.
 - Phase 1 MVP: analytical pricing with autodiff Greeks (`d900420`).
 - Project skeleton, Black-Scholes pricer, autodiff Greeks framework.
 
-[Unreleased]: https://github.com/acea/valax/compare/v0.0.0...HEAD
-[0.0.0]: https://github.com/acea/valax/releases/tag/v0.0.0
+[Unreleased]: https://github.com/ACea15/VALAX/compare/v0.0.0...HEAD
+[0.0.0]: https://github.com/ACea15/VALAX/releases/tag/v0.0.0

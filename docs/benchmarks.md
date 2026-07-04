@@ -18,13 +18,13 @@ method area.
 
 | File | Area | What is compared |
 |------|------|------------------|
-| [`test_european_options_ql.py`](https://github.com/acea/valax/blob/main/tests/test_quantlib_comparison/test_european_options_ql.py) | Analytical equity options | Call/put prices, Greeks (Δ, Γ, Vega), implied vol round-trip |
-| [`test_fixed_income_ql.py`](https://github.com/acea/valax/blob/main/tests/test_quantlib_comparison/test_fixed_income_ql.py) | Curves, bonds | Discount factors at pillars, bond prices, YTM, modified duration, KRD sum-to-duration |
-| [`test_heston_ql.py`](https://github.com/acea/valax/blob/main/tests/test_quantlib_comparison/test_heston_ql.py) | Heston MC | Call prices within 3 SE of QL engine; smile skew direction; risk-neutral drift; variance mean-reversion |
-| [`test_monte_carlo_ql.py`](https://github.com/acea/valax/blob/main/tests/test_quantlib_comparison/test_monte_carlo_ql.py) | GBM MC | Call price within 3 SE of BS; convergence with path count; Asian/barrier bounds; risk-neutral drift; path initial condition |
-| [`test_pde_lattice_ql.py`](https://github.com/acea/valax/blob/main/tests/test_quantlib_comparison/test_pde_lattice_ql.py) | PDE and lattice | Crank-Nicolson vs BS and vs QL FDM; CRR vs BS and vs QL CRR; American put premium vs QL |
-| [`test_risk_greeks_ql.py`](https://github.com/acea/valax/blob/main/tests/test_quantlib_comparison/test_risk_greeks_ql.py) | Risk engine | Greeks (Δ, Γ, Vega, ρ, Θ) vs QL; full-reval repricing under spot/vol/rate bumps; 2nd-order attribution accuracy; parametric VaR |
-| [`test_sabr_ql.py`](https://github.com/acea/valax/blob/main/tests/test_quantlib_comparison/test_sabr_ql.py) | Hagan-SABR | Implied vol across strikes and parameter sets; ATM vol |
+| [`test_european_options_ql.py`](https://github.com/ACea15/VALAX/blob/main/tests/test_quantlib_comparison/test_european_options_ql.py) | Analytical equity options | Call/put prices, Greeks (Δ, Γ, Vega), implied vol round-trip |
+| [`test_fixed_income_ql.py`](https://github.com/ACea15/VALAX/blob/main/tests/test_quantlib_comparison/test_fixed_income_ql.py) | Curves, bonds | Discount factors at pillars, bond prices, YTM, modified duration, KRD sum-to-duration |
+| [`test_heston_ql.py`](https://github.com/ACea15/VALAX/blob/main/tests/test_quantlib_comparison/test_heston_ql.py) | Heston MC | Call prices within 3 SE of QL engine; smile skew direction; risk-neutral drift; variance mean-reversion |
+| [`test_monte_carlo_ql.py`](https://github.com/ACea15/VALAX/blob/main/tests/test_quantlib_comparison/test_monte_carlo_ql.py) | GBM MC | Call price within 3 SE of BS; convergence with path count; Asian/barrier bounds; risk-neutral drift; path initial condition |
+| [`test_pde_lattice_ql.py`](https://github.com/ACea15/VALAX/blob/main/tests/test_quantlib_comparison/test_pde_lattice_ql.py) | PDE and lattice | Crank-Nicolson vs BS and vs QL FDM; CRR vs BS and vs QL CRR; American put premium vs QL |
+| [`test_risk_greeks_ql.py`](https://github.com/ACea15/VALAX/blob/main/tests/test_quantlib_comparison/test_risk_greeks_ql.py) | Risk engine | Greeks (Δ, Γ, Vega, ρ, Θ) vs QL; full-reval repricing under spot/vol/rate bumps; 2nd-order attribution accuracy; parametric VaR |
+| [`test_sabr_ql.py`](https://github.com/ACea15/VALAX/blob/main/tests/test_quantlib_comparison/test_sabr_ql.py) | Hagan-SABR | Implied vol across strikes and parameter sets; ATM vol |
 
 ## 2. Compliance Matrix
 
