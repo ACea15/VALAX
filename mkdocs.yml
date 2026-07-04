@@ -40,7 +40,7 @@ plugins:
         python:
           options:
             docstring_style: google
-            show_source: false
+            show_source: true
             show_signature_annotations: true
             separate_signature: true
             merge_init_into_class: true
@@ -48,6 +48,7 @@ plugins:
             show_root_full_path: false
             show_symbol_type_heading: true
             show_symbol_type_toc: true
+            show_bases: true             # (optional; also the mkdocstrings default)
             heading_level: 3
             members_order: source
             filters:
