@@ -1,0 +1,55 @@
+name: Tests
+
+# Run the pytest suite (including the QuantLib comparison tests) on every
+# push to main and every pull request targeting main. No paths filter so
+# that the workflow always reports a status — friendlier to future branch
+# protection rules that require the test suite to pass.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# On PRs, cancel any in-progress run for the same branch when a new
+# commit is pushed. On main we keep every run (each merge gets its own
+# recorded status).
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install VALAX + dev extras + QuantLib
+        # QuantLib is intentionally NOT part of pyproject.toml's [dev]
+        # extra so local dev remains lightweight; CI installs it
+        # explicitly to exercise tests/test_quantlib_comparison/.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" QuantLib
+
+      - name: Run pytest
+        # --benchmark-skip suppresses pytest-benchmark timings (runner
+        # variance makes them noisy on CI); benchmarks stay runnable
+        # locally via `pytest --benchmark-only`.
+        run: pytest -q --tb=short --benchmark-skip
