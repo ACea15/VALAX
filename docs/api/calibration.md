@@ -1,132 +1,66 @@
 # Calibration
 
-Model parameter fitting via gradient-based optimization.
+Model parameter fitting via gradient-based optimization. All routines
+map constrained parameters to unconstrained space via
+[transforms](#transforms), call `optimistix` / `optax` under the hood,
+and return the fitted model together with a solver `Solution` for
+convergence diagnostics.
 
-## `calibrate_sabr`
+## SABR
 
-```python
-from valax.calibration import calibrate_sabr
+Fit SABR to a volatility smile. Typical use: fix `beta` and calibrate
+`(alpha, rho, nu)` from at-the-money forward vols.
 
-fitted_model, solution = calibrate_sabr(
-    strikes: Float[Array, " n"],          # option strikes
-    market_vols: Float[Array, " n"],      # observed implied vols
-    forward: Float[Array, ""],            # forward price
-    expiry: Float[Array, ""],             # time to expiry
-    initial_guess: SABRModel | None,      # starting point (default: heuristic)
-    fixed_beta: Float[Array, ""] | None,  # fix beta (recommended)
-    weights: Float[Array, " n"] | None,   # per-strike weights (default: uniform)
-    solver: str = "levenberg_marquardt",   # "levenberg_marquardt", "bfgs", "optax_adam"
-    max_steps: int = 256,
-) -> tuple[SABRModel, optimistix.Solution]
-```
+::: valax.calibration.calibrate_sabr
 
-Returns the fitted `SABRModel` and an `optimistix.Solution` with convergence diagnostics.
+## Heston
 
-## `calibrate_heston`
+Fit Heston to option prices. The `pricing_fn` is dependency-injected
+so the calibration machinery stays decoupled from the pricing engine
+— pass either an analytic pricer or an MC pricer with signature
+`(model, strike, spot, rate, dividend, expiry) -> price`.
 
-```python
-from valax.calibration import calibrate_heston
+::: valax.calibration.calibrate_heston
 
-fitted_model, solution = calibrate_heston(
-    strikes: Float[Array, " n"],          # option strikes
-    market_prices: Float[Array, " n"],    # observed option prices
-    spot: Float[Array, ""],               # spot price
-    rate: Float[Array, ""],               # risk-free rate
-    dividend: Float[Array, ""],           # dividend yield
-    expiry: Float[Array, ""],             # time to expiry
-    pricing_fn: Callable,                 # Heston pricer (injected)
-    initial_guess: HestonModel | None,    # starting point
-    weights: Float[Array, " n"] | None,   # per-strike weights
-    solver: str = "levenberg_marquardt",
-    max_steps: int = 512,
-) -> tuple[HestonModel, optimistix.Solution]
-```
+## Stochastic-Local Volatility (SLV)
 
-The `pricing_fn` must have signature `(model, strike, spot, rate, dividend, expiry) -> price`.
+Two-pass SLV calibration. Pass 1 fits Heston to vanillas; pass 2 fits
+the leverage function \(L(k, t)\) via Markovian projection so that the
+SLV model reproduces the input local-vol surface. See
+[theory §4.5](../theory.md#45-stochastic-local-volatility) and the
+[SLV guide](../guide/slv.md) for the mathematics and choice of
+estimator (`particle` vs. `kernel`).
 
-## `calibrate_slv_leverage`
+::: valax.calibration.calibrate_slv_leverage
 
-Pass-2 calibration of the SLV leverage function $L(k, t)$ via Markovian projection of the SLV SDE onto Dupire local volatility. The conditional expectation $\mathbb{E}[V_t \mid k_t = k]$ is estimated from a simulated particle swarm; the calibrated $L$ satisfies $L^2(k, t)\,\mathbb{E}[V_t \mid k_t = k] = \sigma_{\mathrm{Dupire}}^2(k, t)$ by construction. See [theory §4.5](../theory.md#45-stochastic-local-volatility) and the [SLV guide](../guide/slv.md) for the mathematics.
-
-```python
-from valax.calibration import calibrate_slv_leverage
-
-leverage = calibrate_slv_leverage(
-    heston:              HestonModel,                # pass-1 calibrated Heston
-    surface,                                          # any total_variance(k,T) surface
-    spot:                Float[Array, ""],
-    log_moneyness_grid:  Float[Array, "n_k"],        # sorted, ascending
-    time_grid:           Float[Array, "n_t"],        # sorted, ascending (> 0)
-    n_paths:             int,
-    key:                 jax.Array,
-    *,
-    method:              Literal["particle", "kernel"] = "particle",
-    n_iterations:        int = 1,                    # outer fixed-point iterations
-    bandwidth:           float | Callable | None = None,   # default: Silverman per slice
-    ridge:               float = 1e-3,               # used only for method="kernel"
-    L_max:               float = 5.0,
-    L_min:               float = 0.05,
-) -> LeverageGrid
-```
-
-`method="particle"` uses pure Nadaraya-Watson; `method="kernel"` adds a Tikhonov ridge that biases the estimator toward the empirical particle mean in low-density regions (smoother tails, mildly biased centre). `n_iterations=1` recovers the classical one-shot Guyon-Henry-Labordère (2012) particle method; `n_iterations ≥ 2` re-simulates the swarm under the previous-iteration leverage and rebuilds the grid for tighter self-consistency.
-
-## `calibrate_slv`
-
-End-to-end two-pass SLV calibration. Wraps `calibrate_heston` (Pass 1) and `calibrate_slv_leverage` (Pass 2) into one call returning a fully-built `SLVModel`.
-
-```python
-from valax.calibration import calibrate_slv
-
-slv_model = calibrate_slv(
-    # Pass 1 args (forwarded to calibrate_heston):
-    strikes:               Float[Array, " n"],
-    market_prices:         Float[Array, " n"],
-    spot, rate, dividend, expiry, pricing_fn,
-    # Pass 2 args (forwarded to calibrate_slv_leverage):
-    surface,
-    log_moneyness_grid, time_grid, n_paths, key,
-    *,
-    method:                Literal["particle", "kernel"] = "particle",
-    n_iterations:          int = 1,
-    bandwidth:             float | Callable | None = None,
-    ridge:                 float = 1e-3,
-    heston_initial_guess:  HestonModel | None = None,
-    heston_solver:         str = "levenberg_marquardt",
-    heston_max_steps:      int = 512,
-) -> SLVModel
-```
-
-See the [SLV guide](../guide/slv.md) for a worked end-to-end example and discussion of estimator choice / convergence behaviour.
+::: valax.calibration.calibrate_slv
 
 ## Transforms
 
-Reparametrization utilities for mapping constrained parameters to unconstrained space.
+Reparametrization utilities that map constrained parameters
+(e.g. \(\alpha > 0\), \(-1 < \rho < 1\)) to unconstrained \(\mathbb{R}^n\)
+so JAX optimizers can operate without explicit constraints.
 
-```python
-from valax.calibration import positive, bounded, correlation, unit_interval
+::: valax.calibration.transforms.positive
 
-positive()          # x > 0 (softplus)
-bounded(lo, hi)     # lo < x < hi (scaled sigmoid)
-unit_interval()     # 0 < x < 1 (sigmoid)
-correlation()       # -1 < x < 1 (tanh)
-```
+::: valax.calibration.transforms.bounded
 
-### Model-level helpers
+::: valax.calibration.transforms.unit_interval
 
-```python
-from valax.calibration import model_to_unconstrained, unconstrained_to_model, SABR_TRANSFORMS
+::: valax.calibration.transforms.correlation
 
-raw = model_to_unconstrained(sabr_model, SABR_TRANSFORMS)
-# raw = {"alpha": ..., "beta": ..., "rho": ..., "nu": ...}
+::: valax.calibration.transforms.model_to_unconstrained
 
-recovered = unconstrained_to_model(raw, SABR_TRANSFORMS, template=sabr_model)
-```
+::: valax.calibration.transforms.unconstrained_to_model
 
-## Loss Functions
+## Loss functions
 
-```python
-from valax.calibration import vol_residuals, price_residuals, weighted_sse
-```
+Residual functions with the `optimistix` signature
+`fn(y, args) -> residuals`. Used internally by the calibration
+routines; exposed for custom calibration workflows.
 
-These follow the `optimistix` signature `fn(y, args) -> residuals` and are used internally by the calibration routines. They can also be used directly for custom calibration workflows.
+::: valax.calibration.loss.vol_residuals
+
+::: valax.calibration.loss.price_residuals
+
+::: valax.calibration.loss.weighted_sse

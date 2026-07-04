@@ -1,69 +1,34 @@
 # Dates
 
-Date utilities for JIT-compatible date arithmetic. All dates are **integer ordinals** (days since 1970-01-01) stored as `jnp.int32` arrays.
+Date utilities for JIT-compatible date arithmetic. All dates are
+**integer ordinals** (days since 1970-01-01) stored as `jnp.int32`
+arrays. Python `datetime` is intentionally avoided inside traced code
+— convert at the user-facing boundary with
+[`ymd_to_ordinal`][valax.dates.daycounts.ymd_to_ordinal] and work with
+ordinals thereafter.
 
-## Date Conversion
+## Date conversion
 
-### `ymd_to_ordinal`
+::: valax.dates.daycounts.ymd_to_ordinal
 
-```python
-ymd_to_ordinal(year: int, month: int, day: int) -> Int[Array, ""]
-```
+## Day count conventions
 
-Convert a calendar date to an ordinal. Use at the user-facing boundary — inside JIT-traced code, work with ordinals directly.
+All day-count functions share the signature
+`(start, end) -> year_fraction` and support batched inputs via
+broadcasting. Valid convention names for
+[`year_fraction`][valax.dates.daycounts.year_fraction] are
+`"act_365"`, `"act_360"`, `"act_act"`, and `"30_360"`.
 
-## Day Count Conventions
+::: valax.dates.daycounts.year_fraction
 
-All day count functions have the signature:
+::: valax.dates.daycounts.act_365
 
-```python
-fn(start: Int[Array, "..."], end: Int[Array, "..."]) -> Float[Array, "..."]
-```
+::: valax.dates.daycounts.act_360
 
-They support batched inputs via broadcasting.
+::: valax.dates.daycounts.act_act
 
-### `act_365`
+::: valax.dates.daycounts.thirty_360
 
-Actual/365 Fixed. Year fraction = actual days / 365.
+## Schedule generation
 
-### `act_360`
-
-Actual/360. Year fraction = actual days / 360. Common for money market instruments.
-
-### `act_act`
-
-Actual/Actual (ISDA simplified). Year fraction = actual days / 365.25.
-
-### `thirty_360`
-
-30/360 Bond Basis (US). Adjusts day counts to assume 30-day months.
-
-### `year_fraction`
-
-```python
-year_fraction(start, end, convention="act_365") -> Float[Array, "..."]
-```
-
-Dispatch to any convention by name. Valid names: `"act_365"`, `"act_360"`, `"act_act"`, `"30_360"`.
-
-## Schedule Generation
-
-### `generate_schedule`
-
-```python
-generate_schedule(
-    start_year, start_month, start_day,
-    end_year, end_month, end_day,
-    frequency=2,
-) -> Int[Array, "n_dates"]
-```
-
-Generate coupon payment dates backward from maturity. The start date is excluded; the end date (maturity) is always included.
-
-**Arguments**:
-
-| Parameter | Description |
-|---|---|
-| `start_*` | Issue/settlement date (excluded from schedule) |
-| `end_*` | Maturity date (included in schedule) |
-| `frequency` | Payments per year: 1 (annual), 2 (semi-annual), 4 (quarterly) |
+::: valax.dates.schedule.generate_schedule

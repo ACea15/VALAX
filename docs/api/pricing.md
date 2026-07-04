@@ -1,184 +1,219 @@
-# Pricing Functions
+# Pricing functions
 
-All pricing functions are pure functions with no side effects. They take an instrument and market data, and return a scalar price.
+All pricing functions are pure functions with no side effects: they
+take an instrument and market inputs and return a scalar JAX array.
+This is the shape that `jax.grad`, `jax.jit`, and `jax.vmap` expect —
+Greeks, batch pricing, and calibration all compose out of the box.
 
-## Analytical
+## Analytical (closed-form)
 
-### `black_scholes_price`
+### Equity vanillas
 
-```python
-black_scholes_price(option, spot, vol, rate, dividend) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.black_scholes_price
 
-Black-Scholes-Merton closed-form for European options on equities.
+::: valax.pricing.analytic.black76_price
 
-### `black76_price`
+::: valax.pricing.analytic.bachelier_price
 
-```python
-black76_price(option, forward, vol, rate) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.black_scholes.black_scholes_implied_vol
 
-Black-76 for European options on forwards/futures.
+### SABR (Hagan formula)
 
-### `bachelier_price`
+::: valax.pricing.analytic.sabr_implied_vol
 
-```python
-bachelier_price(option, forward, vol, rate) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.sabr_price
 
-Bachelier (normal) model. `vol` is absolute (normal) volatility.
+### Heston (COS method)
 
-### `black_scholes_implied_vol`
+Semi-analytic Heston European option price via the Fang–Oosterlee
+(2008) COS expansion with the Lord–Kahl "Little Trap" characteristic
+function. Call and put payoff coefficients are computed directly (not
+via put-call parity) for sharper accuracy at deep OTM strikes; the
+truncation interval is set from closed-form Heston cumulants.
 
-```python
-black_scholes_implied_vol(option, spot, rate, dividend, market_price,
-                           n_iterations=20) -> Float[Array, ""]
-```
+Defaults `N=160, L=12` give < 1e-7 absolute error in moneyness range
+0.85–1.15; deep wings benefit from `L=18, N=256`. Agrees with
+QuantLib's `AnalyticHestonEngine` to < 5e-7 across the validation
+grid. `rate` and `dividend` default to `model.rate` / `model.dividend`
+when `None` — pass explicit values to reprice the same fitted model
+under a stressed discount curve. See
+[theory §2.4](../theory.md#24-heston-stochastic-volatility).
 
-Newton-Raphson implied volatility using autodiff vega.
+::: valax.pricing.analytic.heston_cos_price
 
-### `heston_cos_price`
+### Dupire local volatility
 
-```python
-heston_cos_price(option, spot,
-                 rate=None, dividend=None,
-                 model: HestonModel = ...,
-                 *, N=160, L=12.0) -> Float[Array, ""]
-```
+Local volatility \(\sigma_\text{loc}(k, T)\) extracted from an
+implied-vol surface via Gatheral's IV-space form of the Dupire
+formula. The `surface` argument is duck-typed — any object exposing
+`total_variance(k, T) -> Float[Array, ""]` works (all three VALAX
+surfaces qualify). All three partial derivatives of total variance are
+evaluated via `jax.grad` directly on the surface — no finite
+differences. Requires `jax_enable_x64=True` (enforced; enabled by
+default in `valax/__init__.py`). See
+[theory §4.4](../theory.md#44-local-volatility-dupire).
 
-Semi-analytic Heston European option price via the Fang-Oosterlee (2008) COS expansion with the Lord-Kahl "Little Trap" characteristic function. Call and put payoff coefficients are computed directly (not via put-call parity) for sharper accuracy at deep OTM strikes; the truncation interval is set from closed-form Heston cumulants. `rate` and `dividend` default to `model.rate` / `model.dividend` when `None` — pass explicit values to reprice the same fitted model under a stressed discount curve. Defaults `N=160, L=12` give < 1e-7 absolute error in moneyness range 0.85–1.15; deep wings benefit from `L=18, N=256`. Agrees with QuantLib's `AnalyticHestonEngine` to < 5e-7 across the validation grid. See [theory §2.4](../theory.md#24-heston-stochastic-volatility) for the characteristic function and `valax/pricing/analytic/heston.py` for the implementation.
+::: valax.pricing.analytic.dupire_local_vol
 
-### `dupire_local_vol`
+::: valax.pricing.analytic.dupire_local_vol_from_strike
 
-```python
-dupire_local_vol(surface, log_moneyness, expiry) -> Float[Array, ""]
-```
+### Bonds
 
-Local volatility $\sigma_{\text{loc}}(k, T)$ extracted from an implied vol surface via Gatheral's IV-space form of the Dupire formula. The `surface` argument is duck-typed — any object exposing `total_variance(k, T) -> Float[Array, ""]` works (all three VALAX surfaces qualify). All three partial derivatives of total variance are evaluated via `jax.grad` directly on the surface — no finite differences. Requires `jax_enable_x64=True` (enforced; enabled by default in `valax/__init__.py`). See [theory §4.4](../theory.md#44-local-volatility-dupire) and `valax/pricing/analytic/dupire.py`.
+::: valax.pricing.analytic.zero_coupon_bond_price
 
-### `dupire_local_vol_from_strike`
+::: valax.pricing.analytic.fixed_rate_bond_price
 
-```python
-dupire_local_vol_from_strike(surface, strike, expiry, forward) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.fixed_rate_bond_price_from_yield
 
-Ergonomic wrapper around `dupire_local_vol` that converts an absolute strike to log-moneyness internally: `k = jnp.log(strike / forward)`. For a deterministic-rate equity, `forward = spot * jnp.exp((rate - dividend) * expiry)`.
+::: valax.pricing.analytic.yield_to_maturity
 
-### Bond Pricing
+::: valax.pricing.analytic.modified_duration
 
-#### `zero_coupon_bond_price`
+::: valax.pricing.analytic.convexity
 
-```python
-zero_coupon_bond_price(bond, curve) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.key_rate_durations
 
-Price a zero-coupon bond from a discount curve. Returns `face_value * DF(maturity)`.
+### Caplets / caps
 
-#### `fixed_rate_bond_price`
+::: valax.pricing.analytic.caplet_price_black76
 
-```python
-fixed_rate_bond_price(bond, curve) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.caplet_price_bachelier
 
-Price a fixed-rate coupon bond by discounting each future coupon and the face value redemption using the curve.
+::: valax.pricing.analytic.cap_price_black76
 
-#### `fixed_rate_bond_price_from_yield`
+::: valax.pricing.analytic.cap_price_bachelier
 
-```python
-fixed_rate_bond_price_from_yield(bond, ytm) -> Float[Array, ""]
-```
+### Swaptions
 
-Standard yield-based bond pricing: $P = \sum_i \frac{C}{(1+y/f)^i} + \frac{F}{(1+y/f)^n}$.
+::: valax.pricing.analytic.swap_rate
 
-#### `yield_to_maturity`
+::: valax.pricing.analytic.swap_price
 
-```python
-yield_to_maturity(bond, market_price, n_iterations=50) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.swaption_price_black76
 
-Newton-Raphson YTM solver using autodiff for the price-yield derivative.
+::: valax.pricing.analytic.swaption_price_bachelier
 
-#### `modified_duration`
+### FX pricing
 
-```python
-modified_duration(bond, ytm) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.fx_forward_rate
 
-$-\frac{1}{P}\frac{dP}{dy}$ computed via `jax.grad`.
+::: valax.pricing.analytic.fx_forward_price
 
-#### `convexity`
+::: valax.pricing.analytic.garman_kohlhagen_price
 
-```python
-convexity(bond, ytm) -> Float[Array, ""]
-```
+::: valax.pricing.analytic.fx_implied_vol
 
-$\frac{1}{P}\frac{d^2P}{dy^2}$ computed via nested `jax.grad`.
+FX delta in one of three market conventions: `"spot"` — standard spot
+delta \(e^{-r_f T} \Phi(d_1)\); `"forward"` — forward delta
+\(\Phi(d_1)\); `"premium_adjusted"` — premium-adjusted spot delta
+\(e^{-r_f T} \Phi(d_1) - P/S\).
 
-#### `key_rate_durations`
+::: valax.pricing.analytic.fx_delta
 
-```python
-key_rate_durations(bond, curve) -> Float[Array, "n_pillars"]
-```
+::: valax.pricing.analytic.strike_to_delta
 
-Sensitivity of bond price to each curve pillar's zero rate. One backward pass gives all sensitivities.
+::: valax.pricing.analytic.delta_to_strike
+
+### Variance swaps
+
+Under Black–Scholes the fair variance is the squared implied vol.
+`variance_swap_price_seasoned` blends realized variance over the
+elapsed period with implied variance over the remaining period.
+
+::: valax.pricing.analytic.variance_swap_fair_strike
+
+::: valax.pricing.analytic.variance_swap_price
+
+::: valax.pricing.analytic.variance_swap_price_seasoned
+
+### Floating-rate instruments
+
+Single-curve pricing for FRNs and OIS swaps. The OIS float leg uses
+the telescoping identity \(N \cdot (DF(T_0) - DF(T_n))\); FRNs satisfy
+the par-at-reset invariant.
+
+::: valax.pricing.analytic.floating_rate_bond_price
+
+::: valax.pricing.analytic.ois_swap_price
+
+::: valax.pricing.analytic.ois_swap_rate
+
+### Rates exotics
+
+::: valax.pricing.analytic.cross_currency_swap_price
+
+::: valax.pricing.analytic.cross_currency_basis_spread
+
+::: valax.pricing.analytic.total_return_swap_price
+
+CMS pricers use per-period forward par swap rates on a synthetic
+annual underlying swap. **No convexity adjustment** — see the
+[rates-exotics guide](../guide/rates-exotics.md) for caveats.
+
+::: valax.pricing.analytic.cms_swap_price
+
+::: valax.pricing.analytic.cms_cap_floor_price_black76
+
+::: valax.pricing.analytic.range_accrual_price_black76
+
+### Inflation derivatives
+
+::: valax.pricing.analytic.zcis_price
+
+::: valax.pricing.analytic.zcis_breakeven_rate
+
+::: valax.pricing.analytic.yyis_price
+
+::: valax.pricing.analytic.inflation_cap_floor_price_black76
+
+### Spread options
+
+Margrabe's exact formula for exchange options (\(K = 0\)) is
+independent of the risk-free rate. Kirk's approximation treats
+\(S_2 + K\) as a single asset with adjusted vol and degenerates to
+Margrabe when \(K = 0\).
+
+::: valax.pricing.analytic.margrabe_price
+
+::: valax.pricing.analytic.kirk_price
+
+::: valax.pricing.analytic.spread_option_price
 
 ## Monte Carlo
 
-See the [Monte Carlo guide](../guide/monte-carlo.md) for the full coverage map and contributor cookbook.
+See the [Monte Carlo guide](../guide/monte-carlo.md) for the full
+coverage map and contributor cookbook.
 
 ### Unified dispatcher (preferred)
 
-#### `mc_price_dispatch`
-
-```python
-mc_price_dispatch(instrument, model, config, key, **market_args) -> MCResult
-```
-
-Looks up a recipe keyed on `(type(instrument), type(model))` and runs the appropriate path generation + payoff + discounting. Raises `ValueError` with the list of available recipes if the pair is not registered.
+`mc_price_dispatch` looks up a recipe keyed on
+`(type(instrument), type(model))` and runs the appropriate path
+generation + payoff + discounting. Raises `ValueError` with the list
+of available recipes if the pair is not registered.
 
 Typical `market_args`:
 
 - Equity recipes: `spot` (required).
-- LMM rate recipes: `forward_index` / `forward_indices` + `taus` (or `exercise_indices` for Bermudan).
-- Optional per-recipe knobs: e.g. `annual_factor` for variance-swap realization, `n_steps_per_period` for LMM, `lsm_config` for Bermudan.
+- LMM rate recipes: `forward_index` / `forward_indices` + `taus` (or
+  `exercise_indices` for Bermudan).
+- Optional per-recipe knobs: e.g. `annual_factor` for variance-swap
+  realization, `n_steps_per_period` for LMM, `lsm_config` for
+  Bermudan.
 
-Returns `MCResult` (see below).
+::: valax.pricing.mc.mc_price_dispatch
 
-#### `MCResult`
+::: valax.pricing.mc.MCResult
 
-```python
-MCResult(price: Float[Array, ""], stderr: Float[Array, ""], n_paths: int)
-```
+::: valax.pricing.mc.MCConfig
 
-Frozen `equinox.Module`. `float(result)` returns `float(result.price)`. For recipes where path-wise standard error is not meaningful (Longstaff-Schwartz Bermudan), `stderr` is set to `0.0` — estimate dispersion by running multiple independent seeds.
+::: valax.pricing.mc.register
 
-#### `MCConfig`
+::: valax.pricing.mc.registered_recipes
 
-```python
-MCConfig(n_paths: int, n_steps: int)
-```
+#### Built-in recipes
 
-Both fields are static — fixes JAX array shapes for JIT.
-
-#### `register`
-
-```python
-register(instrument_cls: type, model_cls: type, *, overwrite: bool = False)
-```
-
-Decorator. Adds an `(instrument_cls, model_cls)` → recipe mapping to the global registry. The decorated recipe must accept keyword arguments `instrument`, `model`, `config`, `key`, plus any `market_args` it consumes, and return an `MCResult`. Raises `ValueError` on duplicate registration unless `overwrite=True`.
-
-#### `registered_recipes`
-
-```python
-registered_recipes() -> list[tuple[str, str]]
-```
-
-Sorted list of `(instrument_name, model_name)` for every registered recipe. Useful for introspection.
-
-### Built-in recipes (21)
-
-Single-asset equity (each combo with `BlackScholesModel`, `HestonModel`, `LocalVolModel`, and `SLVModel`):
+Single-asset equity (each combo with `BlackScholesModel`,
+`HestonModel`, `LocalVolModel`, and `SLVModel`):
 
 - `(EuropeanOption, ...)`
 - `(AsianOption, ...)`
@@ -188,8 +223,11 @@ Single-asset equity (each combo with `BlackScholesModel`, `HestonModel`, `LocalV
 
 Multi-asset equity (`MultiAssetGBMModel`):
 
-- `(SpreadOption, MultiAssetGBMModel)` — payoff $\max(S_1 - S_2 - K, 0)$; validates Margrabe at $K=0$ and Kirk at $K\neq 0$.
-- `(WorstOfBasketOption, MultiAssetGBMModel)` — payoff on $\min_i S_i(T)/S_i(0)$; correlation-sensitive.
+- `(SpreadOption, MultiAssetGBMModel)` — payoff
+  \(\max(S_1 - S_2 - K, 0)\); validates Margrabe at \(K = 0\) and
+  Kirk at \(K \neq 0\).
+- `(WorstOfBasketOption, MultiAssetGBMModel)` — payoff on
+  \(\min_i S_i(T)/S_i(0)\); correlation-sensitive.
 
 Rates (LMM):
 
@@ -200,391 +238,111 @@ Rates (LMM):
 
 ### Legacy entry points
 
-#### `mc_price` *(legacy)*
+Still exported for backward compatibility; new code should use
+`mc_price_dispatch`.
 
-```python
-mc_price(option, spot, model, config, key, payoff_fn=european_payoff) -> Float[Array, ""]
-```
+::: valax.pricing.mc.mc_price
 
-Monte Carlo pricing. Dispatches path generation based on model type (`BlackScholesModel` or `HestonModel`). Still exported for backward compatibility; use `mc_price_dispatch` for new code.
-
-#### `mc_price_with_stderr` *(legacy)*
-
-```python
-mc_price_with_stderr(...) -> tuple[Float[Array, ""], Float[Array, ""]]
-```
-
-Same as `mc_price` but also returns the standard error estimate.
+::: valax.pricing.mc.mc_price_with_stderr
 
 ### Path generators (low-level)
 
-| Function | Model | Output |
-|----------|-------|--------|
-| `generate_gbm_paths` | `BlackScholesModel` | `(n_paths, n_steps+1)` array |
-| `generate_heston_paths` | `HestonModel` | `(spot_paths, var_paths)` &mdash; Andersen (2008) QE scheme |
-| `generate_sabr_paths` | `SABRModel` | `(forward_paths, vol_paths)` |
-| `generate_lmm_paths` | `LMMModel` | `LMMPathResult` |
-| `generate_correlated_gbm_paths` | `MultiAssetGBMModel` | `(n_paths, n_steps+1, n_assets)` |
-| `generate_local_vol_paths` | `LocalVolModel` | `(n_paths, n_steps+1)` &mdash; `lax.scan` + log-Euler with midpoint-in-time σ. ``scheme="midpoint_euler"`` (default) or ``scheme="milstein"`` (opt-in, ~2× cost, helps strong-order accuracy for path-statistics-sensitive analyses; no measurable benefit on vanilla repricing). |
-| `generate_slv_paths` | `SLVModel` | `(spot_paths, var_paths)` each `(n_paths, n_steps+1)` &mdash; Andersen-QE variance leg + log-Euler/Milstein log-spot leg with midpoint-in-time `L`. ``scheme="midpoint_euler"`` (default) or ``scheme="milstein"`` (opt-in). Spot/variance correlation via $Z_1 = \rho Z_v + \sqrt{1-\rho^2} Z_\perp$ — exact on the QE quadratic branch (typical case), approximate on the exponential branch. |
+::: valax.pricing.mc.generate_gbm_paths
+
+::: valax.pricing.mc.generate_heston_paths
+
+::: valax.pricing.mc.generate_sabr_paths
+
+::: valax.pricing.mc.generate_correlated_gbm_paths
+
+Local-vol path generator uses `lax.scan` + log-Euler with
+**midpoint-in-time \(\sigma\)**. `scheme="midpoint_euler"` (default)
+or `scheme="milstein"` (opt-in, ~2× cost — helps strong-order accuracy
+for path-statistics-sensitive analyses; no measurable benefit on
+vanilla repricing).
+
+::: valax.pricing.mc.generate_local_vol_paths
+
+SLV path generator combines an Andersen-QE variance leg with a
+log-Euler / Milstein log-spot leg using midpoint-in-time \(L\).
+Spot/variance correlation via
+\(Z_1 = \rho Z_v + \sqrt{1 - \rho^2} Z_\perp\) — exact on the QE
+quadratic branch (typical case), approximate on the exponential
+branch.
+
+::: valax.pricing.mc.generate_slv_paths
+
+::: valax.pricing.mc.LMMPathResult
+
+::: valax.pricing.mc.generate_lmm_paths
 
 ### Payoff functions (low-level)
 
-Equity:
+Equity payoffs on single-asset paths:
 
-- `european_payoff(paths, option)` — terminal-only
-- `asian_option_payoff(paths, option)` — arithmetic / geometric averaging
-- `equity_barrier_payoff(paths, option)` — KI/KO with sigmoid smoothing
-- `barrier_payoff(paths, option, barrier, is_up, is_knock_in, smoothing)` — manual barrier
-- `lookback_payoff(paths, option)` — floating + fixed strike
-- `variance_swap_payoff(paths, swap, annual_factor)` — mean-zero realized variance
-- `spread_option_mc_payoff(paths, option, asset1_index=0, asset2_index=1)` — for multi-asset GBM paths
-- `worst_of_basket_payoff(paths, option, initial_spots)` — for multi-asset GBM paths
+::: valax.pricing.mc.european_payoff
 
-Rates (LMM):
+::: valax.pricing.mc.asian_option_payoff
 
-- `caplet_mc_payoff(result, caplet, forward_index, tau)`
-- `cap_mc_payoff(result, cap, forward_indices, taus)`
-- `swaption_mc_payoff(result, swaption, forward_indices, taus)`
-- `bermudan_swaption_lsm(result, swaption, exercise_indices, taus, config)` — Longstaff-Schwartz
+::: valax.pricing.mc.asian_payoff
 
-### `LSMConfig`
+::: valax.pricing.mc.equity_barrier_payoff
 
-```python
-LSMConfig(poly_degree: int = 3)
-```
+::: valax.pricing.mc.barrier_payoff
 
-Polynomial basis configuration for Longstaff-Schwartz regression.
+::: valax.pricing.mc.lookback_payoff
+
+::: valax.pricing.mc.variance_swap_payoff
+
+Multi-asset payoffs on `generate_correlated_gbm_paths` output:
+
+::: valax.pricing.mc.spread_option_mc_payoff
+
+::: valax.pricing.mc.worst_of_basket_payoff
+
+Rate payoffs on `LMMPathResult`:
+
+::: valax.pricing.mc.caplet_mc_payoff
+
+::: valax.pricing.mc.cap_mc_payoff
+
+::: valax.pricing.mc.swaption_mc_payoff
+
+### Bermudan (Longstaff–Schwartz)
+
+::: valax.pricing.mc.bermudan_swaption_lsm
+
+::: valax.pricing.mc.LSMConfig
 
 ## PDE
 
-### `pde_price`
+Crank–Nicolson finite-difference solver in log-spot space.
 
-```python
-pde_price(option, spot, vol, rate, dividend, config=PDEConfig()) -> Float[Array, ""]
-```
+::: valax.pricing.pde.solvers.pde_price
 
-Crank-Nicolson finite difference solver in log-spot space.
-
-### `PDEConfig`
-
-```python
-PDEConfig(n_spot: int = 200, n_time: int = 200, spot_range: float = 4.0)
-```
+::: valax.pricing.pde.solvers.PDEConfig
 
 ## Lattice
 
-### `binomial_price`
+### CRR binomial tree
 
-```python
-binomial_price(option, spot, vol, rate, dividend, config=BinomialConfig()) -> Float[Array, ""]
-```
+Supports both European and American exercise.
 
-CRR binomial tree. Supports both European and American exercise.
+::: valax.pricing.lattice.binomial.binomial_price
 
-### `BinomialConfig`
+::: valax.pricing.lattice.binomial.BinomialConfig
 
-```python
-BinomialConfig(n_steps: int = 200, american: bool = False)
-```
+### Callable / puttable bonds
 
----
+Backward induction on a Hull–White recombining trinomial tree.
+Per-step \(\alpha\) calibration matches market discount factors
+exactly. Callable price is bounded above by the equivalent straight
+bond; puttable price is bounded below.
 
-## FX Pricing
+::: valax.pricing.lattice.hull_white_tree.build_hull_white_tree
 
-### `fx_forward_rate`
+::: valax.pricing.lattice.hull_white_tree.HullWhiteTree
 
-```python
-fx_forward_rate(spot, r_domestic, r_foreign, T) -> Float[Array, ""]
-```
+::: valax.pricing.lattice.hull_white_tree.callable_bond_price
 
-Covered-interest-rate-parity forward rate: $F = S \cdot e^{(r_d - r_f) T}$.
-
-### `fx_forward_price`
-
-```python
-fx_forward_price(forward: FXForward, spot, r_domestic, r_foreign) -> Float[Array, ""]
-```
-
-NPV of an FX forward contract. Positive = forward buyer is in-the-money.
-
-### `garman_kohlhagen_price`
-
-```python
-garman_kohlhagen_price(option: FXVanillaOption, spot, vol, r_domestic, r_foreign) -> Float[Array, ""]
-```
-
-Garman-Kohlhagen (modified Black-Scholes) for European FX options. The foreign rate acts as a continuous dividend yield.
-
-### `fx_implied_vol`
-
-```python
-fx_implied_vol(option: FXVanillaOption, spot, r_domestic, r_foreign,
-               market_price, n_iterations=20) -> Float[Array, ""]
-```
-
-Newton-Raphson implied volatility using autodiff vega.
-
-### `fx_delta`
-
-```python
-fx_delta(option: FXVanillaOption, spot, vol, r_domestic, r_foreign,
-         convention="spot") -> Float[Array, ""]
-```
-
-FX delta in one of three market conventions:
-
-- `"spot"` — standard spot delta: $e^{-r_f T} \Phi(d_1)$
-- `"forward"` — forward delta: $\Phi(d_1)$
-- `"premium_adjusted"` — premium-adjusted spot delta: $e^{-r_f T} \Phi(d_1) - P/S$
-
-### `strike_to_delta`
-
-```python
-strike_to_delta(strike, spot, vol, r_domestic, r_foreign, T, is_call,
-                convention="spot") -> Float[Array, ""]
-```
-
-Convert a strike to its delta value under the specified convention.
-
-### `delta_to_strike`
-
-```python
-delta_to_strike(delta, spot, vol, r_domestic, r_foreign, T, is_call,
-                convention="spot", n_iterations=20) -> Float[Array, ""]
-```
-
-Invert delta to find the corresponding strike (Newton-Raphson via autodiff).
-
----
-
-## Variance Swap Pricing
-
-### `variance_swap_fair_strike`
-
-```python
-variance_swap_fair_strike(vol) -> Float[Array, ""]
-```
-
-BSM fair variance strike: $K_{\text{var}} = \sigma^2$. Under Black-Scholes the fair variance is the squared implied vol.
-
-### `variance_swap_price`
-
-```python
-variance_swap_price(swap: VarianceSwap, vol, rate) -> Float[Array, ""]
-```
-
-Mark-to-market of a variance swap under BSM. NPV = $N_{\text{var}} \cdot (\sigma^2 - K_{\text{var}}) \cdot e^{-rT}$.
-
-### `variance_swap_price_seasoned`
-
-```python
-variance_swap_price_seasoned(swap: VarianceSwap, vol, rate,
-                              realized_var, elapsed_fraction) -> Float[Array, ""]
-```
-
-Seasoned variance swap accounting for the portion already accrued: blends realized variance over the elapsed period with implied variance over the remaining period.
-
----
-
-## Floating Rate Instruments
-
-### `floating_rate_bond_price`
-
-```python
-floating_rate_bond_price(bond: FloatingRateBond, curve: DiscountCurve) -> Float[Array, ""]
-```
-
-Price a floating-rate note under the single-curve assumption. Projects forward rates from the curve (or uses known fixings from `bond.fixing_rates` where finite). Satisfies the par-at-reset invariant: a zero-spread FRN on its first reset date prices to face value.
-
-### `ois_swap_price`
-
-```python
-ois_swap_price(swap: OISSwap, curve: DiscountCurve) -> Float[Array, ""]
-```
-
-NPV of an Overnight Index Swap. Float leg uses the telescoping identity $N \cdot (DF(T_0) - DF(T_n))$; fixed leg is the standard annuity. Sign follows `pay_fixed`.
-
-### `ois_swap_rate`
-
-```python
-ois_swap_rate(swap: OISSwap, curve: DiscountCurve) -> Float[Array, ""]
-```
-
-Par OIS rate: $K^* = (DF(T_0) - DF(T_n)) / A$.
-
----
-
-## Rates Exotics
-
-### `cross_currency_swap_price`
-
-```python
-cross_currency_swap_price(swap: CrossCurrencySwap, domestic_curve: DiscountCurve,
-                          foreign_curve: DiscountCurve, spot) -> Float[Array, ""]
-```
-
-NPV (in domestic currency) of a cross-currency basis swap. Two-curve telescoping with spot conversion. With `exchange_notional=True`, the NPV collapses to $N_d \cdot s \cdot A_d$.
-
-### `cross_currency_basis_spread`
-
-```python
-cross_currency_basis_spread(swap: CrossCurrencySwap, domestic_curve: DiscountCurve,
-                            foreign_curve: DiscountCurve, spot) -> Float[Array, ""]
-```
-
-Par basis spread that zeroes the XCCY NPV.
-
-### `total_return_swap_price`
-
-```python
-total_return_swap_price(swap: TotalReturnSwap, curve: DiscountCurve,
-                        unrealized_return=None) -> Float[Array, ""]
-```
-
-NPV under the self-financing asset assumption. At reset: $\text{NPV}_{\text{receiver}} = -N \cdot s \cdot A$. Optional `unrealized_return` adds accrued mark-to-market.
-
-### `cms_swap_price`
-
-```python
-cms_swap_price(swap: CMSSwap, curve: DiscountCurve) -> Float[Array, ""]
-```
-
-CMS swap NPV using per-period forward par swap rates on a synthetic annual underlying swap. **No convexity adjustment** — see the guide for caveats.
-
-### `cms_cap_floor_price_black76`
-
-```python
-cms_cap_floor_price_black76(cap: CMSCapFloor, curve: DiscountCurve,
-                            vol) -> Float[Array, ""]
-```
-
-Black-76 on the unadjusted forward CMS rate. `vol` is scalar or per-period. Floor via put-call parity. Same convexity caveat as `cms_swap_price`.
-
-### `range_accrual_price_black76`
-
-```python
-range_accrual_price_black76(accrual: RangeAccrual, curve: DiscountCurve,
-                            vol) -> Float[Array, ""]
-```
-
-Digital-replication range accrual: per-period snapshot probability $P(L < F < U)$ under Black-76. `vol` is scalar or per-period.
-
----
-
-## Lattice — Hull-White Trinomial Tree
-
-### `build_hull_white_tree`
-
-```python
-build_hull_white_tree(model: HullWhiteModel, T: float, n_steps: int = 100) -> HullWhiteTree
-```
-
-Construct a Hull-White recombining trinomial tree from $t = 0$ to $T$. Per-step $\alpha$ calibration matches market discount factors exactly. Returns a `HullWhiteTree` pytree containing rates, Arrow-Debreu prices, probabilities, and target indices.
-
-### `callable_bond_price`
-
-```python
-callable_bond_price(bond: CallableBond, model: HullWhiteModel,
-                    n_steps: int = 100) -> Float[Array, ""]
-```
-
-Price a callable bond via backward induction on the Hull-White tree. The issuer calls when continuation value exceeds the call price. Result < straight bond price.
-
-### `puttable_bond_price`
-
-```python
-puttable_bond_price(bond: PuttableBond, model: HullWhiteModel,
-                    n_steps: int = 100) -> Float[Array, ""]
-```
-
-Price a puttable bond via backward induction. The holder puts when continuation value falls below the put price. Result > straight bond price.
-
-### `HullWhiteTree`
-
-```python
-class HullWhiteTree(eqx.Module):
-    dt: Float[Array, ""]
-    dx: Float[Array, ""]
-    n_steps: int           # static
-    j_max: int             # static
-    alpha: Float[Array, "n_steps"]
-    rates: Float[Array, "n_steps_plus1 n_states"]
-    probs: Float[Array, "n_states 3"]
-    targets: Int[Array, "n_states 3"]
-```
-
-Pre-built tree data structure. `n_states = 2 * j_max + 1`.
-
----
-
-## Inflation Derivatives
-
-### `zcis_price`
-
-```python
-zcis_price(swap: ZeroCouponInflationSwap, inflation_curve: InflationCurve,
-           discount_curve: DiscountCurve) -> Float[Array, ""]
-```
-
-NPV of a zero-coupon inflation swap. Inflation leg = $N \cdot (CPI(T)/CPI(0) - 1) \cdot DF(T)$; fixed leg = $N \cdot ((1+K)^T - 1) \cdot DF(T)$. Sign follows `is_inflation_receiver`.
-
-### `zcis_breakeven_rate`
-
-```python
-zcis_breakeven_rate(swap: ZeroCouponInflationSwap,
-                    inflation_curve: InflationCurve) -> Float[Array, ""]
-```
-
-Par (breakeven) rate $K^* = (CPI(T)/CPI(0))^{1/T} - 1$. Independent of the discount curve.
-
-### `yyis_price`
-
-```python
-yyis_price(swap: YearOnYearInflationSwap, inflation_curve: InflationCurve,
-           discount_curve: DiscountCurve) -> Float[Array, ""]
-```
-
-NPV of a year-on-year inflation swap. Per-period YoY forward rate from the inflation curve ratio, discounted. No convexity adjustment.
-
-### `inflation_cap_floor_price_black76`
-
-```python
-inflation_cap_floor_price_black76(cap: InflationCapFloor,
-                                  inflation_curve: InflationCurve,
-                                  discount_curve: DiscountCurve,
-                                  vol) -> Float[Array, ""]
-```
-
-Black-76 on the YoY forward inflation rate. `vol` is scalar or per-period. Floor via put-call parity.
-
----
-
-## Spread Options
-
-### `margrabe_price`
-
-```python
-margrabe_price(option: SpreadOption, s1, s2, vol1, vol2, rho,
-               q1=0.0, q2=0.0) -> Float[Array, ""]
-```
-
-Margrabe's exact formula for exchange options ($K = 0$). Price is independent of the risk-free rate. Put via Margrabe parity.
-
-### `kirk_price`
-
-```python
-kirk_price(option: SpreadOption, s1, s2, vol1, vol2, rho, rate,
-           q1=0.0, q2=0.0) -> Float[Array, ""]
-```
-
-Kirk's approximation for spread options ($K \neq 0$). Treats $S_2 + K$ as a single asset with adjusted vol. Degenerates to Margrabe when $K = 0$. Put via put-call parity.
-
-### `spread_option_price`
-
-```python
-spread_option_price(option: SpreadOption, s1, s2, vol1, vol2, rho, rate,
-                    q1=0.0, q2=0.0) -> Float[Array, ""]
-```
-
-Convenience wrapper — dispatches to `kirk_price` (handles all $K$).
+::: valax.pricing.lattice.hull_white_tree.puttable_bond_price

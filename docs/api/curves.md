@@ -1,529 +1,230 @@
 # Curves
 
-Discount curve construction and interpolation. All curve objects are `equinox.Module` pytrees — fully differentiable for key-rate duration computation.
+Discount, inflation, and survival curve construction, interpolation,
+and bootstrapping. All curve objects are `equinox.Module` pytrees —
+fully differentiable, so `jax.grad` through any pricing function that
+takes a curve gives per-pillar key-rate durations for free.
 
-## `DiscountCurve`
+## Discount curve
 
-```python
-class DiscountCurve(eqx.Module):
-    pillar_dates: Int[Array, "n_pillars"]       # sorted ordinal dates
-    discount_factors: Float[Array, "n_pillars"] # DF at each pillar
-    reference_date: Int[Array, ""]              # valuation date
-    day_count: str = "act_365"                  # static field
-```
+Interpolation is log-linear on discount factors (equivalent to
+piecewise-constant continuously-compounded forward rates) with flat
+extrapolation beyond the pillar range. Callable directly:
+`df = curve(date)` (scalar or vectorized).
 
-**Fields**:
+::: valax.curves.DiscountCurve
 
-| Field | Type | Static | Description |
-|---|---|---|---|
-| `pillar_dates` | `Int[Array, "n"]` | No | Ordinal dates for curve nodes, sorted ascending. |
-| `discount_factors` | `Float[Array, "n"]` | No | Discount factors at each pillar. First should be 1.0. **Differentiable.** |
-| `reference_date` | `Int[Array, ""]` | No | Valuation date as ordinal. |
-| `day_count` | `str` | Yes | Day count convention name. |
+### Zero and forward rates
 
-**Interpolation**: Log-linear (linear in log-DF space), equivalent to piecewise-constant continuously-compounded forward rates. Flat extrapolation beyond curve range.
+::: valax.curves.forward_rate
 
-**Usage**:
+::: valax.curves.zero_rate
 
-```python
-# Callable — interpolate at arbitrary dates
-df = curve(date)           # single date
-dfs = curve(date_array)    # vectorized
-```
+## Inflation curve
 
-!!! note "Differentiability"
-    `discount_factors` are differentiable leaves. `jax.grad` through any function that uses a `DiscountCurve` gives sensitivities to each pillar — this is how key-rate durations work.
+Term structure of forward CPI levels. Interpolates in **log-CPI**
+space for smooth implied forward inflation rates.
 
-## `forward_rate`
+::: valax.curves.InflationCurve
 
-```python
-forward_rate(curve, start, end) -> Float[Array, ""]
-```
+::: valax.curves.forward_cpi
 
-Simply-compounded forward rate between two ordinal dates:
+::: valax.curves.zc_inflation_rate
 
-$$F(t_1, t_2) = \frac{DF(t_1)/DF(t_2) - 1}{\tau(t_1, t_2)}$$
+::: valax.curves.yoy_forward_rate
 
-## `zero_rate`
+::: valax.curves.from_zc_rates
 
-```python
-zero_rate(curve, date) -> Float[Array, ""]
-```
+## Survival (credit) curve
 
-Continuously-compounded zero rate to a given date:
+Term structure of survival probabilities for a single credit entity.
+Mirrors `DiscountCurve` in design: log-linear interpolation between
+pillars — equivalent to **piecewise-constant hazard rate** — which is
+the standard market convention. `jax.grad` gives per-pillar
+credit-delta sensitivities (the credit analogue of KRD / DV01).
 
-$$r(t) = -\frac{\ln DF(t)}{\tau(\text{ref}, t)}$$
+::: valax.curves.SurvivalCurve
 
----
+::: valax.curves.survival_probability
 
-## `InflationCurve`
+::: valax.curves.hazard_rate
 
-Term structure of forward CPI (Consumer Price Index) levels. Interpolates in **log-CPI** space for smooth implied forward inflation rates.
+::: valax.curves.piecewise_hazards
 
-```python
-class InflationCurve(eqx.Module):
-    pillar_dates: Int[Array, "n"]       # sorted ordinal dates
-    forward_cpis: Float[Array, "n"]     # forward CPI at each pillar
-    base_cpi: Float[Array, ""]          # CPI at inception
-    reference_date: Int[Array, ""]      # valuation date
-    day_count: str = "act_act"          # static field
-```
+### Survival constructors
 
-**Functions**:
+`from_hazard_rates` treats `hazards[i]` as the constant hazard on
+\((\text{pillar}_{i-1}, \text{pillar}_i]\). `from_cds_spreads` uses
+the credit triangle \(h \approx s / (1 - R)\) to bootstrap survival
+from a flat-spread CDS curve.
 
-| Function | Description |
-|---|---|
-| `forward_cpi(curve, dates)` | Interpolated forward CPI at arbitrary dates |
-| `zc_inflation_rate(curve, dates)` | Zero-coupon breakeven rate: $(CPI(T)/CPI(0))^{1/T} - 1$ |
-| `yoy_forward_rate(curve, starts, ends)` | Year-on-year forward: $CPI(T_i)/CPI(T_{i-1}) - 1$ |
-| `from_zc_rates(ref, pillars, rates, base_cpi)` | Constructor from ZC breakeven rates |
+::: valax.curves.from_hazard_rates
 
-**Usage**:
+::: valax.curves.from_cds_spreads
 
-```python
-from valax.curves import InflationCurve, forward_cpi, from_zc_rates
+See [Risk Factors](../risk-factors.md) — Credit section — for the role
+of the survival curve in the wider risk-factor catalogue, and
+[`valax.risk.shocks`](risk.md#credit-shocks) for the credit-side bump
+primitives.
 
-curve = from_zc_rates(ref_date, pillar_dates, zc_rates, base_cpi=jnp.array(100.0))
-cpi_5y = forward_cpi(curve, maturity_date)
-```
+## Bootstrap instruments
 
-!!! note "Differentiability"
-    `forward_cpis` and `base_cpi` are differentiable leaves. `jax.grad` gives inflation-delta (IE01) sensitivities.
+Bootstrap instruments are the *quotes* used to calibrate curves. Each
+one implements the [`BootstrapInstrument`](#the-bootstrapinstrument-protocol)
+protocol — it carries a static `curves_touched` tuple of curve
+identifiers and exposes a `residual(graph, fixings, ref_date)` method
+that returns zero when the curve graph correctly reprices the quote.
 
----
-
-## Bootstrap Instruments
-
-Bootstrap instruments are the *quotes* used to calibrate curves. Each one
-implements the [`BootstrapInstrument`](#bootstrapinstrument-protocol)
-protocol — it carries a static `curves_touched` tuple of curve identifiers
-and exposes a `residual(graph, fixings, ref_date)` method that returns
-zero when the curve graph correctly reprices the quote.
-
-These are calibration *inputs*, distinct from the tradeable instruments in
-`valax.instruments` (which carry notional and direction). They live in
-`valax.curves` so the dependency graph stays clean.
+These are calibration *inputs*, distinct from the tradeable
+instruments in [`valax.instruments`](instruments.md) (which carry
+notional and direction). They live in `valax.curves` so the
+dependency graph stays clean.
 
 For the no-arbitrage motivation behind each instrument's residual, see
-[theory §3.7](../theory.md#37-no-arbitrage-relations-across-curves) and
-[§3.8](../theory.md#38-joint-multi-curve-calibration). For the production
-roadmap that uses these instruments in a joint solver, see
-[`production.md` §11](../architecture/production.md#11-multi-curve-framework).
+[theory §3.7](../theory.md#37-no-arbitrage-relations-across-curves)
+and [§3.8](../theory.md#38-joint-multi-curve-calibration). For the
+production roadmap that uses these instruments in a joint solver, see
+[production.md §11](../architecture/production.md#11-multi-curve-framework).
 
-### `BootstrapInstrument` protocol
+### The `BootstrapInstrument` protocol
 
-Every quote type is a structural [`Protocol`](https://docs.python.org/3/library/typing.html#typing.Protocol):
+::: valax.curves.bootstrap_proto.BootstrapInstrument
 
-```python
-class BootstrapInstrument(Protocol):
-    curves_touched: tuple[str, ...]   # static
-    def residual(
-        self,
-        graph: CurveGraph,
-        fixings: FixingHistory,
-        ref_date: Int[Array, ""],
-    ) -> Float[Array, ""]: ...
-```
+### Curve graph
 
-`@runtime_checkable` — `isinstance(inst, BootstrapInstrument)` works as a
-weak check on attribute presence.
+`CurveGraph` is a flat, identifier-keyed registry of discount curves.
+Lookup via `graph[curve_id]`, membership via `curve_id in graph`.
+Single-curve callers use the sentinel id `"_default_"`; multi-curve
+callers use semantic identifiers like `"USD.SOFR.OIS"`,
+`"EUR.EURIBOR.6M"`.
 
-### `CurveGraph`
+::: valax.curves.CurveGraph
 
-```python
-class CurveGraph(eqx.Module):
-    curves: dict[str, DiscountCurve]
-```
+::: valax.curves.CurveSpec
 
-A flat, identifier-keyed registry of discount curves. Lookup via `graph[curve_id]`,
-membership via `curve_id in graph`. JAX-pytree native — `jax.tree_util` traverses
-the dict values; string keys are static metadata. Single-curve callers use
-the sentinel id `"_default_"`; multi-curve callers use semantic identifiers
-like `"USD.SOFR.OIS"`, `"EUR.EURIBOR.6M"` (see [`CurveSpec`](#curvespec)).
+### Joint multi-curve solver
 
-### `CurveSpec`
+Joint multi-curve Newton solver — the central deliverable of
+MC-Curves-2. Concatenates the log-DFs of every curve in the graph into
+one state vector, zeros every instrument's residual simultaneously via
+`optimistix.Newton`, and supports `jax.grad` through the calibrated
+graph via `optimistix.ImplicitAdjoint`.
 
-Static, declarative description of one curve to be bootstrapped by
-[`bootstrap_curve_graph`](#bootstrap_curve_graph).
+::: valax.curves.bootstrap_curve_graph
 
-```python
-class CurveSpec(eqx.Module):
-    curve_id:     str                       # static; e.g. "USD.SOFR.OIS"
-    currency:     str                       # static; e.g. "USD"
-    pillar_dates: Int[Array, " n"]
-    interp:       str = "log_linear_df"     # static
-    day_count:    str = "act_365"           # static
-```
+::: valax.curves.CurveBuildDiagnostics
 
-`curve_id` is validated on construction against the frozen alphabet
-`<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]` (see
-[`production.md` §11.3](../architecture/production.md#113-curve-graph-data-model));
-the sentinel `"_default_"` is grandfathered for the single-curve
-`bootstrap_simultaneous` path. `interp` currently accepts only
-`"log_linear_df"`; monotone-convex and tension-spline variants are queued for
-MC-Curves-3.
+`quote_jacobian` is a convenience wrapper around `jax.jacrev` over
+`bootstrap_curve_graph`. Rows are laid out per curve in the order of
+`curve_specs`; within each curve, one row per pillar. Columns follow
+the order of `instruments`. Uses implicit-adjoint so the cost is one
+linear solve per column regardless of Newton iteration count.
 
-### `bootstrap_curve_graph`
+::: valax.curves.quote_jacobian
 
-Joint multi-curve Newton solver — the central deliverable of MC-Curves-2.
-Concatenates the log-DFs of every curve in the graph into one state vector,
-zeros every instrument's residual simultaneously via `optimistix.Newton`, and
-supports `jax.grad` through the calibrated graph via
-`optimistix.ImplicitAdjoint`.
+### Fixings
 
-```python
-def bootstrap_curve_graph(
-    reference_date: Int[Array, ""],
-    curve_specs:    Sequence[CurveSpec],
-    instruments:    Sequence[BootstrapInstrument],
-    *,
-    fixings:        FixingHistory | None = None,
-    solver:         optx.AbstractRootFinder | None = None,
-    initial_guess:  Mapping[str, Float[Array, " n"]] | None = None,
-    max_steps:      int = 256,
-) -> tuple[CurveGraph, CurveBuildDiagnostics]: ...
-```
+Realised fixings for partially-seasoned floating legs, keyed by index
+identifier (e.g. `USD.SOFR`, `USD.SOFR.3M`, `EUR.EURIBOR.6M`) and
+fixing date. `jax.grad` can flow through a lookup, and `eqx.tree_at`
+can replace a single series without rebuilding the registry. See
+theory §3.9 for the no-arbitrage motivation.
 
-The residual system must be square: `len(instruments)` must equal the sum of
-`spec.pillar_dates.shape[0]` across all specs. Every instrument's
-`curves_touched` entries must reference a spec in `curve_specs`; otherwise
-`ValueError` is raised at build time.
+::: valax.curves.FixingSeries
 
-### `CurveBuildDiagnostics`
+::: valax.curves.FixingHistory
 
-```python
-class CurveBuildDiagnostics(eqx.Module):
-    residuals:        Float[Array, " n_instruments"]
-    max_abs_residual: Float[Array, ""]
-    n_steps:          Int[Array, ""]
-    converged:        bool
-```
-
-Minimal calibration report emitted alongside the calibrated `CurveGraph`.
-Extended (per-instrument fitted-vs-quoted table, Jacobian condition number,
-timing) in MC-Curves-3.
-
-### `quote_jacobian`
-
-Convenience wrapper around `jax.jacrev` over `bootstrap_curve_graph`:
-
-```python
-def quote_jacobian(
-    reference_date: Int[Array, ""],
-    curve_specs:    Sequence[CurveSpec],
-    instruments:    Sequence[BootstrapInstrument],
-    *,
-    by:             str = "log_df",       # "log_df" | "df" | "zero_rate"
-    fixings:        FixingHistory | None = None,
-    solver:         optx.AbstractRootFinder | None = None,
-    max_steps:      int = 256,
-) -> Float[Array, "n_pillars_total n_quotes"]: ...
-```
-
-Rows are laid out per curve in the order of `curve_specs`; within each curve,
-one row per pillar. Columns follow the order of `instruments`. Uses
-implicit-adjoint so the cost is one linear solve per column regardless of
-Newton iteration count. Each instrument must expose a `.rate` attribute (the
-classic quote types do); extended-quote coverage (`.spread`,
-`.futures_rate`, `.quoted_forward`) is a MC-Curves-3 refinement.
-
-### `FixingSeries` / `FixingHistory`
-
-```python
-class FixingSeries(eqx.Module):
-    fixing_dates: Int[Array, " n"]
-    fixings: Float[Array, " n"]
-
-class FixingHistory(eqx.Module):
-    indices: dict[str, FixingSeries]
-```
-
-Realised fixings keyed by index id. Methods:
-
-| Method | Returns | Notes |
-|---|---|---|
-| `series.lookup(date)` | `Float[Array, ""]` | Realised value at `date`, or `nan` if absent. |
-| `series.has_fixing(date)` | `Bool[Array, ""]` | JIT-friendly presence check. |
-| `series.lookup_many(dates)` | `Float[Array, " m"]` | Vectorised lookup; `nan` for absent. |
-| `history.lookup(idx, date)` | `Float[Array, ""]` | `KeyError` (trace-time) if `idx` absent. |
-| `history.lookup_many(idx, dates)` | `Float[Array, " m"]` | Vectorised. |
-| `empty_fixing_history()` | `FixingHistory` | Default arg for forward-only swaps. |
+::: valax.curves.empty_fixing_history
 
 ### Convexity-adjustment plug-ins
 
-```python
-ConvexityAdjFn = Callable[
-    [CurveGraph, Int[Array, ""], Int[Array, ""]],
-    Float[Array, ""],
-]
-```
+Used by `MoneyMarketFuture`. Two variants ship with MC-Curves-1;
+`hull_white_convexity_adj(model)` is reserved for a follow-up PR gated
+on short-rate-model integration with the curve build (see
+[theory §3.9](../theory.md#39-futures-convexity-adjustment-and-fixings)).
 
-Used by `MoneyMarketFuture`. Two factories:
+::: valax.curves.no_convexity_adj
 
-| Factory | Returns | Use case |
-|---|---|---|
-| `no_convexity_adj()` | Always 0.0 | Short-dated futures; simplified calibration. |
-| `constant_convexity_adj(bps)` | Always `bps * 1e-4` | Desk-supplied bps; production default for now. |
-
-Reserved for a follow-up PR (gated on the short-rate-model integration with
-the curve build): `hull_white_convexity_adj(model)` — closed-form derivation
-in [theory §3.9](../theory.md#39-futures-convexity-adjustment-and-fixings).
+::: valax.curves.constant_convexity_adj
 
 ### Single-curve quote types
 
-Each type's `curves_touched` is a 1-tuple defaulting to `("_default_",)`.
+Each type's `curves_touched` is a 1-tuple defaulting to
+`("_default_",)`.
 
-#### `DepositRate`
+::: valax.curves.DepositRate
 
-```python
-class DepositRate(eqx.Module):
-    start_date:    Int[Array, ""]
-    end_date:      Int[Array, ""]
-    rate:          Float[Array, ""]
-    day_count:     str = "act_360"            # static
-    curves_touched: tuple = ("_default_",)    # static
-```
+::: valax.curves.FRA
 
-**Residual**: $DF(\text{end})\,(1 + r\,\tau) - DF(\text{start})$.
+::: valax.curves.SwapRate
 
-#### `FRA`
+::: valax.curves.OISSwapRate
 
-Same field layout and same residual as `DepositRate`. Distinction is semantic
-(`start_date > ref_date`).
+::: valax.curves.MoneyMarketFuture
 
-#### `SwapRate`
-
-```python
-class SwapRate(eqx.Module):
-    start_date:     Int[Array, ""]
-    fixed_dates:    Int[Array, " n"]
-    rate:           Float[Array, ""]
-    day_count:      str = "act_360"           # static
-    curves_touched: tuple = ("_default_",)    # static
-```
-
-**Residual**: $r \sum_i \tau_i\,DF(T_i) - (DF(\text{start}) - DF(T_n))$.
-
-#### `OISSwapRate`
-
-```python
-class OISSwapRate(eqx.Module):
-    start_date:     Int[Array, ""]
-    fixed_dates:    Int[Array, " n"]
-    rate:           Float[Array, ""]
-    day_count:      str = "act_360"           # static
-    curves_touched: tuple = ("_default_",)    # static
-    index_id:       str = "OIS"               # static (reserved for fixings)
-```
-
-**Residual**: same as `SwapRate` (the daily-compounded float leg telescopes
-exactly to $DF(\text{start}) - DF(T_n)$ on a single OIS curve). Distinct
-class because the multi-curve world treats OIS swaps as single-curve and
-IBOR swaps as dual-curve. See `IborSwapRate`.
-
-`fixings` is accepted for protocol conformance but not consumed in MC-Curves-1;
-seasoned-OIS support is deferred.
-
-#### `MoneyMarketFuture`
-
-```python
-class MoneyMarketFuture(eqx.Module):
-    start_date:        Int[Array, ""]
-    end_date:          Int[Array, ""]
-    futures_rate:      Float[Array, ""]
-    day_count:         str = "act_360"            # static
-    curves_touched:    tuple = ("_default_",)     # static
-    convexity_adj_fn:  ConvexityAdjFn             # static, default no_convexity_adj
-```
-
-**Residual**: $\text{futures\_rate} - \text{adj}(graph, T_0, T_1) - F^{\text{curve}}(T_0, T_1)$.
-
-The convexity adjustment is pluggable — see the table above.
-
-#### `TurnInstrument`
-
-```python
-class TurnInstrument(eqx.Module):
-    turn_date:           Int[Array, ""]
-    jump_size:           Float[Array, ""]
-    accrual_days_before: int = 1                  # static
-    accrual_days_after:  int = 1                  # static
-    day_count:           str = "act_360"          # static
-    curves_touched:      tuple = ("_default_",)   # static
-```
-
-**Residual**: $F^{\text{curve}}(T_- ,T_+) - \text{jump\_size}$ where the
-window straddles the turn date.
-
-Turn instruments require an interpolation method that admits discontinuities;
-under VALAX's current log-linear-DF interpolation, the jump can be modelled by
-placing two pillars tightly around the turn date.
+::: valax.curves.TurnInstrument
 
 ### Multi-curve same-currency quote types
 
-#### `IborSwapRate` (dual-curve)
+`IborSwapRate` is dual-curve — `curves_touched` convention
+`(discount_curve_id, forward_curve_id)`. Past coupons
+(`fixing_date <= ref_date` and recorded in `FixingHistory[index_id]`)
+use the realised rate instead of the projection.
 
-```python
-class IborSwapRate(eqx.Module):
-    start_date:        Int[Array, ""]
-    fixed_dates:       Int[Array, " n_fixed"]
-    float_dates:       Int[Array, " n_float"]
-    fixing_dates:      Int[Array, " n_float"]
-    rate:              Float[Array, ""]
-    fixed_day_count:   str = "act_360"            # static
-    float_day_count:   str = "act_360"            # static
-    curves_touched:    tuple = ("_default_", "_default_")   # static
-    index_id:          str = "IBOR"               # static
-```
+::: valax.curves.IborSwapRate
 
-**`curves_touched`** convention: `(discount_curve_id, forward_curve_id)`.
-
-**Residual** (theory.md §3.2 dual-curve par condition):
-$\text{fixed\_pv} - \text{float\_pv}$ with float coupons projected from
-`forward_curve_id` and discounted (along with the fixed leg) with
-`discount_curve_id`. Past coupons (`fixing_date <= ref_date` and recorded
-in `FixingHistory[index_id]`) use the realised rate instead of the
-projection.
-
-#### `TenorBasisSwap` (three-curve)
-
-```python
-class TenorBasisSwap(eqx.Module):
-    start_date:           Int[Array, ""]
-    leg_a_dates:          Int[Array, " n_a"]
-    leg_a_fixing_dates:   Int[Array, " n_a"]
-    leg_b_dates:          Int[Array, " n_b"]
-    leg_b_fixing_dates:   Int[Array, " n_b"]
-    spread:               Float[Array, ""]    # default 0.0
-    leg_a_day_count:      str = "act_360"     # static
-    leg_a_index_id:       str = "IBOR_A"      # static
-    leg_b_day_count:      str = "act_360"     # static
-    leg_b_index_id:       str = "IBOR_B"      # static
-    spread_on_leg:        str = "a"           # static, "a" or "b"
-    curves_touched:       tuple = (3 × "_default_",)     # static
-```
-
-**`curves_touched`** convention: `(discount_id, leg_a_curve_id, leg_b_curve_id)`.
-
-**Residual** (theory.md §3.7): $\text{leg\_a\_pv} - \text{leg\_b\_pv}$,
-with the spread added per period to the leg indicated by `spread_on_leg`.
-Both legs use forward projection from their respective forward curves and
+`TenorBasisSwap` is three-curve — `curves_touched` convention
+`(discount_id, leg_a_curve_id, leg_b_curve_id)`. The spread is added
+per period to the leg indicated by `spread_on_leg`. Both legs use
+forward projection from their respective forward curves and
 discounting from the shared OIS curve.
+
+::: valax.curves.TenorBasisSwap
 
 ### Cross-currency quote types
 
-#### `FXForward`
+`FXForward` uses `curves_touched` convention
+`(domestic_curve_id, foreign_curve_id)`; `fx_spot` and
+`quoted_forward` are in *domestic per foreign* units. Residual is the
+covered-interest-parity relation
+\(F^\text{quote} - S(0) \cdot DF_\text{foreign}(T) / DF_\text{domestic}(T)\).
 
-```python
-class FXForward(eqx.Module):
-    value_date:      Int[Array, ""]
-    settle_date:     Int[Array, ""]
-    quoted_forward:  Float[Array, ""]
-    fx_spot:         Float[Array, ""]
-    curves_touched:  tuple = ("_default_", "_default_")    # static
-```
+::: valax.curves.FXForward
 
-**`curves_touched`** convention: `(domestic_curve_id, foreign_curve_id)`.
-`fx_spot` and `quoted_forward` are in *domestic per foreign* units.
+`FXSwap` reduces to `FXForward`'s residual when
+`near_date == ref_date`.
 
-**Residual** (theory.md §3.7 CIP):
-$F^{\text{quote}} - S(0) \cdot DF_{\text{foreign}}(T) / DF_{\text{domestic}}(T)$.
+::: valax.curves.FXSwap
 
-#### `FXSwap`
-
-```python
-class FXSwap(eqx.Module):
-    near_date:       Int[Array, ""]
-    far_date:        Int[Array, ""]
-    near_rate:       Float[Array, ""]
-    far_rate:        Float[Array, ""]
-    curves_touched:  tuple = ("_default_", "_default_")    # static
-```
-
-**Residual**: CIP relation between near and far legs:
-
-$$
-\text{far\_rate} \cdot DF_{\text{for}}(T_{\text{near}})\, DF_{\text{dom}}(T_{\text{far}})
-- \text{near\_rate} \cdot DF_{\text{dom}}(T_{\text{near}})\, DF_{\text{for}}(T_{\text{far}}) = 0.
-$$
-
-Reduces to `FXForward`'s residual when `near_date == ref_date`.
-
-#### `CrossCurrencyBasisSwap` (CCBS)
-
-```python
-class CrossCurrencyBasisSwap(eqx.Module):
-    start_date:        Int[Array, ""]
-    dom_dates:         Int[Array, " n_dom"]
-    dom_fixing_dates:  Int[Array, " n_dom"]
-    for_dates:         Int[Array, " n_for"]
-    for_fixing_dates:  Int[Array, " n_for"]
-    fx_spot:           Float[Array, ""]
-    spread:            Float[Array, ""]    # default 0.0
-    dom_day_count:     str = "act_360"     # static
-    dom_index_id:      str = "DOM_FLOAT"   # static
-    for_day_count:     str = "act_360"     # static
-    for_index_id:      str = "FOR_FLOAT"   # static
-    spread_on_leg:     str = "domestic"    # static, "domestic" or "foreign"
-    variant:           str = "constant_notional"   # static, or "mtm"
-    curves_touched:    tuple = (4 × "_default_",)  # static
-```
-
-**`curves_touched`** convention:
+`CrossCurrencyBasisSwap` (CCBS) uses `curves_touched` convention
 `(dom_discount_id, dom_forward_id, for_discount_id, for_forward_id)`.
 
-**Residuals** (theory.md §3.7 XCCY formula):
+- **`variant = "constant_notional"`**: residual is
+  \([\text{dom\_pv} + (1 - DF_\text{dom}(T_n))] - [\text{for\_pv} + (1 - DF_\text{for}(T_n))]\);
+  `fx_spot` cancels in the normalised residual.
+- **`variant = "mtm"`** (mark-to-market — notional resets at each
+  fixing): the foreign discount curve does not enter the residual
+  (Henrard 2014 §10.5).
 
-* `variant = "constant_notional"`:
+::: valax.curves.CrossCurrencyBasisSwap
 
-    $$
-    [\text{dom\_coupon\_pv} + (1 - DF_{\text{dom}}(T_n))]
-    - [\text{for\_coupon\_pv} + (1 - DF_{\text{for}}(T_n))].
-    $$
+## Multi-curve set
 
-    `fx_spot` cancels in the normalised residual.
+Legacy single-currency `MultiCurveSet` (OIS discount + tenor-keyed
+forwards) plus its bootstrap. Superseded by the joint
+[`bootstrap_curve_graph`](#joint-multi-curve-solver) for new callers;
+still supported for existing code paths.
 
-* `variant = "mtm"` (mark-to-market — notional resets at each fixing):
+::: valax.curves.MultiCurveSet
 
-    $$
-    \sum_i (F^{\text{dom}}_i + s_{\text{dom}})\,\tau_i\,DF_{\text{dom}}(T_i)
-    - \sum_j (F^{\text{for}}_j + s_{\text{for}})\,\tau_j\,DF_{\text{dom}}(T_j).
-    $$
+::: valax.curves.bootstrap_multi_curve
 
-    The foreign discount curve does not enter the MTM residual (Henrard 2014
-    §10.5).
+## Single-curve bootstrap (legacy)
 
----
+Sequential and simultaneous bootstrap for the single-curve
+`("_default_",)` graph. New callers should prefer
+[`bootstrap_curve_graph`](#joint-multi-curve-solver).
 
-## SurvivalCurve
+::: valax.curves.bootstrap_sequential
 
-Term structure of survival probabilities for a single credit entity. Mirrors `DiscountCurve` in design: log-linear interpolation between pillars (= piecewise-constant hazard rate), drop-in target for `jax.grad` to obtain per-pillar credit-delta sensitivities.
-
-### `SurvivalCurve`
-
-```python
-class SurvivalCurve(eqx.Module):
-    pillar_dates: Int[Array, "n_pillars"]
-    survival_probabilities: Float[Array, "n_pillars"]
-    reference_date: Int[Array, ""]
-    day_count: str = "act_365"
-
-    def __call__(dates) -> Float[Array, "..."]  # interpolated S(t)
-```
-
-### Constructors and helpers
-
-```python
-from_hazard_rates(reference_date, pillar_dates, hazards, day_count="act_365") -> SurvivalCurve
-from_cds_spreads(reference_date, pillar_dates, spreads, recovery_rate=0.4, day_count="act_365") -> SurvivalCurve
-```
-
-`from_hazard_rates` treats `hazards[i]` as the constant hazard on `(pillar_{i-1}, pillar_i]`. `from_cds_spreads` uses the credit-triangle `h ≈ s / (1 − R)` to bootstrap survival from a flat-spread CDS curve.
-
-```python
-survival_probability(curve, date) -> Float[Array, ""]
-hazard_rate(curve, date) -> Float[Array, ""]                # average h on [0, t]
-piecewise_hazards(curve) -> Float[Array, "n_pillars"]       # per-interval h
-```
-
-See [Risk Factors](../risk-factors.md) — Credit section — for the role of the survival curve in the wider risk-factor catalogue, and `valax.risk.shocks` for the credit-side bump primitives.
+::: valax.curves.bootstrap_simultaneous

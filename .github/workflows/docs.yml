@@ -1,20 +1,24 @@
 name: Docs
 
 # Trigger the workflow only when files that actually affect the rendered
-# site change.  Since VALAX does not use mkdocstrings or any other
-# Python-driven doc generation, changes under ``valax/`` never alter the
-# built site and would only waste CI minutes.
+# site change.  The API reference pages under ``docs/api/`` embed
+# ``mkdocstrings`` ``:::`` directives that pull docstrings live from
+# ``valax/``, so any source-side docstring or signature change can also
+# alter the built site.
 #
-# The site content depends solely on:
+# The site content depends on:
 #   * everything under ``docs/`` (page sources),
-#   * ``mkdocs.yml`` (nav, theme, extensions),
+#   * everything under ``valax/`` (docstrings + signatures rendered by
+#     mkdocstrings on the API pages),
+#   * ``mkdocs.yml`` (nav, theme, extensions, mkdocstrings config),
 #   * ``pyproject.toml`` (the ``[docs]`` extras version pin — a
-#     mkdocs-material bump can break the build),
+#     mkdocs-material / mkdocstrings bump can break the build),
 #   * this workflow file itself.
 #
 # On ``push`` to ``main`` we build **and** deploy; on ``pull_request``
-# we build with ``--strict`` only, so anchor mismatches and broken
-# cross-references are caught before merge.
+# we build with ``--strict`` only, so anchor mismatches, broken
+# cross-references, and stale mkdocstrings references are caught before
+# merge.
 
 on:
   push:
@@ -22,12 +26,14 @@ on:
       - main
     paths:
       - 'docs/**'
+      - 'valax/**'
       - 'mkdocs.yml'
       - 'pyproject.toml'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/**'
+      - 'valax/**'
       - 'mkdocs.yml'
       - 'pyproject.toml'
       - '.github/workflows/docs.yml'

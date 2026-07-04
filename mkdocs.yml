@@ -32,6 +32,30 @@ markdown_extensions:
 extra_javascript:
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: false
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            heading_level: 3
+            members_order: source
+            filters:
+              - "!^_"
+
+watch:
+  - valax
+
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
@@ -46,6 +70,7 @@ nav:
   - Architecture:
       - Overview: architecture/overview.md
       - Productionisation Design: architecture/production.md
+      - "JAX Patterns": architecture/jax-patterns.md
       - "MC-Curves-2 Handoff": architecture/mc-curves-2.md
       - "QuantLib Validation Pyramid": architecture/quantlib-validation-pyramid.md
   - Models & Theory: theory.md
