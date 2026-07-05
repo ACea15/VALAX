@@ -1,0 +1,92 @@
+name: Benchmarks
+
+# Scheduled performance-tracking workflow. Runs pytest-benchmark
+# weekly and publishes the results to the `gh-pages` branch via
+# benchmark-action/github-action-benchmark, which produces a
+# JS-driven per-benchmark trend chart plus a JSON history.
+#
+# Why not on every push:
+# - Runner-variance makes single-point comparisons unreliable;
+#   trends are the useful signal, and trends need cadence not
+#   coverage.
+# - Every push already exercises correctness via tests.yml.
+#
+# Where the data goes:
+# - The action pushes results to the `gh-pages` branch under
+#   perf/. Since VALAX's Pages site is served via GitHub Actions
+#   (not from a branch), the `gh-pages` branch is currently unused
+#   and safe to co-opt.
+# - First-cut UX: check out the `gh-pages` branch to view the
+#   generated index.html locally. A later polish pass can wire
+#   perf/ into the docs site under docs/benchmarks/ for a public
+#   URL — deferred until we've confirmed the raw numbers are
+#   worth publishing.
+
+on:
+  schedule:
+    # Sunday 03:41 UTC — off-the-hour, and early enough that the
+    # data is fresh when Monday's tests.yml scheduled run fires.
+    - cron: "41 3 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: benchmarks-${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  # Required so benchmark-action/github-action-benchmark can push
+  # to the gh-pages branch.
+  contents: write
+
+jobs:
+  benchmark:
+    name: pytest --benchmark-only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install VALAX + dev extras
+        # QuantLib deliberately omitted — the perf story is about
+        # VALAX itself, not the QL comparison layer. Adding QL
+        # would slow the workflow and muddy the trend signal.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run benchmarks
+        # --benchmark-only selects only pytest-benchmark tests; the
+        # JSON output is what github-action-benchmark ingests.
+        # --benchmark-columns tightens the terminal log (full detail
+        # still lands in the JSON).
+        run: |
+          pytest --benchmark-only \
+            --benchmark-json=benchmark-output.json \
+            --benchmark-columns=min,mean,median,stddev,ops \
+            --benchmark-sort=name
+
+      - name: Publish benchmark trend to gh-pages
+        # Alert threshold: any benchmark that goes >50% slower than
+        # the previous run triggers a comment on the responsible
+        # commit. 150% is a generous first-cut — CI runner variance
+        # alone can easily produce 20–30% swings. Tighten to 130%
+        # or 120% once we have enough history to calibrate.
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: VALAX benchmarks
+          tool: pytest
+          output-file-path: benchmark-output.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: perf
+          auto-push: true
+          alert-threshold: "150%"
+          comment-on-alert: true
+          fail-on-alert: false
+          summary-always: true
