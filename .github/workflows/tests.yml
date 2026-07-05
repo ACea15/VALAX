@@ -1,22 +1,33 @@
 name: Tests
 
 # Run the pytest suite (including the QuantLib comparison tests) on every
-# push to main and every pull request targeting main. No paths filter so
-# that the workflow always reports a status — friendlier to future branch
-# protection rules that require the test suite to pass.
+# push to main and every pull request targeting main, plus a weekly
+# scheduled run to detect ecosystem drift when the repo has been quiet.
+#
+# Because pyproject.toml's deps are unpinned ("jax[cpu]", "equinox", ...
+# with no version specifiers), the weekly scheduled run installs
+# whatever is latest on PyPI at that moment — which is exactly the
+# "does the ecosystem still work with VALAX?" signal we want when
+# coming back to the project after a long pause.
+#
+# Note: GitHub disables scheduled workflows on repos with >60 days of
+# inactivity. If VALAX goes truly silent for that long, the weekly
+# run stops until the next push or manual trigger via workflow_dispatch.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "27 6 * * 1"  # every Monday at 06:27 UTC (off-the-hour, GH-recommended)
   workflow_dispatch:
 
 # On PRs, cancel any in-progress run for the same branch when a new
-# commit is pushed. On main we keep every run (each merge gets its own
-# recorded status).
+# commit is pushed. On main we keep every run (each merge gets its
+# own recorded status). Scheduled runs also queue rather than cancel.
 concurrency:
-  group: tests-${{ github.workflow }}-${{ github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -24,7 +35,7 @@ permissions:
 
 jobs:
   pytest:
-    name: pytest (py${{ matrix.python-version }})
+    name: pytest (ubuntu, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -52,4 +63,66 @@ jobs:
         # --benchmark-skip suppresses pytest-benchmark timings (runner
         # variance makes them noisy on CI); benchmarks stay runnable
         # locally via `pytest --benchmark-only`.
+        # Coverage is only collected on the 3.11 matrix cell to avoid
+        # uploading redundant reports; --cov-report=xml produces
+        # coverage.xml for the Codecov upload step below.
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.11" ]; then
+            pytest -q --tb=short --benchmark-skip \
+              --cov=valax --cov-report=xml --cov-report=term-missing
+          else
+            pytest -q --tb=short --benchmark-skip
+          fi
+
+      - name: Upload coverage to Codecov
+        # Only from the 3.11 cell (where --cov ran). token: is not
+        # required for public repos on Codecov's OSS tier, but adding
+        # it as a repository secret suppresses rate-limit issues once
+        # traffic grows.
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: valax-ubuntu-py311
+          fail_ci_if_error: false   # don't red the whole run if Codecov is flaky
+
+  pytest-macos:
+    # macOS runners consume Actions minutes at a 10x multiplier vs.
+    # Ubuntu. To keep spend low, macOS runs only on push-to-main, on
+    # the weekly schedule, or on explicit workflow_dispatch — never
+    # on PR pushes. PRs stay Ubuntu-only for fast iteration; merged
+    # main commits still get Mac coverage.
+    if: >
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+      || github.event_name == 'schedule'
+      || github.event_name == 'workflow_dispatch'
+    name: pytest (macos, py${{ matrix.python-version }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install VALAX + dev extras + QuantLib
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" QuantLib
+
+      - name: Run pytest
+        # No coverage collection here — the Ubuntu 3.11 cell handles that.
+        # JAX-on-macOS occasionally diverges from JAX-on-Linux at the
+        # last couple of digits (different LAPACK vendors, different
+        # SIMD paths). If tests start failing here on tolerance grounds,
+        # loosen the offending atol/rtol rather than treating it as a
+        # correctness bug.
         run: pytest -q --tb=short --benchmark-skip
