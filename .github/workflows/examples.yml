@@ -1,0 +1,69 @@
+name: Examples
+
+# Smoke-test every script under examples/ to prevent silent rot
+# between the code and the docs. The docs pages (guide/*.md,
+# theory.md, etc.) reference specific example scripts by name; if
+# the library refactors a public symbol and nobody updates the
+# example, tests stay green while the docs point users into a wall.
+# This workflow closes that gap by exit-code-checking every example.
+#
+# Triggers: push to main, PRs to main, and workflow_dispatch. No
+# schedule — examples typically rot in step with code changes, not
+# calendar time. The tests workflow's weekly schedule already
+# handles the "ecosystem drifted underneath a stale repo" scenario.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: examples-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  run-examples:
+    name: run examples/*.py
+    runs-on: ubuntu-latest
+    env:
+      # Force a headless matplotlib backend. Belt-and-suspenders: no
+      # current example calls plt.show(), but if one gets added without
+      # a --show-plot guard, this keeps the CI run from hanging.
+      MPLBACKEND: Agg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install VALAX + dev extras + QuantLib + matplotlib
+        # matplotlib is not a VALAX runtime dep, but some examples
+        # produce plots for the docs. Adding it here keeps examples
+        # runnable in CI without polluting the library's dependency
+        # surface. QuantLib is included because a few examples
+        # compare against QL as part of their pedagogy.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" QuantLib matplotlib
+
+      - name: Run every example script
+        # Iterate over both the top-level examples/ and examples/comparisons/.
+        # Fails fast on the first non-zero exit so the log points at the
+        # culprit without noise from downstream failures.
+        run: |
+          set -e
+          shopt -s nullglob
+          for f in examples/*.py examples/comparisons/*.py; do
+            echo ""
+            echo "=== $f ==="
+            python "$f"
+          done
