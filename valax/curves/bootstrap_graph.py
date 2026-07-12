@@ -67,23 +67,55 @@ class CurveBuildDiagnostics(eqx.Module):
     """Per-curve and per-instrument repricing diagnostics.
 
     Returned alongside the calibrated :class:`CurveGraph` by
-    :func:`bootstrap_curve_graph`.  A minimal subset of the full spec
-    in ``production.md`` §11.6; extended in MC-Curves-3.
+    :func:`bootstrap_curve_graph`.  Production-grade diagnostics
+    covering both convergence health (``residuals``,
+    ``max_abs_residual``, ``rmse``, ``n_steps``, ``converged``) and
+    curve well-posedness (``jacobian_condition_number``), plus a
+    per-instrument fit table in the quote's native units
+    (``fitted_quotes``, ``quoted_values``) for desk sign-off.
+
+    The relationship
+    ``fitted_quotes[i] = quoted_values[i] - residuals[i] / slope[i]``
+    with ``slope[i] = d(inst.residual)/d(quote)`` at the calibrated
+    graph is exact for every VALAX quote type — each residual is
+    linear in its primary quote scalar (rate / spread /
+    futures_rate / quoted_forward / far_rate / jump_size).  Hence
+    ``fitted_quotes - quoted_values`` is exactly the quote-unit
+    fit error, expressed in the same units the desk trades
+    (e.g. rate points, basis points).
 
     Attributes:
         residuals: Final per-instrument residuals (shape
             ``(n_instruments,)``).  Zero at convergence.
         max_abs_residual: Scalar ``max(|residuals|)`` — a quick
             single-number convergence check.
+        rmse: Root-mean-square of ``residuals`` — a smoother
+            convergence indicator than ``max_abs_residual``.
         n_steps: Number of Newton iterations consumed
             (``jnp.asarray(-1)`` if the solver did not populate stats).
         converged: Boolean flag reported by the underlying
             ``optimistix`` solver.
+        fitted_quotes: Per-instrument quote value implied by the
+            calibrated graph (shape ``(n_instruments,)``), in each
+            instrument's native quote units.  Equals
+            ``quoted_values`` up to Newton tolerance at convergence.
+        quoted_values: Per-instrument input quote scalars extracted
+            via :data:`_QUOTE_FIELD` (shape ``(n_instruments,)``).
+        jacobian_condition_number: 2-norm condition number of the
+            residual Jacobian ``d(residuals)/d(log_dfs)`` at the
+            solution.  A very large value (say ``> 1e10``) flags
+            an ill-posed curve build — typically caused by pillars
+            placed too close together or an instrument that
+            constrains an already-anchored region.
     """
 
     residuals: Float[Array, " n_instruments"]
     max_abs_residual: Float[Array, ""]
+    rmse: Float[Array, ""]
     n_steps: Int[Array, ""]
+    fitted_quotes: Float[Array, " n_instruments"]
+    quoted_values: Float[Array, " n_instruments"]
+    jacobian_condition_number: Float[Array, ""]
     converged: bool = eqx.field(static=True)
 
 
@@ -203,6 +235,109 @@ def _pack_initial_guess(
                 )
             result = result.at[offsets[i] : offsets[i + 1]].set(provided)
     return result
+
+
+# ── Quote-field dispatch ─────────────────────────────────────────────
+
+
+# Attribute name carrying the primary quote scalar for each supported
+# bootstrap-instrument type.  Used by :func:`quote_jacobian` (for the
+# reverse-mode Jacobian rows) and by :func:`bootstrap_curve_graph` (for
+# the ``fitted_quotes`` / ``quoted_values`` diagnostic fields).  Any
+# type whose class name is not registered here cannot participate in
+# either.  The FXSwap entry uses ``far_rate`` because market convention
+# holds the near leg at spot and quotes the swap points, which
+# effectively bump the far leg.
+_QUOTE_FIELD: dict[str, str] = {
+    "DepositRate": "rate",
+    "FRA": "rate",
+    "SwapRate": "rate",
+    "OISSwapRate": "rate",
+    "IborSwapRate": "rate",
+    "MoneyMarketFuture": "futures_rate",
+    "TenorBasisSwap": "spread",
+    "CrossCurrencyBasisSwap": "spread",
+    "FXForward": "quoted_forward",
+    "FXSwap": "far_rate",
+    "TurnInstrument": "jump_size",
+}
+
+
+def _quote_field_name(inst: BootstrapInstrument) -> str:
+    """Return the attribute name carrying ``inst``'s primary quote scalar.
+
+    Raises:
+        TypeError: If ``inst``'s class name is not registered in
+            :data:`_QUOTE_FIELD`.
+    """
+    name = type(inst).__name__
+    if name not in _QUOTE_FIELD:
+        raise TypeError(
+            f"quote_jacobian: instrument {name} has no registered "
+            f"primary-quote field.  Register it in "
+            f"valax.curves.bootstrap_graph._QUOTE_FIELD or extend the "
+            f"dispatch to add support."
+        )
+    return _QUOTE_FIELD[name]
+
+
+def _extract_quote_rate(inst: BootstrapInstrument) -> Float[Array, ""]:
+    """Extract the primary quote scalar from a bootstrap instrument.
+
+    Dispatches on ``type(inst).__name__`` via :data:`_QUOTE_FIELD`, so
+    ``.rate`` is returned for classic swap / deposit / FRA quotes,
+    ``.spread`` for :class:`TenorBasisSwap` / :class:`CrossCurrencyBasisSwap`,
+    ``.futures_rate`` for :class:`MoneyMarketFuture`,
+    ``.quoted_forward`` for :class:`FXForward`,
+    ``.far_rate`` for :class:`FXSwap`, and
+    ``.jump_size`` for :class:`TurnInstrument`.
+    """
+    field = _quote_field_name(inst)
+    return jnp.asarray(getattr(inst, field))
+
+
+def _replace_quote_rate(
+    inst: BootstrapInstrument, new_rate: Float[Array, ""]
+) -> BootstrapInstrument:
+    """Return a copy of ``inst`` with its primary quote replaced.
+
+    Uses the same dispatch as :func:`_extract_quote_rate`, so the round
+    trip ``_replace_quote_rate(inst, _extract_quote_rate(inst))`` returns
+    a value-equal copy for every registered instrument type.
+    """
+    field = _quote_field_name(inst)
+    return eqx.tree_at(
+        lambda x, f=field: getattr(x, f), inst, new_rate
+    )
+
+
+def _fitted_quote(
+    inst: BootstrapInstrument,
+    graph: CurveGraph,
+    fixings: FixingHistory,
+    ref_date: Int[Array, ""],
+    residual_value: Float[Array, ""],
+) -> Float[Array, ""]:
+    """Newton correction of the input quote to zero its residual.
+
+    For every VALAX quote type the residual is linear in the primary
+    quote scalar, so the correction
+    ``fitted = quoted - residual / slope`` — with
+    ``slope = d(residual)/d(quote)`` at the calibrated graph — is
+    exact rather than first-order.  Computed via ``jax.grad`` on the
+    instrument's own residual method.
+    """
+    import jax  # local import: diagnostics are one-shot, not JIT-hot
+
+    quoted = _extract_quote_rate(inst)
+
+    def residual_of_quote(q: Float[Array, ""]) -> Float[Array, ""]:
+        return _replace_quote_rate(inst, q).residual(
+            graph, fixings, ref_date
+        )
+
+    slope = jax.grad(residual_of_quote)(quoted)
+    return quoted - residual_value / slope
 
 
 # ── Public API ───────────────────────────────────────────────────────
@@ -334,14 +469,41 @@ def bootstrap_curve_graph(
 
     final_residuals = residual_fn(sol.value, args)
     max_abs = jnp.max(jnp.abs(final_residuals))
+    rmse = jnp.sqrt(jnp.mean(final_residuals ** 2))
     # ``sol.stats`` shape varies by solver; expose iteration count if present.
     n_steps_val = sol.stats.get("num_steps", jnp.asarray(-1))
     converged = bool(sol.result == optx.RESULTS.successful)
 
+    # Per-instrument fitted-vs-quoted diagnostic (in each quote's native
+    # units).  Computed in a Python loop rather than a vmap because each
+    # instrument type has different pytree structure — vmap would need
+    # per-type stacking that isn't worth the complexity for a one-shot
+    # post-solve diagnostic.
+    quoted_values = jnp.stack(
+        [_extract_quote_rate(inst) for inst in instruments]
+    )
+    fitted_quotes = jnp.stack(
+        [
+            _fitted_quote(inst, graph, fixings, ref_i32, final_residuals[i])
+            for i, inst in enumerate(instruments)
+        ]
+    )
+
+    # Jacobian condition number of the residual system at the solution.
+    # Uses ``jax.jacrev`` rather than ``jax.jacfwd`` to match the
+    # implicit-adjoint solve path that ``optimistix`` uses internally.
+    import jax  # local import: one-shot post-solve diagnostic
+    residual_jac = jax.jacrev(residual_fn)(sol.value, args)
+    jacobian_cond = jnp.linalg.cond(residual_jac)
+
     diagnostics = CurveBuildDiagnostics(
         residuals=final_residuals,
         max_abs_residual=max_abs,
+        rmse=rmse,
         n_steps=jnp.asarray(n_steps_val, dtype=jnp.int32),
+        fitted_quotes=fitted_quotes,
+        quoted_values=quoted_values,
+        jacobian_condition_number=jacobian_cond,
         converged=converged,
     )
 
@@ -349,31 +511,6 @@ def bootstrap_curve_graph(
 
 
 # ── Quote-sensitivity Jacobian ───────────────────────────────────────
-
-
-def _extract_quote_rate(inst: BootstrapInstrument) -> Float[Array, ""]:
-    """Extract the primary quote scalar from a bootstrap instrument.
-
-    Supports the ``.rate`` field found on every classic quote type
-    (:class:`DepositRate`, :class:`FRA`, :class:`SwapRate`,
-    :class:`OISSwapRate`, :class:`IborSwapRate`).  Extended coverage
-    (``.spread``, ``.futures_rate``, ``.quoted_forward``) is a
-    MC-Curves-3 refinement.
-    """
-    if hasattr(inst, "rate"):
-        return jnp.asarray(inst.rate)
-    raise TypeError(
-        f"quote_jacobian: instrument {type(inst).__name__} does not "
-        f"expose a .rate field.  Extended-quote support is queued for "
-        f"MC-Curves-3."
-    )
-
-
-def _replace_quote_rate(
-    inst: BootstrapInstrument, new_rate: Float[Array, ""]
-) -> BootstrapInstrument:
-    """Return a copy of ``inst`` with its primary quote replaced."""
-    return eqx.tree_at(lambda x: x.rate, inst, new_rate)
 
 
 def quote_jacobian(

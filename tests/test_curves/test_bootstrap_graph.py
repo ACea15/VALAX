@@ -12,6 +12,10 @@ Coverage:
 * ``jax.grad`` flows through :func:`bootstrap_curve_graph` via
   ``optimistix.ImplicitAdjoint`` (finite, non-zero gradients).
 * Input validation errors (square-system, unknown curve id).
+* Extended :class:`CurveBuildDiagnostics` fields (``rmse``,
+  ``fitted_quotes``, ``quoted_values``, ``jacobian_condition_number``)
+  are populated correctly and satisfy their invariants on a
+  well-posed fixture.
 """
 
 import jax
@@ -114,6 +118,18 @@ class TestSingleCurveDegeneracy:
 
         assert diag.converged
         assert float(diag.max_abs_residual) < 1e-12
+        # Extended diagnostics contract: shapes align with instruments,
+        # RMSE ≤ max_abs_residual, condition number finite and ≥ 1.
+        # cond == 1.0 exactly is legitimate here: for a REF-anchored
+        # deposit strip the residual Jacobian is diagonal, and its
+        # diagonal entries all equal 1 at the solution (par condition
+        # ``exp(log_df) * (1 + r*τ) == 1``), giving a perfectly
+        # conditioned identity system.
+        assert diag.residuals.shape == (len(deps_joint),)
+        assert diag.fitted_quotes.shape == diag.quoted_values.shape == diag.residuals.shape
+        assert float(diag.rmse) <= float(diag.max_abs_residual) + 1e-15
+        assert bool(jnp.isfinite(diag.jacobian_condition_number))
+        assert float(diag.jacobian_condition_number) >= 1.0 - 1e-10
 
         joint_curve = graph["USD.SOFR.OIS"]
         for p in pillars:
@@ -612,3 +628,123 @@ class TestValidation:
         )
         with pytest.raises(ValueError, match="unknown curve"):
             bootstrap_curve_graph(REF, [spec], [dep])
+
+
+# ── Extended CurveBuildDiagnostics ───────────────────────────────────
+
+
+class TestExtendedDiagnostics:
+    """Verify the MC-Curves-3 diagnostics extensions.
+
+    The build in this class uses a small mixed-quote-type fixture so
+    every supported quote-scalar shape (``.rate`` and ``.futures_rate``)
+    is exercised through the ``fitted_quotes`` / ``quoted_values``
+    dispatch.  For the corresponding cross-currency / basis / spread
+    coverage of ``fitted_quotes``, see ``test_quote_jacobian.py``.
+    """
+
+    @staticmethod
+    def _mixed_single_curve_build():
+        """Deposit + money-market future — 2 pillars, 2 quote-field types."""
+        t0 = int(_date(2026, 1, 1))
+        t1 = int(_date(2026, 4, 1))
+        pillars = jnp.array([t0, t1], dtype=jnp.int32)
+        spec = CurveSpec(
+            curve_id="USD.SOFR.3M", currency="USD",
+            pillar_dates=pillars, day_count="act_365",
+        )
+        dep = DepositRate(
+            start_date=REF, end_date=t0,
+            rate=jnp.array(0.045), day_count="act_365",
+            curves_touched=("USD.SOFR.3M",),
+        )
+        fut = MoneyMarketFuture(
+            start_date=jnp.asarray(t0, dtype=jnp.int32),
+            end_date=jnp.asarray(t1, dtype=jnp.int32),
+            futures_rate=jnp.array(0.048),
+            day_count="act_365",
+            curves_touched=("USD.SOFR.3M",),
+        )
+        return [spec], [dep, fut]
+
+    def test_all_fields_populated(self):
+        specs, insts = self._mixed_single_curve_build()
+        _, diag = bootstrap_curve_graph(REF, specs, insts)
+
+        # Shape / dtype contracts.
+        assert diag.residuals.shape == (2,)
+        assert diag.fitted_quotes.shape == (2,)
+        assert diag.quoted_values.shape == (2,)
+        assert diag.rmse.shape == ()
+        assert diag.jacobian_condition_number.shape == ()
+        assert diag.max_abs_residual.shape == ()
+
+        # Finiteness.
+        assert bool(jnp.all(jnp.isfinite(diag.residuals)))
+        assert bool(jnp.all(jnp.isfinite(diag.fitted_quotes)))
+        assert bool(jnp.all(jnp.isfinite(diag.quoted_values)))
+        assert bool(jnp.isfinite(diag.rmse))
+        assert bool(jnp.isfinite(diag.jacobian_condition_number))
+
+    def test_rmse_bounded_by_max_abs_residual(self):
+        specs, insts = self._mixed_single_curve_build()
+        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        # RMSE ≤ max_abs_residual by definition (Cauchy-Schwarz).
+        assert float(diag.rmse) <= float(diag.max_abs_residual) + 1e-15
+
+    def test_quoted_values_match_dispatch_table(self):
+        specs, insts = self._mixed_single_curve_build()
+        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        # Deposit uses .rate, future uses .futures_rate.
+        assert float(diag.quoted_values[0]) == pytest.approx(0.045)
+        assert float(diag.quoted_values[1]) == pytest.approx(0.048)
+
+    def test_fitted_quotes_near_quoted_at_convergence(self):
+        specs, insts = self._mixed_single_curve_build()
+        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        assert diag.converged
+        # At Newton convergence the fitted and quoted values agree to
+        # tolerance in each instrument's native quote units.  The
+        # deposit / futures residuals are ~O(DF × τ × Δr), so the
+        # quote-unit fit is scaled by ~1/(DF × τ).  For a ~1-year build
+        # DF ~ 0.95, τ ~ 1.0 → 1e-10 residual → ~1e-10 quote-unit fit.
+        diff = jnp.abs(diag.fitted_quotes - diag.quoted_values)
+        assert float(jnp.max(diff)) < 1e-8
+
+    def test_jacobian_condition_number_positive_and_finite(self):
+        specs, insts = self._mixed_single_curve_build()
+        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        # 2×2 residual Jacobian is well conditioned for this fixture
+        # (deposit anchors T0, future anchors T1 — near-diagonal).
+        # cond == 1.0 is legitimate for perfectly-anchored diagonal
+        # systems; the acceptance criterion is that the value is
+        # finite and ≥ 1 (with a small floating-point tolerance),
+        # and bounded well below the ill-posed regime.
+        assert bool(jnp.isfinite(diag.jacobian_condition_number))
+        assert float(diag.jacobian_condition_number) >= 1.0 - 1e-10
+        # Sanity: for a well-posed 2-pillar single-curve build the
+        # condition number should be modest (< 1e6).
+        assert float(diag.jacobian_condition_number) < 1e6
+
+    def test_residuals_and_diagnostics_pytree_valid(self):
+        """The extended `CurveBuildDiagnostics` must round-trip through
+        JAX's pytree machinery (needed for scan / cond / grad through
+        the diagnostics returned to callers).
+        """
+        import jax
+        specs, insts = self._mixed_single_curve_build()
+        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        leaves, treedef = jax.tree.flatten(diag)
+        assert len(leaves) >= 7  # 7 array-valued fields
+        rebuilt = jax.tree.unflatten(treedef, leaves)
+        # Reconstructed object still behaves like a CurveBuildDiagnostics.
+        assert rebuilt.converged == diag.converged
+        assert float(rebuilt.max_abs_residual) == float(diag.max_abs_residual)
+
+
+# ── Ensure MoneyMarketFuture is imported for the diagnostics fixture ─
+#
+# Add the import at the top of the module — the following line is a
+# safety re-export used by TestExtendedDiagnostics.  If moved during
+# refactor, keep the ``from valax.curves import ...`` list in sync.
+from valax.curves import MoneyMarketFuture  # noqa: E402
