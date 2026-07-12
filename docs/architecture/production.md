@@ -970,25 +970,89 @@ shipped variants:
 
 ### 11.6 Calibration diagnostics
 
+**Shipped shape (MC-Curves-2 + MC-Curves-3 diagnostics extension).**
+`CurveBuildDiagnostics` is a flat, JAX-pytree-valid `eqx.Module`:
+
 ```python
 class CurveBuildDiagnostics(eqx.Module):
     """Per-curve and per-instrument repricing diagnostics."""
+
+    # Convergence health
+    residuals:                  Float[Array, " n_instruments"]
+    max_abs_residual:           Float[Array, ""]
+    rmse:                       Float[Array, ""]
+    n_steps:                    Int[Array, ""]
+    converged:                  bool = eqx.field(static=True)
+
+    # Per-instrument fit (in each quote's native units)
+    fitted_quotes:              Float[Array, " n_instruments"]
+    quoted_values:              Float[Array, " n_instruments"]
+
+    # Curve well-posedness
+    jacobian_condition_number:  Float[Array, ""]
+```
+
+Field semantics (`valax/curves/bootstrap_graph.py`):
+
+| Field | What it tells you |
+|---|---|
+| `residuals` | Per-instrument residual at the solution; the "raw" solver output. Zero at convergence. |
+| `max_abs_residual` | Scalar `max(|residuals|)`. Quick single-number convergence check. |
+| `rmse` | `sqrt(mean(residuals**2))`. Smoother convergence indicator. |
+| `n_steps` | Newton iterations consumed (`-1` if the solver did not populate stats). |
+| `converged` | Bool flag from `optimistix`. |
+| `fitted_quotes` | Per-instrument quote value implied by the calibrated graph, in each instrument's native units (`.rate` / `.spread` / `.futures_rate` / `.quoted_forward` / `.far_rate` / `.jump_size`). |
+| `quoted_values` | Per-instrument input quote scalars extracted through the same dispatch. Equals `fitted_quotes` up to solver tolerance at convergence. |
+| `jacobian_condition_number` | 2-norm condition number of `d(residuals) / d(log_dfs)` at the solution. Values well above ~1e10 flag ill-posed pillar placement or redundant constraints. Values close to 1 indicate a perfectly-anchored diagonal system (e.g. a REF-anchored deposit strip). |
+
+**Native-quote-unit fit identity.** Because every VALAX quote-type
+residual is *linear* in its primary quote scalar (deposit rate,
+swap rate, basis spread, futures rate, quoted forward, FX far rate,
+turn jump size), the Newton correction
+
+$$
+\mathrm{fitted}_i \;=\; \mathrm{quoted}_i \;-\; \frac{\mathrm{residuals}_i}{\partial\, r_i / \partial\, q_i}
+$$
+
+is *exact*, not first-order. The slope
+$\partial\, r_i / \partial\, q_i$ is computed by `jax.grad` on the
+instrument's own `residual` method — see
+`_fitted_quote(...)` in `bootstrap_graph.py`.
+
+**Trader / audit workflow.** `fitted_quotes − quoted_values` gives
+the per-instrument fit error in quote units (e.g. rate points for
+IRS; basis points for tenor basis; FX units for FXForward), which is
+what appears on desk sign-off sheets. `jacobian_condition_number`
+flags builds where a marginal change in one quote would produce an
+outsized move in another curve — the numerical proxy for "the pillar
+grid isn't aligned with the instrument set".
+
+---
+
+**Historical spec (pre-MC-Curves-3 design intent — kept for
+reference).** The original design targeted per-curve dictionaries
+plus a list of dataclass rows:
+
+```python
+# Historical (pre-shipped) design shape:
+class CurveBuildDiagnostics(eqx.Module):
     rmse_per_curve:        dict[str, float]
     max_error_per_curve:   dict[str, float]
     fitted_vs_quoted:      list[InstrumentFit]   # one per input instrument
     n_iter:                int
     converged:             bool
-    jacobian_condition:    float                 # of dR/d(log-DF)
+    jacobian_condition:    float
     elapsed_ms:            float
 ```
 
-`InstrumentFit` records `(instrument_id, curves_touched, quoted,
-fitted, residual_bp)` per input quote. This is what the build engine
-of §5.2 packages into `BuildReport.diagnostics` for each curve
-artifact — same shape, same audit pipeline as the rest of the system.
-
-A trader looking at a build report can see which quote is straining
-the fit. A regulator can see exact per-instrument repricing error.
+The shipped design chose flat `Float[Array, " n_instruments"]`
+vectors over per-curve `dict[str, float]` because (a) the joint solve
+concatenates residuals into a single flat state anyway, so the flat
+representation avoids an unnecessary partitioning step; (b) all
+fields are pytree-clean `jax.Array` leaves and therefore fully
+differentiable / vmap-able / scan-able. Per-curve views can be
+recovered downstream by partitioning on instrument `curves_touched`
+if a report needs them.
 
 ### 11.7 Interpolation variants
 

@@ -889,7 +889,7 @@ For a swap where the floating leg pays 3M SOFR:
 
 In the single-curve world, the floating leg of a par swap has a clean identity: $PV_{\text{float}} = N \times (DF_{\text{start}} - DF_{\text{end}})$. This breaks under dual-curve — you must project each forward rate individually from the forward curve and discount with the OIS curve.
 
-**VALAX implementation:** `MultiCurveSet` in `valax/curves/multi_curve.py` holds one `discount_curve` and a dictionary of `forward_curves` keyed by tenor. `bootstrap_multi_curve()` first builds the OIS curve, then bootstraps each forward curve using OIS discounting. The dual-curve swap residual function `_dual_curve_swap_residuals` explicitly separates forward projection from discounting.
+**VALAX implementation:** The modern joint solver `bootstrap_curve_graph` (`valax/curves/bootstrap_graph.py`, MC-Curves-2) is the primary path: it takes a set of `CurveSpec` declarations, a flat list of `BootstrapInstrument` quotes (`IborSwapRate` for the dual-curve residual, plus `OISSwapRate`, `TenorBasisSwap`, `CrossCurrencyBasisSwap`, `FXForward`, `FXSwap`, `MoneyMarketFuture`, `TurnInstrument`), and returns a `CurveGraph` (dict of `DiscountCurve` keyed by identifier) plus a `CurveBuildDiagnostics` report. The pedagogical single-currency container `MultiCurveSet` in `valax/curves/multi_curve.py` (OIS `discount_curve` + tenor-keyed `forward_curves` dict) is retained as a legacy view; its `bootstrap_multi_curve()` sequential pipeline is deprecated in favour of the joint solver. See the [Multi-Curve guide](guide/curves.md) and [Why Multi-Curve?](guide/why-multicurve.md) for the narrative treatment.
 
 ### 3.3 Curve Bootstrapping
 
@@ -1194,7 +1194,7 @@ $$
 
 — one linear solve, regardless of how many Newton iterations the bootstrap took. `optimistix.ImplicitAdjoint` performs this automatically when `jax.grad` traces through `bootstrap_curve_graph`. No unrolling. This is the mechanism by which a 28-quote curve build delivers a $28 \times 28$ "DF-sensitivities-to-quotes" matrix at the cost of one extra linear solve, rather than 28 finite-difference re-bootstraps.
 
-**VALAX implementation:** Roadmap. The joint solver `bootstrap_curve_graph` is MC-Curves-2 in the production design (§13). Today's `bootstrap_multi_curve` (`valax/curves/multi_curve.py`) is a special-case sequential implementation for single-currency two-curve setups; it is the structural ancestor of the joint solver and will be replaced with a thin wrapper over it.
+**VALAX implementation:** Shipped in MC-Curves-2. The joint solver `bootstrap_curve_graph` (`valax/curves/bootstrap_graph.py`) concatenates the log-DFs of every curve into a single flat state vector and drives one Newton solve over the concatenated residual system via `optimistix.Newton`. It handles every joint constraint listed above — tenor basis, cross-currency basis, FX forward — through the plug-in [`BootstrapInstrument`](api/curves.md) protocol, and delivers the implicit-adjoint quote-Jacobian described in the next paragraph via `quote_jacobian`. See the [Multi-Curve guide](guide/curves.md#5-multi-curve-bootstrap) for a runnable USD dual-curve example. The sequential `bootstrap_multi_curve` (`valax/curves/multi_curve.py`) is retained one deprecation cycle for the single-currency OIS + tenor case; it emits `DeprecationWarning` and points callers at `bootstrap_curve_graph`.
 
 ### 3.9 Futures, Convexity Adjustment, and Fixings
 
@@ -1278,7 +1278,7 @@ Ignoring fixings causes a sneaky mis-bootstrap: the first coupon of every season
 
 VALAX's `FixingHistory` (§11.8) is the data structure that carries realised fixings into the bootstrap; each `BootstrapInstrument` reads from it before falling back to forward projection. This is mandatory infrastructure for production curve builds, not an optimisation.
 
-**VALAX implementation:** Roadmap. `MoneyMarketFuture`, `FixingHistory`, and `FixingSeries` are part of MC-Curves-1 / MC-Curves-3 in the production design (§13). The Hull-White-derived convexity adjustment plugs in naturally because the HW model is already implemented in `valax/models/hull_white.py` (§2.8).
+**VALAX implementation:** Shipped in MC-Curves-1 and MC-Curves-2. `MoneyMarketFuture` in `valax/curves/instruments.py` carries a pluggable `convexity_adj_fn: ConvexityAdjFn` static field with `no_convexity_adj` and `constant_convexity_adj` factories in `valax/curves/convexity.py`. `FixingHistory` and `FixingSeries` in `valax/curves/fixings.py` are the JIT-friendly registries every floating-leg residual (`IborSwapRate`, `TenorBasisSwap`, both legs of `CrossCurrencyBasisSwap`) consults before falling back to forward projection. The Hull-White-derived `hull_white_convexity_adj(model)` factory is still pending (queued for MC-Curves-3) because it depends on threading the calibrated short-rate model through the curve build; the plug-in point is in place.
 
 ---
 

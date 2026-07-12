@@ -196,7 +196,7 @@ What is in the library **today** (✅) and what is signposted for the next itera
 
 | Stage | Status | Components |
 |---|---|---|
-| Market data containers | ✅ | `MarketData`, `MarketScenario`, `ScenarioSet`, `MultiCurveSet`, `SurvivalCurve`, `InflationCurve`, vol surfaces. |
+| Market data containers | ✅ | `MarketData`, `MarketScenario`, `ScenarioSet`, `CurveGraph` (modern joint-solver output — dict of `DiscountCurve` keyed by identifier), `MultiCurveSet` (legacy single-currency two-tier view; deprecated), `SurvivalCurve`, `InflationCurve`, vol surfaces. |
 | Pricing engines | ✅ (broad) / 📋 (XVA, CDS) | Equity, FX, rates, inflation, callable / puttable bonds, credit CDS pricer planned. |
 | Sensitivity ladders | ✅ | First- and second-order ladder, ten-rung waterfall, autodiff throughout. |
 | Scenario generation | ✅ | Historical, parametric Gaussian / t, named stress (parallel, steepener, butterfly, …). |

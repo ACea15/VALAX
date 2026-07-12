@@ -51,10 +51,37 @@ Follow-ups (queued):
 
 * **MC-Curves-2b** — Rewrite `bootstrap_multi_curve` internals over
   the joint solver (semantic-preserving migration of the dual-curve
-  `SwapRate` interpretation) and remove the legacy code path.
-* **MC-Curves-3** — Extended diagnostics, monotone-convex
-  interpolation, Hull-White futures convexity, CSA / collateralised
-  discounting, business-day calendars.
+  `SwapRate` interpretation) so `MultiCurveSet` becomes a view over
+  `CurveGraph`.  Design intent locked in (see the "Keeping
+  `MultiCurveSet`" discussion in [`guide/curves.md`](../guide/curves.md#54-deprecated-path-bootstrap_multi_curve));
+  execution deferred.
+
+MC-Curves-3 — partial progress:
+
+* ✅ **Extended diagnostics** — `CurveBuildDiagnostics` extended
+  with `rmse`, `fitted_quotes`, `quoted_values`,
+  `jacobian_condition_number` (in addition to the shipped
+  `residuals`, `max_abs_residual`, `n_steps`, `converged`).
+  See [`production.md` §11.6](production.md#116-calibration-diagnostics)
+  for the field-by-field spec and the linear-in-quote fit identity.
+* ✅ **`quote_jacobian` full quote-field coverage** — dispatch
+  extended from `.rate` only to every registered quote scalar:
+  `.rate`, `.spread` (basis / CCBS), `.futures_rate`,
+  `.quoted_forward`, `.far_rate`, `.jump_size`.  Unknown quote
+  types raise `TypeError`.
+* ☐ **Monotone-convex / linear-zero / tension-spline interpolation**
+  on `CurveSpec.interp`.  Log-linear-DF remains the only supported
+  mode; the dispatch site exists.
+* ☐ **Hull-White futures convexity** (`hull_white_convexity_adj(model)`)
+  — plug-in framework in `valax/curves/convexity.py`; blocked on
+  threading a calibrated `HullWhiteModel` into the curve build.
+* ☐ **CSA / collateralised discounting** — currency-of-collateral
+  selection and FX-implied foreign-collateralised discount curves.
+  Roadmap only; design note not yet written.
+* ☐ **Business-day calendars & roll conventions** — `valax/dates/`
+  is holiday-agnostic today.
+* ☐ **Over-determined bootstrap** (`optimistix.least_squares`
+  variant of `bootstrap_curve_graph` with per-quote weights).
 
 The remainder of this document is preserved verbatim as the original
 handoff note.

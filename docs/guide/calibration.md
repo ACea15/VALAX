@@ -38,8 +38,8 @@ The table below summarises the full pipeline VALAX supports today (✅) or plans
 | Market | Calibration inputs (liquid) | Calibration routine | Calibrated artefact | Exotics priced against it |
 |--------|-----------------------------|---------------------|---------------------|---------------------------|
 | **Rates — discount** | OIS deposits, OIS par swaps, FX forwards / FX swaps (cross-currency discount) | [`bootstrap_sequential` / `bootstrap_simultaneous`](curves.md#3-sequential-bootstrap) | `DiscountCurve` (OIS / €STR / SOFR) | All cashflow discounting; bonds; every swap PV |
-| **Rates — projection** | Money-market deposits, FRAs, IMM futures (with convexity adj.), IBOR par swaps, tenor-basis swaps | [`bootstrap_multi_curve`](curves.md#5-multi-curve-bootstrap) | `MultiCurveSet` (one forward curve per tenor) | IRS, FRN, OIS swap, CMS, range accrual, Bermudan swaption ✅ |
-| **Cross-currency** | FX spot, FX forward points, cross-currency basis swaps | [`bootstrap_curve_graph`](curves.md#5-multi-curve-bootstrap) 🟡 | Foreign-leg `DiscountCurve` with XCCY basis | Cross-currency swaps, quanto adjustments ✅ |
+| **Rates — projection** | Money-market deposits, FRAs, IMM futures (with convexity adj.), IBOR par swaps, tenor-basis swaps | [`bootstrap_curve_graph`](curves.md#5-multi-curve-bootstrap) ✅ | `CurveGraph` (one `DiscountCurve` per tenor, keyed by identifier) | IRS, FRN, OIS swap, CMS, range accrual, Bermudan swaption ✅ |
+| **Cross-currency** | FX spot, FX forward points, cross-currency basis swaps (constant-notional and MTM variants) | [`bootstrap_curve_graph`](curves.md#5-multi-curve-bootstrap) ✅ | `CurveGraph` (dom + for OIS + tenor curves, all keyed by identifier) | Cross-currency swaps, quanto adjustments ✅ |
 | **Inflation** | Zero-coupon inflation swaps (ZCIS), year-on-year inflation swaps (YYIS) | [`from_zc_rates`](curves.md#7-inflation-curves) | `InflationCurve` (forward CPI) | ZCIS, YYIS, inflation caps/floors ✅ |
 | **Equity smile (per slice)** | Listed vanilla calls/puts on a single expiry (broker smile / OPRA chain) | [`calibrate_sabr`](#3-sabr-smile-calibration), [`calibrate_svi_slice`](vol-surfaces.md#svi-surface) | `SABRModel` or `SVIParams` for one expiry | European, American, digital, barrier, compound, chooser, Asian, lookback options |
 | **Equity surface** | Vanilla calls/puts across an (expiry × strike) grid | [`calibrate_sabr_surface`](vol-surfaces.md#sabr-surface), [`calibrate_svi_surface`](vol-surfaces.md#svi-surface), [`GridVolSurface`](vol-surfaces.md#grid-surface) | `SABRVolSurface`, `SVIVolSurface`, `GridVolSurface` | Autocallables, worst-of, cliquet, variance swap, all path-dependent exotics |
@@ -71,7 +71,7 @@ The interest-rate calibration universe is the most heterogeneous; it combines mo
 | Cross-currency basis swap (e.g. EUR/USD MTM) | 2Y – 30Y | Long end of foreign discount curve | `CrossCurrencyBasisSwap` |
 | Turn-of-year / quarter-end | Specific dates | Calendar liquidity dislocations | `TurnInstrument` |
 
-**Calibration output.** A `MultiCurveSet` containing one OIS `DiscountCurve` plus one forward `DiscountCurve` per tenor label. See [Curves and Bootstrapping](curves.md) for the full bootstrap mechanics and the joint Newton residual system.
+**Calibration output.** A `CurveGraph` — a dict of `DiscountCurve` values keyed by validated identifiers of the form `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]` (e.g. `USD.SOFR.OIS`, `USD.SOFR.3M`, `EUR.EURIBOR.6M`) — plus a `CurveBuildDiagnostics` report with per-instrument fit table, RMSE, and Jacobian condition number. Any number of currencies and tenors can coexist in a single graph. The legacy single-currency `MultiCurveSet` (OIS + tenor-keyed forwards) is still available for pedagogical two-tier builds and emits a `DeprecationWarning`; see [Curves and Bootstrapping](curves.md) for the full bootstrap mechanics, the joint Newton residual system, and the runnable USD dual-curve example in §5.2.
 
 **What you can price with it.** Every fixed-income instrument in `valax.instruments`: `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `InterestRateSwap`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `RangeAccrual`, plus the discount step of every other pricer in the library.
 
@@ -235,7 +235,7 @@ The whole point of calibration is that the outputs become the **inputs to the pr
 | Calibrated artefact | Consumed by | Example exotics priced |
 |---------------------|-------------|------------------------|
 | `DiscountCurve` (OIS) | Every cashflow PV in the library | All bonds, swaps, options' discounting |
-| `MultiCurveSet` (OIS + 3M/6M forward) | `valax.pricing.analytic.rates`, `valax.pricing.mc.lmm` | IRS, OIS swap, Bermudan swaption (LSM on LMM), CMS, range accrual |
+| `CurveGraph` (OIS + one `DiscountCurve` per tenor per currency) | `valax.pricing.analytic.rates`, `valax.pricing.mc.lmm` *(consumption via a single `DiscountCurve` argument today; see [`curves.md` §8](curves.md#8-what-is-not-yet-implemented) for the pricing-side gap)* | IRS, OIS swap, Bermudan swaption (LSM on LMM), CMS, range accrual |
 | `InflationCurve` | `valax.pricing.analytic.inflation` | ZCIS, YYIS, inflation caps/floors |
 | `SABRVolSurface` / `SVIVolSurface` / `GridVolSurface` | All Black-Scholes / Black-76 pricers, `valax.pricing.mc`, `valax.pricing.pde`, `valax.pricing.lattice` | European, American, digital, barrier, Asian, lookback, autocallable, worst-of, cliquet, variance swap |
 | `SABRModel` (single slice) | `sabr_implied_vol`, `calibrate_sabr_surface` (as initial guess) | One-expiry vanilla repricing, smile-consistent digital replication, CMS convexity adjustment |

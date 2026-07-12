@@ -10,6 +10,31 @@ CMS swaps, CMS caps/floors, and range accruals.
 !!! success "All instruments on this page are implemented."
     See `valax/instruments/rates.py` and `valax/pricing/analytic/rates_exotics.py`.
 
+!!! note "Curve consumption — single-curve today, multi-curve on the roadmap"
+    Every analytic rates pricer takes plain `DiscountCurve` argument(s);
+    none currently accepts a `CurveGraph`.  The multi-curve *calibration*
+    engine ships (see the [Multi-Curve Bootstrap guide](curves.md#5-multi-curve-bootstrap)),
+    but *pricing* against a calibrated `CurveGraph` requires either passing
+    the graph's OIS discount curve as `curve` (single-curve approximation) or
+    manually computing the dual-curve PV from the graph (see the worked
+    example in [`curves.md` §5.2](curves.md#52-a-worked-usd-dual-curve-build)).
+
+    | Pricer | Location | Curve consumption |
+    |---|---|---|
+    | `interest_rate_swap_price` | `valax/pricing/analytic/floating.py` | 1 curve — single-`DiscountCurve` (used for both projection and discounting) |
+    | `ois_swap_price` | `valax/pricing/analytic/floating.py` | 1 curve — telescoping identity assumes projection curve = discount curve |
+    | `caplet_price` / `cap_price` / `floor_price` | `valax/pricing/analytic/caplets.py` | 1 curve |
+    | `european_swaption_price` / `bermudan_swaption_price` | `valax/pricing/analytic/swaptions.py` | 1 curve |
+    | `bond_price` / `callable_bond_price` / `puttable_bond_price` | `valax/pricing/analytic/bonds.py` / `pricing/lattice/hull_white_tree.py` | 1 curve |
+    | `cross_currency_swap_price` | `valax/pricing/analytic/rates_exotics.py` | 2 curves — `domestic_curve` + `foreign_curve` (both `DiscountCurve`; not a `CurveGraph`) |
+    | `zcis_price` / `yyis_price` / `inflation_cap_floor_price_black76` | `valax/pricing/analytic/inflation.py` | 1 curve for nominal discount + 1 `InflationCurve` for CPI projection |
+    | `cms_swap_price` / `cms_cap_price` / `range_accrual_price` | `valax/pricing/analytic/rates_exotics.py` | 1 curve |
+
+    Threading a `CurveGraph` through these signatures (so a swap with a
+    3M-forecast leg can pull `graph["USD.SOFR.3M"]` for projection while
+    `graph["USD.SOFR.OIS"]` handles discounting) is the *MC-Pricing*
+    workstream — planned but not yet started.
+
 ## OIS Swap
 
 **Market context.** The Overnight Index Swap (OIS) is the dominant swap type in

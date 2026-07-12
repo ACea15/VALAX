@@ -112,13 +112,31 @@ graph via `optimistix.ImplicitAdjoint`.
 
 ::: valax.curves.bootstrap_curve_graph
 
+`CurveBuildDiagnostics` records both convergence health (`residuals`,
+`max_abs_residual`, `rmse`, `n_steps`, `converged`) and curve
+well-posedness (`jacobian_condition_number`), plus a per-instrument fit
+table (`fitted_quotes` vs `quoted_values`) expressed in each
+instrument's *native quote units* — e.g. rate for `SwapRate`, spread
+for `TenorBasisSwap`, `futures_rate` for `MoneyMarketFuture`,
+`quoted_forward` for `FXForward`, `far_rate` for `FXSwap`, `jump_size`
+for `TurnInstrument`. At Newton convergence `fitted_quotes ≈
+quoted_values` to solver tolerance; departures indicate an
+under-determined or ill-conditioned build. The condition number is the
+2-norm of $J^{-1}\|J\|$ where $J = \partial\mathrm{residuals} /
+\partial\log(\mathrm{DFs})$ at the solution; values well above ~1e10
+flag ill-posed pillar placement or redundant constraints.
+
 ::: valax.curves.CurveBuildDiagnostics
 
 `quote_jacobian` is a convenience wrapper around `jax.jacrev` over
 `bootstrap_curve_graph`. Rows are laid out per curve in the order of
 `curve_specs`; within each curve, one row per pillar. Columns follow
 the order of `instruments`. Uses implicit-adjoint so the cost is one
-linear solve per column regardless of Newton iteration count.
+linear solve per column regardless of Newton iteration count. The
+primary quote scalar of each instrument is looked up via a
+class-name dispatch table covering all eleven registered quote types
+(`.rate`, `.spread`, `.futures_rate`, `.quoted_forward`, `.far_rate`,
+`.jump_size`); passing an unregistered quote type raises `TypeError`.
 
 ::: valax.curves.quote_jacobian
 
@@ -193,6 +211,16 @@ covered-interest-parity relation
 
 `FXSwap` reduces to `FXForward`'s residual when
 `near_date == ref_date`.
+
+**Quote-Jacobian convention.** `_QUOTE_FIELD["FXSwap"] = "far_rate"`
+— the primary quote scalar for the delta dispatch is `.far_rate`,
+not `.near_rate`.  This matches market practice: an FX swap is
+quoted as *swap points* on top of a spot-pinned near leg
+(`near_rate ≈ spot`), so a change in the swap points is
+mathematically equivalent to bumping the far rate while holding
+the near leg fixed.  Analogously, sensitivities via
+[`quote_jacobian`](#valax.curves.quote_jacobian) w.r.t. an `FXSwap`
+measure the response to a far-rate bump.
 
 ::: valax.curves.FXSwap
 

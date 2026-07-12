@@ -283,82 +283,229 @@ alphabet (see [`production.md` §11.3](../architecture/production.md#113-curve-g
 
 `CurveSpec` validates identifiers against this pattern on construction.
 
-### 5.2 A dual-curve USD SOFR build
+### 5.2 A worked USD dual-curve build
+
+This example builds a small but complete USD dual-curve (OIS + 3M SOFR)
+system, inspects the extended diagnostics, and prices a 2-year IRS
+by hand from the calibrated graph.  The whole block is copy-paste
+runnable — the fixture mirrors
+`tests/test_curves/test_bootstrap_graph.py::TestDualCurve` verbatim.
 
 ```python
 import jax.numpy as jnp
 from valax.curves import (
-    CurveSpec, DepositRate, IborSwapRate, bootstrap_curve_graph,
+    CurveSpec, DepositRate, IborSwapRate,
+    bootstrap_curve_graph, empty_fixing_history,
 )
-from valax.dates.daycounts import ymd_to_ordinal
+from valax.dates.daycounts import ymd_to_ordinal, year_fraction
 
-ref = ymd_to_ordinal(2025, 1, 1)
+# ------------------------------------------------------------------
+# 0. Reference date and a helper for quarterly SOFR-style schedules.
+# ------------------------------------------------------------------
+REF = ymd_to_ordinal(2025, 1, 1)
 
-# 1) Declare the two curves we want to build.
+def _date(y, m, d):
+    return int(ymd_to_ordinal(y, m, d))
+
+def quarterly_dates_to(end_ordinal: int) -> jnp.ndarray:
+    """1-Jan / 1-Apr / 1-Jul / 1-Oct dates strictly after REF, up to end."""
+    dates = []
+    for year in range(2025, 2036):
+        for month in (1, 4, 7, 10):
+            d = _date(year, month, 1)
+            if d > int(REF) and d <= end_ordinal:
+                dates.append(d)
+    return jnp.array(dates, dtype=jnp.int32)
+
+# ------------------------------------------------------------------
+# 1. Declare the two curves we want to build.
+#    Same pillar grid on both sides here — that isn't required in
+#    general, only for the illustration.
+# ------------------------------------------------------------------
+pillars = jnp.array(
+    [_date(2026, 1, 1), _date(2027, 1, 1)], dtype=jnp.int32,
+)
 ois_spec = CurveSpec(
     curve_id="USD.SOFR.OIS", currency="USD",
-    pillar_dates=jnp.array([
-        ymd_to_ordinal(2026, 1, 1),
-        ymd_to_ordinal(2027, 1, 1),
-    ], dtype=jnp.int32),
-    day_count="act_365",
+    pillar_dates=pillars, day_count="act_365",
 )
 fwd_spec = CurveSpec(
     curve_id="USD.SOFR.3M", currency="USD",
-    pillar_dates=jnp.array([
-        ymd_to_ordinal(2026, 1, 1),
-        ymd_to_ordinal(2027, 1, 1),
-    ], dtype=jnp.int32),
-    day_count="act_365",
+    pillar_dates=pillars, day_count="act_365",
 )
 
-# 2) OIS side: two deposits anchoring the discount curve.
+# ------------------------------------------------------------------
+# 2. OIS side — two deposits anchoring the discount curve.
+# ------------------------------------------------------------------
 ois_deps = [
     DepositRate(
-        start_date=ref, end_date=ymd_to_ordinal(2026, 1, 1),
+        start_date=REF, end_date=_date(2026, 1, 1),
         rate=jnp.array(0.040), day_count="act_365",
         curves_touched=("USD.SOFR.OIS",),
     ),
     DepositRate(
-        start_date=ref, end_date=ymd_to_ordinal(2027, 1, 1),
+        start_date=REF, end_date=_date(2027, 1, 1),
         rate=jnp.array(0.042), day_count="act_365",
         curves_touched=("USD.SOFR.OIS",),
     ),
 ]
 
-# 3) 3M-projection side: two IBOR par swaps.  Each has a *dual-curve*
-#    residual — OIS discount + 3M projection — that couples both
+# ------------------------------------------------------------------
+# 3. 3M-projection side — two IBOR par swaps.  Each has a *dual-curve*
+#    residual (OIS discount + 3M forward projection) that couples both
 #    curves.  The joint solver handles that natively.
+#
+#    Fixing convention here: fixing_dates[k] = accrual_start[k]
+#    (start of the k-th accrual period).
+# ------------------------------------------------------------------
+float_1y = quarterly_dates_to(_date(2026, 1, 1))
+fix_1y = jnp.concatenate([jnp.array([REF], dtype=jnp.int32), float_1y[:-1]])
 ibor_1y = IborSwapRate(
-    start_date=ref,
-    fixed_dates=jnp.array([ymd_to_ordinal(2026, 1, 1)], dtype=jnp.int32),
-    float_dates=quarterly_dates_to(ymd_to_ordinal(2026, 1, 1)),
-    fixing_dates=fixing_dates_from(float_dates),
+    start_date=REF,
+    fixed_dates=jnp.array([_date(2026, 1, 1)], dtype=jnp.int32),
+    float_dates=float_1y,
+    fixing_dates=fix_1y,
     rate=jnp.array(0.045),
+    fixed_day_count="act_365", float_day_count="act_365",
     curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
     index_id="USD.SOFR.3M",
 )
-ibor_2y = IborSwapRate(...)  # analogous for 2Y
+float_2y = quarterly_dates_to(_date(2027, 1, 1))
+fix_2y = jnp.concatenate([jnp.array([REF], dtype=jnp.int32), float_2y[:-1]])
+ibor_2y = IborSwapRate(
+    start_date=REF,
+    fixed_dates=jnp.array(
+        [_date(2026, 1, 1), _date(2027, 1, 1)], dtype=jnp.int32,
+    ),
+    float_dates=float_2y,
+    fixing_dates=fix_2y,
+    rate=jnp.array(0.047),
+    fixed_day_count="act_365", float_day_count="act_365",
+    curves_touched=("USD.SOFR.OIS", "USD.SOFR.3M"),
+    index_id="USD.SOFR.3M",
+)
 
-# 4) One joint Newton solve — every residual zeroed simultaneously.
-graph, diagnostics = bootstrap_curve_graph(
-    reference_date=ref,
+# ------------------------------------------------------------------
+# 4. One joint Newton solve — every residual zeroed simultaneously.
+# ------------------------------------------------------------------
+graph, diag = bootstrap_curve_graph(
+    reference_date=REF,
     curve_specs=[ois_spec, fwd_spec],
     instruments=ois_deps + [ibor_1y, ibor_2y],
 )
 
-assert diagnostics.converged
-assert float(diagnostics.max_abs_residual) < 1e-10
+assert diag.converged
+assert float(diag.max_abs_residual) < 1e-10
 
 ois_curve = graph["USD.SOFR.OIS"]
 fwd_curve = graph["USD.SOFR.3M"]
+
+# ------------------------------------------------------------------
+# 5. Inspect the extended CurveBuildDiagnostics — the full 8 fields.
+# ------------------------------------------------------------------
+print(f"converged                    = {diag.converged}")
+print(f"n_steps                      = {int(diag.n_steps)}")
+print(f"max_abs_residual             = {float(diag.max_abs_residual):.2e}")
+print(f"rmse                         = {float(diag.rmse):.2e}")
+print(f"jacobian_condition_number    = {float(diag.jacobian_condition_number):.4f}")
+print("per-instrument fit (fitted − quoted, in native quote units):")
+for i, (q, f) in enumerate(zip(diag.quoted_values, diag.fitted_quotes)):
+    print(f"  instrument {i}: quoted={float(q):.6f}  fitted={float(f):.6f}"
+          f"  err={float(f - q):+.2e}")
 ```
 
-The system is well-determined when `len(instruments) == sum(spec.pillar_dates.shape[0])`;
-`bootstrap_curve_graph` raises `ValueError` otherwise. Each instrument
-carries a static `curves_touched: tuple[str, ...]` naming the curves whose
-DFs enter its residual — the solver dispatches by asking every instrument
-for its own residual and never `isinstance`-checks.
+`fitted_quotes[i] − quoted_values[i]` is exactly the per-instrument
+fit error in quote-native units (rate points here; basis points for
+`TenorBasisSwap` and `CrossCurrencyBasisSwap`; FX units for
+`FXForward`). This holds *exactly* — not just to first order —
+because each VALAX residual is linear in its primary quote scalar,
+so the Newton correction
+`fitted = quoted − residual / (∂residual/∂quote)` is exact. That
+derivation is what the `_fitted_quote` helper in
+`valax/curves/bootstrap_graph.py` computes via `jax.grad` on each
+instrument's own residual.
+
+```python
+# ------------------------------------------------------------------
+# 6. Price a 2Y IRS *from the calibrated graph*, by hand.
+#
+# VALAX's analytic pricers currently take a single DiscountCurve
+# (see §8 for the pricing-side gap).  To price a genuine dual-curve
+# IRS today we apply the dual-curve par formula directly to the
+# calibrated graph:
+#
+#     PV_fixed  = K · Σ_i τ^fixed_i · DF_OIS(T^fixed_i)
+#     PV_float  = Σ_j F_j · τ^float_j · DF_OIS(T^float_j)
+#     F_j       = (DF_3M(T_{j-1}) / DF_3M(T_j) − 1) / τ^float_j
+#     PV_swap   = PV_float − PV_fixed        (receive-float, pay-fixed)
+#
+# ------------------------------------------------------------------
+notional = 10_000_000.0             # USD 10 mm
+fixed_rate = 0.045                  # off-market (par is 0.047 by the 2Y quote)
+
+# Fixed leg — annual, matches ibor_2y.fixed_dates.
+fixed_dates = ibor_2y.fixed_dates
+fixed_starts = jnp.concatenate([REF[None], fixed_dates[:-1]])
+tau_fixed = year_fraction(fixed_starts, fixed_dates, "act_365")
+pv_fixed = fixed_rate * jnp.sum(tau_fixed * ois_curve(fixed_dates))
+
+# Floating leg — quarterly, matches ibor_2y.float_dates.
+float_dates = ibor_2y.float_dates
+float_starts = jnp.concatenate([REF[None], float_dates[:-1]])
+tau_float = year_fraction(float_starts, float_dates, "act_365")
+
+# Forward projection: F_j from the 3M curve (dual-curve).
+df_start_fwd = fwd_curve(float_starts)
+df_end_fwd = fwd_curve(float_dates)
+projected_rates = (df_start_fwd / df_end_fwd - 1.0) / tau_float
+
+# Discount every floating cashflow with OIS (dual-curve).
+df_disc = ois_curve(float_dates)
+pv_float = jnp.sum(projected_rates * tau_float * df_disc)
+
+pv_swap = notional * (pv_float - pv_fixed)
+print(f"\n2Y IRS PV (receive 3M SOFR, pay {fixed_rate:.3%}):")
+print(f"  PV_fixed / N = {float(pv_fixed):+.6f}")
+print(f"  PV_float / N = {float(pv_float):+.6f}")
+print(f"  PV_swap      = {float(pv_swap):+,.2f} USD")
+
+# ------------------------------------------------------------------
+# 7. Sanity cross-check: setting fixed_rate to the calibrated par rate
+#    should give PV ≈ 0 (par swap).  This is the definition of par.
+# ------------------------------------------------------------------
+fixed_rate_par = 0.047
+pv_par_fixed = fixed_rate_par * jnp.sum(tau_fixed * ois_curve(fixed_dates))
+pv_par_swap = notional * (pv_float - pv_par_fixed)
+print(f"\nSame swap at the calibrated par rate ({fixed_rate_par:.3%}):")
+print(f"  PV_swap      = {float(pv_par_swap):+,.4f} USD   (≈ 0 by construction)")
+```
+
+**What this example illustrates**:
+
+1. Two `CurveSpec` declarations describe the target — one OIS
+   discount curve, one 3M forwarding curve — each with its own
+   pillar grid, day count, and identifier.
+2. The instrument list is *flat*: OIS-side deposits and dual-curve
+   IBOR swaps go into the same list.  The solver dispatches by
+   asking each instrument for its own residual via the
+   [`BootstrapInstrument`](../api/curves.md#valax.curves.bootstrap_proto.BootstrapInstrument)
+   protocol — no `isinstance` chains, no per-tenor loops.
+3. The system is well-determined when
+   `len(instruments) == sum(spec.pillar_dates.shape[0])`; here that's
+   4 == 2 + 2.  `bootstrap_curve_graph` raises `ValueError` otherwise.
+4. `CurveBuildDiagnostics` exposes both convergence health
+   (`residuals`, `max_abs_residual`, `rmse`, `n_steps`,
+   `converged`) and curve well-posedness
+   (`jacobian_condition_number`), plus a per-instrument fit table
+   in each quote's native units (`fitted_quotes`, `quoted_values`).
+   That's what a desk sees on the calibration sign-off sheet.
+5. Pricing against the graph is currently manual: pull
+   `ois_curve = graph["USD.SOFR.OIS"]` for discounting and
+   `fwd_curve = graph["USD.SOFR.3M"]` for projection, and apply the
+   dual-curve par formula.  When the MC-Pricing workstream ships,
+   a threaded pricer will let you write
+   `interest_rate_swap_price(swap, graph)` and route the two curves
+   internally by identifier — see §8 for the current gap.
 
 ### 5.3 What used to be impossible
 
@@ -382,8 +529,121 @@ for a working four-curve example.
 `bootstrap_multi_curve` (and its return type `MultiCurveSet`) is retained for
 one deprecation cycle so existing user code continues to work.  It emits a
 `DeprecationWarning` on every call.  New code should call
-`bootstrap_curve_graph` directly. The forthcoming MC-Curves-2b workstream will
-remove the legacy path entirely once callers have migrated.
+`bootstrap_curve_graph` directly.  The forthcoming MC-Curves-2b workstream
+will rewrite `bootstrap_multi_curve` internals over `bootstrap_curve_graph`
+so `MultiCurveSet` becomes a thin view over `CurveGraph`; both APIs are
+expected to coexist long-term.
+
+#### 5.4a Migrating from `bootstrap_multi_curve`
+
+Existing code that uses the sequential dual-curve pipeline typically
+looks like this:
+
+```python
+# BEFORE — sequential dual-curve, single-currency, DeprecationWarning
+from valax.curves import (
+    DepositRate, SwapRate, bootstrap_multi_curve,
+)
+
+mcs = bootstrap_multi_curve(
+    reference_date=REF,
+    discount_instruments=[
+        DepositRate(start_date=REF, end_date=..., rate=..., day_count="act_360"),
+        SwapRate(start_date=REF, fixed_dates=..., rate=..., day_count="act_360"),
+        # ...
+    ],
+    forward_instruments={
+        "3M": [
+            DepositRate(start_date=REF, end_date=..., rate=..., day_count="act_360"),
+            SwapRate(start_date=REF, fixed_dates=..., rate=..., day_count="act_360"),
+            # ...
+        ],
+    },
+    day_count="act_360",
+)
+
+discount_curve = mcs.discount_curve
+forward_3m     = mcs.forward_curves["3M"]
+```
+
+Migrated to the joint solver, the same build looks like:
+
+```python
+# AFTER — one joint Newton solve; no DeprecationWarning
+from valax.curves import (
+    CurveSpec, DepositRate, SwapRate, bootstrap_curve_graph,
+)
+
+ois_spec = CurveSpec(
+    curve_id="USD.SOFR.OIS", currency="USD",
+    pillar_dates=..., day_count="act_360",
+)
+fwd_spec = CurveSpec(
+    curve_id="USD.SOFR.3M", currency="USD",
+    pillar_dates=..., day_count="act_360",
+)
+
+# Explicit ``curves_touched`` on every instrument replaces the
+# ``discount_instruments`` / ``forward_instruments`` split.
+ois_insts = [
+    DepositRate(..., curves_touched=("USD.SOFR.OIS",)),
+    SwapRate(..., curves_touched=("USD.SOFR.OIS",)),
+    # ...
+]
+fwd_insts = [
+    DepositRate(..., curves_touched=("USD.SOFR.3M",)),
+    SwapRate(..., curves_touched=("USD.SOFR.3M",)),
+    # ...
+]
+
+graph, diag = bootstrap_curve_graph(
+    reference_date=REF,
+    curve_specs=[ois_spec, fwd_spec],
+    instruments=ois_insts + fwd_insts,
+)
+
+discount_curve = graph["USD.SOFR.OIS"]
+forward_3m     = graph["USD.SOFR.3M"]
+```
+
+If your downstream code expects a `MultiCurveSet`-shaped object,
+recover the two halves from the graph in one line:
+
+```python
+mcs_like = {
+    "discount": graph["USD.SOFR.OIS"],
+    "forward_3M": graph["USD.SOFR.3M"],
+}
+# Or, keeping the MultiCurveSet type for legacy callers:
+from valax.curves import MultiCurveSet
+mcs = MultiCurveSet(
+    discount_curve=graph["USD.SOFR.OIS"],
+    forward_curves={"3M": graph["USD.SOFR.3M"]},
+)
+```
+
+**Behavioural differences to be aware of after migration:**
+
+1. Return value changes from `MultiCurveSet` to
+   `(CurveGraph, CurveBuildDiagnostics)`.  You gain the diagnostics —
+   `residuals`, `max_abs_residual`, `rmse`, `n_steps`,
+   `fitted_quotes`, `quoted_values`, `jacobian_condition_number`,
+   `converged` — that the sequential pipeline never produced.
+2. Every instrument now needs an explicit `curves_touched` tuple.
+   The single-curve default `("_default_",)` will not match any of
+   your curve specs; the solver raises `ValueError` up front rather
+   than silently mis-routing.
+3. The system must be square: `len(instruments) ==
+   sum(spec.pillar_dates.shape[0])`.  In practice this matches what
+   the sequential pipeline did implicitly (one instrument per pillar
+   per curve).
+4. `IborSwapRate` — a proper dual-curve residual — is the natural
+   replacement for the `SwapRate` quotes on the forward-curve leg.
+   `SwapRate` on a forward-curve tenor still works (it degenerates
+   to the single-curve residual on that tenor's own curve), but
+   you'll want to switch to `IborSwapRate` to get the OIS-discount /
+   3M-project decomposition explicitly.  See the [Dual-curve build
+   in §5.2](#52-a-worked-usd-dual-curve-build) for the shape.
 
 ### 5.5 Quote-sensitivity Jacobian
 
@@ -499,6 +759,38 @@ pricing inflation swaps and caps/floors against a built curve, see
 
 ## 8. What is not yet implemented
 
+!!! warning "Multi-curve today is a **calibration** framework, not a **pricing** framework"
+    VALAX ships production-grade multi-curve *calibration* (`bootstrap_curve_graph`,
+    `CurveGraph`, `quote_jacobian`, extended `CurveBuildDiagnostics`) but the
+    downstream analytic pricers in `valax/pricing/analytic/*` are still
+    single-curve.  Every rates pricer in `floating.py`, `caplets.py`,
+    `swaptions.py`, `bonds.py`, and `inflation.py` takes a single
+    `curve: DiscountCurve` argument and uses it for both forward projection
+    and discounting.  The only exception today is `cross_currency_swap_price`
+    in `rates_exotics.py`, which takes two `DiscountCurve` arguments
+    (`domestic_curve` + `foreign_curve`) — still two independent curves, not
+    a `CurveGraph`.
+
+    The multi-curve *math* is fully implemented and correct inside the
+    calibration residuals (`IborSwapRate.residual`,
+    `TenorBasisSwap.residual`, `CrossCurrencyBasisSwap.residual`, etc.) —
+    it's just not yet threaded into the pricing modules.
+
+    **What this means in practice:**
+
+    - You can calibrate a full `CurveGraph` (OIS + tenor forwards + xccy)
+      today and get correct pillar DFs, per-instrument fits, and
+      implicit-adjoint quote-sensitivities from `quote_jacobian`.
+    - You **cannot** call `interest_rate_swap_price(swap, graph)` today —
+      the pricer expects a single `DiscountCurve`.
+    - To price a dual-curve swap against a calibrated graph today, either
+      (a) pass the same `DiscountCurve` twice (accepting the single-curve
+      approximation) or (b) compute the PV directly from the graph using
+      the dual-curve formula shown in §5.2 below.
+
+    Threading `CurveGraph` (or two-curve arguments) into every analytic
+    pricer is the MC-Pricing workstream — see [roadmap](../roadmap.md#11-multi-curve-bootstrapping).
+
 The MC-Curves-1 PR series shipped the `BootstrapInstrument` protocol, eleven
 calibration quote types (`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`,
 `IborSwapRate`, `MoneyMarketFuture`, `TenorBasisSwap`, `FXForward`, `FXSwap`,
@@ -514,12 +806,20 @@ helper [`quote_jacobian`](../api/curves.md#quote_jacobian), and the
 `bootstrap_multi_curve` is retained for one deprecation cycle and emits a
 `DeprecationWarning` on every call.
 
+The extended `CurveBuildDiagnostics` (MC-Curves-3) now ships production-grade
+convergence and well-posedness diagnostics: `residuals`, `max_abs_residual`,
+`rmse`, `n_steps`, `converged`, plus the per-instrument fit table
+(`fitted_quotes` and `quoted_values` in each instrument's native quote units)
+and the residual-Jacobian condition number (`jacobian_condition_number`).  See
+[`CurveBuildDiagnostics`](../api/curves.md#valax.curves.CurveBuildDiagnostics).
+`quote_jacobian` covers every registered quote type — including `.spread`
+(`TenorBasisSwap`, `CrossCurrencyBasisSwap`), `.futures_rate`
+(`MoneyMarketFuture`), `.quoted_forward` (`FXForward`), `.far_rate`
+(`FXSwap`), and `.jump_size` (`TurnInstrument`).
+
 From the [roadmap (Tier 1.1)](../roadmap.md#11-multi-curve-bootstrapping)
 and the production design, items still pending (MC-Curves-3+):
 
-- **Extended calibration diagnostics** (per-instrument fitted-vs-quoted table,
-  RMSE, Jacobian condition number).  The MVP `CurveBuildDiagnostics` today
-  ships `residuals`, `max_abs_residual`, `n_steps`, `converged`.
 - **Alternative interpolation methods**: linear on zero rates, cubic splines
   on log-DF, monotone-convex (Hagan-West), tension splines.  The log-linear
   baseline is stable and monotone but produces discontinuous forward rates at
