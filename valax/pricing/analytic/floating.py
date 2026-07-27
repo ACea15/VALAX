@@ -4,11 +4,12 @@ Pure functions. All pricers are differentiable via ``jax.grad``, jittable,
 and ``vmap``-friendly, so portfolio risk and key-rate durations come for
 free via autodiff through the curve pytree.
 
-Both pricers assume a **single-curve** setup where the discount curve is
-also used to project forward rates — i.e. the reference rate on the FRN
-or OIS float leg is the same index as the discount curve.  Basis between
-forecasting and discounting curves is a multi-curve extension (see
-``valax/curves/multi_curve.py``) not yet wired into these pricers.
+By default the pricers assume a **single-curve** setup where the discount
+curve is also used to project forward rates — i.e. the reference rate on
+the FRN or OIS float leg is the same index as the discount curve.  Pass
+the optional ``forward_curve`` argument to project the floating leg off a
+distinct forecasting curve (e.g. one built jointly with
+:func:`valax.curves.bootstrap_curve_graph`) while discounting on ``curve``.
 
 References:
     Hull (2018), *Options, Futures, and Other Derivatives*, ch. 7-9.
@@ -25,9 +26,10 @@ from valax.instruments.rates import OISSwap
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import year_fraction
 
-# Reuse the fixed-leg annuity helper from the swaptions module rather than
-# duplicating it. It is a private helper but the intent is the same here.
-from valax.pricing.analytic.swaptions import _annuity
+# Reuse the fixed-leg annuity and dual-curve float-leg helpers from the
+# swaptions module rather than duplicating them. They are private helpers
+# but the intent is the same here.
+from valax.pricing.analytic.swaptions import _annuity, _dual_curve_float_pv
 
 
 # ── Floating rate note ────────────────────────────────────────────────
@@ -35,6 +37,7 @@ from valax.pricing.analytic.swaptions import _annuity
 def floating_rate_bond_price(
     bond: FloatingRateBond,
     curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Price a floating-rate note from a discount curve.
 
@@ -83,16 +86,22 @@ def floating_rate_bond_price(
 
     Args:
         bond: Floating rate note contract.
-        curve: Discount / projection curve (single-curve assumption).
+        curve: Discount curve (also projects forwards when
+            ``forward_curve`` is not given).
+        forward_curve: Optional projection curve for the floating
+            coupons. Defaults to ``curve`` (single-curve setup); the
+            par-at-reset invariant above holds only in that case.
 
     Returns:
         Present value at ``curve.reference_date``.
     """
     tau = year_fraction(bond.fixing_dates, bond.payment_dates, bond.day_count)
+    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = curve(bond.fixing_dates)
+    df_f_start = fwd(bond.fixing_dates)
+    df_f_end = fwd(bond.payment_dates)
     df_end = curve(bond.payment_dates)
-    projected_rate = (df_start / df_end - 1.0) / tau
+    projected_rate = (df_f_start / df_f_end - 1.0) / tau
 
     if bond.fixing_rates is not None:
         rate = jnp.where(
@@ -118,6 +127,7 @@ def floating_rate_bond_price(
 def ois_swap_price(
     swap: OISSwap,
     curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """NPV of an Overnight Index Swap (OIS).
 
@@ -149,15 +159,23 @@ def ois_swap_price(
     Args:
         swap: OIS swap contract.
         curve: OIS discount curve.
+        forward_curve: Optional projection curve for the floating leg
+            (per-period compounded forwards on ``swap.float_dates``).
+            Defaults to ``curve``, where the telescoping identity above
+            applies exactly.
 
     Returns:
         Swap NPV.
     """
     ann = _annuity(swap.start_date, swap.fixed_dates, curve, swap.day_count)
-    df_start = curve(swap.start_date)
-    df_end = curve(swap.float_dates[-1])
-
-    float_pv = swap.notional * (df_start - df_end)
+    if forward_curve is None:
+        df_start = curve(swap.start_date)
+        df_end = curve(swap.float_dates[-1])
+        float_pv = swap.notional * (df_start - df_end)
+    else:
+        float_pv = swap.notional * _dual_curve_float_pv(
+            swap.start_date, swap.float_dates, curve, forward_curve
+        )
     fixed_pv = swap.notional * swap.fixed_rate * ann
 
     payer_pv = float_pv - fixed_pv
@@ -169,6 +187,7 @@ def ois_swap_price(
 def ois_swap_rate(
     swap: OISSwap,
     curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Par OIS rate: fixed rate :math:`K^*` such that the swap NPV is zero.
 
@@ -185,11 +204,18 @@ def ois_swap_rate(
     Args:
         swap: OIS swap contract.
         curve: OIS discount curve.
+        forward_curve: Optional projection curve for the floating leg.
+            Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Par swap rate (annualized).
     """
     ann = _annuity(swap.start_date, swap.fixed_dates, curve, swap.day_count)
-    df_start = curve(swap.start_date)
-    df_end = curve(swap.float_dates[-1])
-    return (df_start - df_end) / ann
+    if forward_curve is None:
+        df_start = curve(swap.start_date)
+        df_end = curve(swap.float_dates[-1])
+        return (df_start - df_end) / ann
+    float_pv = _dual_curve_float_pv(
+        swap.start_date, swap.float_dates, curve, forward_curve
+    )
+    return float_pv / ann

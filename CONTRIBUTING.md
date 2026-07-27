@@ -217,7 +217,17 @@ def price(instrument, *market_args) -> Float[Array, ""]: ...
 ### 3.4 Tests mirror source layout
 
 Every module under `valax/X/Y.py` has a corresponding test file at
-`tests/test_X/test_Y.py`. New modules need new test files in the right place.
+`tests/test_X/test_Y.py`, with one exception: the pricing sub-packages map to
+their own top-level test packages —
+
+| Source | Tests |
+|--------|-------|
+| `valax/pricing/analytic/` | `tests/test_pricing/` |
+| `valax/pricing/mc/` | `tests/test_mc/` |
+| `valax/pricing/pde/` | `tests/test_pde/` |
+| `valax/pricing/lattice/` | `tests/test_lattice/` |
+
+New modules need new test files in the right place.
 
 ### 3.5 Docstrings
 

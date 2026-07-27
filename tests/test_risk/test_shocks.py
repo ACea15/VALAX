@@ -5,13 +5,17 @@ import jax.numpy as jnp
 import pytest
 
 from valax.curves.discount import DiscountCurve, zero_rate
+from valax.curves.graph import CurveGraph
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.market.data import MarketData
 from valax.market.scenario import MarketScenario
 from valax.risk.shocks import (
     apply_scenario,
     bump_curve_zero_rates,
+    bump_graph_curve,
     key_rate_bump,
+    key_rate_graph_bump,
+    parallel_graph_shift,
     parallel_shift,
 )
 
@@ -139,3 +143,85 @@ class TestApplyScenario:
         shocked = apply_scenario(base, scenario)
         zr = zero_rate(shocked.discount_curve, flat_curve.pillar_dates[1])
         assert jnp.isclose(zr, 0.06, atol=1e-4)
+
+    def test_curve_graph_carried_through(self, flat_curve):
+        """apply_scenario preserves the optional curve_graph field."""
+        graph = CurveGraph(curves={"USD.SOFR.OIS": flat_curve})
+        base = MarketData(
+            spots=jnp.array([100.0]),
+            vols=jnp.array([0.2]),
+            dividends=jnp.array([0.0]),
+            discount_curve=flat_curve,
+            curve_graph=graph,
+        )
+        scenario = MarketScenario(
+            spot_shocks=jnp.zeros(1),
+            vol_shocks=jnp.zeros(1),
+            rate_shocks=jnp.full(5, 0.01),
+            dividend_shocks=jnp.zeros(1),
+        )
+        shocked = apply_scenario(base, scenario)
+        assert shocked.curve_graph is not None
+        assert jnp.allclose(
+            shocked.curve_graph["USD.SOFR.OIS"].discount_factors,
+            flat_curve.discount_factors,
+        )
+
+
+class TestGraphShocks:
+    @pytest.fixture
+    def graph(self, flat_curve):
+        # Second curve 50bp above the first: a positive-basis forward curve.
+        ref = flat_curve.reference_date
+        times = (flat_curve.pillar_dates - ref).astype(jnp.float64) / 365.0
+        fwd = DiscountCurve(
+            pillar_dates=flat_curve.pillar_dates,
+            discount_factors=jnp.exp(-0.055 * times),
+            reference_date=ref,
+        )
+        return CurveGraph(curves={"OIS": flat_curve, "FWD3M": fwd})
+
+    def test_bump_targets_only_named_curve(self, graph):
+        bumped = bump_graph_curve(graph, "FWD3M", jnp.full(5, 0.01))
+        # Target curve moved.
+        zr = zero_rate(bumped["FWD3M"], graph["FWD3M"].pillar_dates[1])
+        assert jnp.isclose(zr, 0.065, atol=1e-4)
+        # Other curve untouched (identical leaves).
+        assert jnp.array_equal(
+            bumped["OIS"].discount_factors, graph["OIS"].discount_factors
+        )
+
+    def test_zero_bump_is_identity(self, graph):
+        bumped = bump_graph_curve(graph, "OIS", jnp.zeros(5))
+        assert jnp.allclose(
+            bumped["OIS"].discount_factors,
+            graph["OIS"].discount_factors,
+            atol=1e-12,
+        )
+
+    def test_parallel_graph_shift(self, graph):
+        bumped = parallel_graph_shift(graph, "OIS", jnp.array(0.01))
+        for i in range(1, 5):
+            zr = zero_rate(bumped["OIS"], graph["OIS"].pillar_dates[i])
+            assert jnp.isclose(zr, 0.06, atol=1e-4)
+
+    def test_key_rate_graph_bump(self, graph):
+        bumped = key_rate_graph_bump(graph, "OIS", 3, jnp.array(0.02))
+        zr1 = zero_rate(bumped["OIS"], graph["OIS"].pillar_dates[1])
+        zr3 = zero_rate(bumped["OIS"], graph["OIS"].pillar_dates[3])
+        assert jnp.isclose(zr1, 0.05, atol=1e-4)
+        assert jnp.isclose(zr3, 0.07, atol=1e-4)
+
+    def test_unknown_curve_id_raises(self, graph):
+        with pytest.raises(KeyError):
+            bump_graph_curve(graph, "NO.SUCH.CURVE", jnp.zeros(5))
+
+    def test_differentiable(self, graph):
+        """jax.grad through a graph bump: basis DV01-style derivative."""
+        def f(bump):
+            shocked = parallel_graph_shift(graph, "FWD3M", bump)
+            return shocked["FWD3M"](graph["FWD3M"].pillar_dates[2])
+
+        grad = jax.grad(f)(jnp.array(0.0))
+        assert grad != 0.0
+        assert jnp.isfinite(grad)

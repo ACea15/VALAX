@@ -368,6 +368,15 @@ def bootstrap_curve_graph(
     one linear solve — independent of Newton iteration count.  This
     is what :func:`quote_jacobian` exploits.
 
+    .. note::
+
+       This function is **not jittable by design**: it validates the
+       system shape eagerly, and materialises Python-level diagnostics
+       (e.g. the concrete ``converged`` flag) that require leaving the
+       trace.  Curve building is a one-shot operation, not a JIT-hot
+       path — build the graph once, then JIT the pricing functions
+       that consume it.
+
     Args:
         reference_date: Valuation date as an integer ordinal scalar.
         curve_specs: Sequence of :class:`CurveSpec` describing each
@@ -539,8 +548,11 @@ def quote_jacobian(
         reference_date: Valuation date (integer ordinal scalar).
         curve_specs: Same as :func:`bootstrap_curve_graph`.
         instruments: Same as :func:`bootstrap_curve_graph`.  Each
-            instrument must expose a ``.rate`` field
-            (:func:`_extract_quote_rate`).
+            instrument type must have a registered primary-quote field
+            in :data:`_QUOTE_FIELD` (``rate`` for deposits/FRAs/swaps,
+            ``futures_rate``, ``spread``, ``quoted_forward``,
+            ``far_rate``, or ``jump_size``); unregistered types raise
+            ``TypeError``.
         by: One of ``"log_df"``, ``"df"``, ``"zero_rate"``.  Selects
             which representation of the calibrated pillar values to
             differentiate.

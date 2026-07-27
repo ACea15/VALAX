@@ -45,41 +45,87 @@ def _annuity(
     return jnp.sum(tau * curve(fixed_dates))
 
 
+def _dual_curve_float_pv(
+    start_date: Int[Array, ""],
+    payment_dates: Int[Array, " n"],
+    discount_curve: DiscountCurve,
+    forward_curve: DiscountCurve,
+) -> Float[Array, ""]:
+    """Unit-notional floating-leg PV with distinct projection curve.
+
+    Projects each period's simply-compounded forward off
+    ``forward_curve`` and discounts on ``discount_curve``:
+
+        PV = sum_i (DF_f(T_{i-1}) / DF_f(T_i) - 1) * DF_d(T_i)
+
+    The accrual fraction cancels between projection and payoff, so no
+    day count is needed.  When both curves coincide the sum telescopes
+    to DF(start) - DF(maturity), recovering the single-curve identity.
+    """
+    starts = jnp.concatenate([start_date[None], payment_dates[:-1]])
+    df_f_start = forward_curve(starts)
+    df_f_end = forward_curve(payment_dates)
+    df_d_end = discount_curve(payment_dates)
+    return jnp.sum((df_f_start / df_f_end - 1.0) * df_d_end)
+
+
 # ── Swap utilities ────────────────────────────────────────────────────
 
 def swap_rate(
     swap: InterestRateSwap,
     curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Par swap rate: fixed rate K* such that the swap NPV is zero.
 
+    Single-curve (``forward_curve=None``):
+
         S = (DF(start) - DF(maturity)) / A
 
-    where A is the fixed-leg annuity.
+    where A is the fixed-leg annuity.  With a distinct projection
+    curve the floating leg no longer telescopes and
+
+        S = sum_i (DF_f(T_{i-1})/DF_f(T_i) - 1) * DF_d(T_i) / A
+
+    using the fixed schedule as the projection grid (the
+    :class:`InterestRateSwap` pytree carries no separate float
+    schedule).
 
     Args:
         swap: Swap contract.
         curve: Discount curve.
+        forward_curve: Optional projection curve for the floating leg.
+            Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Par swap rate (annualized).
     """
     ann = _annuity(swap.start_date, swap.fixed_dates, curve, swap.day_count)
-    df_start = curve(swap.start_date)
-    df_end = curve(swap.fixed_dates[-1])
-    return (df_start - df_end) / ann
+    if forward_curve is None:
+        df_start = curve(swap.start_date)
+        df_end = curve(swap.fixed_dates[-1])
+        return (df_start - df_end) / ann
+    float_pv = _dual_curve_float_pv(
+        swap.start_date, swap.fixed_dates, curve, forward_curve
+    )
+    return float_pv / ann
 
 
 def swap_price(
     swap: InterestRateSwap,
     curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """NPV of a vanilla fixed-for-float interest rate swap.
 
-    Uses the replication identity for the floating leg:
+    In the single-curve setup (``forward_curve=None``) the floating leg
+    uses the replication identity:
         PV(float) = notional * (DF(start) - DF(maturity))
 
-    and the discounted fixed cash flows for the fixed leg:
+    With a distinct projection curve the floating leg is projected off
+    ``forward_curve`` and discounted on ``curve`` (fixed schedule used
+    as the projection grid).  The fixed leg is always the discounted
+    fixed cash flows:
         PV(fixed) = notional * fixed_rate * A
 
     A positive result means the payer perspective is in-the-money
@@ -88,15 +134,21 @@ def swap_price(
     Args:
         swap: Swap contract (pay_fixed field determines sign convention).
         curve: Discount curve.
+        forward_curve: Optional projection curve for the floating leg.
+            Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Swap NPV.
     """
     ann = _annuity(swap.start_date, swap.fixed_dates, curve, swap.day_count)
-    df_start = curve(swap.start_date)
-    df_end = curve(swap.fixed_dates[-1])
-
-    float_pv = swap.notional * (df_start - df_end)
+    if forward_curve is None:
+        df_start = curve(swap.start_date)
+        df_end = curve(swap.fixed_dates[-1])
+        float_pv = swap.notional * (df_start - df_end)
+    else:
+        float_pv = swap.notional * _dual_curve_float_pv(
+            swap.start_date, swap.fixed_dates, curve, forward_curve
+        )
     fixed_pv = swap.notional * swap.fixed_rate * ann
 
     payer_pv = float_pv - fixed_pv
@@ -111,6 +163,7 @@ def swaption_price_black76(
     swaption: Swaption,
     curve: DiscountCurve,
     vol: Float[Array, ""],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Black-76 price for a European payer or receiver swaption.
 
@@ -125,6 +178,8 @@ def swaption_price_black76(
         swaption: Swaption contract.
         curve: Discount curve (used to compute S, annuity, and discounting).
         vol: Black (lognormal) swaption implied volatility.
+        forward_curve: Optional projection curve for the underlying
+            swap's floating leg. Defaults to ``curve`` (single-curve).
 
     Returns:
         Payer or receiver swaption price.
@@ -132,9 +187,14 @@ def swaption_price_black76(
     T = year_fraction(curve.reference_date, swaption.expiry_date, swaption.day_count)
     ann = _annuity(swaption.expiry_date, swaption.fixed_dates, curve, swaption.day_count)
 
-    df_start = curve(swaption.expiry_date)
-    df_end = curve(swaption.fixed_dates[-1])
-    S = (df_start - df_end) / ann  # forward par swap rate
+    if forward_curve is None:
+        df_start = curve(swaption.expiry_date)
+        df_end = curve(swaption.fixed_dates[-1])
+        S = (df_start - df_end) / ann  # forward par swap rate
+    else:
+        S = _dual_curve_float_pv(
+            swaption.expiry_date, swaption.fixed_dates, curve, forward_curve
+        ) / ann
 
     K = swaption.strike
     sqrt_T = jnp.sqrt(T)
@@ -154,6 +214,7 @@ def swaption_price_bachelier(
     swaption: Swaption,
     curve: DiscountCurve,
     vol: Float[Array, ""],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Bachelier (normal model) price for a European payer or receiver swaption.
 
@@ -167,6 +228,8 @@ def swaption_price_bachelier(
         swaption: Swaption contract.
         curve: Discount curve.
         vol: Normal (Bachelier) swaption volatility.
+        forward_curve: Optional projection curve for the underlying
+            swap's floating leg. Defaults to ``curve`` (single-curve).
 
     Returns:
         Payer or receiver swaption price.
@@ -174,9 +237,14 @@ def swaption_price_bachelier(
     T = year_fraction(curve.reference_date, swaption.expiry_date, swaption.day_count)
     ann = _annuity(swaption.expiry_date, swaption.fixed_dates, curve, swaption.day_count)
 
-    df_start = curve(swaption.expiry_date)
-    df_end = curve(swaption.fixed_dates[-1])
-    S = (df_start - df_end) / ann
+    if forward_curve is None:
+        df_start = curve(swaption.expiry_date)
+        df_end = curve(swaption.fixed_dates[-1])
+        S = (df_start - df_end) / ann
+    else:
+        S = _dual_curve_float_pv(
+            swaption.expiry_date, swaption.fixed_dates, curve, forward_curve
+        ) / ann
 
     K = swaption.strike
     sigma_T = vol * jnp.sqrt(T)

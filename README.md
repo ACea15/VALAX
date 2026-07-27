@@ -57,24 +57,34 @@ prices = batch_price(black_scholes_price, options,
 ## What's Included
 
 ### Instruments
-- **Equity options** — European calls/puts
-- **Fixed income** — zero coupon bonds, fixed/floating rate bonds, caps/floors, swaptions
+- **Equity options** — European/American vanillas, barriers, Asians, lookbacks, digitals, variance swaps, compound/chooser options, autocallables, cliquets, worst-of baskets, spread options
+- **Fixed income** — zero coupon, fixed/floating, callable/puttable and convertible bonds; caps/floors; IRS, OIS, CMS, cross-currency and total-return swaps; European and Bermudan swaptions; range accruals
+- **Credit** — CDS, CDO tranches
+- **FX** — forwards, FX swaps, vanilla/barrier options, quantos, TARFs
+- **Inflation** — zero-coupon and year-on-year inflation swaps, inflation caps/floors
 
 ### Models
-- Black-Scholes-Merton
+- Black-Scholes-Merton (single- and multi-asset GBM)
 - Heston stochastic volatility
+- SABR
+- Local volatility (Dupire) and stochastic-local volatility (SLV)
+- Hull-White one-factor
 - LIBOR Market Model (LMM)
 
 ### Pricing Engines
 | Engine | Description |
 |--------|-------------|
 | **Analytic** | Black-Scholes, Black-76, Bachelier, bond pricing, caplet/swaption formulas |
-| **Monte Carlo** | GBM and Heston path generation via [diffrax](https://github.com/patrick-kidger/diffrax), LMM simulation |
+| **Monte Carlo** | GBM, Heston, SABR, local-vol and SLV path generation via [diffrax](https://github.com/patrick-kidger/diffrax), LMM simulation, LSM for Bermudans |
 | **PDE** | Crank-Nicolson finite difference solver |
-| **Lattice** | CRR binomial tree (European and American options) |
+| **Lattice** | CRR binomial tree (European and American options), Hull-White trinomial tree |
 
 ### Supporting Infrastructure
-- **Curves** — discount curve construction with log-linear interpolation and bootstrapping
+- **Curves** — discount curve construction with log-linear interpolation, single- and multi-curve bootstrapping, inflation and survival curves
+- **Surfaces** — SVI, SABR and grid volatility surfaces, leverage surfaces for SLV
+- **Calibration** — gradient-based calibration for Heston, SABR and SLV (optimistix/optax)
+- **Market** — market data and scenario containers, synthetic market data generation
+- **Risk** — VaR, sensitivity ladders, bucketing, PCA-based rates factor models
 - **Dates** — JIT-compatible integer ordinal dates, day count conventions (Act/360, Act/365, 30/360), schedule generation
 - **Greeks** — generic autodiff wrappers (`greeks`, `greek`) for any pricing function
 - **Portfolio** — `vmap`-based batch pricing and risk aggregation
@@ -85,19 +95,27 @@ Every data structure is an [`equinox.Module`](https://github.com/patrick-kidger/
 
 ```
 valax/
-├── core/          # Type aliases, constants
+├── core/          # Type aliases, constants, arbitrage diagnostics
 ├── dates/         # Day counts, schedule generation
-├── curves/        # Discount curves, interpolation, bootstrapping
-├── instruments/   # Data-only pytrees: options, bonds, caps, swaptions
-├── models/        # Black-Scholes, Heston, LMM
+├── curves/        # Discount/inflation/survival curves, bootstrapping, multi-curve
+├── surfaces/      # SVI, SABR and grid vol surfaces, SLV leverage
+├── instruments/   # Data-only pytrees: options, bonds, rates, credit, FX, inflation
+├── models/        # Black-Scholes, Heston, SABR, local vol, SLV, Hull-White, LMM
+├── calibration/   # Heston/SABR/SLV calibration, losses, parameter transforms
+├── market/        # Market data, scenarios, synthetic market generation
 ├── pricing/
 │   ├── analytic/  # Closed-form solutions
 │   ├── mc/        # Monte Carlo (diffrax-based path generation)
 │   ├── pde/       # Finite difference (Crank-Nicolson)
-│   └── lattice/   # Binomial trees (CRR)
+│   └── lattice/   # Binomial trees (CRR), Hull-White trinomial tree
 ├── greeks/        # Autodiff wrappers
+├── risk/          # VaR, ladders, bucketing, PCA factor models
 └── portfolio/     # vmap batch pricing, risk aggregation
 ```
+
+> **Note:** importing `valax` enables 64-bit precision globally via
+> `jax.config.update("jax_enable_x64", True)` — a process-wide setting that
+> affects all JAX code in the same process.
 
 ## Examples
 
@@ -111,6 +129,13 @@ Runnable scripts in `examples/` demonstrate the full library with synthetic mark
 | `04_rates_derivatives.py` | Caplet/floor pricing, cap strips, swaps, swaptions, rate Greeks |
 | `05_monte_carlo.py` | GBM/Heston/SABR paths, convergence, Asian + barrier exotics |
 | `06_pde_and_lattice.py` | Crank-Nicolson PDE, binomial trees, American options, method comparison |
+| `07_synthetic_market.py` | Synthetic market snapshot/correlation generators, portfolio sampling, batched pricing |
+| `08_end_to_end_workflow.py` | Full six-stage workflow: synthetic world → noisy observations → calibration → portfolio → pricing/Greeks → arbitrage stress test |
+| `09_pca_rates_pnl.py` | Synthetic yield-curve history, PCA rates factor model, level/slope/curvature shocks, bond-ladder P&L |
+
+`examples/comparisons/` additionally contains side-by-side comparison scripts
+(e.g. against QuantLib) covering options, fixed income, SABR, caps/swaptions,
+Monte Carlo, PDE/lattice, Heston smiles, and risk/VaR.
 
 ```bash
 python examples/01_equity_options.py

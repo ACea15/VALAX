@@ -33,6 +33,19 @@ convenience constant-bump version of `bump_forward_curve`.
 
 ::: valax.risk.shocks.parallel_basis_shift
 
+### Curve-graph shocks
+
+Perturbations for the [`CurveGraph`](curves.md#valax.curves.CurveGraph)
+container: bump any named curve by identifier while every other curve
+on the graph is held fixed. Whether the move is a discounting shock or
+a basis move is purely a matter of which `curve_id` is passed.
+
+::: valax.risk.shocks.bump_graph_curve
+
+::: valax.risk.shocks.parallel_graph_shift
+
+::: valax.risk.shocks.key_rate_graph_bump
+
 ### Credit shocks
 
 Perturbations for `SurvivalCurve`. `bump_hazard_rates` applies an

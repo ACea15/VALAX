@@ -67,12 +67,12 @@ A EUR/USD desk carries at least four, plus FX links:
 - `USD.SOFR.OIS`, `USD.SOFR.3M`
 - `EUR.ESTR.OIS`, `EUR.EURIBOR.6M`
 - FX spot + covered-interest-parity ties on the short end (via
-  [`FXForward`](../api/curves.md#fxforward), [`FXSwap`](../api/curves.md#fxswap))
+  [`FXForward`](../api/curves.md#valax.curves.FXForward), [`FXSwap`](../api/curves.md#valax.curves.FXSwap))
 - cross-currency basis on the long end (via
-  [`CrossCurrencyBasisSwap`](../api/curves.md#crosscurrencybasisswap-ccbs))
+  [`CrossCurrencyBasisSwap`](../api/curves.md#valax.curves.CrossCurrencyBasisSwap))
 
 This collection of curves plus the identifier-keyed lookup is what
-[`CurveGraph`](../api/curves.md#curvegraph) represents.
+[`CurveGraph`](../api/curves.md#valax.curves.CurveGraph) represents.
 
 ## Why sequential bootstrap breaks down
 
@@ -136,7 +136,7 @@ a single equation.
 
 ## Enter the joint Newton solve
 
-[`bootstrap_curve_graph`](../api/curves.md#bootstrap_curve_graph)
+[`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph)
 concatenates the log-DFs of every curve into one flat state vector
 $\mathbf{x} \in \mathbb{R}^N$ and runs `optimistix.Newton` to zero every
 instrument's residual simultaneously:
@@ -150,7 +150,7 @@ $$
 $\mathcal{T}(i)$ is the set of curves instrument $i$ touches, declared
 via its static `curves_touched` tuple. The solver does *not* branch on
 instrument type — it just asks each instrument for its residual, which
-is what the [`BootstrapInstrument` protocol](../api/curves.md#bootstrapinstrument-protocol)
+is what the [`BootstrapInstrument` protocol](../api/curves.md#valax.curves.bootstrap_proto.BootstrapInstrument)
 requires.
 
 Because each instrument owns its residual function, the solver's code
@@ -176,7 +176,7 @@ $$
 $$
 
 The consequence is that
-[`quote_jacobian`](../api/curves.md#quote_jacobian) delivers the full
+[`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian) delivers the full
 
 $$
 J_{ki} = \frac{\partial (\text{DF at pillar } k)}{\partial (\text{market quote } i)}
@@ -209,13 +209,13 @@ tenor-basis and every cross-currency trade a desk carries.
 
 ## What MC-Curves-2 shipped
 
-- [`CurveSpec`](../api/curves.md#curvespec) — declarative curve descriptor
+- [`CurveSpec`](../api/curves.md#valax.curves.CurveSpec) — declarative curve descriptor
   with alphabet-validated identifiers.
-- [`bootstrap_curve_graph`](../api/curves.md#bootstrap_curve_graph) —
+- [`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph) —
   joint Newton solve, `optimistix.Newton` + `ImplicitAdjoint`.
-- [`CurveBuildDiagnostics`](../api/curves.md#curvebuilddiagnostics) —
+- [`CurveBuildDiagnostics`](../api/curves.md#valax.curves.CurveBuildDiagnostics) —
   residuals, iteration count, converged flag.
-- [`quote_jacobian`](../api/curves.md#quote_jacobian) — implicit-adjoint
+- [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian) — implicit-adjoint
   quote-sensitivity matrix in three parametrisations
   (`log_df` / `df` / `zero_rate`).
 - `bootstrap_multi_curve` retained one deprecation cycle with a
@@ -229,7 +229,7 @@ tenor-basis and every cross-currency trade a desk carries.
 
 - **Recipes** — [`curves.md` §5](curves.md#5-multi-curve-bootstrap)
   walks through a USD dual-curve build with `bootstrap_curve_graph`.
-- **API** — [`api/curves.md`](../api/curves.md#curvespec) documents every
+- **API** — [`api/curves.md`](../api/curves.md#valax.curves.CurveSpec) documents every
   argument and return type of the joint solver.
 - **Math** — [`theory.md` §3.7](../theory.md#37-no-arbitrage-relations-across-curves)
   derives every residual (CIP, tenor basis, XCCY).

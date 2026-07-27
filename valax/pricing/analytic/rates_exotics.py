@@ -46,9 +46,10 @@ from valax.instruments.rates import (
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import year_fraction
 
-# Reuse the fixed-leg annuity helper from the swaptions module rather
-# than duplicating it (same reasoning as `floating.py`).
-from valax.pricing.analytic.swaptions import _annuity
+# Reuse the fixed-leg annuity and dual-curve float-leg helpers from the
+# swaptions module rather than duplicating them (same reasoning as
+# `floating.py`).
+from valax.pricing.analytic.swaptions import _annuity, _dual_curve_float_pv
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -195,6 +196,7 @@ def total_return_swap_price(
     swap: TotalReturnSwap,
     curve: DiscountCurve,
     unrealized_return: Float[Array, ""] = None,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """NPV of a total return swap under the self-financing assumption.
 
@@ -232,10 +234,16 @@ def total_return_swap_price(
 
     Args:
         swap: Total return swap contract.
-        curve: Discount / projection curve (single-curve assumption).
+        curve: Discount curve (also projects the funding leg when
+            ``forward_curve`` is not given).
         unrealized_return: Optional scalar fractional return of the
             reference asset since the last reset date, e.g. ``0.02``
             for a 2 % unrealized gain.  Defaults to zero.
+        forward_curve: Optional projection curve for the floating
+            portion of the funding leg.  When given, the telescoping
+            cancellation against the total-return leg no longer holds
+            exactly and the receiver additionally earns the basis
+            between the two curves.  Defaults to ``curve``.
 
     Returns:
         Swap NPV.  Sign follows ``is_total_return_receiver``.
@@ -249,7 +257,19 @@ def total_return_swap_price(
     next_payment = swap.payment_dates[0]
     accrued_pv = swap.notional * unrealized_return * curve(next_payment)
 
-    receiver_pv = spread_pv + accrued_pv
+    if forward_curve is None:
+        basis_pv = jnp.array(0.0)
+    else:
+        # TR leg still telescopes on the discount curve (self-financing
+        # assumption), but the funding float leg is projected off the
+        # forward curve; the difference is the curve basis.
+        tr_leg = curve(swap.start_date) - curve(swap.payment_dates[-1])
+        funding_float = _dual_curve_float_pv(
+            swap.start_date, swap.payment_dates, curve, forward_curve
+        )
+        basis_pv = swap.notional * (tr_leg - funding_float)
+
+    receiver_pv = spread_pv + accrued_pv + basis_pv
 
     if swap.is_total_return_receiver:
         return receiver_pv
@@ -264,6 +284,7 @@ def _cms_forward_rates(
     fixing_dates: Int[Array, " n"],
     cms_tenor: int,
     curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, " n"]:
     """Per-fixing forward CMS rate (no convexity adjustment).
 
@@ -280,6 +301,11 @@ def _cms_forward_rates(
     matches what a single-curve Black-76 caplet-style pricer uses as the
     martingale CMS rate; it deliberately omits the Hagan convexity
     adjustment.
+
+    With a distinct ``forward_curve`` the numerator is the underlying
+    swap's dual-curve floating leg — per-period forwards projected off
+    ``forward_curve`` and discounted on ``curve`` — while the annuity
+    stays on the discount curve.
     """
     year_days = jnp.int32(365)
     periods = jnp.arange(1, cms_tenor + 1, dtype=jnp.int32)
@@ -292,9 +318,20 @@ def _cms_forward_rates(
     dfs_ann = curve(ann_dates)            # (n_fixings, cms_tenor)
     annuity = jnp.sum(dfs_ann, axis=1)    # (n_fixings,) — tau = 1 year each
 
-    df_start = curve(fixing_dates)
-    df_end = curve(maturity_dates)
-    return (df_start - df_end) / annuity
+    if forward_curve is None:
+        df_start = curve(fixing_dates)
+        df_end = curve(maturity_dates)
+        return (df_start - df_end) / annuity
+
+    # Dual-curve floating leg per fixing: sum over the annual grid of
+    # (DF_f(T_{k-1}) / DF_f(T_k) - 1) * DF_d(T_k).
+    grid_starts = jnp.concatenate(
+        [fixing_dates[:, None], ann_dates[:, :-1]], axis=1
+    )
+    df_f_start = forward_curve(grid_starts)   # (n_fixings, cms_tenor)
+    df_f_end = forward_curve(ann_dates)       # (n_fixings, cms_tenor)
+    float_pv = jnp.sum((df_f_start / df_f_end - 1.0) * dfs_ann, axis=1)
+    return float_pv / annuity
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -304,6 +341,7 @@ def _cms_forward_rates(
 def cms_swap_price(
     swap: CMSSwap,
     curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """NPV of a CMS swap (constant-maturity-swap fixed-vs-CMS exchange).
 
@@ -330,12 +368,17 @@ def cms_swap_price(
 
     Args:
         swap: CMS swap contract.
-        curve: Discount / projection curve (single-curve assumption).
+        curve: Discount curve (also projects the CMS rates when
+            ``forward_curve`` is not given).
+        forward_curve: Optional projection curve for the underlying
+            swap rates. Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Swap NPV.
     """
-    cms_rates = _cms_forward_rates(swap.payment_dates, swap.cms_tenor, curve)
+    cms_rates = _cms_forward_rates(
+        swap.payment_dates, swap.cms_tenor, curve, forward_curve
+    )
 
     # CMS leg: per-period tau against the swap's own day count, DF at payment.
     payment_starts = jnp.concatenate(
@@ -365,6 +408,7 @@ def cms_cap_floor_price_black76(
     cap: CMSCapFloor,
     curve: DiscountCurve,
     vol: Float[Array, ""],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Black-76 price of a CMS cap or floor (no convexity adjustment).
 
@@ -401,11 +445,15 @@ def cms_cap_floor_price_black76(
         cap: CMS cap or floor contract.
         curve: Discount curve.
         vol: Black-76 volatility of the CMS rate, scalar or per-period.
+        forward_curve: Optional projection curve for the underlying
+            swap rates. Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Cap or floor NPV.
     """
-    cms_rates = _cms_forward_rates(cap.payment_dates, cap.cms_tenor, curve)
+    cms_rates = _cms_forward_rates(
+        cap.payment_dates, cap.cms_tenor, curve, forward_curve
+    )
 
     # Uniform accrual periods: mirror period-1 length onto period-0 so
     # the first period does not span the whole distance from the
@@ -445,6 +493,7 @@ def range_accrual_price_black76(
     accrual: RangeAccrual,
     curve: DiscountCurve,
     vol: Float[Array, ""],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Digital-replication price of a range accrual note on a rate index.
 

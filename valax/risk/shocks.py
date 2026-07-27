@@ -10,6 +10,8 @@ The module groups primitives by factor category:
   ``key_rate_bump``, ``pca_curve_shock``.
 - **IR (multi-curve)**: ``bump_discount_curve``, ``bump_forward_curve``,
   ``parallel_basis_shift``.
+- **IR (curve graph)**: ``bump_graph_curve``, ``parallel_graph_shift``,
+  ``key_rate_graph_bump``.
 - **Credit**: ``bump_hazard_rates``, ``parallel_credit_spread_shift``,
   ``key_rate_hazard_bump``.
 - **Market-data composite**: ``apply_scenario``.
@@ -22,6 +24,7 @@ from jaxtyping import Float, Int
 from jax import Array
 
 from valax.curves.discount import DiscountCurve
+from valax.curves.graph import CurveGraph
 from valax.curves.multi_curve import MultiCurveSet
 from valax.curves.survival import SurvivalCurve
 from valax.dates.daycounts import year_fraction
@@ -147,6 +150,9 @@ def apply_scenario(
         vols=new_vols,
         dividends=new_dividends,
         discount_curve=new_curve,
+        # Carried through unshocked; use bump_graph_curve for targeted
+        # graph moves.
+        curve_graph=base.curve_graph,
     )
 
 
@@ -223,6 +229,70 @@ def parallel_basis_shift(
     """
     n_pillars = mcs.forward_curves[tenor].pillar_dates.shape[0]
     return bump_forward_curve(mcs, tenor, jnp.full(n_pillars, bump))
+
+
+# ── Curve-graph shocks ───────────────────────────────────────────────
+
+
+def bump_graph_curve(
+    graph: CurveGraph,
+    curve_id: str,
+    rate_bumps: Float[Array, " n_pillars"],
+) -> CurveGraph:
+    """Bump zero rates of a named curve inside a :class:`CurveGraph`.
+
+    All other curves on the graph are left untouched, so the result is
+    a clean single-curve move — the graph analogue of
+    :func:`bump_forward_curve` on a :class:`MultiCurveSet`.  Bumping the
+    discounting curve versus a projection curve is purely a matter of
+    which ``curve_id`` is passed.
+
+    Args:
+        graph: Source curve graph.
+        curve_id: Key into ``graph.curves`` (e.g. ``"USD.LIBOR.3M"``).
+        rate_bumps: Per-pillar additive zero-rate bumps for that curve.
+
+    Returns:
+        A new ``CurveGraph`` with the named curve bumped.
+
+    Raises:
+        KeyError: If ``curve_id`` is not on the graph.
+    """
+    if curve_id not in graph:
+        raise KeyError(
+            f"curve_id {curve_id!r} not in CurveGraph "
+            f"(available: {sorted(graph.keys())})"
+        )
+    new_curves = dict(graph.curves)
+    new_curves[curve_id] = bump_curve_zero_rates(graph[curve_id], rate_bumps)
+    return CurveGraph(curves=new_curves)
+
+
+def parallel_graph_shift(
+    graph: CurveGraph,
+    curve_id: str,
+    bump: Float[Array, ""],
+) -> CurveGraph:
+    """Parallel shift a named graph curve, all other curves held fixed.
+
+    When ``curve_id`` is a projection curve this expresses a pure basis
+    move against the discounting curve; when it is the discounting
+    curve it is a pure discounting shock.
+    """
+    n_pillars = graph[curve_id].pillar_dates.shape[0]
+    return bump_graph_curve(graph, curve_id, jnp.full(n_pillars, bump))
+
+
+def key_rate_graph_bump(
+    graph: CurveGraph,
+    curve_id: str,
+    pillar_index: int,
+    bump: Float[Array, ""],
+) -> CurveGraph:
+    """Bump a single pillar's zero rate on a named graph curve."""
+    n_pillars = graph[curve_id].pillar_dates.shape[0]
+    bumps = jnp.zeros(n_pillars).at[pillar_index].set(bump)
+    return bump_graph_curve(graph, curve_id, bumps)
 
 
 # ── Credit shocks (SurvivalCurve) ────────────────────────────────────

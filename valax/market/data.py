@@ -5,6 +5,7 @@ from jaxtyping import Float
 from jax import Array
 
 from valax.curves.discount import DiscountCurve
+from valax.curves.graph import CurveGraph
 
 
 class MarketData(eqx.Module):
@@ -20,9 +21,14 @@ class MarketData(eqx.Module):
         vols: Implied volatilities per asset.
         dividends: Continuous dividend yields per asset.
         discount_curve: Term structure of discount factors.
+        curve_graph: Optional multi-curve container built by
+            :func:`valax.curves.bootstrap_curve_graph`. ``None`` keeps
+            the single-curve setup; when present, its curves are
+            differentiable pytree leaves like ``discount_curve``.
     """
 
     spots: Float[Array, " n_assets"]
     vols: Float[Array, " n_assets"]
     dividends: Float[Array, " n_assets"]
     discount_curve: DiscountCurve
+    curve_graph: CurveGraph | None = None

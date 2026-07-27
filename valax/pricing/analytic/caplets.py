@@ -22,6 +22,7 @@ def caplet_price_black76(
     caplet: Caplet,
     curve: DiscountCurve,
     vol: Float[Array, ""],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Black-76 price for a caplet or floorlet.
 
@@ -33,17 +34,21 @@ def caplet_price_black76(
 
     Args:
         caplet: Caplet/floorlet contract.
-        curve: Discount curve for forward rates and discounting.
+        curve: Discount curve (also projects the forward when
+            ``forward_curve`` is not given).
         vol: Black (lognormal) implied volatility of the forward rate.
+        forward_curve: Optional projection curve for the forward rate F.
+            Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Caplet or floorlet price.
     """
     T = year_fraction(curve.reference_date, caplet.fixing_date, caplet.day_count)
     tau = year_fraction(caplet.start_date, caplet.end_date, caplet.day_count)
+    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = curve(caplet.start_date)
-    df_end = curve(caplet.end_date)
+    df_start = fwd(caplet.start_date)
+    df_end = fwd(caplet.end_date)
     F = (df_start / df_end - 1.0) / tau
     P = curve(caplet.end_date)
 
@@ -65,6 +70,7 @@ def caplet_price_bachelier(
     caplet: Caplet,
     curve: DiscountCurve,
     vol: Float[Array, ""],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Bachelier (normal model) price for a caplet or floorlet.
 
@@ -76,17 +82,21 @@ def caplet_price_bachelier(
 
     Args:
         caplet: Caplet/floorlet contract.
-        curve: Discount curve.
+        curve: Discount curve (also projects the forward when
+            ``forward_curve`` is not given).
         vol: Normal (Bachelier) volatility of the forward rate.
+        forward_curve: Optional projection curve for the forward rate F.
+            Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Caplet or floorlet price.
     """
     T = year_fraction(curve.reference_date, caplet.fixing_date, caplet.day_count)
     tau = year_fraction(caplet.start_date, caplet.end_date, caplet.day_count)
+    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = curve(caplet.start_date)
-    df_end = curve(caplet.end_date)
+    df_start = fwd(caplet.start_date)
+    df_end = fwd(caplet.end_date)
     F = (df_start / df_end - 1.0) / tau
     P = curve(caplet.end_date)
 
@@ -112,6 +122,7 @@ def cap_price_black76(
     cap: Cap,
     curve: DiscountCurve,
     vol: Float[Array, ""],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Black-76 price for a cap or floor (strip of caplets/floorlets).
 
@@ -152,6 +163,7 @@ def cap_price_bachelier(
     cap: Cap,
     curve: DiscountCurve,
     vol: Float[Array, ""],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Bachelier (normal model) price for a cap or floor.
 
@@ -159,17 +171,21 @@ def cap_price_bachelier(
 
     Args:
         cap: Cap/floor contract.
-        curve: Discount curve.
+        curve: Discount curve (also projects forwards when
+            ``forward_curve`` is not given).
         vol: Flat normal volatility (scalar) or per-caplet vols (shape n).
+        forward_curve: Optional projection curve for the forward rates.
+            Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Cap or floor price.
     """
     T = year_fraction(curve.reference_date, cap.fixing_dates, cap.day_count)
     tau = year_fraction(cap.start_dates, cap.end_dates, cap.day_count)
+    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = curve(cap.start_dates)
-    df_end = curve(cap.end_dates)
+    df_start = fwd(cap.start_dates)
+    df_end = fwd(cap.end_dates)
     F = (df_start / df_end - 1.0) / tau
     P = curve(cap.end_dates)
 

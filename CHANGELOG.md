@@ -405,9 +405,9 @@ hardcoded case.
 ### Infrastructure
 
 - `pyproject.toml` with hatchling build backend; core deps `jax[cpu]`,
-  `equinox`, `diffrax`, `optimistix`, `optax`, `lineax`, `jaxtyping`,
-  `beartype`. Dev deps: `pytest`, `pytest-benchmark`, `hypothesis`.
-  Docs deps: `mkdocs`, `mkdocs-material`.
+  `equinox`, `diffrax`, `optimistix`, `optax`, `lineax`, `jaxtyping`.
+  Dev deps: `pytest`, `pytest-benchmark`, `pytest-cov`, `hypothesis`.
+  Docs deps: `mkdocs`, `mkdocs-material`, `mkdocstrings[python]`.
 - GitHub Pages deployment workflow.
 
 ## [0.0.0] — Initial commit

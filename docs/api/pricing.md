@@ -128,9 +128,11 @@ elapsed period with implied variance over the remaining period.
 
 ### Floating-rate instruments
 
-Single-curve pricing for FRNs and OIS swaps. The OIS float leg uses
-the telescoping identity \(N \cdot (DF(T_0) - DF(T_n))\); FRNs satisfy
-the par-at-reset invariant.
+Pricing for FRNs and OIS swaps. In the default single-curve setup the
+OIS float leg uses the telescoping identity
+\(N \cdot (DF(T_0) - DF(T_n))\) and FRNs satisfy the par-at-reset
+invariant; pass the optional `forward_curve` argument to project the
+floating leg off a distinct forecasting curve.
 
 ::: valax.pricing.analytic.floating_rate_bond_price
 
@@ -155,6 +157,44 @@ annual underlying swap. **No convexity adjustment** — see the
 ::: valax.pricing.analytic.cms_cap_floor_price_black76
 
 ::: valax.pricing.analytic.range_accrual_price_black76
+
+### Curve-graph pricing
+
+Thin wrappers that resolve curve identifiers on a
+[`CurveGraph`](curves.md#valax.curves.CurveGraph) and delegate to the
+`DiscountCurve`-based pricers above. Passing `forward_id=None`
+reproduces single-curve behaviour exactly; see
+[the curves guide §8](../guide/curves.md#8-what-is-not-yet-implemented).
+
+::: valax.pricing.analytic.swap_price_from_graph
+
+::: valax.pricing.analytic.swap_rate_from_graph
+
+::: valax.pricing.analytic.swaption_price_black76_from_graph
+
+::: valax.pricing.analytic.swaption_price_bachelier_from_graph
+
+::: valax.pricing.analytic.floating_rate_bond_price_from_graph
+
+::: valax.pricing.analytic.ois_swap_price_from_graph
+
+::: valax.pricing.analytic.ois_swap_rate_from_graph
+
+::: valax.pricing.analytic.caplet_price_black76_from_graph
+
+::: valax.pricing.analytic.caplet_price_bachelier_from_graph
+
+::: valax.pricing.analytic.cap_price_black76_from_graph
+
+::: valax.pricing.analytic.cap_price_bachelier_from_graph
+
+::: valax.pricing.analytic.total_return_swap_price_from_graph
+
+::: valax.pricing.analytic.cms_swap_price_from_graph
+
+::: valax.pricing.analytic.cms_cap_floor_price_black76_from_graph
+
+::: valax.pricing.analytic.range_accrual_price_black76_from_graph
 
 ### Inflation derivatives
 

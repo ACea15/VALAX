@@ -20,6 +20,10 @@ from valax.risk.shocks import (
     bump_discount_curve,
     bump_forward_curve,
     parallel_basis_shift,
+    # Curve-graph shocks
+    bump_graph_curve,
+    parallel_graph_shift,
+    key_rate_graph_bump,
     # Credit shocks
     bump_hazard_rates,
     parallel_credit_spread_shift,

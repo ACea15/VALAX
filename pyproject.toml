@@ -16,7 +16,6 @@ dependencies = [
     "optax",
     "lineax",
     "jaxtyping",
-    "beartype",
 ]
 
 [project.optional-dependencies]

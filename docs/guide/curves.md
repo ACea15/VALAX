@@ -258,7 +258,7 @@ discounted cashflows, so OIS discounting is the **arbitrage-free** choice.
 See [theory §3.2](../theory.md#32-single-curve-vs-multi-curve-framework).
 
 The MC-Curves-2 API is
-[`bootstrap_curve_graph`](../api/curves.md#bootstrap_curve_graph): a **joint
+[`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph): a **joint
 Newton solve** over the concatenated log-DFs of every curve in the graph.
 This replaces the older sequential `bootstrap_multi_curve` (see [§5.4
 Deprecated path](#54-deprecated-path-bootstrap_multi_curve) below) — and
@@ -427,56 +427,62 @@ instrument's own residual.
 
 ```python
 # ------------------------------------------------------------------
-# 6. Price a 2Y IRS *from the calibrated graph*, by hand.
+# 6. Price a 2Y IRS *from the calibrated graph* with the dual-curve
+#    pricer.
 #
-# VALAX's analytic pricers currently take a single DiscountCurve
-# (see §8 for the pricing-side gap).  To price a genuine dual-curve
-# IRS today we apply the dual-curve par formula directly to the
-# calibrated graph:
+# The analytic rates pricers accept an optional ``forward_curve``
+# argument, and each has a ``*_from_graph`` wrapper that resolves
+# curve ids on the graph and delegates.  Under the hood this is the
+# dual-curve par formula:
 #
 #     PV_fixed  = K · Σ_i τ^fixed_i · DF_OIS(T^fixed_i)
-#     PV_float  = Σ_j F_j · τ^float_j · DF_OIS(T^float_j)
-#     F_j       = (DF_3M(T_{j-1}) / DF_3M(T_j) − 1) / τ^float_j
+#     PV_float  = Σ_j (DF_3M(T_{j-1}) / DF_3M(T_j) − 1) · DF_OIS(T^float_j)
 #     PV_swap   = PV_float − PV_fixed        (receive-float, pay-fixed)
 #
 # ------------------------------------------------------------------
+import equinox as eqx
+from valax.instruments.rates import OISSwap
+from valax.pricing.analytic import ois_swap_price_from_graph
+
 notional = 10_000_000.0             # USD 10 mm
 fixed_rate = 0.045                  # off-market (par is 0.047 by the 2Y quote)
 
-# Fixed leg — annual, matches ibor_2y.fixed_dates.
-fixed_dates = ibor_2y.fixed_dates
-fixed_starts = jnp.concatenate([REF[None], fixed_dates[:-1]])
-tau_fixed = year_fraction(fixed_starts, fixed_dates, "act_365")
-pv_fixed = fixed_rate * jnp.sum(tau_fixed * ois_curve(fixed_dates))
+# Despite its name, OISSwap is VALAX's generic dual-schedule
+# fixed-vs-float pytree — the only swap instrument carrying distinct
+# fixed and float schedules (annual fixed here, quarterly float).
+swap = OISSwap(
+    start_date=REF,
+    fixed_dates=ibor_2y.fixed_dates,     # annual
+    float_dates=ibor_2y.float_dates,     # quarterly
+    fixed_rate=jnp.array(fixed_rate),
+    notional=jnp.array(notional),
+    pay_fixed=True,                      # receive-float, pay-fixed
+    day_count="act_365",
+)
 
-# Floating leg — quarterly, matches ibor_2y.float_dates.
-float_dates = ibor_2y.float_dates
-float_starts = jnp.concatenate([REF[None], float_dates[:-1]])
-tau_float = year_fraction(float_starts, float_dates, "act_365")
-
-# Forward projection: F_j from the 3M curve (dual-curve).
-df_start_fwd = fwd_curve(float_starts)
-df_end_fwd = fwd_curve(float_dates)
-projected_rates = (df_start_fwd / df_end_fwd - 1.0) / tau_float
-
-# Discount every floating cashflow with OIS (dual-curve).
-df_disc = ois_curve(float_dates)
-pv_float = jnp.sum(projected_rates * tau_float * df_disc)
-
-pv_swap = notional * (pv_float - pv_fixed)
+pv_swap = ois_swap_price_from_graph(
+    swap, graph,
+    discount_id="USD.SOFR.OIS",          # discounting: OIS
+    forward_id="USD.SOFR.3M",            # projection: 3M forwards
+)
 print(f"\n2Y IRS PV (receive 3M SOFR, pay {fixed_rate:.3%}):")
-print(f"  PV_fixed / N = {float(pv_fixed):+.6f}")
-print(f"  PV_float / N = {float(pv_float):+.6f}")
 print(f"  PV_swap      = {float(pv_swap):+,.2f} USD")
+
+# Equivalent long-hand form, without the graph wrapper:
+#   ois_swap_price(swap, graph["USD.SOFR.OIS"],
+#                  forward_curve=graph["USD.SOFR.3M"])
 
 # ------------------------------------------------------------------
 # 7. Sanity cross-check: setting fixed_rate to the calibrated par rate
 #    should give PV ≈ 0 (par swap).  This is the definition of par.
 # ------------------------------------------------------------------
-fixed_rate_par = 0.047
-pv_par_fixed = fixed_rate_par * jnp.sum(tau_fixed * ois_curve(fixed_dates))
-pv_par_swap = notional * (pv_float - pv_par_fixed)
-print(f"\nSame swap at the calibrated par rate ({fixed_rate_par:.3%}):")
+par_swap = eqx.tree_at(lambda s: s.fixed_rate, swap, jnp.array(0.047))
+pv_par_swap = ois_swap_price_from_graph(
+    par_swap, graph,
+    discount_id="USD.SOFR.OIS",
+    forward_id="USD.SOFR.3M",
+)
+print(f"\nSame swap at the calibrated par rate (4.700%):")
 print(f"  PV_swap      = {float(pv_par_swap):+,.4f} USD   (≈ 0 by construction)")
 ```
 
@@ -499,25 +505,26 @@ print(f"  PV_swap      = {float(pv_par_swap):+,.4f} USD   (≈ 0 by construction
    (`jacobian_condition_number`), plus a per-instrument fit table
    in each quote's native units (`fitted_quotes`, `quoted_values`).
    That's what a desk sees on the calibration sign-off sheet.
-5. Pricing against the graph is currently manual: pull
-   `ois_curve = graph["USD.SOFR.OIS"]` for discounting and
-   `fwd_curve = graph["USD.SOFR.3M"]` for projection, and apply the
-   dual-curve par formula.  When the MC-Pricing workstream ships,
-   a threaded pricer will let you write
-   `interest_rate_swap_price(swap, graph)` and route the two curves
-   internally by identifier — see §8 for the current gap.
+5. Pricing against the graph goes through the optional dual-curve
+   seam: every analytic rates pricer accepts a `forward_curve`
+   argument (defaulting to the discount curve, i.e. the classic
+   single-curve behaviour), and the `*_from_graph` wrappers in
+   `valax.pricing.analytic.graph_pricing` resolve curve identifiers
+   on the graph and delegate — as `ois_swap_price_from_graph` does
+   above.  Explicit `DiscountCurve` signatures remain the primary
+   API; the graph route is opt-in (see §8).
 
 ### 5.3 What used to be impossible
 
 `bootstrap_multi_curve` could only build **one forward curve at a time**,
 sequentially after the OIS curve. Two structural cases were unreachable:
 
-**Tenor-basis stripping** (3M vs 6M SOFR).  A [`TenorBasisSwap`](../api/curves.md#tenorbasisswap-three-curve)
+**Tenor-basis stripping** (3M vs 6M SOFR).  A [`TenorBasisSwap`](../api/curves.md#valax.curves.TenorBasisSwap)
 constrains both forward curves *simultaneously*; no ordering of one-curve
 solves gives the right answer. In the joint solver this is one more
 instrument in the list, touching three curves.
 
-**Cross-currency joint solve** (EUR-USD).  A [`CrossCurrencyBasisSwap`](../api/curves.md#crosscurrencybasisswap-ccbs)
+**Cross-currency joint solve** (EUR-USD).  A [`CrossCurrencyBasisSwap`](../api/curves.md#valax.curves.CrossCurrencyBasisSwap)
 touches four curves at once (both OIS + both forwards). Combined with an
 FXForward on the short end, the four-curve graph closes with residuals
 ≤ 1e-10 in a single Newton solve — see
@@ -650,7 +657,7 @@ mcs = MultiCurveSet(
 Because the Newton solve is wrapped by `optimistix.ImplicitAdjoint`,
 `jax.grad` and `jax.jacrev` flow through the calibrated graph in **one linear
 solve** per output, independent of Newton iteration count. The convenience
-wrapper [`quote_jacobian`](../api/curves.md#quote_jacobian) exposes this:
+wrapper [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian) exposes this:
 
 ```python
 from valax.curves import quote_jacobian
@@ -759,37 +766,37 @@ pricing inflation swaps and caps/floors against a built curve, see
 
 ## 8. What is not yet implemented
 
-!!! warning "Multi-curve today is a **calibration** framework, not a **pricing** framework"
-    VALAX ships production-grade multi-curve *calibration* (`bootstrap_curve_graph`,
-    `CurveGraph`, `quote_jacobian`, extended `CurveBuildDiagnostics`) but the
-    downstream analytic pricers in `valax/pricing/analytic/*` are still
-    single-curve.  Every rates pricer in `floating.py`, `caplets.py`,
-    `swaptions.py`, `bonds.py`, and `inflation.py` takes a single
-    `curve: DiscountCurve` argument and uses it for both forward projection
-    and discounting.  The only exception today is `cross_currency_swap_price`
-    in `rates_exotics.py`, which takes two `DiscountCurve` arguments
-    (`domestic_curve` + `foreign_curve`) — still two independent curves, not
-    a `CurveGraph`.
+!!! note "Multi-curve pricing is **opt-in**: single-curve remains the default"
+    VALAX ships production-grade multi-curve *calibration*
+    (`bootstrap_curve_graph`, `CurveGraph`, `quote_jacobian`, extended
+    `CurveBuildDiagnostics`) **and** an optional dual-curve pricing seam
+    (the MC-Pricing workstream).  The analytic rates pricers in
+    `floating.py`, `caplets.py`, `swaptions.py`, and `rates_exotics.py`
+    accept an optional `forward_curve: DiscountCurve | None = None`
+    argument: `None` (the default) reproduces the classic single-curve
+    behaviour exactly, while passing a projection curve prices the
+    floating/forward legs off that curve and discounts on `curve`.
+    `bonds.py` and `inflation.py` are discount-only and unchanged;
+    `cross_currency_swap_price` in `rates_exotics.py` keeps its explicit
+    (`domestic_curve` + `foreign_curve`) pair.
 
-    The multi-curve *math* is fully implemented and correct inside the
-    calibration residuals (`IborSwapRate.residual`,
-    `TenorBasisSwap.residual`, `CrossCurrencyBasisSwap.residual`, etc.) —
-    it's just not yet threaded into the pricing modules.
+    **How to consume a calibrated graph:**
 
-    **What this means in practice:**
+    - Directly: `swap_price(swap, graph["USD.SOFR.OIS"],
+      forward_curve=graph["USD.SOFR.3M"])`.
+    - Via the thin wrappers in `valax.pricing.analytic.graph_pricing`:
+      `swap_price_from_graph(swap, graph, "USD.SOFR.OIS", "USD.SOFR.3M")`
+      — pure delegation, no numeric logic (see §5.2 step 6 for a worked
+      example).
+    - Risk: bump individual graph curves with
+      `valax.risk.shocks.bump_graph_curve` / `parallel_graph_shift` /
+      `key_rate_graph_bump`, and carry a graph on
+      `MarketData.curve_graph` (optional field, defaults to `None`).
 
-    - You can calibrate a full `CurveGraph` (OIS + tenor forwards + xccy)
-      today and get correct pillar DFs, per-instrument fits, and
-      implicit-adjoint quote-sensitivities from `quote_jacobian`.
-    - You **cannot** call `interest_rate_swap_price(swap, graph)` today —
-      the pricer expects a single `DiscountCurve`.
-    - To price a dual-curve swap against a calibrated graph today, either
-      (a) pass the same `DiscountCurve` twice (accepting the single-curve
-      approximation) or (b) compute the PV directly from the graph using
-      the dual-curve formula shown in §5.2 below.
-
-    Threading `CurveGraph` (or two-curve arguments) into every analytic
-    pricer is the MC-Pricing workstream — see [roadmap](../roadmap.md#11-multi-curve-bootstrapping).
+    Note that `InterestRateSwap` / `Swaption` carry no separate float
+    schedule, so their dual-curve floating legs use the fixed schedule as
+    the projection grid; `OISSwap` and `FloatingRateBond` carry explicit
+    float schedules and project on them.
 
 The MC-Curves-1 PR series shipped the `BootstrapInstrument` protocol, eleven
 calibration quote types (`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`,
@@ -799,9 +806,9 @@ calibration quote types (`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`,
 
 The MC-Curves-2 PR series (see [`production.md` §11.4](../architecture/production.md#114-joint-global-solver))
 shipped the joint multi-curve Newton solver
-[`bootstrap_curve_graph`](../api/curves.md#bootstrap_curve_graph), the
+[`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph), the
 declarative curve descriptor `CurveSpec`, the implicit-adjoint quote-Jacobian
-helper [`quote_jacobian`](../api/curves.md#quote_jacobian), and the
+helper [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian), and the
 `CurveBuildDiagnostics` container.  The pre-MC-Curves-2 sequential
 `bootstrap_multi_curve` is retained for one deprecation cycle and emits a
 `DeprecationWarning` on every call.

@@ -201,19 +201,13 @@ def spread_option_price(
     q1: Float[Array, ""] = jnp.array(0.0),
     q2: Float[Array, ""] = jnp.array(0.0),
 ) -> Float[Array, ""]:
-    """Price a spread option using the best available method.
+    """Price a spread option via the Kirk approximation.
 
-    Dispatches to :func:`margrabe_price` when ``strike == 0`` and
-    :func:`kirk_price` otherwise.  This is a convenience wrapper;
-    call the underlying functions directly if you need to control
-    the method.
-
-    .. note::
-
-       Because the dispatch is based on the *value* of ``strike``,
-       this function is not ``jax.jit``-friendly when ``strike``
-       varies at trace time.  For JIT use, call ``kirk_price``
-       directly (it handles ``K = 0`` gracefully).
+    This is a thin, ``jax.jit``-friendly convenience wrapper around
+    :func:`kirk_price`, which handles ``K = 0`` gracefully.  For an
+    exchange option (zero strike) the exact closed form is available
+    as :func:`margrabe_price` — call it directly if you want the
+    Margrabe formula rather than the Kirk approximation.
 
     Args:
         option: Spread option instrument.
