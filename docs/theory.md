@@ -1531,11 +1531,70 @@ where $\mathcal{L}$ is the spatial differential operator. This gives:
 
 Each time step requires solving a **tridiagonal linear system**, handled efficiently by `lineax` in VALAX.
 
-**Rannacher smoothing** (not yet implemented): Crank-Nicolson can produce spurious oscillations near the strike at expiry (where the payoff has a kink). Running 2–4 fully implicit steps before switching to CN eliminates these oscillations. This is a planned improvement.
+**Rannacher start-up:** Crank-Nicolson can produce spurious oscillations near a payoff discontinuity (digital) or kink (vanilla at the strike), which contaminate the second-order Greeks $\Gamma$ and vega. The remedy is **Rannacher start-up**: replace the first 2–4 CN steps with fully-implicit (backward-Euler, $\theta = 1$) steps. Backward Euler is strongly damping — it annihilates the high-frequency modes that CN merely propagates — after which CN resumes to recover second-order accuracy. This is essential for digitals (whose terminal data is a step) and barriers, and cheap insurance for vanillas.
 
-**When to use:** 1D problems (single underlying) where you need prices on the full $(S, t)$ grid — useful for American/Bermudan exercise (backward induction through the grid). Faster than MC for low-dimensional problems, but curse-of-dimensionality makes it impractical for $d > 3$.
+#### Early exercise as a free-boundary problem
 
-**VALAX implementation:** `valax/pricing/pde/solvers.py` (`pde_price`). Uses `jax.lax.scan` for the backward time loop and `lineax` for the tridiagonal solve. Grid boundary conditions use Black-Scholes asymptotics.
+American and Bermudan options turn the PDE into a **free-boundary problem**: at each point the holder takes the larger of continuing and exercising, so the value satisfies the linear complementarity conditions
+
+$$
+V \ge g, \qquad \frac{\partial V}{\partial t} + \mathcal{L}V - rV \le 0, \qquad (V - g)\left(\frac{\partial V}{\partial t} + \mathcal{L}V - rV\right) = 0,
+$$
+
+where $g$ is the exercise (intrinsic) payoff. VALAX handles the two exercise styles with two projections, both chosen to keep the solve differentiable so Greeks flow from `jax.grad` (per `AGENTS.md`, never finite differences):
+
+- **Penalty method (continuous American).** Add a forcing term $\rho\,\max(g - V, 0)$ to the discretised step that penalises any violation of $V \ge g$; solving the penalised system with a small **fixed** number of iterations per step pushes the solution onto the free boundary. A fixed iteration count of smooth operations differentiates cleanly.
+- **Explicit projection (discrete-date Bermudan / callable / puttable).** Apply $V \leftarrow \max(V_{\text{cont}}, g)$ (holder-optimal) or $V \leftarrow \min(V_{\text{cont}}, \text{call price})$ (issuer-optimal) **only** at the exercise dates, which are snapped to specific time-steps via $\text{round}(t/\Delta t)$. This is exactly the projection the Hull-White trinomial tree already uses for callable/puttable bonds (§2.8).
+
+The alternative, **PSOR** (projected successive over-relaxation), is rejected in VALAX: its data-dependent iteration count and non-smooth updates are awkward to differentiate under JAX.
+
+#### Multi-dimensional PDEs and ADI
+
+Models with two state variables — Heston $(\ln S, v)$, stochastic-local vol, or two correlated assets $(\ln S_1, \ln S_2)$ — give a 2-D backward PDE. For Heston, Itô on $V(t, \ln S, v)$ under the risk-neutral dynamics of §2.4 yields
+
+$$
+\frac{\partial V}{\partial t} + \tfrac{1}{2} v\,\frac{\partial^2 V}{\partial x^2} + \rho\xi v\,\frac{\partial^2 V}{\partial x\,\partial v} + \tfrac{1}{2}\xi^2 v\,\frac{\partial^2 V}{\partial v^2} + \left(r - q - \tfrac{1}{2}v\right)\frac{\partial V}{\partial x} + \kappa(\theta - v)\frac{\partial V}{\partial v} - rV = 0 ,
+$$
+
+with $x = \ln S$. The key difficulty is the **mixed derivative** $\partial_{x v}$ coming from the spot-vol correlation $\rho$ — it couples the two spatial directions, so a fully-implicit step would require inverting a large block-banded operator.
+
+VALAX instead uses **Alternating-Direction Implicit (ADI)** operator splitting. Write the spatial operator as $\mathcal{L} = \mathcal{A}_0 + \mathcal{A}_1 + \mathcal{A}_2$, where $\mathcal{A}_1$ acts only along $x$, $\mathcal{A}_2$ only along $v$, and $\mathcal{A}_0$ is the mixed-derivative term. Each time step is then a sequence of **1-D tridiagonal solves per axis** with the cross term $\mathcal{A}_0$ treated **explicitly**. Three schemes trade cost for accuracy:
+
+| Scheme | Cross-term order | Best for |
+|--------|------------------|----------|
+| **Douglas** | first | robust default, weak correlation |
+| **Craig–Sneyd** | second | accuracy default (adds a correction stage) |
+| **Hundsdorfer–Verwer** | second | strongly correlated / convection-dominated (large $\lvert\rho\rvert$) |
+
+The Douglas scheme, for a step from $V^{n}$ to $V^{n+1}$ over $\Delta t$ with parameter $\theta$, reads schematically
+
+$$
+\begin{aligned}
+Y_0 &= V^n + \Delta t\,\mathcal{L}V^n, \\
+(I - \theta\Delta t\,\mathcal{A}_j)\,Y_j &= Y_{j-1} - \theta\Delta t\,\mathcal{A}_j V^n, \quad j = 1, 2, \\
+V^{n+1} &= Y_2 ,
+\end{aligned}
+$$
+
+so the only implicit solves are the two per-axis tridiagonal systems $(I - \theta\Delta t\,\mathcal{A}_j)$ — precisely the machinery already built for the 1-D solver. Craig–Sneyd and HV append one or two further explicit stages that reintroduce the mixed term to second order. ADI is unconditionally stable and is the industry standard for Heston and basket finite differences; VALAX chooses it over a sparse block solve specifically because it reuses the existing `lineax` tridiagonal solver per dimension.
+
+#### Local-volatility PDE
+
+Under Dupire local volatility (§4.4) the same 1-D Black-Scholes PDE holds but with a **state- and time-dependent** diffusion coefficient:
+
+$$
+\frac{\partial V}{\partial t} + \left(r - q - \tfrac{1}{2}\sigma_{\text{loc}}^2(x, t)\right)\frac{\partial V}{\partial x} + \tfrac{1}{2}\sigma_{\text{loc}}^2(x, t)\,\frac{\partial^2 V}{\partial x^2} - rV = 0 .
+$$
+
+The operator coefficients are no longer constant along the grid: at each node $(x_i, t_n)$ VALAX evaluates $\sigma_{\text{loc}} = \sigma_{\text{Dupire}}(k_i, t_n)$ via `dupire_local_vol` (with $k_i = x_i - \ln F(t_n)$), vectorised with `jax.vmap`. This is why the operator layer accepts callable coefficients rather than constant bands.
+
+#### Boundary conditions
+
+The finite domain requires boundary conditions on the truncated edges. VALAX uses three families: **Dirichlet** (a fixed value — barrier levels, and deep-ITM/OTM Black-Scholes asymptotics), **Neumann** (a fixed first derivative — value linear in $S$ at the far field), and a **linearity / PDE-at-boundary** condition ($\partial_{xx}V = 0$, the robust choice for the variance axis in Heston where no simple asymptotic is available). Continuously-monitored barriers are imposed as an **absorbing Dirichlet boundary** at the barrier level rather than only through the terminal payoff.
+
+**When to use:** low-dimensional problems (one underlying, or one spot plus one variance factor) where you want the full solution surface, and especially early-exercise, barrier, and digital features where a backward grid with an absorbing boundary and Rannacher start-up beats MC and CRR. Faster than MC for $d \le 2$; the curse of dimensionality makes it impractical for $d > 3$, where Monte Carlo takes over.
+
+**VALAX implementation:** the shipping solver is `valax/pricing/pde/solvers.py` (`pde_price`) — 1-D CN, `jax.lax.scan` backward loop, `lineax` tridiagonal solve, Black-Scholes asymptotic boundaries. The multivariate subsystem (2-D ADI, penalty/projection early exercise, model×instrument dispatch) is specified in the [PDE design doc](architecture/pde-design.md) and delivered in phases; see the [PDE guide](guide/pde.md) for the target coverage matrix.
 
 ### 5.3 Monte Carlo Simulation
 
@@ -1760,10 +1819,7 @@ A scalar P&L explain — "you lost \$2M on vega" — is insufficient for a tradi
 The waterfall decomposes a scenario's P&L into successive rungs of increasing refinement. Given risk factor changes $\Delta S$ (spot), $\Delta\sigma$ (vol), $\Delta r$ (rates), and $\Delta q$ (dividends):
 
 $$
-\Delta V \approx \underbrace{\sum_i \frac{\partial V}{\partial S_i} \Delta S_i}_{\text{Rung 1: Delta (spot)}}
-+ \underbrace{\sum_j \frac{\partial V}{\partial \sigma_j} \Delta \sigma_j}_{\text{Rung 2: Vega}}
-+ \underbrace{\sum_k \frac{\partial V}{\partial r_k} \Delta r_k}_{\text{Rung 3: Rho / DV01}}
-+ \underbrace{\sum_i \frac{\partial V}{\partial q_i} \Delta q_i}_{\text{Rung 4: Dividend}}
+\Delta V \approx \underbrace{\sum_i \frac{\partial V}{\partial S_i} \Delta S_i}_{\text{Rung 1: Delta (spot)}} + \underbrace{\sum_j \frac{\partial V}{\partial \sigma_j} \Delta \sigma_j}_{\text{Rung 2: Vega}} + \underbrace{\sum_k \frac{\partial V}{\partial r_k} \Delta r_k}_{\text{Rung 3: Rho / DV01}} + \underbrace{\sum_i \frac{\partial V}{\partial q_i} \Delta q_i}_{\text{Rung 4: Dividend}}
 $$
 
 $$
