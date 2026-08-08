@@ -17,6 +17,14 @@ Greeks, batch pricing, and calibration all compose out of the box.
 
 ::: valax.pricing.analytic.black_scholes.black_scholes_implied_vol
 
+### Digital options
+
+Closed-form cash-or-nothing digital: a call pays ``payout`` if
+\(S_T > K\) with price \(\text{payout}\, e^{-rT} N(d_2)\); the put pays if
+\(S_T < K\). Used as the analytic reference for the PDE digital recipe.
+
+::: valax.pricing.analytic.digital_option_price
+
 ### SABR (Hagan formula)
 
 ::: valax.pricing.analytic.sabr_implied_vol
@@ -356,11 +364,40 @@ Rate payoffs on `LMMPathResult`:
 
 ## PDE
 
-Crank–Nicolson finite-difference solver in log-spot space.
+Finite-difference pricing. The 1-D Crank–Nicolson solver `pde_price` prices
+European options under Black–Scholes; the dispatcher `pde_price_dispatch` routes
+`(instrument, model)` pairs to the appropriate recipe — European, American (via
+the penalty-method free boundary), digital (with Rannacher start-up), and
+barrier (absorbing boundary, knock-ins via in/out parity). See the
+[PDE design doc](../architecture/pde-design.md) for the architecture.
 
-::: valax.pricing.pde.solvers.pde_price
+### Direct solver (1-D European)
 
-::: valax.pricing.pde.solvers.PDEConfig
+::: valax.pricing.pde.pde_price
+
+::: valax.pricing.pde.PDEConfig
+
+### Dispatcher
+
+`pde_price_dispatch` looks up a recipe keyed on
+`(type(instrument), type(model))` and raises `ValueError` (listing the available
+recipes) if the pair is unregistered.
+
+::: valax.pricing.pde.pde_price_dispatch
+
+::: valax.pricing.pde.PDEResult
+
+::: valax.pricing.pde.register
+
+::: valax.pricing.pde.registered_recipes
+
+### Configuration enums
+
+::: valax.pricing.pde.Scheme
+
+::: valax.pricing.pde.Exercise
+
+::: valax.pricing.pde.PDEConfig2D
 
 ## Lattice
 
