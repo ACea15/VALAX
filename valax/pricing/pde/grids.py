@@ -8,8 +8,8 @@ builder is provided for domains bounded by a barrier.
 
 import equinox as eqx
 import jax.numpy as jnp
+from jax import Array, lax
 from jaxtyping import Float
-from jax import Array
 
 
 class Grid1D(eqx.Module):
@@ -53,6 +53,20 @@ def uniform_log_spot_grid(
     the ``n`` interior nodes (endpoints excluded, matching the Dirichlet
     boundary treatment used by the solver).
 
+    **Spot is detached from autodiff** (via :func:`jax.lax.stop_gradient`) for
+    the purpose of *grid placement only*: the nodes are still centred on the
+    current spot value (unchanged forward price), but the grid no longer
+    *co-moves* with ``spot`` under differentiation. This is what makes
+    second-order spot Greeks (gamma) well defined. If the grid translated with
+    ``spot``, the price read-off would sit at a frozen fractional cell position
+    and the reconstruction would be piecewise-linear in ``spot`` -- exact delta
+    but identically-zero pointwise gamma. Detaching leaves the only
+    differentiable spot dependence in the read-off query ``ln(spot)``, so
+    autodiff recovers ``delta = V_g' / S`` and ``gamma = (V_g'' - V_g') / S^2``
+    directly (paired with the curvature-carrying :func:`read_off_1d`). ``vol``
+    and ``expiry`` are intentionally left differentiable so vega/theta still
+    capture the grid-width dependence.
+
     Args:
         spot: Current spot price.
         vol: Reference volatility used to scale the grid width.
@@ -63,7 +77,7 @@ def uniform_log_spot_grid(
     Returns:
         A :class:`Grid1D` of ``n`` interior log-spot nodes.
     """
-    x_center = jnp.log(spot)
+    x_center = jnp.log(lax.stop_gradient(spot))
     x_width = half_width * vol * jnp.sqrt(expiry)
     x_min = x_center - x_width
     x_max = x_center + x_width
@@ -103,8 +117,18 @@ def read_off_1d(
 ) -> Float[Array, ""]:
     """Interpolate grid ``values`` at a single ``query`` coordinate.
 
-    Uses ``jnp.interp`` (piecewise-linear, differentiable) with flat
-    extrapolation outside the grid.
+    Uses a **Catmull-Rom cubic** (a 4-point Hermite spline on the uniform grid)
+    rather than piecewise-linear ``jnp.interp``. The cubic is C1-continuous and
+    -- crucially -- carries genuine within-cell *curvature*, so its second
+    derivative is non-zero. Combined with the ``stop_gradient`` grid detachment
+    in :func:`uniform_log_spot_grid`, this lets ``jax.grad(jax.grad(...))``
+    recover a correct second-order spot Greek (gamma); piecewise-linear
+    interpolation has no curvature and collapses gamma to ~0. Delta and price
+    are unaffected (both improve slightly) and flat extrapolation outside the
+    grid is preserved to match the previous behaviour.
+
+    The Catmull-Rom coefficients assume (approximately) uniform node spacing,
+    which holds for every grid builder in this module.
 
     Args:
         grid: The spatial grid.
@@ -114,4 +138,26 @@ def read_off_1d(
     Returns:
         The interpolated scalar value.
     """
-    return jnp.interp(query, grid.nodes, values)
+    xs = grid.nodes
+    n = xs.shape[0]
+
+    # Locate the cell [xs[j], xs[j+1]] containing ``query`` and clamp so the
+    # 4-point stencil {j-1, j, j+1, j+2} stays in-bounds (needs n >= 4).
+    j = jnp.clip(jnp.searchsorted(xs, query) - 1, 1, n - 3)
+    dx = xs[j + 1] - xs[j]
+    t = (query - xs[j]) / dx
+
+    p0, p1, p2, p3 = values[j - 1], values[j], values[j + 1], values[j + 2]
+
+    # Uniform Catmull-Rom cubic: interpolates p1 at t=0 and p2 at t=1.
+    cubic = 0.5 * (
+        2.0 * p1
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t**2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t**3
+    )
+
+    # Flat extrapolation outside the interior grid (matches ``jnp.interp``).
+    result = jnp.where(query <= xs[0], values[0], cubic)
+    result = jnp.where(query >= xs[-1], values[-1], result)
+    return result

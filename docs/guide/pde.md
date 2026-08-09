@@ -72,6 +72,16 @@ vega = jax.grad(lambda v: pde_price(option, spot, v, rate, div, config))(vol)
 gamma = jax.grad(jax.grad(lambda s: pde_price(option, s, vol, rate, div, config)))(spot)
 ```
 
+!!! note "Second-order spot Greeks (gamma)"
+
+    Gamma works because the price read-off is a **curvature-carrying cubic**
+    and the grid is *detached* from the differentiated spot (built on
+    `lax.stop_gradient(spot)`, so it stays centred on spot but does not
+    co-move with it). A piecewise-linear read-off on a co-moving grid makes the
+    priced value piecewise-linear in `S` — exact delta but gamma `≡ 0`. See the
+    [PDE design doc](../architecture/pde-design.md#read-off-grid-detachment-and-second-order-greeks-gamma)
+    for the full derivation ($\Gamma = (V_g'' - V_g')/S^2$).
+
 ### Implementation details (1-D)
 
 - **Log-spot grid**: Uniform spacing in $x = \ln S$ ensures equal resolution

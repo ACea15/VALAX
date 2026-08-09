@@ -11,6 +11,7 @@ PR-1 covers single-asset equity instruments under
 """
 
 import jax.numpy as jnp
+from jax import lax
 
 from valax.instruments.options import (
     AmericanOption,
@@ -117,7 +118,13 @@ def _digital_bs(*, instrument, model, config, spot):
 @register(EquityBarrierOption, BlackScholesModel)
 def _barrier_bs(*, instrument, model, config, spot):
     half = config.spot_range * model.vol * jnp.sqrt(instrument.expiry)
-    x_center = jnp.log(spot)
+    # Grid *placement* is a numerical scaffold: detach ``spot`` so the mesh does
+    # not co-move with it under autodiff (the requirement for a correct
+    # second-order spot Greek, see ``uniform_log_spot_grid``). The read-off
+    # query ``x_query`` below is kept live/differentiable; ``half`` stays live in
+    # vol/expiry so vega/theta keep the grid-width sensitivity.
+    x_center = jnp.log(lax.stop_gradient(spot))
+    x_query = jnp.log(spot)
     x_barrier = jnp.log(instrument.barrier)
 
     if instrument.is_up:
@@ -143,7 +150,7 @@ def _barrier_bs(*, instrument, model, config, spot):
         theta=theta_for_scheme(config.scheme),
         rannacher_steps=max(config.rannacher_steps, 2),
     )
-    knockout = read_off_1d(grid, values, x_center)
+    knockout = read_off_1d(grid, values, x_query)
 
     if instrument.is_knock_in:
         vanilla = _european_value(instrument, model, config, spot)

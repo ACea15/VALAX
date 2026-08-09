@@ -176,7 +176,7 @@ class Grid2D(eqx.Module):
 
 def uniform_log_spot_grid(spot, vol, expiry, *, n, half_width) -> Grid1D: ...
 def stretched_grid(center, lo, hi, *, n, concentration) -> Grid1D: ...
-def read_off_1d(grid, values, query) -> Float[Array, ""]:      # jnp.interp
+def read_off_1d(grid, values, query) -> Float[Array, ""]:      # Catmull-Rom cubic
     ...
 def read_off_2d(grid, values, x_query, y_query) -> Float[Array, ""]:
     ...   # reuses valax.surfaces._interp.bilinear_2d
@@ -184,6 +184,68 @@ def read_off_2d(grid, values, x_query, y_query) -> Float[Array, ""]:
 
 We deliberately **reuse `valax/surfaces/_interp.py::bilinear_2d`** for the 2-D
 read-off — it is already autodiff-clean with flat extrapolation.
+
+#### Read-off, grid detachment, and second-order Greeks (gamma)
+
+The 1-D read-off does **not** use `jnp.interp`. A subtle interaction between
+piecewise-linear interpolation and the *spot-centred* grid silently collapses
+gamma to `~0`, so two coupled choices are required to get correct second-order
+spot Greeks through the ordinary autodiff Greek engine.
+
+**The trap: a co-moving grid freezes the read-off.** `uniform_log_spot_grid`
+places nodes at `nodes = ln(spot) + a`, where the offset vector `a` (spacing and
+width) is independent of `spot`. The query is `ln(spot)`. So under
+`jax.grad(·, spot)` the query **and every node translate together** — the query
+sits at a fixed *fractional* cell position for all spot. The read-off is then a
+linear combination of node values with **frozen weights**, *regardless of
+interpolation order*. Worse, each node value is a piecewise-linear function of
+spot (the solve is linear in the terminal data, and the sampled payoff
+`max(S·e^{aₖ} − K, 0)` is piecewise-linear in `S`). Hence the priced `V(S)` is
+itself **piecewise-linear in `S`**: delta (the slope) is exact, but the
+pointwise second derivative — what autodiff returns — is identically zero. The
+option's convexity lives entirely in the kinks *between* nodes, spaced one grid
+cell apart; a finite-difference bump only recovers gamma once `h ≳ dx`.
+
+**The fix — two independent requirements:**
+
+1. **Detach the grid from the differentiated spot.** `uniform_log_spot_grid`
+   builds its nodes on `lax.stop_gradient(spot)`. The forward value is unchanged
+   (still centred on spot), but the *only* differentiable spot dependence is now
+   the read-off query `ln(spot)`. The grid is a numerical scaffold; its
+   placement gradient is a discretization artifact, and dropping it is the
+   correct definition of a PDE Greek. `vol`/`expiry` are left **live** so
+   vega/theta keep the grid-width sensitivity (detaching them regresses vega).
+   European/American/digital recipes inherit this from the shared builder;
+   **barriers** (which mesh with `uniform_linear_grid`, one edge pinned to the
+   barrier) apply the same detachment at the recipe level in `_barrier_bs` —
+   grid bounds on `ln(stop_gradient(spot))`, read-off query left live. Barrier
+   gamma then matches a QuantLib FD reference and obeys in/out gamma parity
+   `Γ(KO) + Γ(KI) = Γ(vanilla)`.
+2. **A curvature-carrying read-off.** `read_off_1d` uses a **Catmull-Rom cubic**
+   (C¹, 4-point Hermite on the uniform grid, flat extrapolation preserved), so
+   `V_g'' ≠ 0`. A linear read-off — *even detached* — still fails, yielding the
+   spurious `Γ = −V_g'/S² = −Δ/S`.
+
+With both in place the query slides across a static value field and autodiff
+recovers, through the **unified** `greeks()` engine (no PDE-specific Greek
+path):
+
+$$
+\Delta = \frac{V_g'}{S}, \qquad \Gamma = \frac{V_g'' - V_g'}{S^2}, \qquad x = \ln S.
+$$
+
+Measured against Black–Scholes at ATM (`n_spot=400`): delta error `~7e-5`, gamma
+error `~1e-5` (vs `≡0` before), and price accuracy *improves* (the cubic read-off
+is closer to analytic than the linear one). Note the cubic's second derivative
+and an on-grid central second difference are the *same stencil* on a uniform
+grid — reading `V''` off the value field directly is an equivalent route; we
+prefer the read-off form because it keeps every Greek on the single autodiff
+path. Regression coverage: `tests/test_pde/test_grids.py`,
+`tests/test_pde/test_crank_nicolson.py::TestPDESecondOrderGreeks`,
+`tests/test_pde/test_barrier_pde.py::TestBarrierGamma`, the QuantLib
+cross-checks `test_pde_pr1_ql.py::{test_european_gamma_matches_quantlib,
+test_barrier_gamma_matches_quantlib}`, and the `--benchmark-only` convergence
+profile in `test_gamma_benchmark.py`.
 
 ### 4.3 `linalg.py` — the tridiagonal workhorse
 

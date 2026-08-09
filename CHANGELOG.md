@@ -12,6 +12,39 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Fixed — PDE second-order spot Greek (gamma) via curvature-carrying read-off
+
+- `valax/pricing/pde/grids.py::read_off_1d` now uses a **Catmull-Rom cubic**
+  (C¹ Hermite on the uniform grid, flat extrapolation preserved) instead of
+  piecewise-linear `jnp.interp`. Linear interpolation has no within-cell
+  curvature, so `jax.grad(jax.grad(pde_price))` collapsed gamma to `~0`. The
+  cubic carries genuine curvature and also improves price/delta accuracy.
+- `uniform_log_spot_grid` builds its nodes on `lax.stop_gradient(spot)`. The
+  grid still centres on spot (unchanged forward price) but no longer *co-moves*
+  with it under autodiff — previously the query `ln(spot)` and every node
+  translated together, freezing the read-off at a fixed fractional cell
+  position and making `V(S)` piecewise-linear in `S` (exact delta, zero
+  pointwise gamma). Detaching leaves the query as the sole differentiable spot
+  dependence; `vol`/`expiry` stay live so vega/theta are unaffected. European,
+  American and digital recipes inherit this automatically.
+- `_barrier_bs` gets the same treatment at the recipe level (barriers build
+  their mesh with `uniform_linear_grid`, one edge pinned to the barrier): the
+  grid bounds use `ln(stop_gradient(spot))` while the read-off query stays live.
+  Barrier gamma now matches a QuantLib finite-difference reference and satisfies
+  in/out gamma parity `Γ(KO) + Γ(KI) = Γ(vanilla)` (`~1e-5`).
+- Net effect: gamma (and other second-order spot Greeks) now flow through the
+  **unified** `greeks()` autodiff engine — no PDE-specific Greek path. ATM
+  Black-Scholes cross-check at `n_spot=400`: gamma error `~1e-5` (was `≡0`),
+  delta error `~7e-5`, price closer to analytic than before.
+- Tests: `tests/test_pde/test_grids.py` (read-off unit + grid-detachment),
+  `TestPDESecondOrderGreeks` in `test_crank_nicolson.py` (gamma vs BS across
+  moneyness/expiry, call/put parity, convergence, `filter_jit` smoke),
+  `TestBarrierGamma` in `test_barrier_pde.py` (finite/nonzero, sign, in/out
+  gamma parity, `filter_jit`), the QuantLib cross-checks
+  `test_pde_pr1_ql.py::{test_european_gamma_matches_quantlib,
+  test_barrier_gamma_matches_quantlib}`, and `test_gamma_benchmark.py`
+  (`--benchmark-only` throughput + convergence profile). Full suite green.
+
 ### Changed — Andersen QE Heston path generator (HE-1 closure)
 
 - Replaced the diffrax Euler-with-reflection scheme in
