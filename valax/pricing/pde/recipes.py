@@ -8,6 +8,34 @@ PR-1 covers single-asset equity instruments under
 - ``DigitalOption`` — CN + Rannacher start-up (damps the payoff discontinuity).
 - ``EquityBarrierOption`` — CN with an absorbing barrier boundary; knock-ins via
   in/out parity.
+
+Local volatility (Dupire) adds a *time-dependent* operator recipe:
+
+- ``EuropeanOption`` under ``LocalVolModel`` — CN with a per-step operator stack
+  (:func:`~valax.pricing.pde.coefficients.lv_operator_stack`).
+
+Accuracy note (FD Dupire vs the implied surface)
+------------------------------------------------
+Feeding the *continuous* Dupire local volatility into a *discrete* backward
+finite-difference scheme does **not** reprice the input vanilla surface exactly
+when the smile is skewed. The continuous Dupire formula is the inverse of the
+continuous forward (Fokker-Planck) equation, which is **not** the adjoint of the
+discrete backward operator, so a skew-dependent, grid-*independent* repricing
+gap remains even in the mesh limit (it does not shrink as ``O(dx^2)``). This is
+a well-known property of FD local-vol engines — QuantLib's
+``FdBlackScholesVanillaEngine`` exhibits the same gap (empirically of the same
+magnitude). Consequences worth knowing:
+
+- **Flat and pure-term-structure (no-skew) surfaces**: the local vol is constant
+  in log-spot, the scheme is exact, and the LV PDE reprices the surface (and
+  agrees with Monte-Carlo) to grid tolerance.
+- **Skewed surfaces**: the LV PDE is self-consistent and converges, agrees with
+  an independent FD reference (and QuantLib) to grid tolerance, but reprices the
+  vanilla surface / matches LV Monte-Carlo only near ATM; the gap grows into the
+  wings with the skew. Monte-Carlo, which samples the true continuous SDE, is
+  the faithful surface-repricer there. Closing the FD gap requires calibrating
+  the local vol to the *discrete* forward operator (Andreasen-Huge) — see the
+  research-ideas backlog rather than this recipe.
 """
 
 import jax.numpy as jnp
@@ -20,13 +48,14 @@ from valax.instruments.options import (
     EuropeanOption,
 )
 from valax.models.black_scholes import BlackScholesModel
+from valax.models.local_vol import LocalVolModel
 from valax.pricing.pde.boundary import (
     american_boundary,
     bs_european_boundary,
     digital_boundary,
     knockout_boundary,
 )
-from valax.pricing.pde.coefficients import bs_operator
+from valax.pricing.pde.coefficients import bs_operator, lv_operator_stack
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.exercise import penalty_solver
 from valax.pricing.pde.grids import (
@@ -67,6 +96,44 @@ def _european_value(instrument, model, config, spot):
 @register(EuropeanOption, BlackScholesModel)
 def _european_bs(*, instrument, model, config, spot):
     return PDEResult(price=_european_value(instrument, model, config, spot))
+
+
+def _lv_reference_vol(model, spot, expiry):
+    """ATM-forward implied vol used only to scale the grid half-width.
+
+    The grid is a numerical scaffold, so the width reference is detached from
+    autodiff (spot and the surface query) — its sole job is to size a mesh wide
+    enough to contain the relevant spot range. Uses the surface's own implied
+    vol at the forward ``F(T) = S_0 exp((r - q) T)``.
+    """
+    mu = model.rate - model.dividend
+    forward = lax.stop_gradient(spot) * jnp.exp(mu * expiry)
+    return lax.stop_gradient(model.surface(forward, expiry))
+
+
+@register(EuropeanOption, LocalVolModel)
+def _european_lv(*, instrument, model, config, spot):
+    ref_vol = _lv_reference_vol(model, spot, instrument.expiry)
+    grid = uniform_log_spot_grid(
+        spot, ref_vol, instrument.expiry, n=config.n_spot, half_width=config.spot_range
+    )
+    operator = lv_operator_stack(
+        model, grid, spot, expiry=instrument.expiry, n_time=config.n_time
+    )
+    boundary = bs_european_boundary(
+        grid, instrument.strike, model.rate, model.dividend, instrument.is_call
+    )
+    terminal = vanilla_terminal(grid, instrument.strike, instrument.is_call)
+    values = solve_backward_1d(
+        operator,
+        boundary,
+        terminal,
+        expiry=instrument.expiry,
+        n_time=config.n_time,
+        theta=theta_for_scheme(config.scheme),
+        rannacher_steps=config.rannacher_steps,
+    )
+    return PDEResult(price=read_off_1d(grid, values, jnp.log(spot)))
 
 
 @register(AmericanOption, BlackScholesModel)
