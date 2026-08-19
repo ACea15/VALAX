@@ -131,13 +131,34 @@ def solve_backward_1d(
 
 
 def theta_for_scheme(scheme) -> float:
-    """Map a :class:`~valax.pricing.pde.config.Scheme` to its theta value.
+    """Map a 1-D :class:`~valax.pricing.pde.config.Scheme` to its theta value.
 
-    Crank-Nicolson -> 0.5; fully-implicit -> 1.0. (2-D ADI schemes are handled
-    by the ADI stepper in PR-2, not here.)
+    Fully-implicit -> ``1.0``; Crank-Nicolson -> ``0.5``. The 2-D ADI schemes
+    (:attr:`~valax.pricing.pde.config.Scheme.DOUGLAS`,
+    :attr:`~valax.pricing.pde.config.Scheme.CRAIG_SNEYD`,
+    :attr:`~valax.pricing.pde.config.Scheme.HV`) are **not** valid here: they
+    split a multi-dimensional operator across axes and are handled by the 2-D
+    ADI stepper, so passing one to the 1-D solver is a configuration error.
+
+    Args:
+        scheme: The requested time-stepping scheme.
+
+    Returns:
+        The implicitness parameter ``theta`` for the 1-D theta-scheme.
+
+    Raises:
+        ValueError: If ``scheme`` is a 2-D ADI scheme, which has no 1-D
+            theta interpretation and would otherwise silently degrade to
+            Crank-Nicolson.
     """
     from valax.pricing.pde.config import Scheme
 
+    if scheme.is_adi():
+        raise ValueError(
+            f"{scheme} is a 2-D ADI scheme and cannot drive the 1-D "
+            "theta-scheme solver; use Scheme.IMPLICIT or Scheme.CRANK_NICOLSON "
+            "for 1-D problems, or route the model through the 2-D ADI stepper."
+        )
     if scheme == Scheme.IMPLICIT:
         return 1.0
     return 0.5

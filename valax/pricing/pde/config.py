@@ -32,6 +32,19 @@ class Scheme(enum.Enum):
     CRAIG_SNEYD = "craig_sneyd"
     HV = "hv"
 
+    def is_adi(self) -> bool:
+        """Whether this is a 2-D operator-splitting (ADI) scheme.
+
+        ADI schemes (:attr:`DOUGLAS`, :attr:`CRAIG_SNEYD`, :attr:`HV`) split a
+        multi-dimensional operator across axes and are only meaningful in the
+        2-D stepper; the 1-D theta-scheme solver rejects them. The 1-D schemes
+        (:attr:`IMPLICIT`, :attr:`CRANK_NICOLSON`) return ``False``.
+
+        Returns:
+            ``True`` for the ADI schemes, ``False`` for the 1-D theta schemes.
+        """
+        return self in (Scheme.DOUGLAS, Scheme.CRAIG_SNEYD, Scheme.HV)
+
 
 class Exercise(enum.Enum):
     """Exercise style applied during the backward sweep.
