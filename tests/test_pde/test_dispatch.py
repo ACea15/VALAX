@@ -6,9 +6,11 @@ import pytest
 
 from valax.instruments.options import EuropeanOption, LookbackOption
 from valax.models.black_scholes import BlackScholesModel
+from valax.models.heston import HestonModel
 from valax.pricing.analytic.black_scholes import black_scholes_price
 from valax.pricing.pde import (
     PDEConfig,
+    PDEConfig2D,
     PDEResult,
     pde_price_dispatch,
     registered_recipes,
@@ -57,6 +59,27 @@ def test_convergence_ordering():
     coarse = abs(float(pde_price_dispatch(opt, model, COARSE, spot=jnp.array(100.0))) - bs)
     fine = abs(float(pde_price_dispatch(opt, model, FINE, spot=jnp.array(100.0))) - bs)
     assert fine < coarse
+
+
+def test_registered_recipes_contains_heston():
+    assert ("EuropeanOption", "HestonModel") in registered_recipes()
+
+
+def test_heston_dispatch_returns_pde_result():
+    m = HestonModel(
+        v0=jnp.array(0.04),
+        kappa=jnp.array(1.5),
+        theta=jnp.array(0.04),
+        xi=jnp.array(0.5),
+        rho=jnp.array(-0.6),
+        rate=jnp.array(0.03),
+        dividend=jnp.array(0.01),
+    )
+    opt = EuropeanOption(strike=jnp.array(100.0), expiry=jnp.array(1.0), is_call=True)
+    cfg = PDEConfig2D(n_x=120, n_y=48, n_time=100, x_range=4.0, y_max=0.5, y_scale=0.03)
+    result = pde_price_dispatch(opt, m, cfg, spot=jnp.array(100.0))
+    assert isinstance(result, PDEResult)
+    assert float(result) > 0.0
 
 
 def test_unregistered_pair_raises():

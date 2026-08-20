@@ -1,10 +1,12 @@
 """Model -> PDE operator coefficient adapters.
 
 Maps a VALAX model onto the drift/diffusion/discount coefficients that
-:func:`~valax.pricing.pde.operators.build_operator_1d` expects. PR-1 covers the
-Black-Scholes model in log-spot space; local volatility (Dupire) adds a
-*time-dependent* operator via :func:`lv_operator_stack`. Further models
-(Heston, SLV, Hull-White) are added in later phases.
+:func:`~valax.pricing.pde.operators.build_operator_1d` (1-D) and
+:func:`~valax.pricing.pde.operators2d.build_operator_2d` (2-D) expect. PR-1
+covers the Black-Scholes model in log-spot space; local volatility (Dupire)
+adds a *time-dependent* 1-D operator via :func:`lv_operator_stack`; the Heston
+stochastic-volatility model adds a 2-D (ADI) operator via
+:func:`heston_operator_2d`. Further models (SLV, Hull-White) are added later.
 """
 
 import jax
@@ -13,10 +15,12 @@ from jax import Array, lax
 from jaxtyping import Float
 
 from valax.models.black_scholes import BlackScholesModel
+from valax.models.heston import HestonModel
 from valax.models.local_vol import LocalVolModel
 from valax.pricing.analytic.dupire import dupire_local_vol
-from valax.pricing.pde.grids import Grid1D
+from valax.pricing.pde.grids import Grid1D, Grid2D
 from valax.pricing.pde.operators import Operator1D, build_operator_1d
+from valax.pricing.pde.operators2d import Operator2D, build_operator_2d
 
 
 def bs_operator(model: BlackScholesModel, grid: Grid1D) -> Operator1D:
@@ -109,3 +113,59 @@ def lv_operator_stack(
 
     # vmap over time levels -> Operator1D with (n_time, n) bands.
     return jax.vmap(_row_operator)(times)
+
+
+def heston_operator_2d(model: HestonModel, grid: Grid2D) -> Operator2D:
+    r"""Build the 2-D Heston ADI operator on a log-spot :math:`\times` variance grid.
+
+    In log-spot ``x = ln S`` and variance ``v`` the Heston pricing PDE is
+
+    .. math::
+
+        V_\tau = \tfrac{1}{2} v\, V_{xx} + \rho \xi v\, V_{xv}
+            + \tfrac{1}{2} \xi^2 v\, V_{vv}
+            + \left(r - q - \tfrac{1}{2} v\right) V_x
+            + \kappa(\theta - v) V_v - r V,
+
+    whose coefficients are **independent of ``x``** (Heston is log-spot
+    translation-invariant) and depend only on the variance ``v``. They map onto
+    :func:`~valax.pricing.pde.operators2d.build_operator_2d` as
+
+    - ``diff_x = v``               (coefficient of ``V_xx``),
+    - ``drift_x = r - q - v/2``    (coefficient of ``V_x``),
+    - ``diff_v = xi^2 v``          (coefficient of ``V_vv``),
+    - ``drift_v = kappa(theta - v)`` (coefficient of ``V_v``),
+    - ``mixed = rho xi v``         (coefficient of ``V_xv``),
+    - ``discount = r``.
+
+    Because the coefficients do not involve spot, no ``stop_gradient`` is needed
+    here: the differentiable-spot dependence of the price lives entirely in the
+    grid placement (the log-spot axis of ``grid`` is already spot-detached by
+    :func:`~valax.pricing.pde.grids.uniform_log_spot_grid`) and in the read-off
+    query, exactly as in the 1-D recipes.
+
+    Args:
+        model: Heston model parameters.
+        grid: The tensor-product log-spot :math:`\times` variance grid.
+
+    Returns:
+        The assembled :class:`~valax.pricing.pde.operators2d.Operator2D`.
+    """
+    v = grid.y.nodes[jnp.newaxis, :]  # (1, n_y); coefficients vary in v only
+    mu = model.rate - model.dividend
+
+    diff_x = v
+    drift_x = mu - 0.5 * v
+    diff_v = model.xi**2 * v
+    drift_v = model.kappa * (model.theta - v)
+    mixed = model.rho * model.xi * v
+
+    return build_operator_2d(
+        grid,
+        diff_x=diff_x,
+        drift_x=drift_x,
+        diff_v=diff_v,
+        drift_v=drift_v,
+        mixed=mixed,
+        discount=model.rate,
+    )

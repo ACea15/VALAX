@@ -99,6 +99,8 @@ class PDEConfig2D(eqx.Module):
         n_time: Number of backward time steps.
         x_range: Half-width of the first axis in std-dev units.
         y_max: Upper bound of the second axis (e.g. maximum variance).
+        y_scale: ``sinh`` concentration scale for the second axis around its
+            centre (e.g. the initial variance ``v0``); smaller = tighter.
         scheme: ADI scheme (default Craig-Sneyd).
         exercise: Exercise style (default European).
         theta: Implicitness parameter for the per-axis solves.
@@ -110,6 +112,7 @@ class PDEConfig2D(eqx.Module):
     n_time: int = eqx.field(static=True, default=200)
     x_range: float = eqx.field(static=True, default=4.0)
     y_max: float = eqx.field(static=True, default=1.0)
+    y_scale: float = eqx.field(static=True, default=0.1)
     scheme: Scheme = eqx.field(static=True, default=Scheme.CRAIG_SNEYD)
     exercise: Exercise = eqx.field(static=True, default=Exercise.EUROPEAN)
     theta: float = eqx.field(static=True, default=0.5)

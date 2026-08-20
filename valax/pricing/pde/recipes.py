@@ -14,6 +14,13 @@ Local volatility (Dupire) adds a *time-dependent* operator recipe:
 - ``EuropeanOption`` under ``LocalVolModel`` — CN with a per-step operator stack
   (:func:`~valax.pricing.pde.coefficients.lv_operator_stack`).
 
+The Heston stochastic-volatility model adds a 2-D (ADI) recipe routed through
+:class:`~valax.pricing.pde.config.PDEConfig2D`:
+
+- ``EuropeanOption`` under ``HestonModel`` — Douglas / Craig-Sneyd / HV ADI on a
+  log-spot :math:`\\times` variance grid
+  (:func:`~valax.pricing.pde.schemes2d.solve_backward_2d`).
+
 Accuracy note (FD Dupire vs the implied surface)
 ------------------------------------------------
 Feeding the *continuous* Dupire local volatility into a *discrete* backward
@@ -48,22 +55,32 @@ from valax.instruments.options import (
     EuropeanOption,
 )
 from valax.models.black_scholes import BlackScholesModel
+from valax.models.heston import HestonModel
 from valax.models.local_vol import LocalVolModel
 from valax.pricing.pde.boundary import (
     american_boundary,
+    apply_heston_variance_bc,
     bs_european_boundary,
     digital_boundary,
+    heston_boundary,
     knockout_boundary,
 )
-from valax.pricing.pde.coefficients import bs_operator, lv_operator_stack
+from valax.pricing.pde.coefficients import (
+    bs_operator,
+    heston_operator_2d,
+    lv_operator_stack,
+)
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.exercise import penalty_solver
 from valax.pricing.pde.grids import (
+    log_spot_variance_grid,
     read_off_1d,
+    read_off_2d,
     uniform_linear_grid,
     uniform_log_spot_grid,
 )
 from valax.pricing.pde.schemes import solve_backward_1d, theta_for_scheme
+from valax.pricing.pde.schemes2d import solve_backward_2d
 from valax.pricing.pde.terminal import (
     digital_terminal,
     intrinsic_payoff,
@@ -134,6 +151,56 @@ def _european_lv(*, instrument, model, config, spot):
         rannacher_steps=config.rannacher_steps,
     )
     return PDEResult(price=read_off_1d(grid, values, jnp.log(spot)))
+
+
+@register(EuropeanOption, HestonModel)
+def _european_heston(*, instrument, model, config, spot):
+    """European option under Heston via an ADI finite-difference solve.
+
+    ``config`` is a :class:`~valax.pricing.pde.config.PDEConfig2D` (its
+    ``scheme`` must be one of the ADI schemes). Grid *placement* is a numerical
+    scaffold, so the spot and the variance centre / reference are detached from
+    autodiff; the differentiable dependence lives entirely in the read-off
+    queries — ``ln(spot)`` (delta / gamma) and the variance level ``v0``
+    (v0-vega) — while the model parameters ``kappa, theta, xi, rho`` stay live
+    through the operator coefficients.
+    """
+    # Detached references used only to size / place the mesh.
+    v0_ref = lax.stop_gradient(model.v0)
+    theta_ref = lax.stop_gradient(model.theta)
+    vol_ref = jnp.sqrt(jnp.maximum(v0_ref, theta_ref))
+
+    grid = log_spot_variance_grid(
+        spot,
+        instrument.expiry,
+        v0_ref,
+        config.y_max,
+        n_x=config.n_x,
+        n_y=config.n_y,
+        x_half_width=config.x_range,
+        v_scale=config.y_scale,
+        vol_ref=vol_ref,
+    )
+    operator = apply_heston_variance_bc(
+        heston_operator_2d(model, grid), grid, model
+    )
+    boundary = heston_boundary(
+        grid, instrument.strike, model.rate, model.dividend, instrument.is_call
+    )
+    payoff = vanilla_terminal(grid.x, instrument.strike, instrument.is_call)
+    terminal = jnp.broadcast_to(payoff[:, jnp.newaxis], grid.shape)
+    values = solve_backward_2d(
+        operator,
+        boundary,
+        terminal,
+        expiry=instrument.expiry,
+        n_time=config.n_time,
+        scheme=config.scheme,
+        theta=config.theta,
+        rannacher_steps=config.rannacher_steps,
+    )
+    price = read_off_2d(grid, values, jnp.log(spot), model.v0)
+    return PDEResult(price=price)
 
 
 @register(AmericanOption, BlackScholesModel)
