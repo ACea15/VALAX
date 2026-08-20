@@ -11,7 +11,10 @@ import jax.numpy as jnp
 
 from valax.pricing.pde.grids import (
     Grid1D,
+    Grid2D,
+    log_spot_variance_grid,
     read_off_1d,
+    read_off_2d,
     sinh_concentrated_grid,
     uniform_linear_grid,
     uniform_log_spot_grid,
@@ -166,3 +169,92 @@ def test_nonuniform_operator_exact_on_quadratic():
     lv = op.lower[1:-1] * v[:-2] + op.diag[1:-1] * v[1:-1] + op.upper[1:-1] * v[2:]
     exact = sig2 + 2.0 * mu * x[1:-1] - r * x[1:-1] ** 2
     assert float(jnp.max(jnp.abs(lv - exact))) < 1e-8
+
+
+# ── 2-D tensor-product grid and bicubic read-off ─────────────────────
+
+
+def _grid2d(n_x=41, n_y=31):
+    """A plain tensor-product grid with directly controlled node coordinates."""
+    x = uniform_linear_grid(jnp.array(-2.0), jnp.array(2.0), n=n_x)
+    y = sinh_concentrated_grid(
+        jnp.array(0.0), jnp.array(1.0), jnp.array(0.2), n=n_y, scale=0.3
+    )
+    return Grid2D(x=x, y=y)
+
+
+def test_grid2d_shape_and_axes():
+    grid = _grid2d(n_x=41, n_y=31)
+    assert grid.n_x == 41
+    assert grid.n_y == 31
+    assert grid.shape == (41, 31)
+    # Variance axis strictly inside (0, v_max) and concentrated near v0=0.2.
+    yn = grid.y.nodes
+    assert float(yn[0]) > 0.0
+    assert float(yn[-1]) < 1.0
+    gaps = jnp.diff(yn)
+    near_v0 = int(jnp.argmin(jnp.abs(yn - 0.2)))
+    assert float(gaps[near_v0]) < float(gaps[0])
+
+
+def test_log_spot_variance_grid_builder():
+    grid = log_spot_variance_grid(
+        jnp.array(100.0),
+        jnp.array(1.0),
+        jnp.array(0.04),
+        jnp.array(1.0),
+        n_x=48,
+        n_y=32,
+        x_half_width=4.0,
+        v_scale=0.02,
+    )
+    assert grid.shape == (48, 32)
+    # x-axis centred on ln(spot).
+    xn = grid.x.nodes
+    assert abs(float(0.5 * (xn[grid.n_x // 2 - 1] + xn[grid.n_x // 2])) - float(jnp.log(100.0))) < 0.05
+    # variance axis positive and bounded.
+    assert float(grid.y.nodes[0]) > 0.0
+    assert float(grid.y.nodes[-1]) < 1.0
+
+
+def test_read_off_2d_reproduces_node_values():
+    grid = _grid2d()
+    xx = grid.x.nodes[:, None]
+    yy = grid.y.nodes[None, :]
+    values = jnp.sin(xx) * jnp.exp(-yy)  # smooth (n_x, n_y) field
+    for i in (2, 15, grid.n_x - 3):
+        for j in (2, 12, grid.n_y - 3):
+            got = float(read_off_2d(grid, values, grid.x.nodes[i], grid.y.nodes[j]))
+            assert abs(got - float(values[i, j])) < 1e-9
+
+
+def test_read_off_2d_accurate_on_smooth_field():
+    grid = _grid2d(n_x=121, n_y=81)
+    xx = grid.x.nodes[:, None]
+    yy = grid.y.nodes[None, :]
+    values = jnp.exp(0.5 * xx) * (1.0 + yy) ** 2
+    qx, qy = jnp.array(0.37), jnp.array(0.42)
+    got = float(read_off_2d(grid, values, qx, qy))
+    exact = float(jnp.exp(0.5 * qx) * (1.0 + qy) ** 2)
+    assert abs(got - exact) < 1e-4
+
+
+def test_read_off_2d_gamma_curvature():
+    """d^2/dx^2 of a field quadratic in x (constant in y) recovers f'' = 2."""
+    grid = _grid2d(n_x=81, n_y=41)
+    xx = grid.x.nodes[:, None]
+    values = jnp.broadcast_to(xx**2, grid.shape)
+    f = lambda x: read_off_2d(grid, values, x, jnp.array(0.3))
+    second = float(jax.grad(jax.grad(f))(jnp.array(0.2)))
+    assert abs(second - 2.0) < 1e-3
+
+
+def test_read_off_2d_cross_derivative():
+    """Separable bicubic reproduces f = x*y exactly => d^2/dx dy = 1."""
+    grid = _grid2d(n_x=61, n_y=51)
+    xx = grid.x.nodes[:, None]
+    yy = grid.y.nodes[None, :]
+    values = xx * yy
+    f = lambda x, y: read_off_2d(grid, values, x, y)
+    cross = float(jax.grad(jax.grad(f, argnums=0), argnums=1)(jnp.array(0.3), jnp.array(0.4)))
+    assert abs(cross - 1.0) < 1e-6

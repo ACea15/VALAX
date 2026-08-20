@@ -3,10 +3,17 @@
 Grid building (previously inlined in ``pde_price``) is factored into reusable
 builders returning a lightweight :class:`Grid1D` pytree. The default is uniform
 spacing in log-spot ``x = ln S`` (equal resolution in moneyness); a linear
-builder is provided for domains bounded by a barrier.
+builder is provided for domains bounded by a barrier, and
+:func:`sinh_concentrated_grid` for non-uniform meshes that cluster resolution
+around a point of interest.
+
+Two-dimensional (e.g. stochastic-volatility) pricing uses a tensor-product
+:class:`Grid2D` (log-spot :math:`\\times` variance) with a separable bicubic
+read-off (:func:`read_off_2d`) that reuses the 1-D Hermite kernel per axis.
 """
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 from jax import Array, lax
 from jaxtyping import Float
@@ -193,7 +200,29 @@ def read_off_1d(
     Returns:
         The interpolated scalar value.
     """
-    xs = grid.nodes
+    return _hermite_read(grid.nodes, values, query)
+
+
+def _hermite_read(
+    xs: Float[Array, " n"],
+    values: Float[Array, " n"],
+    query: Float[Array, ""],
+) -> Float[Array, ""]:
+    """4-point non-uniform cubic Hermite interpolation of ``values`` on ``xs``.
+
+    The shared kernel behind :func:`read_off_1d` and each axis of
+    :func:`read_off_2d`. Endpoint tangents use the second-order non-uniform
+    three-point derivative (exact for quadratics), and values flat-extrapolate
+    outside ``[xs[0], xs[-1]]``. Requires ``len(xs) >= 4``.
+
+    Args:
+        xs: Strictly increasing node coordinates.
+        values: Field values at ``xs``.
+        query: Coordinate at which to interpolate.
+
+    Returns:
+        The interpolated scalar value.
+    """
     n = xs.shape[0]
 
     # Locate the cell [xs[j], xs[j+1]] containing ``query`` and clamp so the
@@ -234,3 +263,130 @@ def read_off_1d(
     result = jnp.where(query <= xs[0], values[0], cubic)
     result = jnp.where(query >= xs[-1], values[-1], result)
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Two-dimensional (tensor-product) grids
+# ─────────────────────────────────────────────────────────────────────
+
+
+class Grid2D(eqx.Module):
+    """A tensor-product 2-D grid of interior nodes.
+
+    The full node set is the Cartesian product ``x.nodes`` :math:`\\times`
+    ``y.nodes``; a field is stored as a matrix of shape ``(n_x, n_y)`` with the
+    first axis indexing ``x`` (e.g. log-spot) and the second indexing ``y``
+    (e.g. variance). Each axis is an independent :class:`Grid1D`, so the 1-D
+    operator / boundary / read-off machinery applies per axis unchanged.
+
+    Attributes:
+        x: First-axis grid (e.g. log-spot ``x = ln S``).
+        y: Second-axis grid (e.g. variance ``v``).
+    """
+
+    x: Grid1D
+    y: Grid1D
+
+    @property
+    def n_x(self) -> int:
+        """Number of interior nodes along the first axis."""
+        return self.x.n
+
+    @property
+    def n_y(self) -> int:
+        """Number of interior nodes along the second axis."""
+        return self.y.n
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Field shape ``(n_x, n_y)`` for values on this grid."""
+        return (self.x.n, self.y.n)
+
+
+def log_spot_variance_grid(
+    spot: Float[Array, ""],
+    expiry: Float[Array, ""],
+    v0: Float[Array, ""],
+    v_max: Float[Array, ""],
+    *,
+    n_x: int,
+    n_y: int,
+    x_half_width: float,
+    v_scale: Float[Array, ""] | float,
+    vol_ref: Float[Array, ""] | None = None,
+) -> Grid2D:
+    """Build a log-spot :math:`\\times` variance grid for 2-D (Heston) pricing.
+
+    The first axis is a uniform log-spot grid centred on ``ln(spot)`` (via
+    :func:`uniform_log_spot_grid`, inheriting its ``stop_gradient`` spot
+    detachment so second-order spot Greeks stay well defined). The second axis
+    is a :func:`sinh_concentrated_grid` on ``[0, v_max]`` clustered around the
+    initial variance ``v0`` — where the value function has the most curvature —
+    coarsening toward ``0`` and ``v_max``.
+
+    The variance boundaries ``0`` and ``v_max`` are the *excluded* endpoints
+    (consistent with the 1-D interior-node convention); their special treatment
+    (the degenerate ``v = 0`` transport row and the ``v = v_max`` linearity
+    condition) is applied by the 2-D operator / boundary layer, not here.
+
+    Args:
+        spot: Current spot price.
+        expiry: Time to expiry (scales the log-spot half-width).
+        v0: Initial variance; the variance axis concentrates around it.
+        v_max: Upper variance bound (excluded boundary).
+        n_x: Interior nodes along log-spot.
+        n_y: Interior nodes along variance.
+        x_half_width: Log-spot half-width in std-dev units.
+        v_scale: ``sinh`` stretching scale for the variance axis (smaller =
+            tighter concentration around ``v0``).
+        vol_ref: Reference volatility for the log-spot half-width. Defaults to
+            ``sqrt(v0)``; pass e.g. ``sqrt(max(v0, theta))`` to size the mesh
+            for a mean-reverting variance that drifts away from ``v0``.
+
+    Returns:
+        The assembled :class:`Grid2D`.
+    """
+    ref = jnp.sqrt(v0) if vol_ref is None else vol_ref
+    x = uniform_log_spot_grid(spot, ref, expiry, n=n_x, half_width=x_half_width)
+    y = sinh_concentrated_grid(
+        jnp.asarray(0.0), v_max, v0, n=n_y, scale=v_scale
+    )
+    return Grid2D(x=x, y=y)
+
+
+def read_off_2d(
+    grid: Grid2D,
+    values: Float[Array, "n_x n_y"],
+    query_x: Float[Array, ""],
+    query_y: Float[Array, ""],
+) -> Float[Array, ""]:
+    """Interpolate a 2-D field at ``(query_x, query_y)`` (separable bicubic).
+
+    Applies the 1-D non-uniform cubic Hermite kernel (:func:`_hermite_read`)
+    tensor-wise: first collapse the variance axis at ``query_y`` for every
+    log-spot row, then interpolate the resulting ``n_x``-vector along the
+    log-spot axis at ``query_x``. Because each axis carries genuine within-cell
+    curvature, ``jax.grad(jax.grad(...))`` recovers second-order Greeks
+    (gamma in ``query_x``, and the mixed ``d^2/dx dy`` cross-sensitivity),
+    exactly as the 1-D read-off enables PDE gamma.
+
+    Separability makes the read-off exact for products of per-axis quadratics
+    (and reproduces every nodal value), which is what the Greek-recovery tests
+    rely on.
+
+    Args:
+        grid: The tensor-product grid.
+        values: Field values of shape ``(n_x, n_y)`` (row = log-spot, column =
+            variance).
+        query_x: First-axis coordinate (e.g. ``ln(spot)``).
+        query_y: Second-axis coordinate (e.g. current variance ``v0``).
+
+    Returns:
+        The interpolated scalar value.
+    """
+    # Collapse the variance axis for each log-spot row -> (n_x,) vector.
+    row_values = jax.vmap(
+        lambda row: _hermite_read(grid.y.nodes, row, query_y)
+    )(values)
+    # Interpolate the row values along the log-spot axis.
+    return _hermite_read(grid.x.nodes, row_values, query_x)
