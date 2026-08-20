@@ -207,7 +207,15 @@ def build_operator_2d(
     )
     a2_upper = jnp.broadcast_to(diff_v * vvu[None, :] + drift_v * vu[None, :], shape)
 
-    c0 = jnp.broadcast_to(jnp.asarray(mixed) * jnp.ones(shape), shape)
+    c0 = jnp.asarray(mixed) * jnp.ones(shape)
+    # The mixed second-derivative term is set to zero on all four domain
+    # boundaries -- the standard in't Hout & Foulon ADI treatment. A one-sided
+    # cross stencil there (the zero-ghost fallback of ``apply_a0``) would inject
+    # a spurious flux -- largest where the coefficient is big, e.g. ``rho xi v``
+    # at ``v = v_max`` -- that pollutes the interior and destroys convergence
+    # (the cross derivative is only applied explicitly, so it needs no boundary
+    # data of its own; suppressing it at the edge is both correct and stable).
+    c0 = c0.at[0, :].set(0.0).at[-1, :].set(0.0).at[:, 0].set(0.0).at[:, -1].set(0.0)
 
     return Operator2D(
         a1_lower=a1_lower,

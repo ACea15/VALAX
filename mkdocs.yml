@@ -73,6 +73,7 @@ nav:
       - Productionisation Design: architecture/production.md
       - "JAX Patterns": architecture/jax-patterns.md
       - "PDE Solvers Design": architecture/pde-design.md
+      - "Numerical Pitfalls": architecture/numerical-pitfalls.md
       - "MC-Curves-2 Handoff": architecture/mc-curves-2.md
       - "QuantLib Validation Pyramid": architecture/quantlib-validation-pyramid.md
   - Models & Theory: theory.md

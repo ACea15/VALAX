@@ -137,6 +137,30 @@ def test_apply_is_sum_of_splits():
     assert float(jnp.max(jnp.abs(total - parts))) < 1e-12
 
 
+def test_mixed_term_is_zero_on_boundaries():
+    """A0 must vanish on all four domain edges (in't Hout ADI treatment).
+
+    A one-sided cross stencil at the boundary injects spurious flux that
+    otherwise destroys convergence -- this guards that regression.
+    """
+    grid = _grid()
+    op = build_operator_2d(
+        grid,
+        diff_x=jnp.array(0.0),
+        drift_x=jnp.array(0.0),
+        diff_v=jnp.array(0.0),
+        drift_v=jnp.array(0.0),
+        mixed=jnp.array(2.5),  # non-zero everywhere before boundary zeroing
+        discount=jnp.array(0.0),
+    )
+    assert bool(jnp.all(op.c0[0, :] == 0.0))
+    assert bool(jnp.all(op.c0[-1, :] == 0.0))
+    assert bool(jnp.all(op.c0[:, 0] == 0.0))
+    assert bool(jnp.all(op.c0[:, -1] == 0.0))
+    # Interior retains the coefficient.
+    assert bool(jnp.all(op.c0[1:-1, 1:-1] == 2.5))
+
+
 def test_bands_have_field_shape():
     grid = _grid(n_x=33, n_y=29)
     op = build_operator_2d(
