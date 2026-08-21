@@ -354,6 +354,30 @@ class Boundary2D(eqx.Module): x_lower: ...; x_upper: ...; y_lower: ...; y_upper:
 
 This generalises today's inline `boundary_lower`/`boundary_upper` closures.
 
+**As delivered (Heston, PR-2).** The axes are handled asymmetrically, because
+only the log-spot axis carries natural Dirichlet data:
+
+- **Log-spot (`x`) axis — Dirichlet.** `Boundary2D` holds two callables
+  `x_lower_fn(tau)` / `x_upper_fn(tau)` (the deep-ITM/OTM Black–Scholes
+  asymptotics, reused from the 1-D `bs_european_boundary`), applied per variance
+  slice as an affine ghost term weighted `(1-θ)`/`θ` across the step. This is why,
+  with `A0 = A2 = 0`, the 2-D stepper collapses **exactly** to the 1-D
+  θ-method.
+- **Variance (`v`) axis — baked into the operator.** The variance edges are *not*
+  Dirichlet, so `apply_heston_variance_bc` rewrites the first and last rows of
+  the tridiagonal `A2` directly:
+    - **`v = 0` (degenerate).** As `v → 0` the variance diffusion `½ξ²v` vanishes
+      and the drift `κ(θ-v) → κθ > 0` points *into* the domain. The row becomes a
+      **drift-only, one-sided upwind** (forward) difference with no coupling to a
+      sub-zero ghost — well posed whether or not the Feller condition
+      `2κθ ≥ ξ²` holds (it never differentiates across `v = 0`).
+    - **`v = v_max`.** A linearity condition `V_vv = 0` via linear ghost
+      extrapolation folded into the stencil.
+- **Mixed term at the boundary.** The cross-derivative operator `A0` is set to
+  **zero on all four edges** (a one-sided cross stencil there injects spurious
+  flux — see [Numerical Pitfalls](numerical-pitfalls.md)). It is applied
+  explicitly only, so it needs no boundary data of its own.
+
 ### 4.8 `terminal.py` — payoff on the mesh
 
 Terminal (payoff) conditions evaluated on the grid, per instrument. Unlike the
@@ -552,9 +576,24 @@ slices:
    only), `dispatch`, `recipes` (American/Digital/Barrier under BS), and the
    `solvers.py` refactor. High value, no ADI. Cross-checks: binomial, analytic,
    call-spread proxy.
-2. **PR-2 (2-D / stochastic vol).** `operators` (2-D cross-term), `adi`, and
-   Heston/SLV/local-vol recipes. Cross-checks: COS, MC, QuantLib
-   `FdHestonVanillaEngine`.
+2. **PR-2 (2-D / stochastic vol).** *European Heston delivered.* `operators2d`
+   (the `A0 + A1 + A2` split with the cross-term), `schemes2d` (Douglas /
+   Craig–Sneyd / Hundsdorfer–Verwer), `heston_operator_2d`, the variance-axis
+   boundary surgery, and the `(EuropeanOption, HestonModel)` recipe. Validated
+   against COS (`rel < 1e-3`), Andersen-QE MC, and QuantLib
+   `AnalyticHestonEngine` / `FdHestonVanillaEngine`. Two intentional divergences
+   from the spec above, both driven by autodiff correctness:
+
+   - The 2-D stepper landed as **`schemes2d.py`** (not a standalone `adi.py`).
+   - The 2-D read-off is a **separable bicubic Hermite** (`read_off_2d`), *not*
+     `bilinear_2d`: bilinear interpolation has no within-cell curvature, so
+     `jax.grad(jax.grad(...))` would collapse gamma (and the mixed cross-Greek)
+     to ~0 — the same reason the 1-D read-off uses a cubic. Grid *placement*
+     stays `stop_gradient`-detached; the live read-off queries (`ln S`, `v0`)
+     carry delta/gamma and v0-vega.
+
+   Still open under PR-2: American/exotic on the 2-D grid, and SLV / two-asset
+   recipes.
 3. **PR-3 (rates).** Hull–White short-rate PDE for callable/puttable bonds and
    Bermudan swaptions. Cross-checks: Hull–White tree, LSM.
 

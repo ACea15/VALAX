@@ -1168,13 +1168,25 @@ Machine learning integration and computational scaling.
 
 ### 5.4 Multi-Dimensional PDE Solvers
 
-- [ ] **ADI (Alternating Direction Implicit)** for 2D PDEs (e.g., Heston PDE in (S, v) space)
+- [x] **ADI (Alternating Direction Implicit)** for 2D PDEs — **European Heston `(ln S, v)` delivered** (Douglas / Craig–Sneyd / Hundsdorfer–Verwer)
+- [ ] **American / exotic under 2-D ADI** (early-exercise projection, barriers on the 2-D grid)
+- [ ] **Local-stochastic vol (SLV) and two-asset** 2-D recipes
 - [ ] **Sparse grid** methods for higher dimensions
 - [ ] **Neural PDE solvers** (PINNs) for high-dimensional problems
 
 **Why:** Current PDE solver is 1D only. Many important models (Heston, local-stochastic vol, multi-asset) require 2D+ PDE solvers.
 
 **Approach:** ADI scheme decomposes 2D operator into 1D sweeps — reuse existing tridiagonal solver via lineax. Sparse grids reduce curse of dimensionality.
+
+**Status (PR-2, delivered).** European options under `HestonModel` price via a 2-D
+ADI finite-difference solver (`valax/pricing/pde/{operators2d,schemes2d}.py`),
+registered on `pde_price_dispatch` through `PDEConfig2D`. Each implicit stage is a
+`vmap`-batched tridiagonal solve per axis (reusing `linalg.py`); the mixed term is
+explicit; the degenerate `v = 0` boundary is a drift-only upwind row (Feller-robust)
+and `v = v_max` a linearity row. Validated against the COS oracle (`rel < 1e-3`
+across strikes), Andersen-QE MC, and QuantLib `AnalyticHestonEngine` /
+`FdHestonVanillaEngine`. A subtle mixed-term boundary bug found during this work is
+written up in [Numerical Pitfalls](architecture/numerical-pitfalls.md).
 
 ---
 
