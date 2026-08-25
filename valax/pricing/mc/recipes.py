@@ -56,6 +56,8 @@ import jax.numpy as jnp
 from jaxtyping import Float, Int
 from jax import Array
 
+from valax.dates.daycounts import year_fraction
+from valax.instruments.bonds import CallableBond, FixedRateBond, FloatingRateBond, PuttableBond
 from valax.instruments.options import (
     AsianOption,
     EquityBarrierOption,
@@ -68,10 +70,12 @@ from valax.instruments.options import (
 from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
+from valax.models.hull_white import HullWhiteModel, hw_bond_price
 from valax.models.lmm import LMMModel
 from valax.models.local_vol import LocalVolModel
 from valax.models.multi_asset import MultiAssetGBMModel
 from valax.models.slv import SLVModel
+from valax.pricing.mc.hull_white_paths import HullWhitePathResult, generate_hull_white_paths
 from valax.pricing.mc.bermudan import LSMConfig, bermudan_swaption_lsm
 from valax.pricing.mc.dispatch import (
     MCConfig,
@@ -88,6 +92,7 @@ from valax.pricing.mc.payoffs import (
     asian_option_payoff,
     equity_barrier_payoff,
     european_payoff,
+    jax_sigmoid,
     lookback_payoff,
     spread_option_mc_payoff,
     variance_swap_payoff,
@@ -755,3 +760,387 @@ def _bermudan_lmm(
         stderr=jnp.array(0.0, dtype=price.dtype),
         n_paths=config.n_paths,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Rates recipes (Hull-White short-rate MC)
+#
+# These recipes simulate the short rate with the exact conditional
+# distribution (no Euler discretisation bias) and discount each cash
+# flow with the money-market numeraire accumulated along the path.
+#
+# API contract for callers:
+#   Required market args:
+#     n_steps (int): Number of time steps for path generation.
+#     T       (float): Horizon in year fractions (must cover bond maturity).
+#   Optional:
+#     n_steps defaults to 100 when not supplied.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _hw_step_index(
+    times: Float[Array, " n_times"],
+    T: Float[Array, ""],
+    n_steps: int,
+) -> Int[Array, " n_times"]:
+    """Snap year-fraction times to the nearest simulation step index.
+
+    Kept as a traced gather (rather than a Python ``int(round(...))``) so the
+    recipes stay composable with ``jax.jit`` / ``jax.grad`` when the instrument
+    is passed as a traced pytree.
+
+    Args:
+        times: Event times in year fractions.
+        T: Simulation horizon used to generate the paths.
+        n_steps: Number of simulation steps (static).
+
+    Returns:
+        Step indices in ``[0, n_steps]``.
+    """
+    raw = jnp.round(times * (n_steps / T)).astype(jnp.int32)
+    return jnp.clip(raw, 0, n_steps)
+
+
+def _hw_path_sdf(
+    result: HullWhitePathResult,
+    times: Float[Array, " n_times"],
+    T: Float[Array, ""],
+    n_steps: int,
+) -> Float[Array, "n_paths n_times"]:
+    """Path-wise stochastic discount factors at a set of event times.
+
+    Args:
+        result: Output of :func:`generate_hull_white_paths`.
+        times: Event times in year fractions.
+        T: Simulation horizon used to generate the paths.
+        n_steps: Number of simulation steps (static).
+
+    Returns:
+        Discount factor :math:`\\hat{D}(0, t_j)` for each path and event time.
+    """
+    idx = _hw_step_index(times, T, n_steps)
+    return jnp.exp(jnp.take(result.log_discount_factors, idx, axis=1))
+
+
+def _hw_coupon_schedule(
+    instrument: FixedRateBond | CallableBond | PuttableBond,
+    ref: Int[Array, ""],
+) -> tuple[Float[Array, " n_pay"], Float[Array, " n_pay"]]:
+    """Cash-flow times and amounts for a fixed-coupon bond.
+
+    Args:
+        instrument: Bond carrying ``payment_dates``, ``coupon_rate``,
+            ``face_value`` and a static ``frequency``.
+        ref: Curve reference date (ordinal).
+
+    Returns:
+        ``(times, amounts)`` — year fractions from ``ref`` to each payment
+        date, and the corresponding cash flow (principal folded into the
+        final coupon).
+    """
+    times = year_fraction(ref, instrument.payment_dates, instrument.day_count)
+    coupon = instrument.face_value * instrument.coupon_rate / instrument.frequency
+    n_pay = instrument.payment_dates.shape[0]
+    amounts = jnp.full((n_pay,), coupon).at[-1].add(instrument.face_value)
+    return times, amounts
+
+
+@register(FixedRateBond, HullWhiteModel)
+def _fixed_bond_hw(
+    *,
+    instrument: FixedRateBond,
+    model: HullWhiteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Fixed-rate bond price under Hull-White short-rate MC.
+
+    The bond's coupon and principal cash flows are discounted with the
+    money-market numeraire accumulated along each simulated path.  No
+    embedded optionality: use :func:`_callable_bond_hw` for callable bonds.
+
+    Required market args:
+        (none beyond instrument and model)
+
+    Optional market args:
+        T: Horizon in year fractions.  Defaults to the year fraction of
+            the last payment date.
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
+
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_hull_white_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    sdf = _hw_path_sdf(result, cf_times, T, n_steps)     # (n_paths, n_pay)
+    pv = jnp.sum(cf_amounts[None, :] * sdf, axis=1)      # (n_paths,)
+
+    # Discounting is already path-wise inside `pv`, so the deterministic
+    # factor is unity; the helper supplies the shared mean/stderr convention.
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(FloatingRateBond, HullWhiteModel)
+def _floating_bond_hw(
+    *,
+    instrument: FloatingRateBond,
+    model: HullWhiteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Floating-rate bond (FRN) price under Hull-White short-rate MC.
+
+    Under the risk-neutral measure a par-at-reset FRN prices to par
+    at each reset date.  For seasoned FRNs or non-zero spread, the
+    floating leg is replicated as:
+
+    .. math::
+
+        V = \\text{face} \\cdot \\hat{D}(0, T_0) + s \\sum_i \\tau_i \\hat{D}(0, T_i) + \\text{face} \\cdot \\hat{D}(0, T_N)
+
+    where :math:`\\hat{D}` is the path-wise stochastic discount factor.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to maturity).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    face = instrument.face_value
+
+    cf_times = year_fraction(ref, instrument.payment_dates, day_count)
+    prev_dates = jnp.concatenate(
+        [instrument.settlement_date[None], instrument.payment_dates[:-1]]
+    )
+    taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
+    spread_amounts = instrument.spread * face * taus          # (n_pay,)
+
+    t_settle = year_fraction(ref, instrument.settlement_date, day_count)
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_hull_white_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+
+    # Floating-leg replication.  The floating coupons between settlement and
+    # maturity are worth face * (D(settle) - D(T_N)); adding the principal
+    # redemption face * D(T_N) cancels the second term exactly, leaving the
+    # familiar "an FRN prices to par at reset" identity:
+    #
+    #     PV = face * D(0, t_settle)  +  spread coupons
+    settle_sdf = _hw_path_sdf(result, t_settle[None], T, n_steps)[:, 0]
+    spread_sdf = _hw_path_sdf(result, cf_times, T, n_steps)
+
+    pv = face * settle_sdf + jnp.sum(spread_amounts[None, :] * spread_sdf, axis=1)
+
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+def _hw_exercisable_bond_pv(
+    model: HullWhiteModel,
+    result: HullWhitePathResult,
+    cf_times: Float[Array, " n_pay"],
+    cf_amounts: Float[Array, " n_pay"],
+    ex_times: Float[Array, " n_ex"],
+    ex_prices: Float[Array, " n_ex"],
+    T: Float[Array, ""],
+    n_steps: int,
+    is_call: bool,
+    smoothing: Float[Array, ""] | None = None,
+) -> Float[Array, " n_paths"]:
+    """Path-wise PV of a fixed-coupon bond with a Bermudan call or put.
+
+    At each exercise date the continuation value is the analytic Hull-White
+    affine PV of the *remaining* cash flows conditional on that path's short
+    rate.  Because Hull-White zero-coupon bonds are affine this continuation
+    value is exact for the underlying bullet bond, so no regression
+    (Longstaff-Schwartz) basis is required.
+
+    Two conventions are baked in, both matching
+    :func:`valax.pricing.lattice.hull_white_tree.callable_bond_price`:
+
+    - **Ex-coupon exercise.** The strike is quoted ex-coupon, so a holder
+      exercised on a coupon date still receives that date's coupon.  The
+      continuation value likewise excludes it.
+    - **Myopic policy.** The continuation value is that of the *bullet*
+      remainder and ignores the option value of later exercise dates.  With a
+      single exercise date this is exact; with several it is a valid but
+      suboptimal adapted policy, so for a callable bond (where the issuer
+      minimises) it is an upper bound on the true price.
+
+    The exercise indicator is smoothed with a sigmoid so pathwise Greeks stay
+    well-defined, following ``valax/pricing/mc/payoffs.py``.
+
+    Args:
+        model: Hull-White model.
+        result: Simulated short-rate paths.
+        cf_times: Coupon/principal payment times (year fractions, ascending).
+        cf_amounts: Cash flow amounts, principal folded into the final coupon.
+        ex_times: Exercise dates (year fractions, **ascending**).
+        ex_prices: Exercise (strike) amounts in currency units.
+        T: Simulation horizon.
+        n_steps: Number of simulation steps (static).
+        is_call: ``True`` for an issuer call, ``False`` for a holder put.
+        smoothing: Sigmoid width in currency units.  Defaults to 0.1 % of
+            each exercise price.
+
+    Returns:
+        Per-path present value.
+    """
+    n_ex = ex_times.shape[0]
+    ex_sdf = _hw_path_sdf(result, ex_times, T, n_steps)        # (n_paths, n_ex)
+    cf_sdf = _hw_path_sdf(result, cf_times, T, n_steps)        # (n_paths, n_pay)
+    r_ex = jnp.take(
+        result.short_rates, _hw_step_index(ex_times, T, n_steps), axis=1
+    )                                                          # (n_paths, n_ex)
+
+    width = 1e-3 * ex_prices if smoothing is None else smoothing
+
+    # Continuation value at each exercise date (loop is over a static count).
+    conts = []
+    for k in range(n_ex):
+        t_k = ex_times[k]
+        # Strictly-later cash flows only: the coupon falling on t_k is paid
+        # regardless of exercise and so is excluded from the comparison.
+        later = (cf_times > t_k).astype(cf_amounts.dtype)      # (n_pay,)
+        zcb = hw_bond_price(
+            model, r_ex[:, k][:, None], t_k, cf_times[None, :]
+        )                                                      # (n_paths, n_pay)
+        conts.append(jnp.sum((later * cf_amounts)[None, :] * zcb, axis=1))
+    cont = jnp.stack(conts, axis=1)                            # (n_paths, n_ex)
+
+    # Issuer calls when continuation exceeds the call price; holder puts when
+    # continuation falls below the put price.
+    moneyness = cont - ex_prices[None, :]
+    if not is_call:
+        moneyness = -moneyness
+    exercise = jax_sigmoid(moneyness / width[None, :])          # (n_paths, n_ex)
+
+    # Probability-weighted survival *entering* each exercise date.  Relies on
+    # `ex_times` being ascending, as the instrument schedules guarantee.
+    ones = jnp.ones((exercise.shape[0], 1), dtype=exercise.dtype)
+    alive_before = jnp.concatenate(
+        [ones, jnp.cumprod(1.0 - exercise, axis=1)[:, :-1]], axis=1
+    )
+    pv_exercise = jnp.sum(alive_before * exercise * ex_prices[None, :] * ex_sdf, axis=1)
+
+    # A coupon survives every exercise date STRICTLY before it (ties are paid,
+    # per the ex-coupon convention above).
+    strictly_before = (ex_times[None, :] < cf_times[:, None]).astype(exercise.dtype)
+    survival = jnp.prod(
+        1.0 - exercise[:, None, :] * strictly_before[None, :, :], axis=2
+    )                                                          # (n_paths, n_pay)
+    pv_coupons = jnp.sum(survival * cf_amounts[None, :] * cf_sdf, axis=1)
+
+    return pv_exercise + pv_coupons
+
+
+@register(CallableBond, HullWhiteModel)
+def _callable_bond_hw(
+    *,
+    instrument: CallableBond,
+    model: HullWhiteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    smoothing: Float[Array, ""] | None = None,
+    **kwargs,
+) -> MCResult:
+    """Callable bond price under Hull-White short-rate MC.
+
+    At each call date the issuer's decision compares the analytic Hull-White
+    affine PV of the remaining cash flows, conditional on that path's short
+    rate, against the call price.  See :func:`_hw_exercisable_bond_pv` for the
+    ex-coupon and myopic-policy conventions, which match the trinomial-tree
+    pricer in :mod:`valax.pricing.lattice.hull_white_tree`.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to bond maturity).
+        n_steps: Number of time steps (default 100).
+        smoothing: Sigmoid width for the exercise indicator, in currency
+            units.  Defaults to 0.1 % of each call price.
+    """
+    ref = model.initial_curve.reference_date
+    cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
+
+    call_times = year_fraction(ref, instrument.call_dates, instrument.day_count)
+    call_prices = instrument.call_prices * instrument.face_value
+
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_hull_white_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    pv = _hw_exercisable_bond_pv(
+        model, result, cf_times, cf_amounts, call_times, call_prices,
+        T, n_steps, is_call=True, smoothing=smoothing,
+    )
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(PuttableBond, HullWhiteModel)
+def _puttable_bond_hw(
+    *,
+    instrument: PuttableBond,
+    model: HullWhiteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    smoothing: Float[Array, ""] | None = None,
+    **kwargs,
+) -> MCResult:
+    """Puttable bond price under Hull-White short-rate MC.
+
+    Symmetric to the callable recipe: at each put date the holder exercises
+    when the analytic Hull-White continuation value falls below the put price.
+    See :func:`_hw_exercisable_bond_pv` for the shared conventions.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to bond maturity).
+        n_steps: Number of time steps (default 100).
+        smoothing: Sigmoid width for the exercise indicator, in currency
+            units.  Defaults to 0.1 % of each put price.
+    """
+    ref = model.initial_curve.reference_date
+    cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
+
+    put_times = year_fraction(ref, instrument.put_dates, instrument.day_count)
+    put_prices = instrument.put_prices * instrument.face_value
+
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_hull_white_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    pv = _hw_exercisable_bond_pv(
+        model, result, cf_times, cf_amounts, put_times, put_prices,
+        T, n_steps, is_call=False, smoothing=smoothing,
+    )
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)

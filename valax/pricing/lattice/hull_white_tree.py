@@ -74,11 +74,61 @@ class HullWhiteTree(eqx.Module):
 # ─────────────────────────────────────────────────────────────────────
 # Tree construction
 # ─────────────────────────────────────────────────────────────────────
+# Tree width utility
+# ─────────────────────────────────────────────────────────────────────
+
+
+def hw_tree_j_max(mean_reversion: float, dt: float) -> int:
+    """Minimum tree half-width for valid Hull-White trinomial branching.
+
+    Returns the smallest :math:`j_{\\max}` such that all branching
+    probabilities remain non-negative at every node, including the boundary
+    rows where non-standard (up- or down-shifted) branching is used.
+
+    Hull & White (1994) show the tight lower bound is
+
+    .. math::
+
+        j_{\\max} = \\max\\!\\left(
+            \\left\\lceil \\frac{0.1835}{a \\,\\Delta t} \\right\\rceil,\\; 1
+        \\right)
+
+    The constant 0.1835 is derived from the condition that the shifted
+    branching probabilities at the boundary rows are non-negative (see
+    Hull & White 1994, §3).
+
+    Both arguments must be **concrete** Python/NumPy scalars — this function
+    is intentionally kept outside any JAX trace because the result determines
+    array shapes.  Typical usage before entering a JAX gradient::
+
+        dt    = T / n_steps
+        j_max = hw_tree_j_max(float(model.mean_reversion), dt)
+        grad  = eqx.filter_grad(
+            lambda m: callable_bond_price(bond, m, n_steps=n_steps, j_max=j_max)
+        )(model)
+
+    Args:
+        mean_reversion: Hull-White mean-reversion speed :math:`a` (positive).
+        dt: Tree time step in year fractions (:math:`T / n_{\\text{steps}}`).
+
+    Returns:
+        Minimum valid tree half-width as a Python ``int``.
+
+    References:
+        Hull & White (1994), "Numerical Procedures for Implementing Term
+            Structure Models: Single-Factor Models", §3.
+    """
+    return max(int(jnp.ceil(0.1835 / (float(mean_reversion) * float(dt)))), 1)
+
+
+# ─────────────────────────────────────────────────────────────────────
+
 
 def build_hull_white_tree(
     model: HullWhiteModel,
     T: float,
     n_steps: int = 100,
+    j_max: int | None = None,
 ) -> HullWhiteTree:
     """Build a Hull-White trinomial tree from *t* = 0 to *T*.
 
@@ -86,6 +136,12 @@ def build_hull_white_tree(
         model: Hull-White model (carries initial curve and parameters).
         T: Horizon in year fractions.
         n_steps: Number of time steps.
+        j_max: Tree half-width — see :func:`hw_tree_j_max`.  When ``None``
+            (default) it is computed automatically from the concrete model
+            parameters via :func:`hw_tree_j_max`.  Pass an explicit ``int``
+            (pre-computed outside any JAX trace) to enable
+            ``eqx.filter_grad`` or ``eqx.filter_jit`` through the pricing
+            functions.
 
     Returns:
         A :class:`HullWhiteTree` ready for backward induction.
@@ -93,12 +149,11 @@ def build_hull_white_tree(
     a = model.mean_reversion
     sigma = model.volatility
 
-    dt = T / n_steps
+    dt = T / n_steps          # Python float — always concrete
     dx = sigma * jnp.sqrt(3.0 * dt)
 
-    # Maximum number of states above/below zero before switching
-    # to non-standard (up/down) branching.
-    j_max = max(int(jnp.ceil(0.1835 / (float(a) * float(dt)))), 1)
+    if j_max is None:
+        j_max = hw_tree_j_max(float(a), dt)
     n_states = 2 * j_max + 1
 
     # State indices: j ∈ {-j_max, …, +j_max} stored as array indices
@@ -246,6 +301,7 @@ def callable_bond_price(
     bond: CallableBond,
     model: HullWhiteModel,
     n_steps: int = 100,
+    j_max: int | None = None,
 ) -> Float[Array, ""]:
     """Price a callable fixed-rate bond on a Hull-White trinomial tree.
 
@@ -259,13 +315,16 @@ def callable_bond_price(
         bond: Callable bond instrument.
         model: Hull-White model (initial curve provides discounting).
         n_steps: Number of tree time steps.
+        j_max: Tree half-width — see :func:`hw_tree_j_max`.  Pass a
+            pre-computed concrete ``int`` to enable ``eqx.filter_grad``
+            through this function.
 
     Returns:
         Callable bond price (dirty price at ``settlement_date``).
     """
     ref = model.initial_curve.reference_date
     maturity_time = float(year_fraction(ref, bond.payment_dates[-1], bond.day_count))
-    tree = build_hull_white_tree(model, maturity_time, n_steps)
+    tree = build_hull_white_tree(model, maturity_time, n_steps, j_max=j_max)
 
     n_states = 2 * tree.j_max + 1
     coupon = bond.face_value * bond.coupon_rate / bond.frequency
@@ -310,11 +369,15 @@ def callable_bond_price(
         rates_step = tree.rates[step]
         cont = _backward_one_step(values, rates_step, tree.dt, tree.probs, tree.targets)
 
-        # Add coupon at this step.
-        cont = cont + coupon_at_step[step]
-
-        # Call exercise: issuer calls if cont > call_price.
+        # Call exercise: issuer calls if the *ex-coupon* continuation value
+        # exceeds the call price.  The call price is quoted ex-coupon, so a
+        # holder called on a coupon date receives the redemption amount *plus*
+        # that date's coupon — hence the exercise decision is taken before the
+        # coupon is added, not after.
         cont = jnp.minimum(cont, call_price_at_step[step])
+
+        # Coupon is paid whether or not the bond is called.
+        cont = cont + coupon_at_step[step]
 
         return cont
 
@@ -330,6 +393,7 @@ def puttable_bond_price(
     bond: PuttableBond,
     model: HullWhiteModel,
     n_steps: int = 100,
+    j_max: int | None = None,
 ) -> Float[Array, ""]:
     """Price a puttable fixed-rate bond on a Hull-White trinomial tree.
 
@@ -343,13 +407,16 @@ def puttable_bond_price(
         bond: Puttable bond instrument.
         model: Hull-White model.
         n_steps: Number of tree time steps.
+        j_max: Tree half-width — see :func:`hw_tree_j_max`.  Pass a
+            pre-computed concrete ``int`` to enable ``eqx.filter_grad``
+            through this function.
 
     Returns:
         Puttable bond price (dirty price at ``settlement_date``).
     """
     ref = model.initial_curve.reference_date
     maturity_time = float(year_fraction(ref, bond.payment_dates[-1], bond.day_count))
-    tree = build_hull_white_tree(model, maturity_time, n_steps)
+    tree = build_hull_white_tree(model, maturity_time, n_steps, j_max=j_max)
 
     n_states = 2 * tree.j_max + 1
     coupon = bond.face_value * bond.coupon_rate / bond.frequency
@@ -384,9 +451,12 @@ def puttable_bond_price(
         step = n - 1 - i_fwd
         rates_step = tree.rates[step]
         cont = _backward_one_step(values, rates_step, tree.dt, tree.probs, tree.targets)
-        cont = cont + coupon_at_step[step]
-        # Put exercise: holder puts if cont < put_price.
+        # Put exercise on the *ex-coupon* continuation value: the put price is
+        # quoted ex-coupon, so a holder who puts on a coupon date still
+        # receives that date's coupon.  See `callable_bond_price`.
         cont = jnp.maximum(cont, put_price_at_step[step])
+        # Coupon is paid whether or not the bond is put.
+        cont = cont + coupon_at_step[step]
         return cont
 
     values = jax.lax.fori_loop(0, n, step_fn, values)

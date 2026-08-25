@@ -5,11 +5,11 @@ Composes path generation + payoff evaluation + discounting.
 
 from typing import Callable
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
-import equinox as eqx
-from jaxtyping import Float
 from jax import Array
+from jaxtyping import Float
 
 from valax.instruments.options import EuropeanOption
 from valax.models.black_scholes import BlackScholesModel
@@ -18,8 +18,8 @@ from valax.models.local_vol import LocalVolModel
 from valax.models.slv import SLVModel
 from valax.pricing.mc.local_vol_paths import generate_local_vol_paths
 from valax.pricing.mc.paths import generate_gbm_paths, generate_heston_paths
-from valax.pricing.mc.slv_paths import generate_slv_paths
 from valax.pricing.mc.payoffs import european_payoff
+from valax.pricing.mc.slv_paths import generate_slv_paths
 
 
 class MCConfig(eqx.Module):

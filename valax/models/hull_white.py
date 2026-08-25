@@ -75,6 +75,35 @@ def _pillar_times(curve: DiscountCurve) -> Float[Array, " n"]:
     )
 
 
+def _log_df_grid(
+    curve: DiscountCurve,
+) -> tuple[Float[Array, " n_nodes"], Float[Array, " n_nodes"]]:
+    """Log-DF interpolation nodes, anchored at the reference date.
+
+    ``DiscountCurve`` interpolates log-linearly with *flat* extrapolation.  A
+    curve whose first pillar sits strictly after the reference date therefore
+    has zero log-DF slope on :math:`[0, t_1)`, which silently drives the
+    instantaneous forward :func:`_instantaneous_forward` to zero at the short
+    end.  Prepending the no-arbitrage anchor :math:`\\ln P^M(0, 0) = 0` removes
+    that artefact.
+
+    When the curve already carries a ``t = 0`` pillar the anchor is a duplicate
+    node holding the same value, so the interpolant is unchanged.
+
+    Args:
+        curve: Initial market discount curve.
+
+    Returns:
+        Pair of ``(times, log_discount_factors)`` interpolation nodes.
+    """
+    pillar_t = _pillar_times(curve)
+    log_dfs = jnp.log(curve.discount_factors)
+    return (
+        jnp.concatenate([jnp.zeros((1,), dtype=pillar_t.dtype), pillar_t]),
+        jnp.concatenate([jnp.zeros((1,), dtype=log_dfs.dtype), log_dfs]),
+    )
+
+
 def _log_df_at_time(
     model: HullWhiteModel,
     t: Float[Array, ""],
@@ -83,11 +112,10 @@ def _log_df_at_time(
 
     Interpolates in log-DF space exactly as the ``DiscountCurve`` does
     internally, but accepts a continuous year-fraction argument rather
-    than an integer ordinal date.
+    than an integer ordinal date, and grounds the curve at ``t = 0``.
     """
-    pillar_t = _pillar_times(model.initial_curve)
-    log_dfs = jnp.log(model.initial_curve.discount_factors)
-    return jnp.interp(t, pillar_t, log_dfs)
+    times, log_dfs = _log_df_grid(model.initial_curve)
+    return jnp.interp(t, times, log_dfs)
 
 
 def _market_df(
@@ -95,9 +123,8 @@ def _market_df(
     t: Float[Array, "..."],
 ) -> Float[Array, "..."]:
     """Market discount factor :math:`P^M(0, t)` at year-fraction *t*."""
-    pillar_t = _pillar_times(model.initial_curve)
-    log_dfs = jnp.log(model.initial_curve.discount_factors)
-    return jnp.exp(jnp.interp(t, pillar_t, log_dfs))
+    times, log_dfs = _log_df_grid(model.initial_curve)
+    return jnp.exp(jnp.interp(t, times, log_dfs))
 
 
 def _instantaneous_forward(
@@ -110,6 +137,162 @@ def _instantaneous_forward(
     piecewise-constant forwards for a log-linear curve.
     """
     return -jax.grad(lambda s: _log_df_at_time(model, s))(t)
+
+
+# ── Public curve accessors (continuous time) ──────────────────────────
+
+def hw_market_df(
+    model: HullWhiteModel,
+    t: Float[Array, "..."],
+) -> Float[Array, "..."]:
+    """Market discount factor :math:`P^M(0, t)` at a year fraction.
+
+    ``DiscountCurve.__call__`` takes integer ordinal dates; this accessor takes
+    a continuous year fraction, which is the natural coordinate for the
+    model's analytics.  Both interpolate log-linearly on the same pillars and
+    agree wherever the two coordinates coincide.
+
+    Args:
+        model: Hull-White model carrying the initial curve.
+        t: Year fraction(s) from the curve reference date.
+
+    Returns:
+        Market discount factor at each ``t``.
+    """
+    return _market_df(model, t)
+
+
+def hw_instantaneous_forward(
+    model: HullWhiteModel,
+    t: Float[Array, ""],
+) -> Float[Array, ""]:
+    """Market instantaneous forward rate :math:`f^M(0, t)`.
+
+    Args:
+        model: Hull-White model carrying the initial curve.
+        t: Year fraction from the curve reference date.
+
+    Returns:
+        Instantaneous forward rate at ``t``.
+    """
+    return _instantaneous_forward(model, t)
+
+
+def hw_alpha(
+    model: HullWhiteModel,
+    t: Float[Array, "..."],
+) -> Float[Array, "..."]:
+    """Deterministic exact-fit shift :math:`\\alpha(t)` in :math:`r = x + \\alpha`.
+
+    Hull-White admits a clean split of the short rate into a *centred*
+    Ornstein-Uhlenbeck state and a deterministic shift that carries the whole
+    dependence on the initial curve:
+
+    .. math::
+
+        r(t) = x(t) + \\alpha(t), \\qquad
+        dx(t) = -a\\,x(t)\\,dt + \\sigma\\,dW(t), \\quad x(0) = 0
+
+    .. math::
+
+        \\alpha(t) = f^M(0, t)
+            + \\frac{\\sigma^2}{2a^2}\\bigl(1 - e^{-at}\\bigr)^2
+
+    This is the parameterisation every numerical scheme wants: the state
+    variable :math:`x` is a zero-mean OU process with *time-independent*
+    drift and diffusion, so a lattice, a PDE mesh, or an exact Monte-Carlo
+    step can be built once on :math:`x` and shifted by :math:`\\alpha` to
+    recover the discount rate. It is the continuous-time analogue of the
+    trinomial tree's :math:`\\alpha_i` calibration shifts, and it makes the
+    exact fit to the initial curve a closed-form translation rather than a
+    numerical forward induction.
+
+    At :math:`t = 0` the second term vanishes and
+    :math:`\\alpha(0) = f^M(0, 0) = r(0)`.
+
+    Args:
+        model: Hull-White model carrying the initial curve and parameters.
+        t: Year fraction(s) from the curve reference date.
+
+    Returns:
+        The shift :math:`\\alpha(t)` at each ``t``.
+
+    References:
+        Brigo & Mercurio (2006), *Interest Rate Models*, §3.3 (eq. 3.30).
+    """
+    a = model.mean_reversion
+    sigma = model.volatility
+    t_arr = jnp.asarray(t)
+    forward = jnp.vectorize(lambda s: _instantaneous_forward(model, s))(t_arr)
+    convexity = (sigma**2 / (2.0 * a**2)) * (1.0 - jnp.exp(-a * t_arr)) ** 2
+    return forward + convexity
+
+
+def _convexity_integral(
+    a: Float[Array, ""],
+    t: Float[Array, "..."],
+) -> Float[Array, "..."]:
+    """:math:`\\int_0^t (1 - e^{-as})^2\\,ds`, the antiderivative behind
+    :func:`hw_alpha_average`'s convexity term."""
+    return (
+        t
+        - 2.0 * (1.0 - jnp.exp(-a * t)) / a
+        + (1.0 - jnp.exp(-2.0 * a * t)) / (2.0 * a)
+    )
+
+
+def hw_alpha_average(
+    model: HullWhiteModel,
+    t0: Float[Array, "..."],
+    t1: Float[Array, "..."],
+) -> Float[Array, "..."]:
+    """Exact time-average of :math:`\\alpha` over ``[t0, t1]``.
+
+    .. math::
+
+        \\bar\\alpha(t_0, t_1)
+            = \\frac{1}{t_1 - t_0}\\int_{t_0}^{t_1} \\alpha(s)\\,ds
+
+    Both halves are integrated in closed form. The market forward term
+    telescopes into a ratio of discount factors,
+
+    .. math::
+
+        \\int_{t_0}^{t_1} f^M(0, s)\\,ds
+            = \\ln\\frac{P^M(0, t_0)}{P^M(0, t_1)},
+
+    and the convexity term integrates analytically via
+    :math:`\\int_0^t (1 - e^{-as})^2 ds`.
+
+    **Why this matters for discretised schemes.** Sampling :math:`\\alpha` at a
+    step midpoint is only second-order accurate when :math:`\\alpha` is smooth.
+    It is not: a log-linear discount curve has a *piecewise-constant*
+    instantaneous forward that jumps at every pillar, so midpoint sampling
+    leaves an :math:`O(\\Delta t)` error on each step straddling a pillar and a
+    scheme built on it **stalls** — empirically a Hull-White PDE plateaus at a
+    ~4e-6 zero-coupon-bond repricing error no matter how finely time is
+    refined, while the same scheme on a flat curve converges cleanly at
+    second order. Averaging exactly restores the model's defining exact-fit
+    property for an arbitrary curve shape, because each step then discounts by
+    precisely the market forward discount factor across it.
+
+    Args:
+        model: Hull-White model carrying the initial curve and parameters.
+        t0: Start of the averaging interval, in year fractions.
+        t1: End of the averaging interval, in year fractions.
+
+    Returns:
+        The average of :math:`\\alpha` over each ``[t0, t1]`` interval.
+    """
+    a = model.mean_reversion
+    sigma = model.volatility
+    dt = t1 - t0
+
+    forward_avg = (_log_df_at_time(model, t0) - _log_df_at_time(model, t1)) / dt
+    convexity_avg = (sigma**2 / (2.0 * a**2)) * (
+        _convexity_integral(a, t1) - _convexity_integral(a, t0)
+    ) / dt
+    return forward_avg + convexity_avg
 
 
 # ── Analytic zero-coupon bond price ───────────────────────────────────

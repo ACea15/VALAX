@@ -24,6 +24,11 @@ from valax.pricing.analytic.swaptions import (
     swaption_price_black76,
     swaption_price_bachelier,
 )
+from valax.pricing.analytic.hull_white_swaptions import (
+    hw_critical_rate,
+    hw_swaption_price,
+    hw_zcb_option_price,
+)
 from valax.pricing.analytic.digital import digital_option_price
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_price
 from valax.pricing.analytic.heston import heston_cos_price

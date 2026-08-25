@@ -35,6 +35,23 @@ estimator (`particle` vs. `kernel`).
 
 ::: valax.calibration.calibrate_slv
 
+## Hull–White
+
+Fits the two free short-rate parameters \((a, \sigma)\) to a European swaption
+surface using the closed-form Jamshidian pricer, so the least-squares Jacobian
+is exact autodiff rather than a bumped approximation.
+
+The two parameters are strongly correlated along the ATM surface — \(a\) sets
+the decay of forward-rate volatility with expiry, \(\sigma\) its level — so
+fixing \(a\) and fitting only \(\sigma\) is usually the better-posed problem.
+See [theory](../theory/hull-white-swaptions.md#5-why-this-makes-hullwhite-calibratable).
+
+::: valax.calibration.calibrate_hull_white
+
+::: valax.calibration.swaption_prices_from_vols
+
+::: valax.calibration.hw_swaption_prices
+
 ## Transforms
 
 Reparametrization utilities that map constrained parameters

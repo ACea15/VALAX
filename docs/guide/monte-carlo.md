@@ -113,9 +113,17 @@ not yet wired), 🟠 = needs a new path generator, 🔴 = needs major infra.
 
 | Instrument | MC pricing | Blocker |
 |-----------|:---:|---|
-| `FixedRateBond` / `FloatingRateBond` | 🟠 | Needs Hull-White MC path generator |
-| `CallableBond` / `PuttableBond` | 🟠 | LSM on HW MC paths (LSM engine already exists) |
+| `FixedRateBond` / `FloatingRateBond` | ✅ | `HullWhiteModel` |
+| `CallableBond` / `PuttableBond` | ✅ | `HullWhiteModel` (analytic affine continuation value) |
 | `ConvertibleBond` | 🔴 | Equity + rates + credit coupled MC |
+
+Callable and puttable bonds do **not** need a Longstaff-Schwartz regression:
+Hull-White zero-coupon bonds are affine in the short rate, so the continuation
+value of the bullet remainder is available in closed form at every exercise
+date. The policy is myopic across multiple exercise dates (it ignores the
+option value of deferring), which makes the MC price an upper bound on the
+trinomial-tree price — see
+`tests/test_mc/test_hull_white_recipes.py::TestTreeTriangulation`.
 
 ### FX / Inflation / Credit
 
@@ -396,6 +404,39 @@ result = generate_lmm_paths(
 # result.forwards_at_fixing.shape == (n_paths, N)
 # result.discount_factors.shape == (n_paths, N+1)
 ```
+
+### Hull-White (short rate)
+
+Unlike every other generator above, `generate_hull_white_paths` does **not**
+discretise an SDE. Writing \(r(t) = x(t) + \alpha(t)\) with \(x\) a centred
+Ornstein-Uhlenbeck process, the transition law of \(x\) is Gaussian in closed
+form, so each step samples the exact conditional distribution:
+
+$$
+r(t+\Delta t) \mid r(t) \;\sim\; \mathcal{N}\!\left(
+  \alpha(t+\Delta t) + \bigl(r(t) - \alpha(t)\bigr)e^{-a\Delta t},\;
+  \tfrac{\sigma^2}{2a}\bigl(1 - e^{-2a\Delta t}\bigr)\right)
+$$
+
+There is therefore **no Euler bias in \(r\) at any step size**. `n_steps`
+controls only the accuracy of the trapezoidal accumulation of
+\(\int_0^{t}r\,ds\) into `log_discount_factors`, which is what actually
+discounts cash flows — so choose it based on the discounting accuracy you
+need, not on the stability of the rate process.
+
+```python
+from valax.pricing.mc import generate_hull_white_paths
+
+result = generate_hull_white_paths(
+    hw_model, T=5.0, n_steps=250, n_paths=50_000,
+    key=jax.random.PRNGKey(0),
+)
+# result.short_rates.shape          == (n_paths, n_steps + 1)
+# result.log_discount_factors.shape == (n_paths, n_steps + 1)
+```
+
+See [Hull-White Monte Carlo](../theory/hull-white-mc.md) for the derivation
+of \(\alpha(t)\) and the exact-fit condition.
 
 ## 4. Payoff functions (low-level)
 
