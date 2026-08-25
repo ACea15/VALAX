@@ -155,8 +155,15 @@ def solve_backward_2d(
     def step(u, inputs):
         m, theta_m, do_correction = inputs
         theta_dt = theta_m * dt
-        tau_known = (n_time - m) * dt      # time-remaining at the known level
-        tau_solved = (n_time - m - 1) * dt  # time-remaining at the solved level
+        # Backward march from expiry: the carry entering step ``m`` has ``m``
+        # steps already taken (tau = m*dt; ``m = 0`` is the terminal payoff at
+        # tau = 0) and the level being solved lies one step further back. Same
+        # convention as the 1-D stepper, so the two agree when A0 = A2 = 0.
+        # This carried the same mirrored-tau bug as the 1-D stepper (it was
+        # written to mirror it) -- see entry 2 of
+        # docs/architecture/numerical-pitfalls.md.
+        tau_known = m * dt          # time-remaining at the known level
+        tau_solved = (m + 1) * dt   # time-remaining at the solved level
 
         g_known = _x_boundary_term(
             op, boundary.x_lower_fn(tau_known), boundary.x_upper_fn(tau_known)

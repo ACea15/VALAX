@@ -12,9 +12,13 @@ backward Euler. **Rannacher start-up** runs the first ``rannacher_steps`` steps
 (nearest expiry) fully-implicit to damp oscillations from non-smooth terminal
 data, then switches to the requested ``theta``.
 
-The backward march is a single ``jax.lax.scan``. An optional ``solver_fn`` seam
-replaces the plain tridiagonal solve — this is how the American penalty method
-(:mod:`valax.pricing.pde.exercise`) plugs in.
+The backward march is a single ``jax.lax.scan``. Two seams hook into it:
+
+- ``solver_fn`` replaces the plain tridiagonal solve — this is how the American
+  penalty method (:mod:`valax.pricing.pde.exercise`) plugs in;
+- ``event_fn`` post-processes the field after each step, which is how *discrete*
+  contractual events land: coupon payments and Bermudan / callable / puttable
+  exercise projection.
 
 **Time-dependent operators.** The ``operator`` argument may carry either 1-D
 bands (length ``n``, constant in time — the original behaviour) or 2-D *stacked*
@@ -30,7 +34,7 @@ from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Float
+from jaxtyping import Float, Int
 from jax import Array
 
 from valax.pricing.pde.boundary import Boundary1D
@@ -41,6 +45,8 @@ StepSolver = Callable[
     [Float[Array, " n_minus_1"], Float[Array, " n"], Float[Array, " n_minus_1"], Float[Array, " n"]],
     Float[Array, " n"],
 ]
+
+EventFn = Callable[[Int[Array, ""], Float[Array, " n"]], Float[Array, " n"]]
 
 
 def solve_backward_1d(
@@ -53,6 +59,7 @@ def solve_backward_1d(
     theta: float,
     rannacher_steps: int = 0,
     solver_fn: Optional[StepSolver] = None,
+    event_fn: Optional[EventFn] = None,
 ) -> Float[Array, " n"]:
     """Backward time-march the terminal condition to ``t = 0``.
 
@@ -70,6 +77,17 @@ def solve_backward_1d(
         rannacher_steps: Number of leading fully-implicit steps.
         solver_fn: Optional per-step linear solver (defaults to the plain
             tridiagonal solve). Used to inject the American penalty method.
+        event_fn: Optional discrete-event hook applied to the field *after*
+            each backward step, as ``event_fn(level, values) -> values``.
+            ``level`` is the **forward** time-level index of the level just
+            solved, counting ``0`` at ``t = 0`` up to ``n_time`` at expiry, so
+            it runs over ``n_time - 1 ... 0``. It is a traced scalar, so the
+            hook must select with :func:`jax.numpy.where` / indexing into a
+            per-level array rather than Python control flow. This is the seam
+            for contractual events that land *between* time steps — coupon
+            payments, and Bermudan / callable / puttable exercise projection
+            (:func:`~valax.pricing.pde.exercise.explicit_project`). Continuous
+            American exercise uses ``solver_fn`` instead.
 
     Returns:
         The solution field on the grid at ``t = 0``.
@@ -93,8 +111,24 @@ def solve_backward_1d(
         else:
             m, theta_m = inputs
             al, ad, au = a_lower, a_diag, a_upper
-        tau_new = (n_time - m) * dt        # time-remaining at the known level
-        tau_old = (n_time - m - 1) * dt    # time-remaining at the solved level
+        # The scan marches *backward from expiry*: the carry entering step ``m``
+        # is the level with ``m`` steps already taken, i.e. time-remaining
+        # ``m*dt`` (``m = 0`` is the terminal payoff, tau = 0), and the level
+        # being solved sits one step further back at ``(m+1)*dt``. The final
+        # solved level therefore carries tau = ``n_time*dt = T``, which is the
+        # t = 0 price returned below.
+        #
+        # These two lines previously read ``(n_time - m)*dt`` and
+        # ``(n_time - m - 1)*dt`` -- exactly mirrored -- so every time-dependent
+        # boundary was evaluated with the wrong discount factor. It hid for a
+        # long time because the default 4-sigma domain put the resulting error
+        # (4.5e-4 on an ATM Black-Scholes call) inside every tolerance in the
+        # repo, including the QuantLib comparisons. See entry 2 of
+        # docs/architecture/numerical-pitfalls.md, and the invariance guards in
+        # tests/test_pde/test_schemes.py::TestBoundaryTimeDirection and
+        # tests/test_pde/test_crank_nicolson.py::TestPDEDomainWidthIndependence.
+        tau_known = m * dt          # time-remaining at the known level
+        tau_solved = (m + 1) * dt   # time-remaining at the solved level
 
         expl = 1.0 - theta_m
         # RHS = (I + (1-theta) A) v
@@ -104,13 +138,18 @@ def solve_backward_1d(
             expl * au[:-1],
             v,
         )
-        # Boundary contributions (explicit at level n+1, implicit at level n).
-        bc_lo_new = boundary.lower_fn(tau_new)
-        bc_lo_old = boundary.lower_fn(tau_old)
-        bc_hi_new = boundary.upper_fn(tau_new)
-        bc_hi_old = boundary.upper_fn(tau_old)
-        rhs = rhs.at[0].add(expl * al[0] * bc_lo_new + theta_m * al[0] * bc_lo_old)
-        rhs = rhs.at[-1].add(expl * au[-1] * bc_hi_new + theta_m * au[-1] * bc_hi_old)
+        # Boundary contributions (explicit at the known level, implicit at the
+        # solved level).
+        bc_lo_known = boundary.lower_fn(tau_known)
+        bc_lo_solved = boundary.lower_fn(tau_solved)
+        bc_hi_known = boundary.upper_fn(tau_known)
+        bc_hi_solved = boundary.upper_fn(tau_solved)
+        rhs = rhs.at[0].add(
+            expl * al[0] * bc_lo_known + theta_m * al[0] * bc_lo_solved
+        )
+        rhs = rhs.at[-1].add(
+            expl * au[-1] * bc_hi_known + theta_m * au[-1] * bc_hi_solved
+        )
 
         # LHS = (I - theta A)
         lhs_lower = -theta_m * al[1:]
@@ -118,6 +157,11 @@ def solve_backward_1d(
         lhs_upper = -theta_m * au[:-1]
 
         v_new = solve(lhs_lower, lhs_diag, lhs_upper, rhs)
+        if event_fn is not None:
+            # Forward time-level index of the level just solved: the solved
+            # level sits at time-remaining (m+1)*dt, i.e. forward level
+            # n_time - m - 1.
+            v_new = event_fn(n_time - m - 1, v_new)
         return v_new, None
 
     steps = jnp.arange(n_time)

@@ -68,6 +68,35 @@ class TestPDEConvergence:
         assert fine < coarse
 
 
+# ── Domain-width independence ────────────────────────────────────────
+#
+# Regression guard for the boundary-sampling time direction (see
+# ``tests/test_pde/test_schemes.py::TestBoundaryTimeDirection``). Correct
+# Dirichlet data makes the truncation error decay exponentially in the domain
+# half-width, so an ATM price is essentially insensitive to ``spot_range``
+# beyond ~2.5 std devs. When the boundary was sampled at the mirrored time
+# level, the far-field values were wrong by ``K(1 - exp(-rT))`` and the residual
+# leaked inward: half-width 2.0 was off by 1.4e-1 and 3.0 by 1.4e-2, versus
+# ~1e-5 discretisation error. This test fails loudly on that regression.
+
+class TestPDEDomainWidthIndependence:
+    @pytest.mark.parametrize("is_call", [True, False])
+    def test_price_insensitive_to_spot_range(self, is_call):
+        option = EuropeanOption(
+            strike=jnp.array(100.0), expiry=jnp.array(1.0), is_call=is_call
+        )
+        args = (jnp.array(100.0), jnp.array(0.2), jnp.array(0.05), jnp.array(0.0))
+        bs = float(black_scholes_price(option, *args))
+
+        for half_width in (2.5, 3.0, 4.0, 6.0):
+            cfg = PDEConfig(n_spot=400, n_time=400, spot_range=half_width)
+            err = abs(float(pde_price(option, *args, cfg)) - bs)
+            assert err < 1e-3, (
+                f"spot_range={half_width}: error {err:.3e} — the far-field "
+                f"Dirichlet data is leaking into the price"
+            )
+
+
 # ── Greeks via autodiff through PDE ──────────────────────────────────
 
 class TestPDEGreeks:
