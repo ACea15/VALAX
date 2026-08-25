@@ -13,6 +13,11 @@ Factories cover the cases needed in PR-1:
 - :func:`digital_boundary` — discounted payout at the ITM edge, zero at the OTM.
 - :func:`knockout_boundary` — absorbing (zero) value at the barrier edge.
 
+Short-rate problems have no closed-form far-field value to pin, so instead of
+Dirichlet data they impose a *shape*: :func:`apply_linearity_bc_1d` bakes a
+zero-curvature (``V_xx = 0``) condition straight into the operator's edge rows,
+to be paired with the inert :func:`zero_boundary`.
+
 For the 2-D Heston solver, :class:`Boundary2D` / :func:`heston_boundary` supply
 the log-spot Dirichlet asymptotics (reusing the 1-D machinery, constant across
 variance), and :func:`apply_heston_variance_bc` bakes the *variance*-axis
@@ -29,6 +34,7 @@ from jax import Array
 
 from valax.models.heston import HestonModel
 from valax.pricing.pde.grids import Grid1D, Grid2D, boundary_coords
+from valax.pricing.pde.operators import Operator1D
 from valax.pricing.pde.operators2d import Operator2D
 
 
@@ -165,6 +171,105 @@ def digital_boundary(
             return jnp.zeros_like(tau)
 
     return Boundary1D(lower_fn, upper_fn)
+
+
+def zero_boundary() -> Boundary1D:
+    """Dirichlet data that is identically zero at both edges.
+
+    Used with :func:`apply_linearity_bc_1d`, which folds the exterior ghost
+    coupling back into the interior and *zeroes* the two edge bands. Once that
+    is done the boundary values are multiplied by zero and never influence the
+    solve, so this is the correct inert placeholder to hand the stepper.
+
+    Returns:
+        A :class:`Boundary1D` returning zero for any time-remaining.
+    """
+    zero = lambda tau: jnp.zeros_like(tau)
+    return Boundary1D(zero, zero)
+
+
+def apply_linearity_bc_1d(operator: Operator1D, grid: Grid1D) -> Operator1D:
+    r"""Impose ``V_xx = 0`` at both edges of a 1-D operator by folding the ghosts.
+
+    The Dirichlet factories in this module all rely on knowing the value
+    function's far-field asymptotics in closed form. For a **short-rate** PDE
+    there is no such closed form once the instrument carries embedded
+    optionality: the far-field value of a callable bond is neither zero nor an
+    analytic bond price, because whether the issuer calls depends on the whole
+    remaining exercise schedule.
+
+    The standard remedy is to stop imposing a *value* and instead impose a
+    *shape*: at the domain edges the solution is assumed locally linear in the
+    state,
+
+    .. math::
+
+        V_{xx}\big|_{x_{\min}} = V_{xx}\big|_{x_{\max}} = 0 .
+
+    Linear extrapolation of the exterior ghost,
+    :math:`V_{-1} = V_0 - \rho_{\text{lo}} (V_1 - V_0)` and
+    :math:`V_{n} = V_{n-1} + \rho_{\text{hi}} (V_{n-1} - V_{n-2})`, folds the
+    two exterior couplings back into the interior stencil, leaving the first
+    row's sub-diagonal and the last row's super-diagonal exactly zero. This is
+    the 1-D analogue of the ``v = v_max`` treatment in
+    :func:`apply_heston_variance_bc`, and it matches the boundary handling of
+    QuantLib's short-rate finite-difference operators.
+
+    Two consequences are worth stating explicitly, since they bound what the
+    fold can and cannot do:
+
+    - It is **exact on affine fields**. When ``V`` is linear in ``x`` the
+      extrapolated ghost *is* the true exterior value, so the folded rows
+      reproduce ``L V = mu V_x - r V`` to machine precision with no boundary
+      data at all. This is the sense in which the condition is "free".
+    - The convection term at the two edge rows degrades from the central
+      difference to a **one-sided** one — algebraically, the fold turns the
+      first-derivative stencil into the forward difference
+      ``(V_1 - V_0) / h_+`` at the lower edge and the backward difference
+      ``(V_{n-1} - V_{n-2}) / h_-`` at the upper edge. So the edge rows are
+      first-order accurate in the drift. That is harmless provided the domain
+      is wide enough for the edges to carry negligible probability, which is
+      the same requirement the Dirichlet factories impose.
+
+    Because the edge bands are zeroed, the Dirichlet values supplied to the
+    stepper become irrelevant — pair this with :func:`zero_boundary`.
+
+    Both plain (length ``n``) and *stacked* (shape ``(n_time, n)``, one row per
+    backward step) band layouts are supported; the fold is applied along the
+    trailing axis, so a time-dependent operator is handled unchanged.
+
+    Args:
+        operator: The raw :class:`~valax.pricing.pde.operators.Operator1D`.
+        grid: The spatial grid the operator was built on.
+
+    Returns:
+        A new :class:`~valax.pricing.pde.operators.Operator1D` whose first and
+        last rows impose zero curvature.
+    """
+    x = grid.nodes
+    x_lo, x_hi = boundary_coords(grid)
+
+    # Ghost-to-interior extrapolation weights (1 on a uniform grid).
+    ratio_lo = (x[0] - x_lo) / (x[1] - x[0])
+    ratio_hi = (x_hi - x[-1]) / (x[-1] - x[-2])
+
+    lower, diag, upper = operator.lower, operator.diag, operator.upper
+
+    # Lower edge: V_ghost = V_0 - ratio_lo (V_1 - V_0).
+    al_first = lower[..., 0]
+    diag = diag.at[..., 0].add(al_first * (1.0 + ratio_lo))
+    upper = upper.at[..., 0].add(-al_first * ratio_lo)
+    lower = lower.at[..., 0].set(0.0)
+
+    # Upper edge: V_ghost = V_{n-1} + ratio_hi (V_{n-1} - V_{n-2}).
+    au_last = upper[..., -1]
+    diag = diag.at[..., -1].add(au_last * (1.0 + ratio_hi))
+    lower = lower.at[..., -1].add(-au_last * ratio_hi)
+    upper = upper.at[..., -1].set(0.0)
+
+    return eqx.tree_at(
+        lambda o: (o.lower, o.diag, o.upper), operator, (lower, diag, upper)
+    )
 
 
 def knockout_boundary(

@@ -212,6 +212,29 @@ tree construction and the backward induction. You get **effective duration,
 effective convexity, and key-rate durations of callable bonds** with no
 finite-difference bumping.
 
+!!! warning "Differentiating w.r.t. model parameters needs an explicit `j_max`"
+
+    The lattice half-width \(j_{\max}\) sets array shapes, so it must be a
+    concrete Python `int`. `build_hull_white_tree` derives it from
+    `mean_reversion` via `float(a)`, which raises
+    `ConcretizationTypeError` the moment `a` becomes a tracer. Curve shifts
+    (below) are unaffected — they leave `a` concrete — but
+    `eqx.filter_grad` over the model pytree is not. Precompute the width and
+    pass it in:
+
+    ```python
+    from valax.pricing.lattice import hw_tree_j_max
+
+    j_max = hw_tree_j_max(float(model.mean_reversion), T / n_steps)
+    dP_dsigma = eqx.filter_grad(
+        lambda m: callable_bond_price(bond, m, n_steps=n_steps, j_max=j_max)
+    )(model).volatility
+    ```
+
+    Holding \(j_{\max}\) fixed is also the *correct* sensitivity: it keeps the
+    lattice geometry constant so the derivative measures the effect of the
+    parameter, not of a discretisation that jumped a step.
+
 ### Effective duration: parallel curve shift
 
 ```python
@@ -261,16 +284,74 @@ This is the autodiff payoff: in a traditional system you'd build the tree once
 per pillar shift (so 2N tree builds for N pillars). Here it costs one reverse-mode
 pass over a single tree build.
 
-## 7. What's Next
+## 7. The Monte-Carlo Route
+
+The same instruments price through the MC dispatcher against a
+`HullWhiteModel`, which is useful as an independent cross-check of the tree
+(the two share only the analytic ZCB formula):
+
+```python
+from valax.pricing.mc import MCConfig, mc_price_dispatch
+
+res = mc_price_dispatch(bond, model, MCConfig(n_paths=40_000, n_steps=60), key)
+print(f"{res.price:.4f} +/- {res.stderr:.4f}")
+```
+
+At each call date the issuer compares the analytic Hull-White PV of the
+*remaining* cash flows against the call price. Because Hull-White ZCBs are
+affine this continuation value is exact for the bullet remainder, so — unlike
+equity Bermudans — no Longstaff-Schwartz regression basis is needed.
+
+Two caveats worth knowing:
+
+- **Ex-coupon strike.** A holder called on a coupon date still receives that
+  coupon; the exercise test excludes it from the continuation value. Tree and
+  MC agree on this convention, as does QuantLib.
+- **Myopic policy.** The rule ignores the option value of deferring to a
+  *later* call date. With a single call date it is exact; with several it is a
+  valid but suboptimal policy, and since the issuer minimises the holder's
+  value the MC price is an upper bound on the tree price. On a 5Y bond with two
+  call dates the gap is a few basis points.
+
+## 7b. Three Routes to the Same Price
+
+Hull-White is now priced by three independent engines, which is the whole point
+of building them: a callable-bond price that agrees across all three is a price
+worth trusting.
+
+| Engine | Best at | Weak at |
+|---|---|---|
+| **Trinomial tree** (`pricing/lattice`) | intuition, matching desk convention | date snapping caps accuracy; `j_max` is a shape, so `a` must be concrete |
+| **Monte Carlo** (`pricing/mc`) | path-dependence, exotic payoffs | early exercise needs a policy proxy (myopic rule or LSM) |
+| **PDE** (`pricing/pde`) | early exercise — a pointwise projection, no policy error; fully traceable | curse of dimensionality beyond ~2 factors |
+
+```python
+from valax.pricing.pde import PDEConfig, pde_price_dispatch
+
+config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
+price = pde_price_dispatch(bermudan_swaption, hw_model, config).price
+```
+
+For the short-rate PDE, `n_spot` is the number of state nodes and `spot_range`
+is the domain half-width in standard deviations of the short rate at the
+horizon (prices are flat in it from about 4 outward). Full details — including
+why the exact-fit shift must be *integrated* rather than sampled, and why
+cashflow dates are not snapped — are in
+[Hull-White Finite Differences](../theory/hull-white-pde.md).
+
+## 8. What's Next
 
 | Capability | Status | Notes |
 |------------|--------|-------|
 | Hull-White trinomial tree | ✅ Implemented | `valax/pricing/lattice/hull_white_tree.py` |
-| Callable / puttable bonds | ✅ Implemented | This guide |
+| Callable / puttable bonds | ✅ Implemented | This guide (tree) and MC — see below |
 | Analytic ZCB pricing | ✅ Implemented | `hw_bond_price` |
+| Short-rate Monte Carlo | ✅ Implemented | `generate_hull_white_paths` — exact conditional sampling |
+| Jamshidian swaption decomposition | ✅ Implemented | `hw_swaption_price` — QL-validated |
+| Calibration to a swaption surface | ✅ Implemented | `calibrate_hull_white` |
+| Short-rate PDE (bonds, callables, swaptions) | ✅ Implemented | `valax/pricing/pde/hull_white.py` — QL-validated |
+| **Bermudan swaptions** under Hull-White | ✅ Implemented | On the PDE — exact exercise projection, no regression proxy |
 | OAS solver | 🟡 Roadmap | Trivial extension once we add a curve-shift parameter to the pricer |
-| Jamshidian swaption decomposition | 🟡 Roadmap | Required for HW calibration to swaption surfaces |
-| Bermudan swaptions on the HW tree | 🟡 Roadmap | Currently priced via LSM on LMM paths (`valax/pricing/mc/bermudan.py`) |
 | G2++ (two-factor) | 🟡 Roadmap | Adds smile-fitting flexibility |
 
 See the [Roadmap](../roadmap.md) for tracking.

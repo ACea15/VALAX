@@ -42,7 +42,7 @@ def build_operator_1d(
     grid: Grid1D,
     drift: Float[Array, ""] | Float[Array, " n"],
     diffusion: Float[Array, ""] | Float[Array, " n"],
-    discount: Float[Array, ""],
+    discount: Float[Array, ""] | Float[Array, " n"],
 ) -> Operator1D:
     """Assemble the central-difference operator from drift/diffusion/discount.
 
@@ -69,7 +69,9 @@ def build_operator_1d(
         grid: Spatial grid (uniform or concentrated).
         drift: Convection coefficient ``mu`` (scalar or per-node).
         diffusion: Diffusion coefficient ``sigma^2`` (scalar or per-node).
-        discount: Discount rate ``r`` (scalar).
+        discount: Discount rate ``r`` (scalar or per-node). Short-rate models
+            need the per-node form: in the Hull-White state variable ``x`` the
+            discount rate *is* the state, ``r = x + alpha(t)``.
 
     Returns:
         The assembled :class:`Operator1D`.

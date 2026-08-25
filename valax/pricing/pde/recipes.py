@@ -21,6 +21,12 @@ The Heston stochastic-volatility model adds a 2-D (ADI) recipe routed through
   log-spot :math:`\\times` variance grid
   (:func:`~valax.pricing.pde.schemes2d.solve_backward_2d`).
 
+Interest-rate instruments under
+:class:`~valax.models.hull_white.HullWhiteModel` live in a module of their own,
+:mod:`valax.pricing.pde.hull_white` (bonds, callable / puttable bonds, European
+and Bermudan swaptions), since they need short-rate-specific grid, boundary and
+discrete-event machinery.
+
 Accuracy note (FD Dupire vs the implied surface)
 ------------------------------------------------
 Feeding the *continuous* Dupire local volatility into a *discrete* backward

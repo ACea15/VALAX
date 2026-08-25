@@ -196,6 +196,45 @@ Crank–Nicolson can oscillate near a payoff discontinuity (digitals) or kink
 runs that many fully-implicit steps first to damp the oscillations before
 switching to CN — enabled by default for digital and barrier recipes.
 
+## 5.6 Interest rates: the Hull–White short-rate PDE
+
+The same 1-D substrate prices interest-rate instruments under
+`HullWhiteModel`, including the ones no closed form reaches —
+**Bermudan swaptions** and callable/puttable bonds:
+
+```python
+from valax.pricing.pde import PDEConfig, pde_price_dispatch
+
+config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
+price = pde_price_dispatch(bermudan_swaption, hw_model, config).price
+```
+
+Three things differ from the equity recipes, each for a concrete reason:
+
+- **The mesh is in the centred state \(x\)**, not the short rate, using
+  \(r(t) = x(t) + \alpha(t)\). The drift and diffusion are then
+  time-independent and the state starts at the origin, so `n_spot` counts state
+  nodes and `spot_range` is a half-width in standard deviations of the short
+  rate at the horizon. No `stop_gradient` scaffolding is needed: the read-off
+  point \(x = 0\) is fixed.
+- **The edges impose zero curvature rather than a Dirichlet value**, because a
+  callable bond has no closed-form far-field value — it depends on the whole
+  remaining exercise schedule.
+- **Coupons and exercise use a discrete-event hook** on the backward sweep,
+  with exercise decided ex-coupon and cashflows scaled by the analytic
+  Hull-White bond price from their snapped level to their true date (so
+  cashflow timing contributes no discretisation error).
+
+Because schedules are scattered with traced indices, nothing has to be
+concrete — unlike the trinomial tree, whose half-width is an array shape. The
+pricers compose with `eqx.filter_jit` and `eqx.filter_grad` directly, and
+sensitivities to \(a\) and \(\sigma\) match finite differences to
+\(10^{-8}\)–\(10^{-11}\).
+
+See [Hull-White Finite Differences](../theory/hull-white-pde.md) for the
+derivation and validation, and [Short-Rate Models](short-rate.md) for how the
+PDE, tree and Monte-Carlo engines compare.
+
 ## 6. When to use PDE
 
 - **Low-dimensional problems** (single underlying, or one spot + one variance
@@ -213,6 +252,12 @@ single asset, the [binomial tree](lattice.md) is a lightweight alternative.
 
 - [PDE design doc](../architecture/pde-design.md) — full architecture, ADI and
   early-exercise rationale, delivery phases.
+- [Hull-White Finite Differences](../theory/hull-white-pde.md) — the short-rate
+  PDE: state variable, boundary treatment, discrete events, validation.
+- [Numerical Pitfalls](../architecture/numerical-pitfalls.md) — a register of
+  discretisation bugs this solver has actually shipped and fixed, each with the
+  debugging playbook that localised it. Read before adding a scheme or a
+  boundary condition.
 - [Theory §5.2](../theory.md#52-pde-finite-differences) — derivations, ADI
   schemes, penalty method, Rannacher start-up.
 - [Monte Carlo](monte-carlo.md) and [Binomial Trees](lattice.md) — complementary

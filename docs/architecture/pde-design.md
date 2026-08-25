@@ -161,7 +161,9 @@ Grid construction (currently inlined in `pde_price`) becomes reusable builders
 returning lightweight `eqx.Module` meshes. Uniform spacing in `x = ln S` is the
 default (equal resolution in moneyness); an optional analytic **sinh-stretch**
 concentrates nodes near a focal point (strike or barrier) for sharper Greeks
-without extra nodes.
+without extra nodes. `centred_state_grid` covers the short-rate case: a mesh for
+a mean-reverting state that starts at the origin, sized in standard deviations
+of that state at the horizon.
 
 ```python
 class Grid1D(eqx.Module):
@@ -282,7 +284,21 @@ def solve_backward_1d(operator, boundary, terminal, grid, *, n_time, dt,
 ```
 
 The optional `project` callable is the seam for early exercise (§7) — it is
-`None` for European, and a value-projection closure otherwise.
+`None` for European, and a value-projection closure otherwise. As shipped there
+are two seams: `solver_fn` (replaces the per-step tridiagonal solve — the
+American penalty method) and `event_fn` (post-processes the field after each
+step — discrete coupons and Bermudan/callable/puttable exercise projection).
+
+> **Time-index convention — get this wrong and every time-dependent boundary is
+> silently mispriced.** The scan marches `m = 0 … n_time-1` starting from the
+> *terminal payoff*, so the level entering step `m` has time-remaining `m*dt`
+> (`m = 0` is expiry, `tau = 0`) and the level being solved sits at `(m+1)*dt`.
+> `event_fn` is handed the **forward** level index of the level just solved,
+> `n_time - m - 1`, counting `0` at `t = 0` up to `n_time` at expiry.
+> The stepper originally mirrored the boundary `tau`; see entry 2 of
+> [Numerical Pitfalls](numerical-pitfalls.md) for why that survived 1298
+> QuantLib comparisons, and `TestBoundaryTimeDirection` /
+> `TestEventSeam` for the guards that now pin both conventions.
 
 ### 4.5 `operators.py` — spatial operators
 
@@ -342,6 +358,22 @@ corners). Three BC families cover our instruments:
   field).
 - **Linearity / "PDE-at-boundary"** — impose $\partial_{xx}V = 0$ at the far
   edge (the common robust choice for the variance axis in Heston).
+
+*As shipped*, the linearity condition is not a `Boundary` object but an
+**operator transform**: `apply_linearity_bc_1d` folds a linearly-extrapolated
+exterior ghost back into the first and last rows, zeroing the edge bands so no
+boundary data is consumed at all (pair it with the inert `zero_boundary`). The
+2-D variance axis uses the same idea via `apply_heston_variance_bc`.
+
+This is what short-rate problems need, because they have **no closed-form
+far-field value to pin**: a callable bond's deep-ITM/OTM value depends on the
+entire remaining exercise schedule. Two properties bound what it buys — it is
+*exact on affine fields* (the extrapolated ghost is then the true value), but
+the convection term at the edges degrades to a one-sided difference and is
+therefore first-order there. Harmless once the domain is wide enough that the
+edges carry negligible probability, which is the same requirement the Dirichlet
+factories impose — and worth *verifying* by sweeping the width rather than
+assuming (entry 2 of [Numerical Pitfalls](numerical-pitfalls.md)).
 
 ```python
 class Dirichlet(eqx.Module): value_fn: Callable   # tau -> value
@@ -411,6 +443,14 @@ Both are `jax.grad`-friendly. `explicit_project` reuses the date→step snapping
 idiom from `hull_white_tree.py` (`round(times / dt)`), so discrete exercise
 dates map to specific `lax.scan` steps.
 
+*As shipped*, discrete (Bermudan/callable/puttable) exercise is applied through
+the `event_fn` seam on `solve_backward_1d` rather than a separate `project`
+argument; the snapping is done with **traced** indices (`.at[levels].set(...)`),
+so schedules need not be concrete and the pricers stay `filter_jit`-able —
+unlike the trinomial tree, whose half-width is an array shape. Note that
+snapping is used for *exercise* dates only: cashflow dates get an exact
+analytic correction instead (§5).
+
 ### 4.10 `coefficients.py` — model → operator coefficients
 
 The adapter layer mapping each VALAX model onto the drift/diffusion fields the
@@ -423,7 +463,7 @@ wherever possible.
 | `HestonModel` | `(ln S, v)` | from `HestonDrift`/`HestonDiffusion`: `½v ∂ₓₓ`, `½ξ²v ∂ᵥᵥ`, `ρξv ∂ₓᵥ` |
 | `LocalVolModel` | `x = ln S` | per-node `σ_loc = dupire_local_vol(surface, k, t)` at each `(x, t)` |
 | `SLVModel` | `(ln S, v)` | Heston block × leverage `L(k,t)·√v` via `LeverageGrid.__call__` |
-| `HullWhiteModel` | `r` | drift `θ(t)−a r`, diffusion `½σ²`, discount `r` |
+| `HullWhiteModel` | `x = r − α(t)` | drift `−a x`, diffusion `½σ²`, discount `x + α(t)` — the discount coefficient *is* the state, so the operator is a per-step **stack** (`hw_operator_stack`) |
 | `MultiAssetGBMModel` | `(ln S₁, ln S₂)` | covariance `Σ_ij = ρ_ij σ_i σ_j` (cross term = `ρσ₁σ₂`) |
 
 Local vol is the interesting case: coefficients are **time- and
@@ -438,6 +478,12 @@ A direct mirror of `mc/dispatch.py`: a module-level dict registry keyed on
 `pde_price_dispatch` entry point that raises a helpful `ValueError` listing
 available recipes on a miss. `recipes.py` is imported for its side effects
 (populating the registry), exactly like `mc/recipes.py`.
+
+*As shipped*, `recipes.py` holds the equity recipes and
+**`hull_white.py`** the interest-rate ones (`FixedRateBond`, `CallableBond`,
+`PuttableBond`, `Swaption`, `BermudanSwaption`), split out because the
+short-rate side needs its own grid, boundary and discrete-event machinery.
+Both are imported for side effects by `pde/__init__.py`.
 
 ```python
 _REGISTRY: dict[tuple[type, type], Callable[..., PDEResult]] = {}
@@ -485,11 +531,31 @@ def pde_price(option, spot, vol, rate, dividend, config=PDEConfig()) -> Float[Ar
 - **Variance axis (Heston/SLV):** `v` directly on `[0, y_max]`, with a
   linearity BC at `v = y_max` and the natural (degenerate) behaviour at
   `v = 0` handled by the Feller-aware upwinding of the convection term.
-- **Short-rate axis (Hull–White):** `r` directly, centred on the forward curve;
-  discount term `r·V`.
+- **Short-rate axis (Hull–White):** *as shipped*, the **centred state** `x` of
+  `r(t) = x(t) + alpha(t)`, not `r` directly (`centred_state_grid`). The drift
+  and diffusion are then time-independent, the state starts exactly at the
+  origin — so the read-off point is fixed and needs no `stop_gradient`
+  scaffolding — and the whole dependence on the initial curve collapses into the
+  scalar `alpha`. The discount term is `(x + alpha(t))·V`, i.e. the discount
+  coefficient varies in **both space and time**, which is why the operator is a
+  per-step stack rather than a single set of bands.
 - **Time:** backward from the terminal condition, `dt = T / n_time`, via
-  `jax.lax.scan`.
-- **Read-off:** `jnp.interp` in 1-D; `bilinear_2d` in 2-D — both differentiable.
+  `jax.lax.scan`. See the time-index convention box in §4.4.
+- **Curve-derived quantities are *integrated* across a step, not sampled at its
+  midpoint.** A log-linear discount curve has a piecewise-constant instantaneous
+  forward that jumps at every pillar, so midpoint sampling is only first-order
+  on the steps that straddle one — enough to stall an otherwise second-order
+  scheme (entry 3 of [Numerical Pitfalls](numerical-pitfalls.md)).
+- **Contractual dates are not snapped to time levels** where an exact correction
+  exists. Snapping displaces a cashflow by up to `dt/2`, an `O(dt)` error that
+  dominates a second-order scheme; the Hull–White recipes instead scale each
+  coupon by the analytic bond price from its snapped level to its true payment
+  date (entry 4 of [Numerical Pitfalls](numerical-pitfalls.md)). Exercise dates
+  *are* snapped — a decision has to happen at a level — but that error is second
+  order.
+- **Read-off:** cubic Hermite in 1-D (`read_off_1d`); separable bicubic in 2-D
+  (`read_off_2d`) — both differentiable, and both carrying genuine within-cell
+  curvature so second-order Greeks survive.
 
 ## 6. Multi-dimensional scheme: why ADI
 

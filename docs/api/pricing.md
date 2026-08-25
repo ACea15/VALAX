@@ -101,6 +101,24 @@ default in `valax/__init__.py`). See
 
 ::: valax.pricing.analytic.swaption_price_bachelier
 
+#### Hull–White (Jamshidian)
+
+Model-consistent swaption pricing under the one-factor Hull–White short-rate
+model. Because every bond price at expiry is monotone in the single state
+variable, the option on the coupon bond decomposes **exactly** into a portfolio
+of zero-coupon bond options — no lattice, no simulation. This is the pricer
+that makes Hull–White calibratable; see
+[Jamshidian Decomposition](../theory/hull-white-swaptions.md).
+
+The discount curve is taken from `model.initial_curve`, so prices are
+automatically consistent with the curve the model was exact-fitted to.
+
+::: valax.pricing.analytic.hw_swaption_price
+
+::: valax.pricing.analytic.hw_critical_rate
+
+::: valax.pricing.analytic.hw_zcb_option_price
+
 ### FX pricing
 
 ::: valax.pricing.analytic.fx_forward_rate
@@ -324,6 +342,16 @@ branch.
 
 ::: valax.pricing.mc.generate_lmm_paths
 
+The Hull–White short-rate generator samples the **exact** conditional
+Ornstein–Uhlenbeck law rather than discretising the SDE, so it is unbiased in
+\(r(t)\) at any step size (the only discretisation error is the trapezoidal
+accumulation of \(\int r\,dt\) into the log discount factor). See
+[Hull–White Monte Carlo](../theory/hull-white-mc.md) for the derivation.
+
+::: valax.pricing.mc.HullWhitePathResult
+
+::: valax.pricing.mc.generate_hull_white_paths
+
 ### Payoff functions (low-level)
 
 Equity payoffs on single-asset paths:
@@ -368,7 +396,10 @@ Finite-difference pricing. The 1-D Crank–Nicolson solver `pde_price` prices
 European options under Black–Scholes; the dispatcher `pde_price_dispatch` routes
 `(instrument, model)` pairs to the appropriate recipe — European, American (via
 the penalty-method free boundary), digital (with Rannacher start-up), and
-barrier (absorbing boundary, knock-ins via in/out parity). See the
+barrier (absorbing boundary, knock-ins via in/out parity). Interest-rate
+instruments under `HullWhiteModel` — including **Bermudan swaptions** and
+callable/puttable bonds — are covered by the
+[Hull–White short-rate PDE](#hullwhite-short-rate-pde) recipes below. See the
 [PDE design doc](../architecture/pde-design.md) for the architecture.
 
 ### Direct solver (1-D European)
@@ -399,6 +430,28 @@ recipes) if the pair is unregistered.
 
 ::: valax.pricing.pde.PDEConfig2D
 
+### Hull–White short-rate PDE
+
+Interest-rate instruments under `HullWhiteModel`, solved in the centred state
+variable \(x\) of \(r(t) = x(t) + \alpha(t)\). Recipes are registered for
+`FixedRateBond`, `CallableBond`, `PuttableBond`, `Swaption` and
+`BermudanSwaption`, and are reached through `pde_price_dispatch` like any other
+pair. See the theory note
+[Hull-White Finite Differences](../theory/hull-white-pde.md) for the
+discretisation, boundary treatment and validation.
+
+Unlike the trinomial tree, nothing here has to be concrete: schedules are
+scattered with traced indices, so the pricers compose with `eqx.filter_jit` and
+`eqx.filter_grad` directly.
+
+::: valax.pricing.pde.coefficients.hw_operator_stack
+
+::: valax.pricing.pde.grids.centred_state_grid
+
+::: valax.pricing.pde.boundary.apply_linearity_bc_1d
+
+::: valax.pricing.pde.boundary.zero_boundary
+
 ## Lattice
 
 ### CRR binomial tree
@@ -415,6 +468,13 @@ Backward induction on a Hull–White recombining trinomial tree.
 Per-step \(\alpha\) calibration matches market discount factors
 exactly. Callable price is bounded above by the equivalent straight
 bond; puttable price is bounded below.
+
+The lattice half-width \(j_{\max}\) determines array shapes, so it must be a
+concrete Python `int`. It is computed automatically from `mean_reversion`,
+which forces that parameter to be concrete — pass `j_max=` explicitly (see
+`hw_tree_j_max`) to differentiate through the tree with `eqx.filter_grad`.
+
+::: valax.pricing.lattice.hull_white_tree.hw_tree_j_max
 
 ::: valax.pricing.lattice.hull_white_tree.build_hull_white_tree
 

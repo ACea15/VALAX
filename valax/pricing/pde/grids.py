@@ -119,6 +119,43 @@ def uniform_linear_grid(
     return Grid1D(nodes=nodes, n=n)
 
 
+def centred_state_grid(
+    std_dev: Float[Array, ""],
+    *,
+    n: int,
+    half_width: float,
+) -> Grid1D:
+    """Build a uniform grid of ``n`` interior nodes on ``[-w, w]``, ``w = half_width * std_dev``.
+
+    The mesh for a **mean-reverting state variable** that starts at zero, such
+    as the centred Ornstein-Uhlenbeck factor ``x`` in the Hull-White
+    decomposition ``r(t) = x(t) + alpha(t)``. Unlike the equity log-spot grid,
+    the domain is anchored at the origin rather than at a market quote, so
+    there is nothing to detach from autodiff: the read-off always happens at
+    ``x = 0`` (a fixed coordinate), and the only differentiable dependence on
+    the model parameters enters through ``std_dev``, which sizes the domain.
+
+    Pass the state's terminal standard deviation for ``std_dev`` — for
+    Hull-White, ``sqrt(sigma^2/(2a) (1 - e^{-2aT}))`` from
+    :func:`~valax.models.hull_white.hw_short_rate_variance`. The truncation
+    error decays like the Gaussian tail beyond ``half_width`` std devs, so 6-8
+    is ample.
+
+    Endpoints are excluded (Dirichlet / ghost boundary treatment), consistent
+    with the other builders in this module.
+
+    Args:
+        std_dev: Standard deviation of the state at the horizon.
+        n: Number of interior nodes.
+        half_width: Half-width of the domain in std-dev units.
+
+    Returns:
+        A :class:`Grid1D` of ``n`` interior nodes symmetric about zero.
+    """
+    w = half_width * std_dev
+    return uniform_linear_grid(-w, w, n=n)
+
+
 def sinh_concentrated_grid(
     lo: Float[Array, ""],
     hi: Float[Array, ""],

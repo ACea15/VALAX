@@ -6,7 +6,9 @@ Maps a VALAX model onto the drift/diffusion/discount coefficients that
 covers the Black-Scholes model in log-spot space; local volatility (Dupire)
 adds a *time-dependent* 1-D operator via :func:`lv_operator_stack`; the Heston
 stochastic-volatility model adds a 2-D (ADI) operator via
-:func:`heston_operator_2d`. Further models (SLV, Hull-White) are added later.
+:func:`heston_operator_2d`; and Hull-White adds the short-rate operator stack
+:func:`hw_operator_stack`, whose *discount* coefficient is the state variable
+itself. Further models (SLV, G2++) are added later.
 """
 
 import jax
@@ -16,6 +18,7 @@ from jaxtyping import Float
 
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
+from valax.models.hull_white import HullWhiteModel, hw_alpha_average
 from valax.models.local_vol import LocalVolModel
 from valax.pricing.analytic.dupire import dupire_local_vol
 from valax.pricing.pde.grids import Grid1D, Grid2D
@@ -113,6 +116,88 @@ def lv_operator_stack(
 
     # vmap over time levels -> Operator1D with (n_time, n) bands.
     return jax.vmap(_row_operator)(times)
+
+
+def hw_operator_stack(
+    model: HullWhiteModel,
+    grid: Grid1D,
+    *,
+    expiry: Float[Array, ""],
+    n_time: int,
+) -> Operator1D:
+    r"""Build the *time-dependent* Hull-White operator stack in state space.
+
+    The solver works in the **centred state variable** ``x`` of the Hull-White
+    decomposition :math:`r(t) = x(t) + \alpha(t)` (see
+    :func:`~valax.models.hull_white.hw_alpha`), where
+
+    .. math::
+
+        dx(t) = -a\,x(t)\,dt + \sigma\,dW(t), \qquad x(0) = 0 .
+
+    Working in ``x`` rather than ``r`` is what makes the mesh tractable: the
+    drift and diffusion are then *time-independent*, the state starts exactly
+    at the origin, and the entire dependence on the initial curve is pushed
+    into the scalar shift :math:`\alpha(t)`. The backward pricing equation for
+    a value function :math:`V(x, \tau)` with :math:`\tau = T - t` is
+
+    .. math::
+
+        V_\tau = \tfrac{1}{2}\sigma^2 V_{xx} - a x\,V_x
+                 - \bigl(x + \alpha(t)\bigr) V ,
+
+    so only the **discount** coefficient varies, and it varies in *both* space
+    and time — it is the short rate itself. That is why this returns a stack:
+    the bands have shape ``(n_time, n)``, row ``m`` being the operator used at
+    backward step ``m`` (nearest expiry first), exactly the layout
+    :func:`~valax.pricing.pde.schemes.solve_backward_1d` consumes.
+
+    :math:`\alpha` is **exactly averaged** across each step rather than sampled
+    at its midpoint: backward step ``m`` spans forward time
+    ``[k dt, (k+1) dt]`` with ``k = n_time - m - 1``, and the row uses
+    :func:`~valax.models.hull_white.hw_alpha_average` over that interval. The
+    midpoint convention used by :func:`lv_operator_stack` is *not* good enough
+    here, because a log-linear discount curve has a piecewise-constant
+    instantaneous forward that jumps at each pillar; midpoint sampling stalls
+    the scheme's time convergence at a ~4e-6 bond-repricing error, while exact
+    averaging restores clean second-order behaviour and, with it, Hull-White's
+    defining exact fit to the initial curve.
+
+    Unlike the equity recipes nothing is detached from autodiff here: the grid
+    is anchored at the origin rather than at a market quote (see
+    :func:`~valax.pricing.pde.grids.centred_state_grid`), so ``a`` and
+    ``sigma`` stay fully differentiable through both the coefficients and the
+    mesh — which is what makes the PDE usable inside a calibration objective.
+
+    Args:
+        model: Hull-White model carrying ``a``, ``sigma`` and the initial curve.
+        grid: The state-variable (``x``) grid.
+        expiry: Horizon ``T`` in year fractions (``dt = T / n_time``).
+        n_time: Number of backward time steps (== number of stacked rows).
+
+    Returns:
+        An :class:`~valax.pricing.pde.operators.Operator1D` with bands of shape
+        ``(n_time, n)``.
+    """
+    a = model.mean_reversion
+    sigma = model.volatility
+    x = grid.nodes
+
+    dt = expiry / n_time
+    # Backward step m (m = 0 is nearest expiry) spans forward levels
+    # k = n_time - m - 1 to k + 1.
+    k = n_time - jnp.arange(n_time) - 1
+    alphas = hw_alpha_average(model, k * dt, (k + 1) * dt)  # (n_time,)
+
+    drift = -a * x
+    diffusion = sigma**2
+
+    def _row_operator(alpha: Float[Array, ""]) -> Operator1D:
+        return build_operator_1d(
+            grid, drift=drift, diffusion=diffusion, discount=x + alpha
+        )
+
+    return jax.vmap(_row_operator)(alphas)
 
 
 def heston_operator_2d(model: HestonModel, grid: Grid2D) -> Operator2D:

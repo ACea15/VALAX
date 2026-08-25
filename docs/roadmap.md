@@ -43,7 +43,7 @@ A snapshot of every instrument class relevant to production bank systems, with i
 | `InterestRateSwap` | Rates | `instruments/rates.py` | Analytic (replication), curve discounting |
 | `Swaption` | Rates | `instruments/rates.py` | Black-76, Bachelier |
 | `OISSwap` / `SOFRSwap` | Rates | `instruments/rates.py` | Telescoping float-leg identity + fixed-leg annuity (single-curve) |
-| `BermudanSwaption` | Rates | `instruments/rates.py` | Longstaff-Schwartz MC on LMM paths |
+| `BermudanSwaption` | Rates | `instruments/rates.py` | Hull-White PDE (exact exercise projection); Longstaff-Schwartz MC on LMM paths |
 | `FXForward` | FX | `instruments/fx.py` | Covered interest rate parity |
 | `FXVanillaOption` | FX | `instruments/fx.py` | Garman-Kohlhagen, implied vol, 3 delta conventions |
 | `FXBarrierOption` | FX | `instruments/fx.py` | Instrument defined; analytical pricing TBD |
@@ -645,7 +645,12 @@ entries plus tests.
 Each item lists the new code, the unlocked recipes, effort estimate,
 and blockers. Ordered by expected ROI.
 
-### MC-B1 — Hull-White short-rate MC paths
+### MC-B1 — Hull-White short-rate MC paths ✅ **Delivered**
+
+Shipped as `valax/pricing/mc/hull_white_paths.py` plus the four bond recipes
+below. Exercise for callable/puttable uses the analytic affine continuation
+value (exact for the bullet remainder, myopic across multiple exercise dates).
+Theory: `docs/theory/hull-white-mc.md`.
 
 **What.** A new path generator `generate_hull_white_paths(model, T, n_steps, n_paths, key)`
 producing short-rate paths plus path-wise discount factors
@@ -751,7 +756,7 @@ session.
 
 | ID | New code | Recipes added | Effort | Blocking |
 |----|----------|--------------|--------|----------|
-| MC-B1 | `generate_hull_white_paths` | 4 (bonds + callable/puttable + Bermudan alt.) | ~60 + tests | None |
+| MC-B1 ✅ | `generate_hull_white_paths` | 4 (bonds + callable/puttable + Bermudan alt.) | ~60 + tests | Delivered |
 | MC-B2 | Generic LSM lift | 2 (AmericanOption × GBM/Heston) | ~80 + tests | Minor refactor of `bermudan.py` |
 | MC-B3 | `FXGBMModel` + wrapper | 2+ (FX vanilla/barrier, foundation for quanto/TARF) | ~40 + tests | Model-design decision |
 | MC-B4 | Observation scanner + autocallable payoff | 3 (Autocallable × 3 models) | ~120 + tests | None (multi-asset unblocked) |
@@ -997,6 +1002,8 @@ New instrument types and entire asset classes.
 
 ### 3.1 Bermudan Swaptions
 
+- [x] **Hull-White PDE** with exercise as a pointwise projection on the value
+      function — no regression, so no policy error
 - [ ] **Longstaff-Schwartz (LSM)** regression for early exercise on LMM paths
 - [ ] **American Monte Carlo** with basis function selection (polynomials, neural network regressors)
 - [ ] **Lower/upper bound** estimation (Andersen-Broadie)
@@ -1005,15 +1012,28 @@ New instrument types and entire asset classes.
 
 **Approach:** Generate LMM paths (already have this). At each exercise date, regress continuation value on state variables. Use `jnp.polyval` or a small neural network for regression. The exercise boundary is differentiable for Greeks.
 
+**Status (PR-3, delivered).** Under Hull-White the exercise decision needs no
+regression at all: the tail-swap value is analytic at every node, so the PDE
+projects exactly and the *only* numerical error is in the continuation value.
+Validated against `ql.FdHullWhiteSwaptionEngine` (~2e-4 relative) and
+`ql.TreeSwaptionEngine` (~1.2e-3), plus the structural check that a
+single-exercise Bermudan reproduces the Jamshidian European.
+
 ### 3.2 Callable and Puttable Bonds
 
-- [ ] **Callable bond** pricing via backward induction on Hull-White tree/PDE
+- [x] **Callable bond** pricing via backward induction on Hull-White tree/PDE
 - [ ] **OAS (option-adjusted spread)** calculation
 - [ ] **Effective duration and convexity** via autodiff on OAS
 
 **Why:** Callable bonds are a massive market (most corporate bonds are callable). OAS is the standard risk metric.
 
 **Approach:** Requires Hull-White (Tier 2.1). Build a trinomial tree or use PDE with early exercise boundary. OAS is a shift to the discount curve — autodiff gives sensitivities.
+
+**Status (PR-3, delivered).** Both the trinomial tree and the PDE price
+callable/puttable bonds. The PDE is the more accurate of the two: it scales
+each coupon by the analytic bond price from its snapped time level to its true
+payment date, removing the O(dt) cashflow-timing error that limits the tree.
+OAS remains open.
 
 ### 3.3 FX Derivatives
 
@@ -1187,6 +1207,21 @@ and `v = v_max` a linearity row. Validated against the COS oracle (`rel < 1e-3`
 across strikes), Andersen-QE MC, and QuantLib `AnalyticHestonEngine` /
 `FdHestonVanillaEngine`. A subtle mixed-term boundary bug found during this work is
 written up in [Numerical Pitfalls](architecture/numerical-pitfalls.md).
+
+**Status (PR-3, delivered).** The 1-D substrate now also carries the
+**Hull-White short-rate PDE** (`valax/pricing/pde/hull_white.py`): fixed-rate,
+callable and puttable bonds, European swaptions, and **Bermudan swaptions**.
+Solved in the centred state `x` of `r = x + alpha(t)`, with a zero-curvature
+edge treatment (no closed-form far field exists for a callable), an exactly
+*integrated* `alpha` (midpoint sampling stalls convergence on any curve with
+pillar kinks), and a discrete-event seam on the backward sweep for coupons and
+exercise. Validated against the analytic curve price, Jamshidian, the HW tree,
+and QuantLib's FD/tree engines — see
+[Hull-White Finite Differences](theory/hull-white-pde.md). Three discretisation
+bugs surfaced and were fixed in the process — a time-reversed boundary sampling
+in *both* the 1-D and 2-D steppers, a stalled convergence from midpoint-sampling
+a kinked curve, and an O(dt) cashflow-snapping error — all written up as
+entries 2-4 of [Numerical Pitfalls](architecture/numerical-pitfalls.md).
 
 ---
 

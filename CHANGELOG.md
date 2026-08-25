@@ -12,6 +12,155 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Hull-White short-rate PDE: Bermudan swaptions and callables (roadmap PR-3)
+
+- `valax/pricing/pde/hull_white.py`: finite-difference pricing under
+  `HullWhiteModel`, registered on `pde_price_dispatch` for `FixedRateBond`,
+  `CallableBond`, `PuttableBond`, `Swaption` and **`BermudanSwaption`**. This is
+  the third independent numerical route to the model, joining the trinomial tree
+  and the exact-OU Monte Carlo.
+- **Bermudan swaptions no longer need a regression proxy.** On a backward grid
+  early exercise is a pointwise projection on the value function, and under
+  Hull-White the tail-swap exercise value is analytic at every node — so the
+  policy carries no error at all and the only numerical error is in the
+  continuation value. Previously these were reachable only via LSM on LMM paths.
+- Solved in the centred state \(x\) of \(r(t) = x(t) + \alpha(t)\): drift and
+  diffusion are then time-independent, the state starts at the origin, and the
+  read-off point is fixed (so, unlike the equity recipes, no `stop_gradient`
+  grid scaffolding is required).
+- Fully traceable: schedules are scattered with *traced* indices, so unlike the
+  trinomial tree — whose half-width \(j_{\max}\) is an array shape and forces
+  `mean_reversion` to be concrete — the PDE pricers take no concrete inputs and
+  compose with `eqx.filter_jit` / `eqx.filter_grad` directly. Sensitivities to
+  \(a\) and \(\sigma\) match central differences to `1e-8`–`1e-11`, including
+  through the exercise projection.
+- Validation: analytic curve price for option-free bonds (`8e-6`, cleanly second
+  order); Jamshidian for European swaptions (`~3e-5` relative, VALAX and
+  QuantLib); `ql.FdHullWhiteSwaptionEngine` for Bermudans (`~2e-4`) and
+  `ql.TreeSwaptionEngine` (`~1.2e-3`); the HW tree and
+  `ql.TreeCallableFixedRateBondEngine` for callables/puttables (`< 5e-3`).
+  Two exact structural checks complement these: an out-of-the-money call
+  reproduces the bullet bond to machine precision, and a single-exercise
+  Bermudan reproduces the European.
+- New substrate, all model-agnostic and reusable (G2++ will want the same
+  pieces): `pde/grids.centred_state_grid`,
+  `pde/boundary.apply_linearity_bc_1d` (zero-curvature ghost fold — a callable
+  bond has no closed-form far-field value to pin with Dirichlet data) and
+  `pde/boundary.zero_boundary`, `pde/coefficients.hw_operator_stack`, and an
+  `event_fn` seam on `solve_backward_1d` for discrete coupons and exercise.
+- `valax/models/hull_white.py`: `hw_alpha` (the exact-fit shift, now public and
+  shared with the MC path generator instead of duplicated) and
+  `hw_alpha_average`.
+- Theory: `docs/theory/hull-white-pde.md`.
+
+### Fixed — cashflow-timing error in short-rate backward induction
+
+- Snapping a coupon to the nearest time level displaces it by up to `dt/2`, an
+  `O(dt)` error that dominated everything else — `~2e-3` on a five-year bullet,
+  three orders of magnitude worse than the scheme's own error, and enough to
+  mask its second-order convergence entirely. The PDE recipes instead scale each
+  coupon by the analytic Hull-White bond price `P(t_k, t_c | x)` from its
+  snapped level to its true payment date: exact at every node, for either sign
+  of `t_c - t_k`. The trinomial tree still snaps, and is correspondingly the
+  less accurate engine (`-2.2e-3` to `+3.4e-5` on an option-free bond, depending
+  on the step count).
+- `hw_alpha` must be **integrated** across each time step, not sampled at its
+  midpoint. A log-linear discount curve has a piecewise-constant instantaneous
+  forward that jumps at every pillar, so midpoint sampling is only first-order
+  on steps straddling a pillar. The symptom was a scheme that converged cleanly
+  at second order on a flat curve but *stalled* at a `~4e-6` bond-repricing
+  error on a sloped one — a violation of Hull-White's defining exact fit.
+  `hw_alpha_average` integrates both halves in closed form (the market-forward
+  half telescopes into a discount ratio), restoring second order on flat,
+  sloped and humped curves alike.
+
+### Fixed — time-reversed boundary sampling in the PDE steppers
+
+- `solve_backward_1d` and `solve_backward_2d` sampled the Dirichlet boundary
+  callables at `(n_time - m) * dt` instead of `m * dt`. Since `lax.scan` marches
+  backward from the terminal payoff, the two are exactly mirrored, so every
+  time-dependent boundary was evaluated with the wrong discount factor — the
+  far-field value was off by `K(1 - exp(-rT))` and the residual leaked inward.
+- **This changes prices**, most visibly on narrow grids. For an ATM
+  Black-Scholes European call (`n_spot = n_time = 400`) the error against the
+  analytic price was `1.4e-1` at `spot_range=2`, `1.4e-2` at `3` and `4.5e-4` at
+  the default `4`; after the fix all widths sit at `~1e-5`, i.e. pure
+  discretisation error. The default `spot_range=4.0` masked it, which is why it
+  survived the QuantLib comparison suite.
+- Guarded by two new regression tests that fail on the old code: a
+  spatially-constant probe in `tests/test_pde/test_schemes.py` (the solution
+  must stay constant in `x` to machine precision, which only holds if the edge
+  ghosts are taken at the interior's time level), and a domain-width
+  independence check in `tests/test_pde/test_crank_nicolson.py`.
+
+### Added — Hull-White swaptions (Jamshidian) and swaption-surface calibration
+
+- `valax/pricing/analytic/hull_white_swaptions.py`: `hw_swaption_price` prices
+  European payer/receiver swaptions in closed form. Because every bond price at
+  expiry is monotone in the single state variable, the option on the coupon
+  bond decomposes *exactly* into a portfolio of zero-coupon bond options — no
+  lattice, no simulation, no numerical integration. Also exposes
+  `hw_critical_rate` and `hw_zcb_option_price`.
+- The critical rate is an `optimistix` Newton solve, so it is implicitly
+  differentiable: `jax.grad` applies the implicit function theorem to the
+  converged root rather than unrolling iterations. Autodiff sensitivities match
+  central differences to `~1e-11`.
+- `valax/calibration/hull_white.py`: `calibrate_hull_white` fits \((a, \sigma)\)
+  to a swaption surface, with `fixed_mean_reversion` for the usual desk
+  workflow of pinning `a` and fitting `sigma`. `swaption_prices_from_vols`
+  converts Black-76/Bachelier quotes to the price targets.
+- `hw_market_df` / `hw_instantaneous_forward` are now public accessors on
+  `valax/models/hull_white.py` (previously private, but needed across modules).
+- Validation: `< 1e-4` relative vs `ql.JamshidianSwaptionEngine`, and `< 5e-3`
+  vs `ql.TreeSwaptionEngine` — the latter an *independent* numerical method.
+  Synthetic round-trip recovers the generating \((a, \sigma)\) to `1e-5`.
+- Theory: `docs/theory/hull-white-swaptions.md`.
+
+### Added — Hull-White short-rate Monte Carlo (roadmap MC-B1)
+
+- `valax/pricing/mc/hull_white_paths.py`: `generate_hull_white_paths` and
+  `HullWhitePathResult`. Samples the **exact** conditional Ornstein-Uhlenbeck
+  law rather than discretising the SDE, so `r(t)` is unbiased at any step size;
+  the only discretisation error is the trapezoidal accumulation of
+  \(\int r\,dt\) into the log discount factor. Derivation in
+  `docs/theory/hull-white-mc.md`.
+- Four MC dispatcher recipes registered against `HullWhiteModel`:
+  `FixedRateBond`, `FloatingRateBond`, `CallableBond`, `PuttableBond`.
+  Callable/puttable use the analytic Hull-White affine continuation value at
+  each exercise date, which is exact for the bullet remainder and so needs no
+  Longstaff-Schwartz regression basis. Exercise indicators are sigmoid-smoothed
+  so pathwise Greeks stay well-defined.
+- `hw_tree_j_max` exposes the Hull & White (1994) lattice half-width so callers
+  can hoist the shape-determining `j_max` out of the trace and differentiate
+  through the trinomial tree with `eqx.filter_grad`.
+- `tests/test_quantlib_comparison/test_rates_pricers_ql.py`: QuantLib
+  cross-validation for swaptions (Black-76 + Bachelier, payer and receiver),
+  caps/floors, and the Hull-White callable/puttable tree.
+
+### Fixed — Callable/puttable bonds exercised one coupon too cheaply
+
+- `valax/pricing/lattice/hull_white_tree.py` compared the **cum-coupon**
+  continuation value against the call/put price. Call prices are quoted
+  *ex-coupon*: a holder called on a coupon date receives the redemption amount
+  *plus* that date's coupon. The exercise decision now precedes the coupon
+  accrual in both `callable_bond_price` and `puttable_bond_price`.
+- Impact: callable bonds were undervalued by up to one coupon (2.16 price
+  points on a 5 % 5Y par-callable). The error was invisible because the
+  QuantLib tree comparison had never executed — its fixture raised a
+  constructor `TypeError` under QuantLib >= 1.35. With both fixed, VALAX now
+  matches `ql.TreeCallableFixedRateBondEngine` to `< 5e-3` relative, and MC
+  agrees with the tree to within MC error on a single-call bond.
+
+### Fixed — Hull-White forwards collapsed to zero before the first curve pillar
+
+- `_instantaneous_forward` differentiates a `jnp.interp` of log discount
+  factors. `DiscountCurve` extrapolates flat, so a curve whose first pillar sat
+  strictly after the reference date had zero log-DF slope on the leading stub
+  and returned `f(0, t) = 0` there. `_log_df_grid` now anchors the
+  interpolation at the no-arbitrage point \(\ln P(0,0) = 0\); curves that
+  already carry a `t = 0` pillar are unaffected.
+- Two call sites had been working around this by injecting a `t = 0` pillar.
+
 ### Fixed — PDE second-order spot Greek (gamma) via curvature-carrying read-off
 
 - `valax/pricing/pde/grids.py::read_off_1d` now uses a **Catmull-Rom cubic**
