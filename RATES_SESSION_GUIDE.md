@@ -190,6 +190,57 @@ pin what exists to a reference *before* building on it.
    the skipped `test_cap_strip_on_caplet_vols_ql.py`. This is also the
    prerequisite for CMS convexity below.
 
+   ### 5·bis — state of the code, verified (read this before starting)
+
+   Checked against the source at the close of the PR-3 session, so a cold start
+   does not have to rediscover it:
+
+   - **`sabr_price(option, forward, rate, model)` takes a flat scalar `rate`
+     and a hand-passed `forward`.** No curve, no annuity. This is the whole of
+     the (c) gap — there is no curve-aware path to extend, only one to write.
+   - **`sabr_implied_vol` is Hagan lognormal only** — one function, no
+     `is_normal` / shift parameter to thread. (a) is a genuinely new expansion,
+     not a flag.
+   - **`SABRVolSurface` is strike × expiry with no tenor axis.** It therefore
+     *cannot* become a swaption cube by extension — (b) needs a new object
+     (expiry × tenor × strike) rather than a field added to the existing one.
+     `SABRVolSurface` also feeds Dupire/SLV via `total_variance`, so it has
+     equity consumers: don't repurpose it, leave it alone.
+   - **`bachelier.py` has `bachelier_price` but no implied-vol inverter.**
+     A `bachelier_implied_vol` is a prerequisite for any lognormal↔normal
+     quote conversion, and is not currently anywhere in the repo.
+   - **`generate_sabr_paths` already exists** (`valax/pricing/mc/sabr_paths.py`)
+     — the natural *internal* oracle for the normal expansion, in the
+     triangulation style that has now caught five bugs in this codebase.
+
+   **Suggested first slice (5a), with its oracles.** Self-contained and fully
+   validatable before any surface plumbing exists:
+
+   - Pin the **exact degenerate reductions** first — these hold to machine
+     precision and need no external reference: `β=0, ν→0` ⟹ normal vol `= α`
+     exactly (arithmetic Brownian motion); `β=1, ν→0` ⟹ lognormal vol `= α`
+     exactly.
+   - Then the **MC cross-check**: both expansions must land within MC error of
+     `generate_sabr_paths` on the same option.
+   - Then the **capability test** that is the point of the exercise: negative
+     and zero strikes must price finitely, where the lognormal path cannot run
+     at all.
+   - ⚠️ **Trap:** the lognormal and normal Hagan expansions are *different*
+     approximations to the same SDE and agree only to `O(ν²T)`. A consistency
+     test must assert that the ATM gap **scales** correctly, *not* that the two
+     are equal. An equality assertion here is exactly the kind that gets
+     loosened until it means nothing.
+   - ⚠️ **Check before assuming:** QuantLib 1.41's API for normal / shifted
+     SABR smile sections has *not* been verified. `ql.sabrVolatility` is the
+     lognormal one. Confirm what exists before writing a QL test around it —
+     the reductions plus the MC carry the validation regardless.
+
+   **Also relevant from workstream 3:** `optimistix` 0.1.0's
+   Levenberg-Marquardt raises `List arity mismatch` when the residual closes
+   over a sequence of instrument pytrees. Any new calibrator (cube stripping,
+   per-expiry fits) will hit this; `calibrate_hull_white` works around it with
+   line-searched BFGS.
+
 6. **G2++ / HW-2F (multi-factor Gaussian short rate)** *(medium readiness — the
    whole affine/Markovian toolchain from HW-1F generalizes)*. Adds a second
    stochastic factor so tenor rates **decorrelate**, unlocking instruments HW-1F
