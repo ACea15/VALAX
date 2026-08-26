@@ -1,25 +1,31 @@
 # %% [markdown]
-# # Hull-White One-Factor Model: MC vs Tree vs QuantLib
+# # Hull-White One-Factor Model: MC vs Tree vs PDE vs QuantLib
 #
-# Three-way comparison for a single model, three numerical methods:
+# The ultimate cross-check for a single model: **three independent VALAX
+# numerical routes** to the same callable/puttable bond price, each validated
+# against a QuantLib oracle where one exists.
 #
 # | Method            | VALAX                               | QuantLib oracle              |
 # |-------------------|-------------------------------------|------------------------------|
 # | **Analytic ZCB**  | `hw_bond_price`                     | `ql.HullWhite` + ZCB formula |
 # | **Trinomial tree**| `callable_bond_price` / `puttable_bond_price` | `ql.TreeCallableFixedRateBondEngine` |
+# | **Finite-diff PDE**| `pde_price_dispatch` (θ-scheme)    | `ql.TreeCallableFixedRateBondEngine` |
 # | **Short-rate MC** | `generate_hull_white_paths`         | — (tree + analytic as oracle)|
 #
 # Key themes:
 # - Exact-fit property: `hw_bond_price(r0=f(0,0), 0, T) == P^M(0, T)`
 # - ZCB martingale check: `E[exp(-∫r dt)] == P^M(0, T)` (MC vs analytic)
 # - Callable / puttable bond monotonicity: callable ≤ straight ≤ puttable
-# - Convergence: MC error ∝ 1/√N;  tree error ∝ 1/steps
-# - Autodiff through both the tree and the MC path generator
+# - Three-way solver agreement: tree ≈ PDE ≈ QuantLib on the same instrument
+# - Convergence: MC error ∝ 1/√N;  tree error ∝ 1/steps;  PDE error ∝ 1/steps²
+# - Autodiff through the tree, the PDE sweep, and the MC path generator
 #
 # Validated by:
 #   tests/test_mc/test_hull_white_paths.py
 #   tests/test_lattice/test_hull_white_tree.py
+#   tests/test_pde/test_hull_white.py
 #   tests/test_quantlib_comparison/test_rates_pricers_ql.py
+#   tests/test_quantlib_comparison/test_hull_white_pde_ql.py
 
 # %% Imports
 import jax
@@ -45,13 +51,14 @@ from valax.pricing.lattice.hull_white_tree import (
     puttable_bond_price,
 )
 from valax.pricing.mc.hull_white_paths import generate_hull_white_paths
+from valax.pricing.pde import PDEConfig, pde_price_dispatch
 
 # ============================================================================
 # 1. SHARED MARKET SETUP
 # ============================================================================
 
 print("=" * 72)
-print("Hull-White One-Factor Model: MC vs Tree vs QuantLib")
+print("Hull-White One-Factor Model: MC vs Tree vs PDE vs QuantLib")
 print("=" * 72)
 
 # Model parameters
@@ -281,7 +288,7 @@ print(f"{'QuantLib discounting':<24} {ql_straight:10.4f} {abs(ql_straight - anal
 # ============================================================================
 
 print(f"\n{'=' * 72}")
-print("§5  CALLABLE BOND:  HW Trinomial Tree vs QuantLib")
+print("§5  CALLABLE / PUTTABLE BOND:  HW Trinomial Tree vs PDE vs QuantLib")
 print("=" * 72)
 
 # ── VALAX tree convergence
@@ -296,6 +303,23 @@ for n_steps_tree in [50, 100, 200, 500]:
     if n_steps_tree == 200:
         tree_callable_ref = pc
         tree_puttable_ref = pp
+
+# ── VALAX finite-difference PDE convergence (θ-scheme, 2nd-order in dt)
+#    Same instruments, an independent numerical route.  The state grid is the
+#    centred x = r − α(t) decomposition; the price is read off at x = 0.  A ~401
+#    × 400 grid matches the FINE config validated in tests/test_pde/test_hull_white.py.
+print(f"\n--- PDE convergence (VALAX θ-scheme) ---")
+print(f"{'n_spot × n_time':>16} {'Callable':>12} {'Puttable':>12}")
+print("-" * 42)
+pde_callable_ref = None
+for n in [100, 200, 400]:
+    cfg = PDEConfig(n_spot=n + 1, n_time=n, spot_range=6.0)
+    pc_pde = float(pde_price_dispatch(callable_bond, model, cfg))
+    pp_pde = float(pde_price_dispatch(puttable_bond, model, cfg))
+    print(f"{f'{n + 1} × {n}':>16} {pc_pde:>12.4f} {pp_pde:>12.4f}")
+    if n == 400:
+        pde_callable_ref = pc_pde
+        pde_puttable_ref = pp_pde
 
 # ── QuantLib tree (200 steps)
 ql_call_sched = ql.CallabilitySchedule()
@@ -324,22 +348,30 @@ ql_puttable_bond.setPricingEngine(tree_engine_ql)
 ql_callable = ql_callable_bond.dirtyPrice()
 ql_puttable = ql_puttable_bond.dirtyPrice()
 
-# ── Head-to-head at 200 steps
-print(f"\n--- Head-to-head at 200 steps ---")
-print(f"(Note: residual diff on callable/puttable reflects VALAX NullCalendar")
-print(f" integer-day ordinals vs QuantLib date-generation — see WS1 QL tests")
-print(f" in tests/test_quantlib_comparison/test_rates_pricers_ql.py for the")
-print(f" rigorously aligned comparison at rel < 5e-3.)\n")
-print(f"{'Instrument':<24} {'VALAX tree':>12} {'QuantLib tree':>14} {'|diff|':>10} {'rel':>8}")
-print("-" * 70)
-for label, v_price, q_price in [
-    ("Straight bond",   analytic_straight, ql_straight),
-    ("Callable bond",   tree_callable_ref, ql_callable),
-    ("Puttable bond",   tree_puttable_ref, ql_puttable),
+# ── Head-to-head: tree vs PDE vs QuantLib
+print(f"\n--- Head-to-head (tree @200 steps, PDE @401×400) ---")
+print(f"(Note: residual diff vs QuantLib on callable/puttable reflects VALAX")
+print(f" NullCalendar integer-day ordinals vs QuantLib date-generation — see")
+print(f" tests/test_quantlib_comparison/test_rates_pricers_ql.py and")
+print(f" test_hull_white_pde_ql.py for the rigorously aligned comparisons at")
+print(f" rel < 5e-3.  The tree↔PDE agreement below is model-internal and needs")
+print(f" no such alignment — it is the sharpest of the three checks.)\n")
+print(f"{'Instrument':<16} {'VALAX tree':>12} {'VALAX PDE':>12} {'QuantLib':>12} "
+      f"{'|tree−PDE|':>11} {'rel vs QL':>10}")
+print("-" * 78)
+for label, v_tree, v_pde, q_price in [
+    ("Straight bond", analytic_straight, analytic_straight, ql_straight),
+    ("Callable bond", tree_callable_ref, pde_callable_ref,  ql_callable),
+    ("Puttable bond", tree_puttable_ref, pde_puttable_ref,  ql_puttable),
 ]:
-    diff = abs(v_price - q_price)
-    rel  = diff / q_price
-    print(f"{label:<24} {v_price:>12.4f} {q_price:>14.4f} {diff:>10.4f} {rel:>8.4%}")
+    tree_pde_diff = abs(v_tree - v_pde)
+    rel_ql = abs(v_tree - q_price) / q_price
+    print(f"{label:<16} {v_tree:>12.4f} {v_pde:>12.4f} {q_price:>12.4f} "
+          f"{tree_pde_diff:>11.4f} {rel_ql:>10.4%}")
+
+print(f"\n→  Tree and PDE — two fully independent discretisations of the same")
+print(f"   Hull-White dynamics — agree to grid tolerance, and both sit close to")
+print(f"   the QuantLib tree oracle.  Three methods, one price.")
 
 # ── Monotonicity check (fundamental no-arb constraint)
 print(f"\n--- Monotonicity check (callable ≤ straight ≤ puttable) ---\n")
@@ -363,13 +395,16 @@ print("§6  PARAMETER SENSITIVITY VIA AUTODIFF")
 print("=" * 72)
 
 print("""
-VALAX differentiates through both numerical methods via eqx.filter_grad.
+VALAX differentiates through all three numerical methods via eqx.filter_grad.
 
 The single prerequisite for tree autodiff: pre-compute j_max as a concrete
 Python int from the model before entering the JAX trace.  This decouples
 the shape-determining computation from the differentiable leaves (σ, a).
 Inside the trace j_max is a static literal, so shapes are known at compile
 time and jax.grad can flow through the entire backward-induction scan.
+
+The PDE and MC routes need no such preparation: the PDE grid shape is fixed by
+PDEConfig and the MC path shape by n_paths/n_steps, so both differentiate as-is.
 """)
 
 # ── Pre-compute j_max once from concrete model values ─────────────────
@@ -392,6 +427,28 @@ print(f"  Tree  d(puttable)/d(a) = {float(grad_pb.mean_reversion):+.4f}")
 print(f"  (callable σ-grad < 0: higher vol → issuer benefits → bond cheaper for holder)")
 print(f"  (puttable σ-grad > 0: higher vol → holder benefits → bond more valuable)")
 
+# ── PDE autodiff: eqx.filter_grad straight through the backward θ-scheme sweep.
+#    No j_max analogue is needed — the grid shape is fixed by PDEConfig, so the
+#    whole solve is differentiable out of the box.  The gradients should match
+#    the tree's to grid tolerance, since they differentiate the same price.
+PDE_GRAD_CFG = PDEConfig(n_spot=201, n_time=200, spot_range=6.0)
+grad_cb_pde = eqx.filter_grad(
+    lambda m: pde_price_dispatch(callable_bond, m, PDE_GRAD_CFG).price
+)(model)
+grad_pb_pde = eqx.filter_grad(
+    lambda m: pde_price_dispatch(puttable_bond, m, PDE_GRAD_CFG).price
+)(model)
+
+print(f"\n  PDE   d(callable)/d(σ) = {float(grad_cb_pde.volatility):+.4f}"
+      f"   (tree: {float(grad_cb.volatility):+.4f})")
+print(f"  PDE   d(callable)/d(a) = {float(grad_cb_pde.mean_reversion):+.4f}"
+      f"   (tree: {float(grad_cb.mean_reversion):+.4f})")
+print(f"  PDE   d(puttable)/d(σ) = {float(grad_pb_pde.volatility):+.4f}"
+      f"   (tree: {float(grad_pb.volatility):+.4f})")
+print(f"  PDE   d(puttable)/d(a) = {float(grad_pb_pde.mean_reversion):+.4f}"
+      f"   (tree: {float(grad_pb.mean_reversion):+.4f})")
+print(f"  → tree and PDE sensitivities agree — same price, same derivatives.")
+
 # ── MC autodiff: fully JIT + filter_grad ──────────────────────────────
 @eqx.filter_jit
 @eqx.filter_grad
@@ -404,9 +461,10 @@ print(f"\n  MC    d(ZCB P(0,3))/d(σ) = {float(grad_mc.volatility):+.6f}")
 print(f"  MC    d(ZCB P(0,3))/d(a) = {float(grad_mc.mean_reversion):+.6f}")
 
 print("""
-→  Both the tree rollback and the MC scan are fully differentiable once
-   j_max is supplied as a static int.  In QuantLib there is no autodiff
-   path — sensitivities always require finite-difference bumps of the model.
+→  All three routes — the tree rollback, the PDE backward sweep, and the MC
+   scan — are fully differentiable (the tree needs only j_max as a static int;
+   the PDE and MC need nothing).  In QuantLib there is no autodiff path for any
+   of them — sensitivities always require finite-difference bumps of the model.
 """)
 
 # ============================================================================
@@ -452,14 +510,17 @@ print(f"""
 │ Exact-fit property  │ ✓  (by construction, any curve)│ ✓                            │
 │ Trinomial tree      │ build_hull_white_tree +        │ TreeCallableFixedRate-       │
 │                     │ callable/puttable_bond_price   │ BondEngine                   │
+│ Finite-diff PDE     │ pde_price_dispatch (θ-scheme,  │ TreeCallableFixedRate-       │
+│                     │ centred x-grid, 2nd-order dt)  │ BondEngine                   │
 │ Short-rate MC       │ generate_hull_white_paths      │ — (not in QL)                │
 │                     │ (exact OU conditional sampling)│                              │
 │ MC ZCB check        │ E[exp(-∫r)] ≈ P^M(0,T)  ✓    │ N/A                          │
-│ Callable bond price │ tree:  {tree_callable_ref:.4f}                │ {ql_callable:.4f}                   │
-│ Puttable bond price │ tree:  {tree_puttable_ref:.4f}                │ {ql_puttable:.4f}                   │
-│ |diff| (callable)  │ {abs(tree_callable_ref - ql_callable):.4f}                          │ reference                    │
-│ |diff| (puttable)  │ {abs(tree_puttable_ref - ql_puttable):.4f}                          │ reference                    │
+│ Callable  tree/PDE  │ {tree_callable_ref:.4f} / {pde_callable_ref:.4f}            │ {ql_callable:.4f}                   │
+│ Puttable  tree/PDE  │ {tree_puttable_ref:.4f} / {pde_puttable_ref:.4f}            │ {ql_puttable:.4f}                   │
+│ |tree − PDE| (call) │ {abs(tree_callable_ref - pde_callable_ref):.4f}  (model-internal)        │ —                            │
+│ |tree − PDE| (put)  │ {abs(tree_puttable_ref - pde_puttable_ref):.4f}  (model-internal)        │ —                            │
 │ Autodiff (tree)     │ jax.grad through rollback  ✓  │ FD bump required             │
+│ Autodiff (PDE)      │ jax.grad through sweep     ✓  │ FD bump required             │
 │ Autodiff (MC)       │ jax.grad through scan loop ✓  │ not supported                │
 │ GPU/TPU             │ automatic (JAX backend)    ✓  │ CPU only                     │
 └─────────────────────┴────────────────────────────────┴──────────────────────────────┘

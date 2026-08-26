@@ -1,3 +1,41 @@
+# Lattice Methods
+
+VALAX provides two recombining-lattice pricing engines: a Cox-Ross-Rubinstein
+(CRR) binomial tree for equity vanillas, and a Hull-White trinomial tree for
+short-rate bonds with embedded optionality.
+
+## Coverage matrix
+
+| Instrument | Model | Dimension | Scheme | Exercise | Cross-checked against |
+|---|---|---|---|---|---|
+| `EuropeanOption` | `BlackScholesModel` | 1-D | CRR binomial | European | analytic BS |
+| `EuropeanOption` | `BlackScholesModel` | 1-D | CRR binomial | American | PDE (`AmericanOption`, CN + penalty) |
+| `CallableBond` | `HullWhiteModel` | 1-D `r` | trinomial | Bermudan (call dates) | PDE / MC |
+| `PuttableBond` | `HullWhiteModel` | 1-D `r` | trinomial | Bermudan (put dates) | PDE / MC |
+
+## When to use a tree
+
+The lattice engine is deliberately narrower than the [PDE](pde.md) — it carries
+no local-vol/stochastic-vol models, no barriers or digitals, and no 2-D grids.
+Reach for a tree when its specific strengths matter:
+
+- **Lightweight single-asset early exercise** — a CRR tree is one self-contained
+  backward induction with no grid/operator/boundary/scheme machinery, making it
+  the low-overhead route to American vanillas on a single underlying.
+- **Independent cross-validation oracle** — a recombining tree is a
+  *structurally different* numerical method from finite differences, so it
+  catches discretisation bugs a second FD scheme would share. The PDE
+  American-option and Hull-White callable/puttable recipes are validated against
+  these trees.
+- **No far-field boundary to model** — trees need no artificial truncation of
+  the state space, removing one error source (relevant for the short-rate tree
+  below, whose callable payoff has no closed-form far field).
+
+For breadth — LocalVol/Heston, barriers, digitals, 2-D ADI, Bermudan swaptions,
+and cleaner Greeks near kinks/barriers — prefer the [PDE](pde.md).
+
+---
+
 # Binomial Trees
 
 VALAX implements the Cox-Ross-Rubinstein (CRR) binomial tree for European and American option pricing.
