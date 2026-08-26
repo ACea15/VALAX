@@ -166,7 +166,94 @@ pin what exists to a reference *before* building on it.
    pricers jit and differentiate as-is — which matters for putting a Bermudan
    inside a calibration objective.
 
-**→ Next up: workstream 5 (SABR ↔ multi-curve seam), then 6 (G2++).**
+**→ Next up: OAS (small, closes the callable-bond story), then workstream 5 (SABR ↔ multi-curve seam), then 6 (G2++).**
+
+---
+
+### 3b. OAS / Z-spread for callable and puttable bonds *(small, ~1 day)*
+
+**What it is.** The option-adjusted spread (OAS) is the constant parallel shift
+`s` on the model's discount curve such that the model price equals the market
+dirty price. For a plain bond it collapses to the Z-spread (no option to adjust
+for); for a callable bond it isolates the pure credit/liquidity component by
+stripping out the call's value.
+
+**Why now.** The PDE callable pricer is now differentiable with no concrete
+inputs — `jax.grad` flows through the exercise projection directly. That's what
+makes OAS cheap: it's a one-parameter root-find whose sensitivities come for
+free. None of that would have been possible before PR-3.
+
+**Location.** `valax/risk/oas.py`. It's a risk metric, sits next to
+`shocks.py`, and borrows `parallel_shift` directly from there.
+
+**The design insight that makes this clean.** Under Hull-White, a parallel shift
+sends every pillar zero rate `r_i → r_i + s`, and since `−s·t` is exactly
+linear the shift holds at *every* continuous time `t`:
+
+```
+f^M(0,t) → f^M(0,t) + s   =>   alpha(t) → alpha(t) + s
+```
+
+The convexity term of `alpha` (which depends only on `a`, `σ`) is untouched.
+The PDE therefore sees `r = x + alpha(t) + s` — a pure constant shift to the
+discount coefficient, with the x-dynamics completely unchanged. The two
+conventional definitions of OAS (shift discounting only vs re-fit the whole
+model) **coincide exactly** under HW + parallel shift. Worth asserting as a
+unit test: `hw_alpha(shifted_model, t) − hw_alpha(original, t) == s` to machine
+precision.
+
+**Implementation.** ~80 lines. Root-find `s` with `optimistix.Newton`, passing
+`parallel_shift(model.initial_curve, s)` into a fresh `HullWhiteModel` at each
+step. Implicitly differentiable, so `jax.grad` on the solved `s` gives
+effective duration and convexity automatically without unrolling iterations.
+
+```python
+# sketch
+def callable_bond_oas(bond, model, market_price, config):
+    def residual(s, _):
+        shifted = HullWhiteModel(..., initial_curve=parallel_shift(curve, s))
+        return pde_price_dispatch(bond, shifted, config).price - market_price
+    return optx.root_find(residual, optx.Newton(...), x0=jnp.zeros(()))
+```
+
+**Tests — in order, each acting as oracle for the next.**
+
+1. **`hw_alpha` shift identity** — assert `hw_alpha_average(shifted, t0, t1) −
+   hw_alpha_average(original, t0, t1) == s` to `1e-14`. Free, exact, catches any
+   mistake in how the shift is threaded into the model.
+2. **Round-trip to zero** — price the bond with the model; feed that back as
+   "market price"; recover OAS = 0 to solver tolerance (`< 1e-10`).
+3. **Option-free bond: OAS ≡ Z-spread exactly.** Compute Z-spread through
+   `fixed_rate_bond_price` (completely separate code path), compare to OAS from
+   the PDE. Exact equality to solver tolerance — not a tolerance-band, because
+   there's genuinely no option component to adjust for.
+4. **Z-spread > OAS for a callable.** The call is valuable to the issuer, so
+   z-spread overestimates the credit/liquidity component. Model-free directional
+   invariant; any sign flip is a bug.
+5. **Effective duration(callable) < duration(bullet)** — the call truncates the
+   price upside, compressing duration. Another directional invariant.
+6. **Negative effective convexity near the call boundary.** This is the money
+   shot — the entire economic point of the callable-bond story, and nothing but
+   a real model reproduces it. If convexity is positive everywhere, something is
+   wrong upstream. Check via `jax.grad(jax.grad(oas_price_fn))(spread)`;
+   sanity-check the value against central differences (test device only, per
+   `AGENTS.md`).
+7. **QuantLib `CallableFixedRateBond.OAS(...)` comparison** — this is the
+   external oracle. ⚠️ **Compounding-convention trap**: QL's OAS is quoted on a
+   *compounded* convention (takes `frequency` and `compounding` args), while our
+   `parallel_shift` is continuously compounded. Convert explicitly with
+   `log(1 + s/freq) * freq ≈ s` for small `s`, or just pick a regime where the
+   difference is sub-bp and document it. Confusing the two would produce a
+   plausible-looking ~5bp systematic error that's easy to mistake for model
+   difference.
+
+**Engine consistency note.** `dP/ds ≈ −Duration × P ≈ −4.5 × 95 ≈ −430` per
+unit spread on a 5Y bond. The ~1e-3 price gap between the tree and PDE engines
+(set by the tree's coupon-snapping error) maps to **< 0.05bp of OAS**. Engine
+choice is irrelevant for OAS — use the PDE, it's faster to differentiate and
+more accurate.
+
+---
 
 5. **SABR ↔ multi-curve integration seam** *(high value, medium readiness — both
    halves already exist)*. Marry the mature-but-disjoint multi-curve framework
