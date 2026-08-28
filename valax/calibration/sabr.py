@@ -1,5 +1,7 @@
 """SABR model calibration to a volatility smile."""
 
+from collections.abc import Callable
+
 import jax.numpy as jnp
 import equinox as eqx
 import optimistix
@@ -23,10 +25,20 @@ def _default_sabr_guess(
     forward: Float[Array, ""],
     market_vols: Float[Array, " n"],
     beta: Float[Array, ""],
+    is_normal: bool = False,
 ) -> SABRModel:
-    """Heuristic initial guess for SABR calibration."""
+    """Heuristic initial guess for SABR calibration.
+
+    The alpha seed inverts the leading-order ATM backbone in the relevant
+    quoting convention: lognormal ``sigma_B ~ alpha * F^(beta-1)`` gives
+    ``alpha ~ sigma_B * F^(1-beta)``, whereas normal ``sigma_N ~ alpha * F^beta``
+    gives ``alpha ~ sigma_N * F^(-beta)``.
+    """
     atm_vol = jnp.median(market_vols)
-    alpha = atm_vol * forward ** (1.0 - beta)
+    if is_normal:
+        alpha = atm_vol * forward ** (-beta)
+    else:
+        alpha = atm_vol * forward ** (1.0 - beta)
     return SABRModel(
         alpha=alpha,
         beta=beta,
@@ -45,6 +57,8 @@ def calibrate_sabr(
     weights: Float[Array, " n"] | None = None,
     solver: str = "levenberg_marquardt",
     max_steps: int = 256,
+    vol_fn: Callable = sabr_implied_vol,
+    is_normal: bool = False,
 ) -> tuple[SABRModel, optimistix.Solution]:
     """Calibrate SABR parameters to a volatility smile.
 
@@ -60,6 +74,12 @@ def calibrate_sabr(
         solver: ``"levenberg_marquardt"`` (default), ``"bfgs"``, or
             ``"optax_adam"``.
         max_steps: Maximum optimizer iterations.
+        vol_fn: SABR implied-vol function used to build residuals. Defaults to
+            the lognormal :func:`sabr_implied_vol`; pass
+            :func:`sabr_normal_implied_vol` (optionally pre-bound with a shift
+            via ``functools.partial``) to calibrate against normal quotes.
+        is_normal: Whether ``vol_fn`` is a normal-vol expansion. Only affects
+            the default initial-guess backbone (see :func:`_default_sabr_guess`).
 
     Returns:
         (fitted_model, solution) — the fitted SABRModel and the
@@ -68,7 +88,9 @@ def calibrate_sabr(
     beta = fixed_beta if fixed_beta is not None else jnp.array(0.5)
 
     if initial_guess is None:
-        initial_guess = _default_sabr_guess(forward, market_vols, beta)
+        initial_guess = _default_sabr_guess(
+            forward, market_vols, beta, is_normal=is_normal
+        )
 
     if fixed_beta is not None:
         initial_guess = eqx.tree_at(
@@ -89,7 +111,7 @@ def calibrate_sabr(
         weights = jnp.ones_like(strikes)
 
     y0 = model_to_unconstrained(initial_guess, transforms)
-    args = (transforms, initial_guess, sabr_implied_vol, strikes,
+    args = (transforms, initial_guess, vol_fn, strikes,
             market_vols, forward, expiry, weights)
 
     if solver == "levenberg_marquardt":

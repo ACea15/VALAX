@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from valax.instruments.options import EuropeanOption
-from valax.pricing.analytic.bachelier import bachelier_price
+from valax.pricing.analytic.bachelier import bachelier_price, bachelier_implied_vol
 from valax.greeks.autodiff import greek
 
 
@@ -82,3 +82,55 @@ class TestBachelierGreeks:
         option, fwd, vol, rate = atm_call
         g = greek(bachelier_price, "gamma", option, fwd, vol, rate)
         assert float(g) > 0.0
+
+
+class TestBachelierImpliedVol:
+    """Invert bachelier_price for the normal (absolute) volatility."""
+
+    @pytest.mark.parametrize("strike", [80.0, 100.0, 120.0])
+    @pytest.mark.parametrize("is_call", [True, False])
+    def test_round_trip(self, strike, is_call):
+        """price -> vol -> price recovers the input vol to tight tolerance."""
+        option = EuropeanOption(
+            strike=jnp.array(strike), expiry=jnp.array(1.5), is_call=is_call
+        )
+        fwd = jnp.array(100.0)
+        rate = jnp.array(0.02)
+        true_vol = jnp.array(18.0)  # normal (absolute) vol
+        price = bachelier_price(option, fwd, true_vol, rate)
+        iv = bachelier_implied_vol(option, fwd, price, rate)
+        assert abs(float(iv) - float(true_vol)) < 1e-8
+
+    def test_round_trip_negative_forward(self):
+        """Normal model admits negative forwards/strikes (rates use case)."""
+        option = EuropeanOption(
+            strike=jnp.array(-0.005), expiry=jnp.array(2.0), is_call=True
+        )
+        fwd = jnp.array(-0.002)
+        rate = jnp.array(0.01)
+        true_vol = jnp.array(0.008)
+        price = bachelier_price(option, fwd, true_vol, rate)
+        iv = bachelier_implied_vol(option, fwd, price, rate)
+        assert abs(float(iv) - float(true_vol)) < 1e-8
+
+    def test_jit_compiles(self):
+        option = EuropeanOption(
+            strike=jnp.array(100.0), expiry=jnp.array(1.0), is_call=True
+        )
+        fwd, rate, true_vol = jnp.array(100.0), jnp.array(0.02), jnp.array(20.0)
+        price = bachelier_price(option, fwd, true_vol, rate)
+        iv = jax.jit(bachelier_implied_vol)(option, fwd, price, rate)
+        assert jnp.isfinite(iv)
+
+    def test_vega_via_implicit_diff(self):
+        """d(price)/d(vol) inverted: d(vol)/d(price) = 1/vega > 0, finite."""
+        option = EuropeanOption(
+            strike=jnp.array(105.0), expiry=jnp.array(1.0), is_call=True
+        )
+        fwd, rate, true_vol = jnp.array(100.0), jnp.array(0.02), jnp.array(20.0)
+        price = bachelier_price(option, fwd, true_vol, rate)
+        dvol_dprice = jax.grad(
+            lambda p: bachelier_implied_vol(option, fwd, p, rate)
+        )(price)
+        assert float(dvol_dprice) > 0.0
+        assert jnp.isfinite(dvol_dprice)

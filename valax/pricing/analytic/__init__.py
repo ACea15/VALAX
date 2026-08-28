@@ -2,7 +2,7 @@
 
 from valax.pricing.analytic.black_scholes import black_scholes_price
 from valax.pricing.analytic.black76 import black76_price
-from valax.pricing.analytic.bachelier import bachelier_price
+from valax.pricing.analytic.bachelier import bachelier_price, bachelier_implied_vol
 from valax.pricing.analytic.bonds import (
     zero_coupon_bond_price,
     fixed_rate_bond_price,
@@ -30,7 +30,12 @@ from valax.pricing.analytic.hull_white_swaptions import (
     hw_zcb_option_price,
 )
 from valax.pricing.analytic.digital import digital_option_price
-from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_price
+from valax.pricing.analytic.sabr import (
+    sabr_implied_vol,
+    sabr_price,
+    sabr_normal_implied_vol,
+    sabr_price_bachelier,
+)
 from valax.pricing.analytic.heston import heston_cos_price
 from valax.pricing.analytic.dupire import (
     dupire_local_vol,
@@ -90,4 +95,16 @@ from valax.pricing.analytic.graph_pricing import (
     cms_swap_price_from_graph,
     cms_cap_floor_price_black76_from_graph,
     range_accrual_price_black76_from_graph,
+)
+
+# Curve-aware, smile-aware rates pricers (vol-source entry points).
+# Imported last: it pulls in valax.surfaces.constant, and by this point every
+# analytic submodule the surfaces package depends on is already loaded.
+from valax.pricing.analytic.rates_smile import (
+    swaption_price,
+    caplet_price,
+    cap_price,
+    swaption_price_from_graph,
+    caplet_price_from_graph,
+    cap_price_from_graph,
 )

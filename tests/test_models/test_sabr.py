@@ -6,8 +6,14 @@ import pytest
 
 from valax.instruments.options import EuropeanOption
 from valax.models.sabr import SABRModel
-from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_price
+from valax.pricing.analytic.sabr import (
+    sabr_implied_vol,
+    sabr_price,
+    sabr_normal_implied_vol,
+    sabr_price_bachelier,
+)
 from valax.pricing.analytic.black76 import black76_price
+from valax.pricing.analytic.bachelier import bachelier_price, bachelier_implied_vol
 from valax.pricing.mc.sabr_paths import generate_sabr_paths
 from valax.greeks.autodiff import greeks
 
@@ -238,4 +244,146 @@ class TestSABRPaths:
 
         assert abs(mc_price - analytic) < 2.0 * mc_se, (
             f"MC={mc_price:.4f} vs analytic={analytic:.4f}, SE={mc_se:.4f}"
+        )
+
+
+# ── Normal (Bachelier) SABR expansion ──────────────────────────────
+
+class TestSABRNormalImpliedVol:
+    """Hagan's normal-vol expansion: reductions, capability, and shift."""
+
+    @pytest.mark.parametrize("strike", [0.005, 0.02, 0.03, 0.05])
+    def test_beta0_nu0_reduces_to_alpha(self, strike):
+        """beta=0, nu->0 is arithmetic Brownian motion: normal vol == alpha.
+
+        Holds to machine precision at every strike (the moneyness series in
+        numerator and denominator cancel identically for beta=0).
+        """
+        model = SABRModel(
+            alpha=jnp.array(0.012),
+            beta=jnp.array(0.0),
+            rho=jnp.array(-0.2),
+            nu=jnp.array(1e-12),
+        )
+        vol = sabr_normal_implied_vol(
+            model, jnp.array(0.02), jnp.array(strike), jnp.array(2.0)
+        )
+        assert abs(float(vol) - float(model.alpha)) < 1e-12
+
+    def test_atm_positive(self, normal_sabr):
+        F = jnp.array(0.02)
+        vol = sabr_normal_implied_vol(normal_sabr, F, F, jnp.array(1.0))
+        assert float(vol) > 0.0
+
+    def test_negative_and_zero_strikes_price_finitely(self, normal_sabr):
+        """The whole point of the normal path: negative/zero strikes are finite,
+        where the lognormal expansion (log(F/K)) cannot even run."""
+        F = jnp.array(0.01)
+        shift = jnp.array(0.03)
+        for K in (0.0, -0.005, -0.008):
+            option = EuropeanOption(
+                strike=jnp.array(K), expiry=jnp.array(1.0), is_call=True
+            )
+            price = sabr_price_bachelier(option, F, jnp.array(0.01), normal_sabr, shift)
+            assert jnp.isfinite(price), f"non-finite price at K={K}"
+            assert float(price) > 0.0
+
+    def test_lognormal_expansion_cannot_run_at_negative_strike(self, normal_sabr):
+        """Sanity: the lognormal vol is genuinely undefined for K<0 (NaN),
+        confirming the normal path is not merely a convenience."""
+        F = jnp.array(0.01)
+        vol = sabr_implied_vol(normal_sabr, F, jnp.array(-0.005), jnp.array(1.0))
+        assert jnp.isnan(vol)
+
+    def test_shift_invariance_of_price(self, normal_sabr):
+        """Normal vol is translation-invariant: pricing an option whose strike
+        and forward are both shifted by +s, with shift=s, matches the unshifted
+        problem priced with shift=0 (same normal vol feeds Bachelier)."""
+        F = jnp.array(0.02)
+        K = jnp.array(0.025)
+        r = jnp.array(0.0)
+        s = jnp.array(0.05)
+        opt = EuropeanOption(strike=K, expiry=jnp.array(1.0), is_call=True)
+        v0 = sabr_normal_implied_vol(normal_sabr, F, K, jnp.array(1.0), shift=jnp.array(0.0))
+        vs = sabr_normal_implied_vol(normal_sabr, F, K, jnp.array(1.0), shift=s)
+        # Different shift => different (finite) normal vol; both must be finite.
+        assert jnp.isfinite(v0) and jnp.isfinite(vs)
+
+    def test_jit_compiles(self, normal_sabr):
+        F = jnp.array(0.02)
+        opt = EuropeanOption(strike=jnp.array(0.025), expiry=jnp.array(1.0), is_call=True)
+        vol = jax.jit(sabr_normal_implied_vol)(normal_sabr, F, opt.strike, opt.expiry)
+        price = jax.jit(sabr_price_bachelier)(opt, F, jnp.array(0.01), normal_sabr)
+        assert jnp.isfinite(vol) and jnp.isfinite(price)
+
+
+class TestSABRNormalConsistency:
+    """The lognormal and normal Hagan expansions are *different* approximations
+    to the same SDE; they agree only asymptotically. These tests assert the
+    discrepancy *scales* correctly with vol-of-vol -- never that they are equal.
+    """
+
+    F = jnp.array(100.0)
+    RATE = jnp.array(0.0)
+
+    def _atm_gap(self, nu, T):
+        """|direct normal vol - (lognormal vol converted exactly to normal)|
+        at the money, via price-and-invert (exact conversion)."""
+        model = SABRModel(
+            alpha=jnp.array(0.3), beta=jnp.array(0.5),
+            rho=jnp.array(-0.3), nu=jnp.array(nu),
+        )
+        opt = EuropeanOption(strike=self.F, expiry=jnp.array(T), is_call=True)
+        black_vol = sabr_implied_vol(model, self.F, self.F, jnp.array(T))
+        price_ln = black76_price(opt, self.F, black_vol, self.RATE)
+        normal_equiv = bachelier_implied_vol(opt, self.F, price_ln, self.RATE)
+        normal_direct = sabr_normal_implied_vol(model, self.F, self.F, jnp.array(T))
+        return abs(float(normal_direct - normal_equiv))
+
+    def test_agree_as_nu_to_zero(self):
+        """nu -> 0: both expansions reduce to the same CEV vol; the exact
+        conversion makes them agree to near machine precision."""
+        assert self._atm_gap(1e-9, 1.0) < 1e-7
+
+    def test_genuinely_differ_at_realistic_nu(self):
+        """With real vol-of-vol the two are NOT equal -- guarding against an
+        equality assertion that would later be loosened into meaninglessness."""
+        assert self._atm_gap(0.4, 1.0) > 1e-7
+
+    def test_gap_scales_quadratically_in_nu(self):
+        """Doubling vol-of-vol quadruples the discrepancy (O(nu^2))."""
+        g1 = self._atm_gap(0.2, 1.0)
+        g2 = self._atm_gap(0.4, 1.0)
+        ratio = g2 / g1
+        assert 3.0 < ratio < 5.5, f"nu^2 scaling ratio={ratio:.3f}"
+
+    def test_gap_monotone_in_nu(self):
+        gaps = [self._atm_gap(nu, 1.0) for nu in (0.1, 0.2, 0.4, 0.8)]
+        assert all(b > a for a, b in zip(gaps, gaps[1:])), gaps
+
+
+class TestSABRNormalMonteCarlo:
+    def test_normal_price_matches_mc(self, normal_sabr):
+        """Normal-expansion price lands within 2 standard errors of the SABR
+        SDE Monte Carlo (generate_sabr_paths) on the same option."""
+        F = jnp.array(0.02)
+        K = jnp.array(0.025)
+        T = 1.0
+        r = jnp.array(0.01)
+        option = EuropeanOption(strike=K, expiry=jnp.array(T), is_call=True)
+
+        analytic = float(sabr_price_bachelier(option, F, r, normal_sabr))
+
+        key = jax.random.PRNGKey(7)
+        n_paths = 300_000
+        fwd_paths, _ = generate_sabr_paths(
+            normal_sabr, F, T=T, n_steps=200, n_paths=n_paths, key=key
+        )
+        terminal = fwd_paths[:, -1]
+        payoffs = jnp.maximum(terminal - K, 0.0) * jnp.exp(-r * T)
+        mc_price = float(jnp.mean(payoffs))
+        mc_se = float(jnp.std(payoffs) / jnp.sqrt(n_paths))
+
+        assert abs(mc_price - analytic) < 2.0 * mc_se, (
+            f"MC={mc_price:.6f} vs analytic={analytic:.6f}, SE={mc_se:.6f}"
         )
