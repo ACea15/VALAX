@@ -6,7 +6,7 @@ implemented and documented in [Analytical Pricing § FX Options](analytical.md#f
 This page covers the extended set: quanto options, TARFs, and FX swaps. For the
 full mathematical treatment (Garman-Kohlhagen SDE, three delta conventions,
 premium-adjusted delta, ATM delta-neutral straddle), see
-[Models & Theory §2.7](../theory.md#27-garman-kohlhagen-fx-options).
+[Models & Theory §2.7](../theory/stochastic-models.md#27-garman-kohlhagen-fx-options).
 
 All FX instruments use the **FOR/DOM** convention: the foreign currency is the asset,
 and the domestic currency is the numeraire. For example, EUR/USD = 1.10 means 1 EUR

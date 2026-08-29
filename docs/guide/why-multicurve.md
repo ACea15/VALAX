@@ -27,7 +27,7 @@ the same curve so the sum telescopes.
 ## What changed in 2008
 
 Three empirical forces broke the single-curve model. See
-[`theory.md` §3.2](../theory.md#32-single-curve-vs-multi-curve-framework)
+[`theory.md` §3.2](../theory/curves.md#32-single-curve-vs-multi-curve-framework)
 for the arbitrage-theoretic version of the same story.
 
 ### 1. LIBOR credit spread blew out
@@ -92,7 +92,7 @@ break the ordering.
 ### Structural failure 1 — tenor-basis swaps
 
 A 3M-vs-6M same-currency basis swap has this par condition (see
-[`theory.md` §3.7](../theory.md#37-no-arbitrage-relations-across-curves)
+[`theory.md` §3.7](../theory/curves.md#37-no-arbitrage-relations-across-curves)
 for the derivation):
 
 $$
@@ -118,7 +118,7 @@ The only correct answer is a **joint solve** — put the 3M pillars, the
 A EUR-USD cross-currency basis swap touches **four** unknown curves at
 once — `USD.SOFR.OIS`, `USD.SOFR.3M`, `EUR.ESTR.OIS`,
 `EUR.EURIBOR.6M` — plus FX spot. See [`theory.md` §3.7 "Cross-currency
-basis"](../theory.md#37-no-arbitrage-relations-across-curves) for the
+basis"](../theory/curves.md#37-no-arbitrage-relations-across-curves) for the
 XCCY equation.
 
 There is **no** ordering that lets you finish one currency then the
@@ -159,7 +159,7 @@ path is identical for `DepositRate`, `TenorBasisSwap`, and
 protocol; the solver never learns about them.
 
 The joint residual system is derived in
-[`theory.md` §3.8](../theory.md#38-joint-multi-curve-calibration) with
+[`theory.md` §3.8](../theory/curves.md#38-joint-multi-curve-calibration) with
 a worked EUR-USD 28-unknown example.
 
 ## Bonus: implicit-adjoint quote-Jacobian
@@ -231,9 +231,9 @@ tenor-basis and every cross-currency trade a desk carries.
   walks through a USD dual-curve build with `bootstrap_curve_graph`.
 - **API** — [`api/curves.md`](../api/curves.md#valax.curves.CurveSpec) documents every
   argument and return type of the joint solver.
-- **Math** — [`theory.md` §3.7](../theory.md#37-no-arbitrage-relations-across-curves)
+- **Math** — [`theory.md` §3.7](../theory/curves.md#37-no-arbitrage-relations-across-curves)
   derives every residual (CIP, tenor basis, XCCY).
-  [`theory.md` §3.8](../theory.md#38-joint-multi-curve-calibration)
+  [`theory.md` §3.8](../theory/curves.md#38-joint-multi-curve-calibration)
   formalises the joint system.
 - **Design** — [`production.md` §11](../architecture/production.md#11-multi-curve-framework)
   documents the data model, joint-solver interface, and phased delivery.

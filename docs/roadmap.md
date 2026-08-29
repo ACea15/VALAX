@@ -348,7 +348,7 @@ in `tests/test_pricing/test_local_vol_paths.py::TestSchemeComparison`.
 the `generate_local_vol_paths` signature docstring, the API reference
 (`docs/api/pricing.md`), the user guide
 (`docs/guide/monte-carlo.md`), and the theory section
-(`docs/theory.md §4.4`). Cross-links flow consistently from each
+(`docs/theory/volatility.md §4.4`). Cross-links flow consistently from each
 entry point to the empirical sweep table.
 
 **Why ship anyway.** Three reasons:

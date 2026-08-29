@@ -159,7 +159,7 @@ The catalogue of JAX idioms VALAX uses to satisfy these invariants — static tr
 3. **No global state, no caches that survive between calls, no observer pattern.** Determinism is by construction; any leak of state means yesterday's risk run might not replay tomorrow.
 4. **Dates inside traced code are integer ordinals.** `datetime.date` may appear at the user-facing boundary and only there.
 5. **No `scipy` inside JIT-traced code.** Use `optimistix` / `lineax` / `jax.scipy`. Otherwise the trader-hot-path / batch-risk equivalence in §4 silently breaks.
-6. **New instruments must declare their risk-factor consumption** in [Risk Factors § 5](risk-factors.md#5-instrument-factor-matrix). This is what keeps the bucketing layer in [§ 7.8 of Theory](theory.md#78-risk-bucketing-linear-and-jacobian-transformations) honest at scale.
+6. **New instruments must declare their risk-factor consumption** in [Risk Factors § 5](risk-factors.md#5-instrument-factor-matrix). This is what keeps the bucketing layer in [§ 7.8 of Theory](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations) honest at scale.
 
 If any of these properties is hard to satisfy for a new module, that is a strong signal the module is fighting the architecture, and the right next step is to redesign the module rather than weaken the architecture.
 

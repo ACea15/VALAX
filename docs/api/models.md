@@ -84,7 +84,7 @@ duck-typed surface contract.
     dividends are a planned extension via a `forward_curve: Callable`
     field. Path generation uses `generate_local_vol_paths` (log-Euler
     with midpoint-in-time \(\sigma\)); see
-    [theory §4.4](../theory.md#44-local-volatility-dupire) for the
+    [theory §4.4](../theory/volatility.md#44-local-volatility-dupire) for the
     midpoint-vs-left-endpoint choice.
 
 ::: valax.models.LocalVolModel
@@ -103,7 +103,7 @@ calibrated implied-vol surface by Markovian projection:
 with \(k_t = \ln(S_t / F(t))\) and \(\langle dW_1, dW_2 \rangle = \rho\, dt\).
 The leverage function comes from pass 2 of the SLV calibration
 ([`calibrate_slv_leverage`][valax.calibration.calibrate_slv_leverage]).
-See [theory §4.5](../theory.md#45-stochastic-local-volatility) and
+See [theory §4.5](../theory/volatility.md#45-stochastic-local-volatility) and
 the [SLV guide](../guide/slv.md) for the underlying mathematics.
 
 !!! note "Path generator never queries `surface`"

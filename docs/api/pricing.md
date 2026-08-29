@@ -45,7 +45,7 @@ QuantLib's `AnalyticHestonEngine` to < 5e-7 across the validation
 grid. `rate` and `dividend` default to `model.rate` / `model.dividend`
 when `None` — pass explicit values to reprice the same fitted model
 under a stressed discount curve. See
-[theory §2.4](../theory.md#24-heston-stochastic-volatility).
+[theory §2.4](../theory/stochastic-models.md#24-heston-stochastic-volatility).
 
 ::: valax.pricing.analytic.heston_cos_price
 
@@ -59,7 +59,7 @@ surfaces qualify). All three partial derivatives of total variance are
 evaluated via `jax.grad` directly on the surface — no finite
 differences. Requires `jax_enable_x64=True` (enforced; enabled by
 default in `valax/__init__.py`). See
-[theory §4.4](../theory.md#44-local-volatility-dupire).
+[theory §4.4](../theory/volatility.md#44-local-volatility-dupire).
 
 ::: valax.pricing.analytic.dupire_local_vol
 

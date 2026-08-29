@@ -7,7 +7,7 @@ set** (OIS discount + tenor-specific forward curves).
 
 If you want the mathematical framework — discount factors vs. zero rates vs.
 forward rates, single- vs. multi-curve, interpolation methods, and day count
-conventions — see [Models & Theory §3](../theory.md#3-curve-framework). For using
+conventions — see [Models & Theory §3](../theory/curves.md#3-curve-framework). For using
 a curve to price a bond and extract duration / KRDs, see the
 [Fixed Income guide](fixed-income.md).
 
@@ -255,7 +255,7 @@ runs:
 
 Under a CSA with daily collateral, the OIS rate is the funding rate for
 discounted cashflows, so OIS discounting is the **arbitrage-free** choice.
-See [theory §3.2](../theory.md#32-single-curve-vs-multi-curve-framework).
+See [theory §3.2](../theory/curves.md#32-single-curve-vs-multi-curve-framework).
 
 The MC-Curves-2 API is
 [`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph): a **joint
@@ -760,7 +760,7 @@ yoy = yoy_forward_rate(
 
 For the mathematical framework (forward CPI vs. real rate, ZCIS breakeven
 identity, YoY convexity, seasonality) see
-[theory §3.6](../theory.md#36-inflation-curves-and-breakeven-pricing). For
+[theory §3.6](../theory/curves.md#36-inflation-curves-and-breakeven-pricing). For
 pricing inflation swaps and caps/floors against a built curve, see
 [Inflation Derivatives](inflation.md).
 
@@ -963,15 +963,15 @@ compilation, the eventual joint solver) composes on top of it without
 requiring any further per-instrument code.
 
 For the no-arbitrage motivation behind each residual, see
-[theory §3.7](../theory.md#37-no-arbitrage-relations-across-curves)
+[theory §3.7](../theory/curves.md#37-no-arbitrage-relations-across-curves)
 (CIP, tenor basis, XCCY basis) and
-[theory §3.8](../theory.md#38-joint-multi-curve-calibration) (the
+[theory §3.8](../theory/curves.md#38-joint-multi-curve-calibration) (the
 joint residual system).  For full instrument-by-instrument signatures and
 residual equations, see [API: Bootstrap Instruments](../api/curves.md#bootstrap-instruments).
 
 ## 10. Further reading
 
-- [Models & Theory §3](../theory.md#3-curve-framework) — mathematical framework: DFs, zero/forward rates, single vs. multi-curve, interpolation families, day count conventions.
+- [Models & Theory §3](../theory/curves.md#3-curve-framework) — mathematical framework: DFs, zero/forward rates, single vs. multi-curve, interpolation families, day count conventions.
 - [Fixed Income guide](fixed-income.md) — using a curve to price bonds, extract YTM, duration, KRDs.
 - [Interest Rate Exotics guide](rates-exotics.md) — OIS swaps, XCCY, CMS, range accrual against a multi-curve set.
 - [Inflation Derivatives guide](inflation.md) — ZCIS, YYIS, inflation caps against an `InflationCurve`.

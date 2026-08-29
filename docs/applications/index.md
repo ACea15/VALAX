@@ -101,7 +101,7 @@ The through-line: **do not start with trading, and do not start with regulatory 
 
 - **The systems around VALAX in a bank stack** → [Where VALAX Fits](../landscape.md).
 - **The end-to-end risk pipeline these applications sit on** → [Risk: End-to-End](../risk-overview.md).
-- **The mathematical foundations** → [Models & Theory](../theory.md).
+- **The mathematical foundations** → [Models & Theory](../theory/index.md).
 - **The concrete code walkthroughs** → [User Guide](../guide/tutorial-rates.md).
 - **The forward direction** → [Vision](../vision.md), [Roadmap](../roadmap.md).
 - **Why the library makes the architectural choices it does** → [Design Rationale](../design-rationale.md).

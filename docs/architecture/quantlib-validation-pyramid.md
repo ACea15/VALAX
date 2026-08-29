@@ -469,7 +469,7 @@ Heston had `2κθ − ξ² ≪ 0`, e.g. seed=20260101: `κ=0.0000, θ=0.0292,
 
 - `docs/roadmap.md` HE-1 entry moved to "Done (Sprint 5)" with
   before/after metrics.
-- `docs/theory.md` §2.4 rewritten to describe Andersen QE instead of
+- `docs/theory/stochastic-models.md` §2.4 rewritten to describe Andersen QE instead of
   the diffrax Euler-with-reflection scheme; §5.3 SDE table footnote
   updated.
 - `CHANGELOG.md` `[Unreleased]` gains a new section for HE-1.

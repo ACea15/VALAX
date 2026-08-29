@@ -255,7 +255,7 @@ for K in strikes:
 
 Single-seed runs at this size show ~15–30 bp worst-case noise; the
 [Dupire-consistency gate](monte-carlo.md#local-volatility) averages 4
-seeds to hit < 20 bp. See [theory §4.4](../theory.md#44-local-volatility-dupire)
+seeds to hit < 20 bp. See [theory §4.4](../theory/volatility.md#44-local-volatility-dupire)
 for the full discussion of MC bias floors and the Milstein scheme as
 the path to sub-5-bp accuracy.
 

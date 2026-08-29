@@ -338,7 +338,7 @@ jit_price(option, spot, vol, rate, div)
 
 | Type of change | Doc to update |
 |----------------|---------------|
-| New theory / formula | `docs/theory.md` |
+| New theory / formula | `docs/theory/` (one page per chapter) |
 | New instrument | `docs/guide/<asset-class>.md` and `docs/api/instruments.md` |
 | New pricing function | `docs/guide/<method>.md` and `docs/api/pricing.md` |
 | New model | `docs/guide/<area>.md` and `docs/api/models.md` |

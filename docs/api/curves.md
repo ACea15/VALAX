@@ -81,8 +81,8 @@ notional and direction). They live in `valax.curves` so the
 dependency graph stays clean.
 
 For the no-arbitrage motivation behind each instrument's residual, see
-[theory §3.7](../theory.md#37-no-arbitrage-relations-across-curves)
-and [§3.8](../theory.md#38-joint-multi-curve-calibration). For the
+[theory §3.7](../theory/curves.md#37-no-arbitrage-relations-across-curves)
+and [§3.8](../theory/curves.md#38-joint-multi-curve-calibration). For the
 production roadmap that uses these instruments in a joint solver, see
 [production.md §11](../architecture/production.md#11-multi-curve-framework).
 
@@ -159,7 +159,7 @@ theory §3.9 for the no-arbitrage motivation.
 Used by `MoneyMarketFuture`. Two variants ship with MC-Curves-1;
 `hull_white_convexity_adj(model)` is reserved for a follow-up PR gated
 on short-rate-model integration with the curve build (see
-[theory §3.9](../theory.md#39-futures-convexity-adjustment-and-fixings)).
+[theory §3.9](../theory/curves.md#39-futures-convexity-adjustment-and-fixings)).
 
 ::: valax.curves.no_convexity_adj
 

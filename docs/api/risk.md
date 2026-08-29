@@ -190,7 +190,7 @@ overall zone is the worse of the two test zones.
 
 Linear aggregation and Jacobian reparameterization for risk-factor
 coordinate changes. See
-[Models & Theory §7.8](../theory.md#78-risk-bucketing-linear-and-jacobian-transformations)
+[Models & Theory §7.8](../theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations)
 for the mathematics.
 
 ### `BucketMap`

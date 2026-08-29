@@ -8,7 +8,7 @@ extract Greeks via autodiff**.
 
 For the mathematical background (SDE, affine bond price formula, Jamshidian
 decomposition, $\theta(t)$ exact-fit calibration), see
-[Models & Theory §2.8](../theory.md#28-hull-white-one-factor-short-rate-model).
+[Models & Theory §2.8](../theory/stochastic-models.md#28-hull-white-one-factor-short-rate-model).
 
 ## 1. Why Hull-White?
 

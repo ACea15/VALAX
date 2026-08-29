@@ -364,7 +364,7 @@ The two adoptions cross-pollinate: the Model Validation team benefits when Quant
 
 - **The applications overview and audience ranking** → [Applications](index.md).
 - **The commercial-adoption companion** → [Market Risk & Model Validation](market-risk.md).
-- **The mathematical foundations of every model in the library** → [Models & Theory](../theory.md).
+- **The mathematical foundations of every model in the library** → [Models & Theory](../theory/index.md).
 - **Calibration patterns and shipped examples** → [Calibration](../guide/calibration.md), [Vol Surfaces](../guide/vol-surfaces.md), [SLV](../guide/slv.md).
 - **SDE path simulation and Monte Carlo** → [Monte Carlo](../guide/monte-carlo.md).
 - **PDE solvers and lattice methods** → [PDE Solvers](../guide/pde.md), [Binomial Trees](../guide/lattice.md).

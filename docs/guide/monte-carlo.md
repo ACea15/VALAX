@@ -12,7 +12,7 @@ VALAX provides a three-layer Monte Carlo stack:
 
 For the mathematical framework (risk-neutral expectation, SDE discretization,
 pathwise vs. likelihood-ratio Greeks, variance reduction), see
-[Models & Theory §5.3](../theory.md#53-monte-carlo-simulation).
+[Models & Theory §5.3](../theory/pricing-methods.md#53-monte-carlo-simulation).
 
 ## 1. Quick start: the dispatcher
 
@@ -185,7 +185,7 @@ spot_paths, var_paths = generate_heston_paths(
 )
 ```
 
-See [theory §2.4](../theory.md#24-heston-stochastic-volatility) for the
+See [theory §2.4](../theory/stochastic-models.md#24-heston-stochastic-volatility) for the
 Feller condition and numerical caveats near the variance boundary.
 
 ### Local volatility
@@ -194,7 +194,7 @@ $$dS = (r - q) S\, dt + \sigma_{\text{loc}}(S, t)\, S\, dW$$
 
 where $\sigma_{\text{loc}}$ is recomputed from a calibrated implied-vol surface
 at every path step via Gatheral's IV-space Dupire formula (see
-[theory §4.4](../theory.md#44-local-volatility-dupire)). The model itself
+[theory §4.4](../theory/volatility.md#44-local-volatility-dupire)). The model itself
 carries no precomputed grid; autodiff flows from MC prices straight into the
 surface parameters.
 
@@ -247,7 +247,7 @@ constant-factor improvement). The default is Euler because it is
 cheaper for no measurable accuracy loss on the common case. See the
 [`generate_local_vol_paths`](../api/pricing.md#generate_local_vol_paths)
 module docstring for the full empirical sweep and
-[theory §4.4](../theory.md#44-local-volatility-dupire) for the weak-
+[theory §4.4](../theory/volatility.md#44-local-volatility-dupire) for the weak-
 vs strong-order discussion.
 
 **Surface choice.** `SVIVolSurface` is the recommended Dupire input —
@@ -370,7 +370,7 @@ Since pure GBM has a log-linear SDE, the log-Euler step is **exact** for
 any `n_steps`. Use large `n_steps` only when the payoff monitors
 intermediate observations (barriers, Asians, autocallables).
 
-See [theory §2.9](../theory.md#29-two-asset-correlated-bsm-and-spread-options)
+See [theory §2.9](../theory/stochastic-models.md#29-two-asset-correlated-bsm-and-spread-options)
 for the analytical spread-option formulas (Margrabe / Kirk) that the
 multi-asset MC recipes are validated against.
 
@@ -485,7 +485,7 @@ without a separate `exp(-rT)` term.
 
 Because the entire pipeline is pure JAX, `jax.grad` flows through path
 generation, payoff evaluation, and discounting. This is the **pathwise
-method** (§[theory 6.3](../theory.md#63-pathwise-method-for-mc-greeks)).
+method** (§[theory 6.3](../theory/greeks.md#63-pathwise-method-for-mc-greeks)).
 
 ```python
 def price_fn(spot):
@@ -637,7 +637,7 @@ variance reduction. The following are roadmap items:
 | Importance sampling | 🟡 | Problem-specific |
 | Stratified / quasi-MC (Sobol, Halton) | 🟡 | `diffrax` does not yet expose quasi-random Brownian increments |
 
-See [theory §5.3](../theory.md#53-monte-carlo-simulation) for the
+See [theory §5.3](../theory/pricing-methods.md#53-monte-carlo-simulation) for the
 underlying theory.
 
 ## 9. Performance notes
@@ -656,8 +656,8 @@ underlying theory.
 
 ## 10. Further reading
 
-- [Models & Theory §5.3](../theory.md#53-monte-carlo-simulation) — risk-neutral expectation, SDE discretization, convergence, variance reduction, pathwise vs. likelihood-ratio Greeks.
-- [Models & Theory §6.3](../theory.md#63-pathwise-method-for-mc-greeks) — when pathwise differentiation works and when it doesn't.
+- [Models & Theory §5.3](../theory/pricing-methods.md#53-monte-carlo-simulation) — risk-neutral expectation, SDE discretization, convergence, variance reduction, pathwise vs. likelihood-ratio Greeks.
+- [Models & Theory §6.3](../theory/greeks.md#63-pathwise-method-for-mc-greeks) — when pathwise differentiation works and when it doesn't.
 - [Greeks via Autodiff](greeks.md) — how `jax.grad` composes with the MC pipeline.
 - [Risk & Scenarios](risk.md) — vmapped MC pricing for VaR / ES.
 - [Roadmap](../roadmap.md) — execution order for the 🟡 / 🟠 / 🔴 items in the coverage map.

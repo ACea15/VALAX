@@ -160,7 +160,7 @@ chooser = ChooserOption(
 
 !!! success "Implemented (analytic + Monte Carlo)"
     - Analytic: `valax.pricing.analytic.spread.margrabe_price` (exact at $K = 0$), `kirk_price` (approximation for $K \neq 0$), `spread_option_price`.
-    - Monte Carlo: via `mc_price_dispatch(SpreadOption, MultiAssetGBMModel, ...)`. See [Monte Carlo guide](monte-carlo.md) and [theory §2.9](../theory.md#29-two-asset-correlated-bsm-and-spread-options).
+    - Monte Carlo: via `mc_price_dispatch(SpreadOption, MultiAssetGBMModel, ...)`. See [Monte Carlo guide](monte-carlo.md) and [theory §2.9](../theory/stochastic-models.md#29-two-asset-correlated-bsm-and-spread-options).
 
 **Market context.** Spread options pay the difference between two asset prices minus
 a fixed strike. They are ubiquitous in commodity markets (**crack spreads**: crude

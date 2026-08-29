@@ -27,7 +27,7 @@ so the calibration machinery stays decoupled from the pricing engine
 Two-pass SLV calibration. Pass 1 fits Heston to vanillas; pass 2 fits
 the leverage function \(L(k, t)\) via Markovian projection so that the
 SLV model reproduces the input local-vol surface. See
-[theory §4.5](../theory.md#45-stochastic-local-volatility) and the
+[theory §4.5](../theory/volatility.md#45-stochastic-local-volatility) and the
 [SLV guide](../guide/slv.md) for the mathematics and choice of
 estimator (`particle` vs. `kernel`).
 

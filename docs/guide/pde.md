@@ -15,7 +15,7 @@ bumping.
     [§5](#5-the-multivariate-subsystem) onward is a design specification —
     the interface below is the intended API and is being delivered in phases.
     See the [PDE design doc](../architecture/pde-design.md) for the full
-    architecture and [theory §5.2](../theory.md#52-pde-finite-differences) for
+    architecture and [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences) for
     the math.
 
 ## 1. The Black-Scholes PDE
@@ -258,7 +258,7 @@ single asset, the [binomial tree](lattice.md) is a lightweight alternative.
   discretisation bugs this solver has actually shipped and fixed, each with the
   debugging playbook that localised it. Read before adding a scheme or a
   boundary condition.
-- [Theory §5.2](../theory.md#52-pde-finite-differences) — derivations, ADI
+- [Theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences) — derivations, ADI
   schemes, penalty method, Rannacher start-up.
 - [Monte Carlo](monte-carlo.md) and [Binomial Trees](lattice.md) — complementary
   numerical methods and cross-checks.

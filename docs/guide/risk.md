@@ -372,7 +372,7 @@ Total factors = `3 * n_assets + n_pillars`. The covariance matrix columns follow
 
 The basic `pnl_attribution` function (shown above) gives a scalar decomposition: one number for delta-spot, one for delta-vol, one for gamma. **Sensitivity ladders** extend this to a fully bucketed, multi-rung P&L decomposition with all second-order cross terms — vanna, volga, rate convexity, and cross spot×rate / vol×rate effects.
 
-For the mathematical foundations, see [Models & Theory § 7.4](../theory.md#74-sensitivity-ladders).
+For the mathematical foundations, see [Models & Theory § 7.4](../theory/risk-measures.md#74-sensitivity-ladders).
 
 ### Computing a Ladder
 
@@ -480,7 +480,7 @@ This pattern is natural for end-of-day P&L explain: compute the ladder at the cl
 
 Every risk metric in VALAX — VaR, ES, backtests, the FRTB PLA test — reduces to a single primitive: a **P&L vector** of length $N$, with one entry per scenario or per historical day. Once you have the vector, the metrics are just sample statistics.
 
-For the theoretical framing of HPL / RTPL / APL and why these three series are kept separate, see [Models & Theory § 7.5](../theory.md#75-pl-vectors-hypothetical-risk-theoretical-actual).
+For the theoretical framing of HPL / RTPL / APL and why these three series are kept separate, see [Models & Theory § 7.5](../theory/risk-measures.md#75-pl-vectors-hypothetical-risk-theoretical-actual).
 
 ### Hypothetical P&L (full revaluation)
 
@@ -548,7 +548,7 @@ The difference `var_rtpl - var_hpl` is the **model-induced VaR bias**: how much 
 
 A VaR forecast is only as good as its track record. The Basel framework requires 99% one-day VaR to be backtested on a rolling 250-day window, with capital multipliers driven by the breach count. VALAX provides the standard Kupiec, Christoffersen, and traffic-light tools in `valax/risk/backtesting.py`.
 
-For the underlying statistics, see [Models & Theory § 7.6](../theory.md#76-var-backtesting).
+For the underlying statistics, see [Models & Theory § 7.6](../theory/risk-measures.md#76-var-backtesting).
 
 ### Counting breaches
 
@@ -617,7 +617,7 @@ For a 250-day window at 99% VaR: 0–4 breaches green, 5–9 yellow, ≥10 red �
 
 The FRTB Internal Models Approach requires a second daily validation on top of the VaR backtest: each desk must demonstrate that its **risk-theoretical P&L (RTPL)** tracks its **hypothetical P&L (HPL)** in both rank order (Spearman) and distribution (Kolmogorov–Smirnov). Failing the PLA test forces the desk off internal models and onto the (usually more punitive) standardized approach.
 
-For the regulatory background and threshold derivation, see [Models & Theory § 7.7](../theory.md#77-frtb-pl-attribution-test).
+For the regulatory background and threshold derivation, see [Models & Theory § 7.7](../theory/risk-measures.md#77-frtb-pl-attribution-test).
 
 ### Spearman rank correlation
 
@@ -691,7 +691,7 @@ Raw autodiff sensitivities live in the *finest* possible factor space — one DV
 - **Factor reduction** — PCA scores (level / slope / curvature) for well-conditioned VaR on a 30-pillar curve.
 - **Parametric vol bucketing** — push grid-vol sensitivities into SABR or SVI parameter space via the calibration Jacobian.
 
-VALAX provides two transformation families in `valax/risk/bucketing.py`. They share the same matrix algebra, but they correspond to two different mental models and are named accordingly. See [Models & Theory § 7.8](../theory.md#78-risk-bucketing-linear-and-jacobian-transformations) for the derivation.
+VALAX provides two transformation families in `valax/risk/bucketing.py`. They share the same matrix algebra, but they correspond to two different mental models and are named accordingly. See [Models & Theory § 7.8](../theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations) for the derivation.
 
 ### Linear aggregation: `BucketMap`
 

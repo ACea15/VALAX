@@ -14,7 +14,7 @@ US CPI-U, Euro HICP, or UK RPI. The key conventions are:
 The two fundamental inflation swap types — zero-coupon and year-on-year — form the
 building blocks for all inflation products. For the mathematical framework (forward
 CPI curves, breakeven rates, convexity adjustments, and seasonality), see
-[Models & Theory §3.6](../theory.md#36-inflation-curves-and-breakeven-pricing).
+[Models & Theory §3.6](../theory/curves.md#36-inflation-curves-and-breakeven-pricing).
 
 ## Zero-Coupon Inflation Swap (ZCIS)
 
@@ -110,7 +110,7 @@ ratio observed at $t_i$ but discounted from $t_i$ to today. The adjustment depen
 on the volatility and correlation structure of inflation rates and nominal rates.
 For typical market parameters, the adjustment is on the order of 1–5 bps per annum,
 but it can be significant for long-dated swaps. See
-[theory §3.6](../theory.md#year-on-year-inflation-swaps-yyis) for the full
+[theory §3.6](../theory/curves.md#year-on-year-inflation-swaps-yyis) for the full
 Jarrow-Yildirim treatment. VALAX's current `yyis_price` uses the forward ratio
 directly (the standard baseline); a convexity-adjusted variant is on the roadmap.
 

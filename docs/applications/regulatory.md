@@ -2,7 +2,7 @@
 
 *How VALAX supports bank market-risk capital programmes — the Basel III.1 **Fundamental Review of the Trading Book (FRTB)** migration and the Federal Reserve's annual **Comprehensive Capital Analysis and Review (CCAR / DFAST)** stress tests.*
 
-This page is the **outward-facing** view of the risk stack described in [Risk: End-to-End](../risk-overview.md), the [Risk & Scenarios guide](../guide/risk.md), and [Models & Theory § 7](../theory.md#7-risk-measures). Read those first for the mathematical foundations and the code walkthrough; read *this* to see how they map onto a real bank regulatory programme.
+This page is the **outward-facing** view of the risk stack described in [Risk: End-to-End](../risk-overview.md), the [Risk & Scenarios guide](../guide/risk.md), and [Models & Theory § 7](../theory/risk-measures.md#7-risk-measures). Read those first for the mathematical foundations and the code walkthrough; read *this* to see how they map onto a real bank regulatory programme.
 
 ---
 
@@ -210,7 +210,7 @@ The net effect: the derivatives pricing engine and the regulatory reporting engi
 ## 6. Where to read next
 
 - **The pipeline these workflows sit on** → [Risk: End-to-End](../risk-overview.md).
-- **The mathematics of VaR / ES / backtesting / PLA / bucketing** → [Models & Theory § 7](../theory.md#7-risk-measures).
+- **The mathematics of VaR / ES / backtesting / PLA / bucketing** → [Models & Theory § 7](../theory/risk-measures.md#7-risk-measures).
 - **The concrete code walkthrough** → [Risk & Scenarios guide](../guide/risk.md).
 - **The factor taxonomy — what is and is not modelled** → [Risk Factors](../risk-factors.md).
 - **The horizontal view of the systems around VALAX in a bank stack** → [Where VALAX Fits](../landscape.md).

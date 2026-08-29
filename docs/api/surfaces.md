@@ -81,7 +81,7 @@ then linearly interpolates across slices in \(T\). Identity to
     \(\partial w / \partial T\) positive at short expiries — without
     it, the \(1/w\) terms in the Dupire denominator diverge and any
     local-vol MC stepping through the boundary takes a zero-vol first
-    step. See [theory §4.4](../theory.md#44-local-volatility-dupire).
+    step. See [theory §4.4](../theory/volatility.md#44-local-volatility-dupire).
 
 ### SVI slice primitives
 

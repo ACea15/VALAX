@@ -2,7 +2,7 @@
 
 *A narrative guide to why risk exists, who consumes it, and how every number on a risk report falls out of one tiny pure-functional primitive.*
 
-This page sits between the abstract maths in [Models & Theory § 7](theory.md#7-risk-measures) and the concrete code in the [Risk & Scenarios guide](guide/risk.md). Read it first if you have not built a bank risk system before. Read it again if you are about to extend the engine — it is the map that tells you where each new factor, instrument, or test fits in.
+This page sits between the abstract maths in [Models & Theory § 7](theory/risk-measures.md#7-risk-measures) and the concrete code in the [Risk & Scenarios guide](guide/risk.md). Read it first if you have not built a bank risk system before. Read it again if you are about to extend the engine — it is the map that tells you where each new factor, instrument, or test fits in.
 
 ---
 
@@ -110,7 +110,7 @@ This is just **pricing**: evaluate every position under today's market and sum.
 V_portfolio(market) = Σ V_i(instrument_i, market)
 ```
 
-In VALAX, every pricing function in `valax/pricing/` has the shape `V(instrument, market) → price`, with `market` carrying curves, spots, vols, and any other state. Today's `V` minus yesterday's `V` (with **today's portfolio**, not yesterday's) is the **hypothetical P&L (HPL)** — the cleanest definition of P&L because it strips out intraday trading and new deals. (See [Theory § 7.5](theory.md#75-pl-vectors-hypothetical-risk-theoretical-actual) for HPL vs APL vs RTPL.)
+In VALAX, every pricing function in `valax/pricing/` has the shape `V(instrument, market) → price`, with `market` carrying curves, spots, vols, and any other state. Today's `V` minus yesterday's `V` (with **today's portfolio**, not yesterday's) is the **hypothetical P&L (HPL)** — the cleanest definition of P&L because it strips out intraday trading and new deals. (See [Theory § 7.5](theory/risk-measures.md#75-pl-vectors-hypothetical-risk-theoretical-actual) for HPL vs APL vs RTPL.)
 
 ### 4.2 How does my book move when markets move?
 
@@ -120,7 +120,7 @@ $$
 \delta_x = \frac{\partial V}{\partial x}, \qquad \gamma_{xy} = \frac{\partial^2 V}{\partial x \partial y}
 $$
 
-In VALAX they come from `jax.grad` and `jax.hessian` on the pricing function — one reverse-mode pass per order — and are collected into a `SensitivityLadder` by [`compute_ladder`](guide/risk.md#sensitivity-ladders-and-waterfall-pl). No bump-and-reprice. No finite differences. **The "Greeks" a trader sees and the "key-rate DV01" a regulator wants are literally the same array, sliced and bucketed differently** — see [Theory § 6](theory.md#6-greeks-and-automatic-differentiation) for the autodiff derivation and [Theory § 7.4](theory.md#74-sensitivity-ladders) for ladders.
+In VALAX they come from `jax.grad` and `jax.hessian` on the pricing function — one reverse-mode pass per order — and are collected into a `SensitivityLadder` by [`compute_ladder`](guide/risk.md#sensitivity-ladders-and-waterfall-pl). No bump-and-reprice. No finite differences. **The "Greeks" a trader sees and the "key-rate DV01" a regulator wants are literally the same array, sliced and bucketed differently** — see [Theory § 6](theory/greeks.md#6-greeks-and-automatic-differentiation) for the autodiff derivation and [Theory § 7.4](theory/risk-measures.md#74-sensitivity-ladders) for ladders.
 
 ### 4.3 What's a bad day for my book?
 
@@ -129,14 +129,14 @@ This is **VaR and Expected Shortfall**. A "bad day" is the left tail of the dist
 - $\text{VaR}_\alpha$ = the loss exceeded with probability $1-\alpha$.
 - $\text{ES}_\alpha$ = the average loss conditional on exceeding $\text{VaR}_\alpha$.
 
-The distribution comes from a **P&L vector**: full-revaluation under many scenarios (historical or Monte Carlo) gives **HPL**; passing the same scenarios through the second-order ladder gives **RTPL** much faster. Both vectors plug straight into [`value_at_risk`](api/risk.md) and [`expected_shortfall`](api/risk.md). The conceptual derivation lives in [Theory § 7.1](theory.md#71-value-at-risk-var) and [§ 7.2](theory.md#72-expected-shortfall-cvar); the workflow code is in the [guide](guide/risk.md#full-revaluation-var).
+The distribution comes from a **P&L vector**: full-revaluation under many scenarios (historical or Monte Carlo) gives **HPL**; passing the same scenarios through the second-order ladder gives **RTPL** much faster. Both vectors plug straight into [`value_at_risk`](api/risk.md) and [`expected_shortfall`](api/risk.md). The conceptual derivation lives in [Theory § 7.1](theory/risk-measures.md#71-value-at-risk-var) and [§ 7.2](theory/risk-measures.md#72-expected-shortfall-cvar); the workflow code is in the [guide](guide/risk.md#full-revaluation-var).
 
 ### 4.4 Is the risk model honest?
 
 This is **backtesting**. A model that consistently under-predicts losses is dangerous; a model that wildly over-predicts is wasteful of capital. Two regulator-mandated tests, both shipped in VALAX:
 
-- **VaR backtest** — count how often realised P&L breaches the model's forecast, and apply the Basel traffic-light zoning (`basel_traffic_light`) plus the Kupiec POF and Christoffersen independence tests for finer power. ([Theory § 7.6](theory.md#76-var-backtesting).)
-- **FRTB P&L Attribution test (PLA)** — compare *risk-theoretical* P&L (from the ladder) to *hypothetical* P&L (from full revaluation) over 250 days. Use Spearman rank correlation for monotonic agreement and a Kolmogorov-Smirnov test for distributional agreement, then read the BCBS d558 zone with `pla_traffic_light`. ([Theory § 7.7](theory.md#77-frtb-pl-attribution-test).)
+- **VaR backtest** — count how often realised P&L breaches the model's forecast, and apply the Basel traffic-light zoning (`basel_traffic_light`) plus the Kupiec POF and Christoffersen independence tests for finer power. ([Theory § 7.6](theory/risk-measures.md#76-var-backtesting).)
+- **FRTB P&L Attribution test (PLA)** — compare *risk-theoretical* P&L (from the ladder) to *hypothetical* P&L (from full revaluation) over 250 days. Use Spearman rank correlation for monotonic agreement and a Kolmogorov-Smirnov test for distributional agreement, then read the BCBS d558 zone with `pla_traffic_light`. ([Theory § 7.7](theory/risk-measures.md#77-frtb-pl-attribution-test).)
 
 When PLA fails red, the desk loses its right to use the **Internal Models Approach** for capital and has to fall back to the (usually more punitive) **Standardised Approach**. This is the largest single financial incentive in the entire framework: keep the ladder sharp.
 
@@ -166,7 +166,7 @@ A regulator looking at fifty banks needs to compare them. A clearing house compu
 | Internal limits | Whatever the bank chooses, often coarser (e.g. "short / belly / wings"). |
 | PCA factor risk | Three to five data-driven components per curve. |
 
-VALAX exposes both transformation flavours — **linear** (`aggregate`, `BucketMap`) for FRTB / SIMM-style summation, and **Jacobian** (`pushforward_sensitivities`, `pca_jacobian`, `level_slope_curvature_jacobian`) for smooth reparameterizations like PCA or SVI/SABR parameter Greeks. The mathematics is in [Theory § 7.8](theory.md#78-risk-bucketing-linear-and-jacobian-transformations); the practical recipes are in the [guide](guide/risk.md#risk-bucketing); the full registry of which factors live where is in [Risk Factors § 7](risk-factors.md#7-bucketing).
+VALAX exposes both transformation flavours — **linear** (`aggregate`, `BucketMap`) for FRTB / SIMM-style summation, and **Jacobian** (`pushforward_sensitivities`, `pca_jacobian`, `level_slope_curvature_jacobian`) for smooth reparameterizations like PCA or SVI/SABR parameter Greeks. The mathematics is in [Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations); the practical recipes are in the [guide](guide/risk.md#risk-bucketing); the full registry of which factors live where is in [Risk Factors § 7](risk-factors.md#7-bucketing).
 
 A useful aphorism for engineers new to the area: **internal risk models live in autodiff-natural raw-factor space; the outside world lives in bucket space. The job of the bucketing layer is to be the FX desk between the two.**
 
@@ -219,10 +219,10 @@ The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](ri
 
 Different audiences will follow different paths from here:
 
-- **Quants / pricing developers** → [Models & Theory](theory.md) for the math, [Risk Factors](risk-factors.md) for what's in the engine, [API: Risk](api/risk.md) for signatures.
+- **Quants / pricing developers** → [Models & Theory](theory/index.md) for the math, [Risk Factors](risk-factors.md) for what's in the engine, [API: Risk](api/risk.md) for signatures.
 - **Risk system developers / engineers** → [Risk & Scenarios guide](guide/risk.md) for the workflow, [Risk Factors § 5 Instrument → Factor matrix](risk-factors.md#5-instrument-factor-matrix) for coverage, [Roadmap](roadmap.md) for the priorities.
 - **Front-office (trader / structurer)** → [Greeks guide](guide/greeks.md) and the *Sensitivity Ladders* section of the [Risk guide](guide/risk.md#sensitivity-ladders-and-waterfall-pl).
-- **Regulators / validators** → [Theory § 7.6–7.8](theory.md#76-var-backtesting) for the backtesting + PLA + bucketing maths, [Risk Factors](risk-factors.md) for the audit-trail of what is and is not modelled.
+- **Regulators / validators** → [Theory § 7.6–7.8](theory/risk-measures.md#76-var-backtesting) for the backtesting + PLA + bucketing maths, [Risk Factors](risk-factors.md) for the audit-trail of what is and is not modelled.
 
 ---
 

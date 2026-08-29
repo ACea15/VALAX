@@ -535,7 +535,7 @@ system this would cost you *N* bootstrap re-runs plus *N* re-pricings.
 | Topic | Where to read more |
 |-------|--------------------|
 | Multi-curve (OIS discount + tenor projection) | [Curves §5](curves.md#5-multi-curve-bootstrap) |
-| Non-NSS curve shapes, monotone-convex interpolation | [Theory §3](../theory.md#3-curve-framework) |
+| Non-NSS curve shapes, monotone-convex interpolation | [Theory §3](../theory/curves.md#3-curve-framework) |
 | Calibrating the swaption *cube* (SABR per slice) | [Volatility Surfaces](vol-surfaces.md), [Calibration §3](calibration.md#3-sabr-smile-calibration) |
 | Hull-White $(a, \sigma)$ from swaptions (Jamshidian) | [Short-Rate Models](short-rate.md) |
 | Pricing exotics — callable bonds, CMS, range accruals | [Callable Bonds](callable-bonds.md), [Interest Rate Exotics](rates-exotics.md) |

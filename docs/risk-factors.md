@@ -2,7 +2,7 @@
 
 This page is the canonical catalogue of every **risk factor** in VALAX: the inputs that, when they move, change portfolio value, and against which the engine measures Greeks and runs P&L attribution / VaR / PLA.
 
-For the *workflow* (scenarios, shocks, VaR, backtests) see [Risk & Scenarios](guide/risk.md). For the underlying maths see [Models & Theory §7](theory.md#7-risk-measures). This page focuses on **what the factors are**, **where they live in the code**, and **what is and isn't yet implemented**.
+For the *workflow* (scenarios, shocks, VaR, backtests) see [Risk & Scenarios](guide/risk.md). For the underlying maths see [Models & Theory §7](theory/risk-measures.md#7-risk-measures). This page focuses on **what the factors are**, **where they live in the code**, and **what is and isn't yet implemented**.
 
 ---
 
@@ -295,7 +295,7 @@ Every factor in this registry can be re-expressed in a **coarser coordinate syst
 | **Linear aggregation** (`BucketMap`) | $\delta_b = A\,\delta_x$, $\Delta x = A^{\!\top}\Delta b$, $\Sigma_b = A\,\Sigma_x A^{\!\top}$ | FRTB tenor vertices, ISDA SIMM buckets, sector / currency / rating aggregation. |
 | **Jacobian reparameterization** | $\delta_b = J^{\!\top}\delta_x$, $\Delta x = J\,\Delta b$, $\Sigma_b = J^{\!\top}\Sigma_x J$ | PCA factor reduction, level / slope / curvature, SVI / SABR parameter sensitivities. |
 
-Linear aggregation is the special case $J = A^{\!\top}$. The full implementation lives in `valax/risk/bucketing.py`; see [Theory § 7.8](theory.md#78-risk-bucketing-linear-and-jacobian-transformations) and the [Risk & Scenarios guide § Risk Bucketing](guide/risk.md#risk-bucketing).
+Linear aggregation is the special case $J = A^{\!\top}$. The full implementation lives in `valax/risk/bucketing.py`; see [Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations) and the [Risk & Scenarios guide § Risk Bucketing](guide/risk.md#risk-bucketing).
 
 ### Standard bucket schemes
 

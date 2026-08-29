@@ -76,8 +76,19 @@ nav:
       - "Numerical Pitfalls": architecture/numerical-pitfalls.md
       - "MC-Curves-2 Handoff": architecture/mc-curves-2.md
       - "QuantLib Validation Pyramid": architecture/quantlib-validation-pyramid.md
+  - Instruments: instruments.md
   - Models & Theory:
-      - Overview: theory.md
+      - Overview: theory/index.md
+      - Foundational Framework: theory/foundations.md
+      - Stochastic Models: theory/stochastic-models.md
+      - Curve Framework: theory/curves.md
+      - Volatility: theory/volatility.md
+      - Pricing Methods: theory/pricing-methods.md
+      - Greeks & Automatic Differentiation: theory/greeks.md
+      - Risk Measures: theory/risk-measures.md
+      - Calibration Theory: theory/calibration.md
+      - Interest-Rate Derivatives: theory/rate-derivatives.md
+      - References: theory/references.md
       - Rates:
           - "Hull-White MC: Exact Conditional Simulation": theory/hull-white-mc.md
           - "Hull-White Swaptions: Jamshidian Decomposition": theory/hull-white-swaptions.md

@@ -188,7 +188,7 @@ Order matters. Read top-down before any code.
 | `docs/architecture/production.md` §11.3, §11.4 | Data model and joint-solver interface design. The function signature `bootstrap_curve_graph(...)` is specified there. |
 | `docs/architecture/production.md` §13 | Phased delivery plan; MC-Curves-2's scope and acceptance criteria. |
 | `docs/architecture/production.md` §14 Q7–Q11 | Multi-curve open questions. **Q7 (instrument abstraction) is now resolved by MC-Curves-1.** Q8, Q10, Q11 are still open and gate parts of MC-Curves-2 — see §3 below. |
-| `docs/theory.md` §3.7, §3.8 | No-arb identities (CIP, tenor basis, XCCY) and the joint residual system formalism. The math justifying why the solver must be joint, not sequential. |
+| `docs/theory/curves.md` §3.7, §3.8 | No-arb identities (CIP, tenor basis, XCCY) and the joint residual system formalism. The math justifying why the solver must be joint, not sequential. |
 | `valax/curves/multi_curve.py` | The current sequential dual-curve bootstrapper. Read end-to-end. The `_dual_curve_swap_residuals` function is the structural ancestor of what MC-Curves-2 generalises. |
 | `valax/curves/bootstrap.py` | The current `bootstrap_simultaneous` Newton solve. The joint-solver implementation will reuse the `optimistix.Newton` + log-DF pattern with `ImplicitAdjoint`. |
 | `valax/curves/instruments.py` | Spot-check the `_floating_leg_pv` helper and at least one instrument from each of the four classes (single-curve / dual-curve / three-curve / four-curve). |

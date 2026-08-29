@@ -9,7 +9,7 @@
     gain Google-style docstrings and are switched on in
     [`api/pricing.md`](../api/pricing.md) so `mkdocs build --strict` stays green.
 
-    The theory behind the equations is in [theory §5.2](../theory.md#52-pde-finite-differences);
+    The theory behind the equations is in [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences);
     the user-facing walkthrough is in the [PDE guide](../guide/pde.md).
 
 ## 1. Motivation
@@ -670,7 +670,7 @@ green throughout.
 ## 11. Relationship to existing docs
 
 - **Theory:** the PDE math (operators, ADI, penalty method, Rannacher, per-model
-  PDEs) lives in [theory §5.2](../theory.md#52-pde-finite-differences).
+  PDEs) lives in [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences).
 - **User guide:** usage, the model×instrument matrix, config knobs, and
   Greeks-through-solver are in the [PDE guide](../guide/pde.md).
 - **API reference:** [`api/pricing.md`](../api/pricing.md) — populated

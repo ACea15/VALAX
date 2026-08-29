@@ -9,6 +9,12 @@ trade. Pricing is performed by separate pure functions (see
 [Analytical Pricing](analytical.md), [Monte Carlo](monte-carlo.md),
 [PDE Methods](pde.md), and [Lattice Methods](lattice.md)).
 
+!!! tip "Coverage matrix & definitions"
+    For a single cross-tabulation of every instrument against its numerical
+    method, volatility/model input, and calibration route — plus a
+    definition-focused write-up (underlying, cash flows, payoff) with links to
+    the theory — see [Instruments — Coverage & Definitions](../instruments.md).
+
 !!! tip
     All instruments are immutable pytrees. To modify a field, use `equinox.tree_at`
     or create a new instance. This guarantees safe `jax.jit`, `jax.vmap`, and
