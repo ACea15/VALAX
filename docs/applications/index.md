@@ -99,6 +99,7 @@ The through-line: **do not start with trading, and do not start with regulatory 
 
 ## 5. Where to read next
 
+- **Every instrument, its pricing method, vol input, and calibration** → [Instrument Pricing](instrument-pricing.md).
 - **The systems around VALAX in a bank stack** → [Where VALAX Fits](../landscape.md).
 - **The end-to-end risk pipeline these applications sit on** → [Risk: End-to-End](../risk-overview.md).
 - **The mathematical foundations** → [Models & Theory](../theory/index.md).

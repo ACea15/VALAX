@@ -63,6 +63,7 @@ nav:
   - "Where VALAX Fits": landscape.md
   - Applications:
       - Overview: applications/index.md
+      - "Instrument Pricing": applications/instrument-pricing.md
       - "Market Risk & Model Validation": applications/market-risk.md
       - "Quant Research": applications/quant-research.md
       - "Treasury & ALM": applications/treasury.md
@@ -76,7 +77,6 @@ nav:
       - "Numerical Pitfalls": architecture/numerical-pitfalls.md
       - "MC-Curves-2 Handoff": architecture/mc-curves-2.md
       - "QuantLib Validation Pyramid": architecture/quantlib-validation-pyramid.md
-  - Instruments: instruments.md
   - Models & Theory:
       - Overview: theory/index.md
       - Foundational Framework: theory/foundations.md
@@ -102,7 +102,6 @@ nav:
   - Benchmarks: benchmarks.md
   - User Guide:
       - "Tutorial — Rates End-to-End": guide/tutorial-rates.md
-      - Instruments Overview: guide/instruments.md
       - Analytical Pricing: guide/analytical.md
       - Yield Curves & Bootstrapping: guide/curves.md
       - Why Multi-Curve?: guide/why-multicurve.md
