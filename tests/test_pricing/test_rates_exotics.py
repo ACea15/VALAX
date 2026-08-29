@@ -14,6 +14,9 @@ from valax.instruments.rates import (
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.dates.schedule import generate_schedule
+from valax.surfaces.constant import ConstantVol
+from valax.surfaces.swaption_cube import SwaptionCube
+from valax.surfaces.optionlet_surface import OptionletVolSurface
 from valax.pricing.analytic.rates_exotics import (
     cross_currency_swap_price,
     cross_currency_basis_spread,
@@ -519,4 +522,154 @@ class TestRangeAccrual:
         vol = jnp.array(0.30)
         eager = range_accrual_price_black76(ra, dom_curve, vol)
         jitted = jax.jit(range_accrual_price_black76)(ra, dom_curve, vol)
+        assert float(jitted) == pytest.approx(float(eager), rel=1e-10)
+
+
+# ── Surface / cube wiring for the exotics ────────────────────────────
+
+def _flat_swaption_cube(vol, is_normal=False):
+    """A 2x2 SwaptionCube with a (near-)flat lognormal smile at ``vol``."""
+    g = lambda v: jnp.full((2, 2), v)
+    return SwaptionCube(
+        expiries=jnp.array([0.5, 15.0]), tenors=jnp.array([1.0, 30.0]),
+        forwards=g(0.05), alphas=g(vol), betas=g(1.0), rhos=g(0.0),
+        nus=g(1e-6), is_normal=is_normal,
+    )
+
+
+def _flat_optionlet_surface(vol):
+    """A 2-expiry OptionletVolSurface with a (near-)flat lognormal smile."""
+    n = 2
+    ones = jnp.ones(n)
+    return OptionletVolSurface(
+        expiries=jnp.array([0.25, 15.0]), forwards=0.05 * ones,
+        alphas=vol * ones, betas=1.0 * ones, rhos=0.0 * ones, nus=1e-6 * ones,
+    )
+
+
+class TestCMSCapFloorVolSource:
+    """Smile-source and convexity wiring on the CMS cap/floor pricer."""
+
+    @pytest.fixture
+    def cap(self, quarterly_schedule):
+        return CMSCapFloor(
+            payment_dates=quarterly_schedule[-4:],
+            strike=jnp.array(0.05), notional=jnp.array(1_000_000.0),
+            cms_tenor=5, is_cap=True,
+        )
+
+    @pytest.fixture
+    def flat_curve_15y(self, ref_date):
+        return _flat_curve(ref_date, 0.05, 16)
+
+    def test_scalar_matches_constantvol(self, cap, flat_curve_15y):
+        """A bare scalar and a ConstantVol source price identically."""
+        s = float(cms_cap_floor_price_black76(cap, flat_curve_15y, jnp.array(0.25)))
+        c = float(cms_cap_floor_price_black76(cap, flat_curve_15y, ConstantVol(jnp.array(0.25))))
+        assert s == pytest.approx(c, rel=1e-10)
+
+    def test_flat_cube_matches_scalar(self, cap, flat_curve_15y):
+        """A (near-)flat SwaptionCube reproduces the flat-vol Black-76 price."""
+        s = float(cms_cap_floor_price_black76(cap, flat_curve_15y, jnp.array(0.20)))
+        cube = float(cms_cap_floor_price_black76(cap, flat_curve_15y, _flat_swaption_cube(0.20)))
+        assert cube == pytest.approx(s, rel=2e-3)
+
+    def test_convexity_raises_atm_cap_price(self, cap, flat_curve_15y):
+        """Convexity lifts each forward CMS rate, raising an ATM cap's value."""
+        base = float(cms_cap_floor_price_black76(cap, flat_curve_15y, jnp.array(0.20)))
+        adj = float(cms_cap_floor_price_black76(
+            cap, flat_curve_15y, jnp.array(0.20), convexity_method="analytic",
+        ))
+        assert adj > base
+
+    def test_convexity_methods_close(self, cap, flat_curve_15y):
+        a = float(cms_cap_floor_price_black76(
+            cap, flat_curve_15y, jnp.array(0.20), convexity_method="analytic"))
+        r = float(cms_cap_floor_price_black76(
+            cap, flat_curve_15y, jnp.array(0.20), convexity_method="replication"))
+        assert a == pytest.approx(r, rel=5e-2)
+
+    def test_jit_with_cube(self, cap, flat_curve_15y):
+        cube = _flat_swaption_cube(0.20)
+        eager = cms_cap_floor_price_black76(cap, flat_curve_15y, cube)
+        jitted = jax.jit(lambda c: cms_cap_floor_price_black76(cap, c, cube))(flat_curve_15y)
+        assert float(jitted) == pytest.approx(float(eager), rel=1e-10)
+
+
+class TestCMSSwapConvexity:
+    """Convexity wiring on the CMS swap pricer."""
+
+    @pytest.fixture
+    def cms(self, ref_date, quarterly_schedule):
+        return CMSSwap(
+            start_date=ref_date, payment_dates=quarterly_schedule,
+            fixed_rate=jnp.array(0.05), notional=jnp.array(1_000_000.0),
+            cms_tenor=5,
+        )
+
+    @pytest.fixture
+    def flat_curve_15y(self, ref_date):
+        return _flat_curve(ref_date, 0.05, 16)
+
+    def test_no_vol_is_baseline(self, cms, flat_curve_15y):
+        """Omitting ``vol`` reproduces the historical no-convexity price."""
+        base = float(cms_swap_price(cms, flat_curve_15y))
+        explicit = float(cms_swap_price(cms, flat_curve_15y, vol=None))
+        assert base == pytest.approx(explicit, rel=1e-12)
+
+    def test_convexity_raises_payer_pv(self, cms, flat_curve_15y):
+        """Positive convexity lifts CMS rates ⇒ payer (receive-CMS) PV rises."""
+        base = float(cms_swap_price(cms, flat_curve_15y))
+        adj = float(cms_swap_price(
+            cms, flat_curve_15y, vol=_flat_swaption_cube(0.20),
+            convexity_method="analytic",
+        ))
+        assert adj > base
+
+    def test_methods_close(self, cms, flat_curve_15y):
+        cube = _flat_swaption_cube(0.20)
+        a = float(cms_swap_price(cms, flat_curve_15y, vol=cube, convexity_method="analytic"))
+        r = float(cms_swap_price(cms, flat_curve_15y, vol=cube, convexity_method="replication"))
+        assert a == pytest.approx(r, rel=5e-2)
+
+
+class TestRangeAccrualVolSource:
+    """Smile-source wiring on the range accrual pricer."""
+
+    @pytest.fixture
+    def ra(self, quarterly_schedule):
+        return RangeAccrual(
+            payment_dates=quarterly_schedule,
+            coupon_rate=jnp.array(0.08),
+            lower_barrier=jnp.array(0.03),
+            upper_barrier=jnp.array(0.07),
+            notional=jnp.array(1_000_000.0),
+        )
+
+    def test_scalar_matches_constantvol(self, ra, dom_curve):
+        s = float(range_accrual_price_black76(ra, dom_curve, jnp.array(0.30)))
+        c = float(range_accrual_price_black76(ra, dom_curve, ConstantVol(jnp.array(0.30))))
+        assert s == pytest.approx(c, rel=1e-10)
+
+    def test_flat_surface_matches_scalar(self, ra, dom_curve):
+        s = float(range_accrual_price_black76(ra, dom_curve, jnp.array(0.20)))
+        surf = float(range_accrual_price_black76(ra, dom_curve, _flat_optionlet_surface(0.20)))
+        assert surf == pytest.approx(s, rel=2e-3)
+
+    def test_skewed_surface_shifts_price(self, ra, dom_curve):
+        """A skewed surface (different vol at each barrier) moves the price
+        away from the flat-vol digital replication."""
+        skewed = OptionletVolSurface(
+            expiries=jnp.array([0.25, 15.0]), forwards=jnp.array([0.05, 0.05]),
+            alphas=jnp.array([0.02, 0.02]), betas=jnp.array([0.5, 0.5]),
+            rhos=jnp.array([-0.5, -0.5]), nus=jnp.array([0.6, 0.6]),
+        )
+        flat = float(range_accrual_price_black76(ra, dom_curve, jnp.array(0.20)))
+        smile = float(range_accrual_price_black76(ra, dom_curve, skewed))
+        assert smile != pytest.approx(flat, rel=1e-3)
+
+    def test_jit_with_surface(self, ra, dom_curve):
+        surf = _flat_optionlet_surface(0.20)
+        eager = range_accrual_price_black76(ra, dom_curve, surf)
+        jitted = jax.jit(lambda c: range_accrual_price_black76(ra, c, surf))(dom_curve)
         assert float(jitted) == pytest.approx(float(eager), rel=1e-10)

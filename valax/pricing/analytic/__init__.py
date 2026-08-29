@@ -68,6 +68,10 @@ from valax.pricing.analytic.rates_exotics import (
     cms_cap_floor_price_black76,
     range_accrual_price_black76,
 )
+from valax.pricing.analytic.cms_convexity import (
+    cms_convexity_adjustment,
+    cms_convexity_adjusted_rates,
+)
 from valax.pricing.analytic.inflation import (
     zcis_price,
     zcis_breakeven_rate,
@@ -98,8 +102,8 @@ from valax.pricing.analytic.graph_pricing import (
 )
 
 # Curve-aware, smile-aware rates pricers (vol-source entry points).
-# Imported last: it pulls in valax.surfaces.constant, and by this point every
-# analytic submodule the surfaces package depends on is already loaded.
+# Self-contained: does not import the surfaces package (see rates_smile), so the
+# surfaces -> pricing dependency stays one-directional and acyclic.
 from valax.pricing.analytic.rates_smile import (
     swaption_price,
     caplet_price,

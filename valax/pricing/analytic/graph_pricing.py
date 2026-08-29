@@ -21,6 +21,8 @@ wrappers when your curves already live in a :class:`CurveGraph` built by
 :func:`valax.curves.bootstrap_curve_graph`.
 """
 
+from typing import Callable
+
 from jaxtyping import Float
 from jax import Array
 
@@ -357,8 +359,11 @@ def cms_swap_price_from_graph(
     graph: CurveGraph,
     discount_id: str,
     forward_id: str | None = None,
+    *,
+    vol: Float[Array, ""] | Callable[..., Float[Array, ""]] | None = None,
+    convexity_method: str = "replication",
 ) -> Float[Array, ""]:
-    """CMS swap NPV on a curve graph (no convexity adjustment).
+    """CMS swap NPV on a curve graph, with optional Hagan convexity.
 
     Args:
         swap: CMS swap contract.
@@ -366,43 +371,58 @@ def cms_swap_price_from_graph(
         discount_id: Id of the discounting curve on the graph.
         forward_id: Optional id of the projection curve for the
             underlying swap rates.
+        vol: Optional vol source (swaption cube / callable) or scalar for
+            the convexity adjustment; ``None`` uses unadjusted forwards.
+        convexity_method: ``"replication"`` or ``"analytic"``; ignored
+            when ``vol`` is ``None``.
 
     Returns:
         Swap NPV.
     """
     discount_curve, forward_curve = _resolve(graph, discount_id, forward_id)
-    return cms_swap_price(swap, discount_curve, forward_curve)
+    return cms_swap_price(
+        swap, discount_curve, forward_curve,
+        vol=vol, convexity_method=convexity_method,
+    )
 
 
 def cms_cap_floor_price_black76_from_graph(
     cap: CMSCapFloor,
     graph: CurveGraph,
     discount_id: str,
-    vol: Float[Array, ""],
+    vol: Float[Array, ""] | Callable[..., Float[Array, ""]],
     forward_id: str | None = None,
+    *,
+    convexity_method: str | None = None,
 ) -> Float[Array, ""]:
-    """Black-76 CMS cap/floor price on a curve graph (no convexity adj.).
+    """Black-76 / Bachelier CMS cap/floor price on a curve graph.
 
     Args:
         cap: CMS cap or floor contract.
         graph: Curve graph holding the required curves.
         discount_id: Id of the discounting curve on the graph.
-        vol: Black-76 volatility of the CMS rate, scalar or per-period.
+        vol: CMS-rate volatility — scalar, per-period array, or a vol
+            source (swaption cube / callable with ``is_normal``).
         forward_id: Optional id of the projection curve for the
             underlying swap rates.
+        convexity_method: ``"replication"``, ``"analytic"``, or ``None``
+            (no convexity adjustment).
 
     Returns:
         Cap or floor NPV.
     """
     discount_curve, forward_curve = _resolve(graph, discount_id, forward_id)
-    return cms_cap_floor_price_black76(cap, discount_curve, vol, forward_curve)
+    return cms_cap_floor_price_black76(
+        cap, discount_curve, vol, forward_curve,
+        convexity_method=convexity_method,
+    )
 
 
 def range_accrual_price_black76_from_graph(
     accrual: RangeAccrual,
     graph: CurveGraph,
     discount_id: str,
-    vol: Float[Array, ""],
+    vol: Float[Array, ""] | Callable[..., Float[Array, ""]],
     forward_id: str | None = None,
 ) -> Float[Array, ""]:
     """Digital-replication range accrual price on a curve graph.
@@ -411,7 +431,9 @@ def range_accrual_price_black76_from_graph(
         accrual: Range accrual contract.
         graph: Curve graph holding the required curves.
         discount_id: Id of the discounting curve on the graph.
-        vol: Black-76 volatility of the reference rate.
+        vol: Reference-rate volatility — scalar, per-period array, or a
+            vol source (callable with ``is_normal``) queried at each
+            barrier for the smile skew.
         forward_id: Optional id of the reference-rate projection curve.
 
     Returns:

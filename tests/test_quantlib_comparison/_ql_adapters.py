@@ -185,6 +185,203 @@ def ql_dates_from_year_offsets(
     return [today + ql.Period(int(round(y * 365)), ql.Days) for y in years]
 
 
+def ql_annual_ibor_index(
+    rate: float,
+    today: ql.Date = DEFAULT_QL_DATE,
+) -> tuple[ql.IborIndex, ql.YieldTermStructureHandle]:
+    """Build the annual, Act/365, ``NullCalendar`` flat Ibor index.
+
+    This is the single-curve index used by the caplet/CMS fixtures below; it
+    matches VALAX's annual synthetic-swap convention (one period per year,
+    Act/365, no business-day logic).
+
+    Args:
+        rate: Flat continuously-compounded rate for the discount curve.
+        today: QL evaluation date.
+
+    Returns:
+        Tuple ``(ibor_index, discount_handle)``.
+    """
+    reset_evaluation_date(today)
+    dc = ql.Actual365Fixed()
+    disc = ql.YieldTermStructureHandle(ql.FlatForward(today, rate, dc))
+    idx = ql.IborIndex(
+        "Flat", ql.Period(ql.Annual), 0, ql.EURCurrency(),
+        ql.NullCalendar(), ql.Unadjusted, False, dc, disc,
+    )
+    return idx, disc
+
+
+def ql_optionlet_vol_surface(
+    expiry_years: list[float] | tuple[float, ...],
+    strikes: list[float] | tuple[float, ...],
+    vol_grid,
+    rate: float,
+    today: ql.Date = DEFAULT_QL_DATE,
+) -> dict[str, Any]:
+    """Build a QL optionlet (caplet) vol structure directly from a vol grid.
+
+    Wraps ``ql.StrippedOptionlet`` + ``ql.StrippedOptionletAdapter`` around a
+    pre-computed ``expiry x strike`` grid of caplet Black vols (e.g. a VALAX
+    :class:`~valax.surfaces.optionlet_surface.OptionletVolSurface` sampled at
+    its calibration nodes).  At the node ``(expiry, strike)`` points the adapter
+    returns the input vol exactly, so a cap priced with
+    ``ql.BlackCapFloorEngine`` reading this structure matches a VALAX cap
+    priced off the same surface with no interpolation gap — provided the cap's
+    strike and caplet expiries coincide with grid nodes.
+
+    Args:
+        expiry_years: Optionlet expiries (year fractions), one per grid row.
+        strikes: Strikes (grid columns).
+        vol_grid: ``(n_expiries, n_strikes)`` array-like of Black caplet vols.
+        rate: Flat discount rate.
+        today: QL evaluation date.
+
+    Returns:
+        Dict with ``adapter`` (``StrippedOptionletAdapter``), ``handle``
+        (``OptionletVolatilityStructureHandle``), ``index`` (the annual Ibor
+        index) and ``discount`` (yield-curve handle).
+    """
+    idx, disc = ql_annual_ibor_index(rate, today)
+    strikes = [float(k) for k in strikes]
+    opt_dates = [
+        today + ql.Period(int(round(float(t) * 365)), ql.Days)
+        for t in expiry_years
+    ]
+    vol_quotes = [
+        [ql.QuoteHandle(ql.SimpleQuote(float(vol_grid[i][j])))
+         for j in range(len(strikes))]
+        for i in range(len(opt_dates))
+    ]
+    stripped = ql.StrippedOptionlet(
+        0, ql.NullCalendar(), ql.Unadjusted, idx,
+        opt_dates, strikes, vol_quotes, ql.Actual365Fixed(),
+    )
+    adapter = ql.StrippedOptionletAdapter(stripped)
+    handle = ql.OptionletVolatilityStructureHandle(adapter)
+    return {
+        "adapter": adapter, "handle": handle,
+        "index": idx, "discount": disc,
+    }
+
+
+def ql_stripped_optionlet_surface(
+    cap_tenor_years: list[float] | tuple[float, ...],
+    cap_strikes: list[float] | tuple[float, ...],
+    cap_vol_grid,
+    rate: float,
+    switch_strike: float,
+    today: ql.Date = DEFAULT_QL_DATE,
+) -> dict[str, Any]:
+    """Strip caplet vols from cap (term) vols via ``ql.OptionletStripper1``.
+
+    Builds a ``ql.CapFloorTermVolSurface`` from a ``tenor x strike`` grid of
+    flat cap vols and inverts it into a caplet (optionlet) vol structure with
+    ``ql.OptionletStripper1`` + ``ql.StrippedOptionletAdapter`` — the market
+    "bootstrap the caplet smile from cap quotes" path.
+
+    Args:
+        cap_tenor_years: Cap maturities in years (surface rows).
+        cap_strikes: Strikes (surface columns).
+        cap_vol_grid: ``(n_tenors, n_strikes)`` array-like of flat cap vols.
+        rate: Flat discount rate.
+        switch_strike: Reference strike QL uses to switch between capfloor
+            parity instruments during stripping.
+        today: QL evaluation date.
+
+    Returns:
+        Dict with ``adapter``, ``handle``, ``stripper`` (the
+        ``OptionletStripper1``), ``index`` and ``discount``.
+    """
+    idx, disc = ql_annual_ibor_index(rate, today)
+    cap_strikes = [float(k) for k in cap_strikes]
+    tenors = [ql.Period(int(round(float(t))), ql.Years) for t in cap_tenor_years]
+    m = ql.Matrix(len(tenors), len(cap_strikes))
+    for i in range(len(tenors)):
+        for j in range(len(cap_strikes)):
+            m[i][j] = float(cap_vol_grid[i][j])
+    term_surface = ql.CapFloorTermVolSurface(
+        0, ql.NullCalendar(), ql.Unadjusted, tenors, cap_strikes, m,
+        ql.Actual365Fixed(),
+    )
+    stripper = ql.OptionletStripper1(
+        term_surface, idx, float(switch_strike), 1e-6, 100, disc,
+    )
+    adapter = ql.StrippedOptionletAdapter(stripper)
+    handle = ql.OptionletVolatilityStructureHandle(adapter)
+    return {
+        "adapter": adapter, "handle": handle, "stripper": stripper,
+        "index": idx, "discount": disc,
+    }
+
+
+def ql_cms_convexity_setup(
+    rate: float,
+    tenor_years: int,
+    expiry_years: float,
+    flat_vol: float,
+    today: ql.Date = DEFAULT_QL_DATE,
+) -> dict[str, Any]:
+    """Build a QL CMS coupon and read Hagan analytic/numeric convexity.
+
+    Constructs an annual, Act/365 ``ql.SwapIndex`` (matching VALAX's annual
+    synthetic swap), a flat ``ql.ConstantSwaptionVolatility`` and a
+    near-natural CMS coupon (payment one day after the fixing, so the
+    fixing→payment delay is negligible and the coupon approximates the natural
+    CMS swaplet VALAX models).  Both ``ql.AnalyticHaganPricer`` and
+    ``ql.NumericHaganPricer`` (``GFunctionStandard``, zero mean reversion) are
+    evaluated.
+
+    Args:
+        rate: Flat discount rate.
+        tenor_years: Underlying-swap tenor in years.
+        expiry_years: Time to the CMS fixing in years.
+        flat_vol: Flat Black swaption volatility.
+        today: QL evaluation date.
+
+    Returns:
+        Dict with ``forward`` (forward swap rate), ``analytic_adj`` and
+        ``numeric_adj`` (convexity adjustments), and ``analytic_rate`` /
+        ``numeric_rate`` (adjusted CMS rates).
+    """
+    idx, disc = ql_annual_ibor_index(rate, today)
+    dc = ql.Actual365Fixed()
+    cal = ql.NullCalendar()
+    swvolh = ql.SwaptionVolatilityStructureHandle(
+        ql.ConstantSwaptionVolatility(
+            today, cal, ql.Unadjusted,
+            ql.QuoteHandle(ql.SimpleQuote(float(flat_vol))), dc,
+        )
+    )
+    mean_rev = ql.QuoteHandle(ql.SimpleQuote(0.0))
+    swap_index = ql.SwapIndex(
+        "FlatCMS", ql.Period(int(tenor_years), ql.Years), 0, ql.EURCurrency(),
+        cal, ql.Period(ql.Annual), ql.Unadjusted, dc, idx,
+    )
+    start = today + ql.Period(int(round(float(expiry_years) * 365)), ql.Days)
+    end = start + ql.Period(1, ql.Days)   # minimal delay ⇒ natural swaplet
+    forward = float(swap_index.fixing(start))
+    coupon = ql.CmsCoupon(end, 1_000_000.0, start, end, 0, swap_index)
+
+    coupon.setPricer(
+        ql.AnalyticHaganPricer(swvolh, ql.GFunctionFactory.Standard, mean_rev)
+    )
+    analytic_adj = float(coupon.convexityAdjustment())
+    analytic_rate = float(coupon.rate())
+
+    coupon.setPricer(
+        ql.NumericHaganPricer(swvolh, ql.GFunctionFactory.Standard, mean_rev)
+    )
+    numeric_adj = float(coupon.convexityAdjustment())
+    numeric_rate = float(coupon.rate())
+
+    return {
+        "forward": forward,
+        "analytic_adj": analytic_adj, "analytic_rate": analytic_rate,
+        "numeric_adj": numeric_adj, "numeric_rate": numeric_rate,
+    }
+
+
 __all__ = [
     "DEFAULT_QL_DATE",
     "reset_evaluation_date",
@@ -193,4 +390,8 @@ __all__ = [
     "market_to_ql_heston_process",
     "ql_flat_curve",
     "ql_dates_from_year_offsets",
+    "ql_annual_ibor_index",
+    "ql_optionlet_vol_surface",
+    "ql_stripped_optionlet_surface",
+    "ql_cms_convexity_setup",
 ]

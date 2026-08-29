@@ -7,20 +7,22 @@ Contents
 - ``total_return_swap_price``
   Single-curve reduction of a TRS under self-financing asset assumption.
 - ``cms_swap_price``
-  CMS swap priced off a synthetic annual underlying swap (no convexity
-  adjustment).
+  CMS swap priced off a synthetic annual underlying swap, with an
+  optional Hagan convexity adjustment (``vol`` source).
 - ``cms_cap_floor_price_black76``
-  Black-76 on the unadjusted forward CMS rate (no convexity adjustment).
+  Black-76 / Bachelier CMS cap/floor with an optional smile-aware vol
+  source and optional Hagan convexity adjustment.
 - ``range_accrual_price_black76``
   Digital-replication range accrual: per-period snapshot probability of
-  the reference rate lying in ``[lower_barrier, upper_barrier]``.
+  the reference rate lying in ``[lower_barrier, upper_barrier]``, with an
+  optional smile-aware vol source queried at each barrier.
 
 All pricers are pure functions and differentiable via ``jax.grad``.  The
-CMS and range-accrual pricers ship **without** a convexity/timing
-adjustment — the true CMS rate differs from the forward swap rate by a
-Hagan-replication or SABR-integration correction that is a legitimate
-larger piece of work.  Users who need the adjustment should compose it
-externally.
+CMS and range-accrual pricers default to the historical baseline (no
+convexity adjustment, flat vol) when passed a bare scalar ``vol`` and no
+``convexity_method`` — passing a swaption cube and/or a convexity method
+turns on the Hagan correction (see
+:mod:`valax.pricing.analytic.cms_convexity`).
 
 References:
     Hagan (2003), "Convexity Conundrums: Pricing CMS Swaps, Caps, and
@@ -31,10 +33,16 @@ References:
         Framework*, ch. 9 (cross-currency).
 """
 
+from typing import Callable
+
 import jax
 import jax.numpy as jnp
 from jaxtyping import Float, Int
 from jax import Array
+
+# A *vol source* is a scalar/array vol or a callable exposing ``is_normal``
+# (e.g. a SwaptionCube / OptionletVolSurface / ConstantVol).
+VolSource = Float[Array, ""] | Callable[..., Float[Array, ""]]
 
 from valax.instruments.rates import (
     CrossCurrencySwap,
@@ -50,6 +58,7 @@ from valax.dates.daycounts import year_fraction
 # swaptions module rather than duplicating them (same reasoning as
 # `floating.py`).
 from valax.pricing.analytic.swaptions import _annuity, _dual_curve_float_pv
+from valax.pricing.analytic.cms_convexity import cms_convexity_adjusted_rates
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -342,6 +351,9 @@ def cms_swap_price(
     swap: CMSSwap,
     curve: DiscountCurve,
     forward_curve: DiscountCurve | None = None,
+    *,
+    vol: VolSource | None = None,
+    convexity_method: str = "replication",
 ) -> Float[Array, ""]:
     """NPV of a CMS swap (constant-maturity-swap fixed-vs-CMS exchange).
 
@@ -353,18 +365,23 @@ def cms_swap_price(
 
     .. math::
 
-        \\text{NPV}_{\\text{payer}} = N \\sum_i S_i \\tau_i DF(t_i)
+        \\text{NPV}_{\\text{payer}} = N \\sum_i \\hat S_i \\tau_i DF(t_i)
                                     - N \\cdot K \\cdot A.
 
-    .. warning::
+    **Convexity adjustment.**  A CMS rate is a martingale only under its
+    own annuity measure, so its expectation under the payment measure,
+    :math:`\\hat S_i`, differs from the forward par swap rate :math:`S_i`
+    by a convexity term that depends on the swap-rate smile.  Pass a
+    ``vol`` source to switch it on:
 
-       **No convexity adjustment.**  The true expected CMS rate under
-       each payment measure differs from the forward par swap rate by
-       a convexity term that depends on the swap-rate volatility.
-       This pricer uses the forward directly, which is a standard
-       *baseline* but is not market-accurate for flows on CMS rates.
-       Hagan-replication / SABR-integration is a legitimate larger
-       piece of work tracked in the roadmap.
+    - ``vol=None`` (default) — no adjustment; :math:`\\hat S_i = S_i`.
+      This reproduces the historical baseline pricer bit-for-bit.
+    - ``vol`` a :class:`~valax.surfaces.swaption_cube.SwaptionCube`
+      (or scalar) — each forward is convexity-adjusted via
+      :func:`~valax.pricing.analytic.cms_convexity.cms_convexity_adjusted_rates`
+      under Hagan's model, using ``convexity_method`` (``"replication"``
+      integrates the whole smile; ``"analytic"`` is the closed-form
+      approximation).
 
     Args:
         swap: CMS swap contract.
@@ -372,6 +389,11 @@ def cms_swap_price(
             ``forward_curve`` is not given).
         forward_curve: Optional projection curve for the underlying
             swap rates. Defaults to ``curve`` (single-curve setup).
+        vol: Optional vol source (swaption cube / callable with
+            ``is_normal``) or scalar for the convexity adjustment. When
+            ``None`` the forward CMS rates are used unadjusted.
+        convexity_method: ``"replication"`` or ``"analytic"``; ignored
+            when ``vol`` is ``None``.
 
     Returns:
         Swap NPV.
@@ -379,6 +401,16 @@ def cms_swap_price(
     cms_rates = _cms_forward_rates(
         swap.payment_dates, swap.cms_tenor, curve, forward_curve
     )
+
+    if vol is not None:
+        # Fixing time to each payment (natural CMS swaplet: fixes at the
+        # synthetic swap's start = the payment date).
+        T_fix = year_fraction(
+            curve.reference_date, swap.payment_dates, swap.day_count
+        )
+        cms_rates = cms_convexity_adjusted_rates(
+            cms_rates, T_fix, swap.cms_tenor, vol, method=convexity_method,
+        )
 
     # CMS leg: per-period tau against the swap's own day count, DF at payment.
     payment_starts = jnp.concatenate(
@@ -407,10 +439,12 @@ def cms_swap_price(
 def cms_cap_floor_price_black76(
     cap: CMSCapFloor,
     curve: DiscountCurve,
-    vol: Float[Array, ""],
+    vol: VolSource,
     forward_curve: DiscountCurve | None = None,
+    *,
+    convexity_method: str | None = None,
 ) -> Float[Array, ""]:
-    """Black-76 price of a CMS cap or floor (no convexity adjustment).
+    """Black-76 / Bachelier price of a CMS cap or floor.
 
     Each CMS caplet is priced with Black-76 on the forward CMS rate
     :math:`F_i` computed by :func:`_cms_forward_rates`:
@@ -432,21 +466,35 @@ def cms_cap_floor_price_black76(
     the first period mirrors the second period's length.  Requires
     ``n >= 2`` payment dates.
 
-    ``vol`` can be a scalar (flat Black vol) or a 1-D array of shape
-    ``(n,)`` for a per-caplet vol term structure.
+    **Volatility input.**  ``vol`` may be:
 
-    .. warning::
+    - a scalar (flat Black vol) or a 1-D array of shape ``(n,)`` for a
+      per-caplet vol term structure — used directly, reproducing the
+      historical Black-76 pricer bit-for-bit; or
+    - a *vol source* (a callable exposing ``is_normal``, e.g. a
+      :class:`~valax.surfaces.swaption_cube.SwaptionCube`), queried per
+      period at ``(strike, expiry_i, cms_tenor)`` so the price reflects
+      the swaption smile.  A normal source routes each caplet to the
+      Bachelier formula.
 
-       Same caveat as :func:`cms_swap_price` — the forward CMS rate is
-       **not** convexity-adjusted, so this pricer is a baseline rather
-       than a market-accurate pricer.
+    **Convexity adjustment.**  Set ``convexity_method`` to
+    ``"replication"`` or ``"analytic"`` to convexity-adjust each forward
+    CMS rate via
+    :func:`~valax.pricing.analytic.cms_convexity.cms_convexity_adjusted_rates`
+    before applying the option formula.  Left ``None`` (default), the
+    forward CMS rates are used unadjusted (the historical baseline).
+
+    Floors are obtained by put-call parity on each period.
 
     Args:
         cap: CMS cap or floor contract.
         curve: Discount curve.
-        vol: Black-76 volatility of the CMS rate, scalar or per-period.
+        vol: CMS-rate volatility — scalar, per-period array, or a vol
+            source (swaption cube / callable with ``is_normal``).
         forward_curve: Optional projection curve for the underlying
             swap rates. Defaults to ``curve`` (single-curve setup).
+        convexity_method: ``"replication"``, ``"analytic"``, or ``None``
+            (no convexity adjustment).
 
     Returns:
         Cap or floor NPV.
@@ -471,12 +519,37 @@ def cms_cap_floor_price_black76(
     sqrt_T = jnp.sqrt(T_safe)
 
     K = cap.strike
-    F = cms_rates
-    d1 = (jnp.log(F / K) + 0.5 * vol**2 * T_safe) / (vol * sqrt_T)
-    d2 = d1 - vol * sqrt_T
+
+    # Optional Hagan convexity adjustment of each forward CMS rate.
+    if convexity_method is not None:
+        F = cms_convexity_adjusted_rates(
+            cms_rates, T_safe, cap.cms_tenor, vol, method=convexity_method,
+        )
+    else:
+        F = cms_rates
+
+    # Resolve the per-period vol: a smile source is queried at the option
+    # strike; a bare scalar/array is used directly.
+    if callable(vol) and hasattr(vol, "is_normal"):
+        tenor_f = jnp.asarray(float(cap.cms_tenor))
+        sigma = jax.vmap(lambda t: vol(K, t, tenor_f))(T_safe)
+        is_normal = vol.is_normal
+    else:
+        sigma = jnp.asarray(vol)
+        is_normal = False
 
     Phi = jax.scipy.stats.norm.cdf
-    caplet_pvs = cap.notional * tau * df_pay * (F * Phi(d1) - K * Phi(d2))
+    if is_normal:
+        phi = jax.scipy.stats.norm.pdf
+        sig_T = sigma * sqrt_T
+        d = (F - K) / sig_T
+        caplet_pvs = cap.notional * tau * df_pay * (
+            (F - K) * Phi(d) + sig_T * phi(d)
+        )
+    else:
+        d1 = (jnp.log(F / K) + 0.5 * sigma**2 * T_safe) / (sigma * sqrt_T)
+        d2 = d1 - sigma * sqrt_T
+        caplet_pvs = cap.notional * tau * df_pay * (F * Phi(d1) - K * Phi(d2))
 
     if cap.is_cap:
         return jnp.sum(caplet_pvs)
@@ -492,7 +565,7 @@ def cms_cap_floor_price_black76(
 def range_accrual_price_black76(
     accrual: RangeAccrual,
     curve: DiscountCurve,
-    vol: Float[Array, ""],
+    vol: VolSource,
     forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     """Digital-replication price of a range accrual note on a rate index.
@@ -539,8 +612,13 @@ def range_accrual_price_black76(
     Args:
         accrual: Range accrual contract.
         curve: Discount / projection curve.
-        vol: Black-76 volatility of the reference rate.  Scalar or
-            per-period shape ``(n,)``.
+        vol: Reference-rate volatility — a scalar / per-period ``(n,)``
+            array (used for both barriers), or a vol source (a callable
+            exposing ``is_normal``, e.g. an
+            :class:`~valax.surfaces.optionlet_surface.OptionletVolSurface`)
+            queried at each barrier ``(strike, expiry_i)`` so the two
+            digitals see the smile skew between the lower and upper
+            strikes.
 
     Returns:
         NPV of the range accrual coupons.  Redemption of principal is
@@ -566,13 +644,23 @@ def range_accrual_price_black76(
     # Guard for a period that has already started (T <= 0).
     T_safe = jnp.maximum(T, 1e-10)
     sqrt_T = jnp.sqrt(T_safe)
-    sigma_sqrt_T = vol * sqrt_T
 
     L = accrual.lower_barrier
     U = accrual.upper_barrier
 
-    d2_L = (jnp.log(F / L) - 0.5 * vol**2 * T_safe) / sigma_sqrt_T
-    d2_U = (jnp.log(F / U) - 0.5 * vol**2 * T_safe) / sigma_sqrt_T
+    # Vol: a smile source is queried at each barrier so the skew between
+    # the lower and upper strikes is captured (the two digitals see
+    # different vols); a bare scalar/array is used for both barriers,
+    # reproducing the flat-vol digital replication bit-for-bit.
+    if callable(vol) and hasattr(vol, "is_normal"):
+        vol_L = jax.vmap(lambda t: vol(L, t))(T_safe)
+        vol_U = jax.vmap(lambda t: vol(U, t))(T_safe)
+    else:
+        vol_L = jnp.asarray(vol)
+        vol_U = jnp.asarray(vol)
+
+    d2_L = (jnp.log(F / L) - 0.5 * vol_L**2 * T_safe) / (vol_L * sqrt_T)
+    d2_U = (jnp.log(F / U) - 0.5 * vol_U**2 * T_safe) / (vol_U * sqrt_T)
 
     Phi = jax.scipy.stats.norm.cdf
     prob_in_range = Phi(-d2_U) - Phi(-d2_L)

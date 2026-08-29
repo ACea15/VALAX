@@ -14,13 +14,18 @@ to the Black-76 or Bachelier core per the source's convention -- reusing the
 So passing a flat scalar reproduces the existing pricers bit-for-bit, while
 passing a smile object makes the price strike/expiry(/tenor)-aware.
 
-This module sits *above* both the analytic pricers and the surfaces package.
-``ConstantVol`` is imported from its standalone submodule to keep the
-surfaces -> pricing dependency acyclic.
+This module sits in the *pricing* layer and deliberately does **not** import
+the surfaces package: a bare scalar is wrapped in the self-contained
+:class:`_FlatVol` source below rather than in
+:class:`~valax.surfaces.constant.ConstantVol`.  This keeps the dependency
+one-directional (surfaces -> pricing) and avoids a circular import, since the
+surfaces package imports back into ``valax.calibration`` / ``valax.pricing``.
+This mirrors :func:`valax.pricing.analytic.cms_convexity._resolve_vol_source`.
 """
 
 import jax
 import jax.numpy as jnp
+import equinox as eqx
 from jaxtyping import Float
 from jax import Array
 
@@ -38,20 +43,42 @@ from valax.pricing.analytic.caplets import (
     cap_price_black76,
     cap_price_bachelier,
 )
-from valax.surfaces.constant import ConstantVol
+
+
+class _FlatVol(eqx.Module):
+    """Self-contained flat-vol source used to wrap a bare scalar.
+
+    Structurally identical to :class:`~valax.surfaces.constant.ConstantVol`
+    (callable, carries an ``is_normal`` flag) but defined here in the pricing
+    package so the curve-aware pricers never import the surfaces package,
+    keeping the surfaces -> pricing dependency acyclic.
+
+    Attributes:
+        vol: The constant volatility.
+        is_normal: Quoting convention -- True for normal (Bachelier), False for
+            lognormal (Black-76).
+    """
+
+    vol: Float[Array, ""]
+    is_normal: bool = eqx.field(static=True, default=False)
+
+    def __call__(self, *coords: Float[Array, ""]) -> Float[Array, ""]:
+        """Return the constant vol, ignoring any (strike, expiry, tenor) coords."""
+        return jnp.asarray(self.vol)
 
 
 def _as_vol_source(vol):
     """Normalize a scalar-or-callable into a vol source.
 
     A vol source is a callable exposing an ``is_normal`` attribute (e.g.
-    ``SwaptionCube``, ``OptionletVolSurface``, ``ConstantVol``). A bare scalar
-    is wrapped in a lognormal :class:`ConstantVol`; pass ``ConstantVol(v,
-    is_normal=True)`` explicitly for a flat normal vol.
+    ``SwaptionCube``, ``OptionletVolSurface``,
+    :class:`~valax.surfaces.constant.ConstantVol`). A bare scalar is wrapped in
+    a lognormal :class:`_FlatVol`; pass a ``ConstantVol(v, is_normal=True)`` (or
+    any callable with ``is_normal=True``) explicitly for a flat normal vol.
     """
     if callable(vol) and hasattr(vol, "is_normal"):
         return vol
-    return ConstantVol(jnp.asarray(vol))
+    return _FlatVol(jnp.asarray(vol))
 
 
 # ── Swaptions (swaption cube) ─────────────────────────────────────────
