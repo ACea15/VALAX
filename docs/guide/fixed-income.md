@@ -192,6 +192,29 @@ This is computed via `jax.grad` through the discount curve pytree — the exact 
 !!! tip "Autodiff Advantage"
     In a traditional library, key-rate durations require N+1 curve builds (one per pillar bump). VALAX computes all of them in a **single backward pass** through `jax.grad`, which is both faster and exact to machine precision.
 
+### Z-Spread and Spread DV01
+
+The **Z-spread** is the constant continuously-compounded spread added to every point of the discount curve that reprices the bond to its market price — the standard measure of a bond's credit/liquidity premium over the risk-free curve. Its risk sensitivities (spread duration, spread DV01, spread convexity) fall out of the same autodiff machinery:
+
+```python
+from valax.risk import (
+    bond_z_spread,
+    z_spread_dv01,
+    z_spread_duration,
+    z_spread_convexity,
+)
+
+# Solve the Z-spread that matches a market dirty price of 96.0
+z = bond_z_spread(bond, curve, jnp.array(96.0))
+
+# Spread risk evaluated at the bond's own Z-spread
+dv01 = z_spread_dv01(bond, curve, z)        # cash P&L per +1 bp of spread
+dur  = z_spread_duration(bond, curve, z)    # -1/P dP/dz
+cvx  = z_spread_convexity(bond, curve, z)   #  1/P d²P/dz²
+```
+
+`z_spread_dv01` is reported positive for a long position (price falls as the spread widens) and satisfies $\text{DV01}_z = D_z \, P \times 10^{-4}$. For a bond discounted off a single curve, a Z-spread shift is the same curve move as a parallel zero-rate shift, so `z_spread_dv01` equals the bond's parallel-curve DV01 — the *spread* framing is what separates credit/liquidity risk from pure rate risk in a report. For a **callable** bond the analogous, option-aware measure is the OAS; see [Callable Bonds](callable-bonds.md#option-adjusted-spread-oas) and [Models & Theory §7.9](../theory/risk-measures.md#79-option-adjusted-spread-and-z-spread).
+
 ## Full Example
 
 ```python

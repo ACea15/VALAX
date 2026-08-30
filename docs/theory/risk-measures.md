@@ -420,3 +420,74 @@ A practical reason to bucket: the raw covariance $\Sigma_x$ estimated from $T$ h
 - Jacobian ops: `pushforward_sensitivities`, `pullback_shocks`, `reparameterize_covariance`, `jacobian_from_fn`;
 - builders: `tenor_bucket_map` (indicator and linear), `equal_weight_bucket_map`, `level_slope_curvature_jacobian`, `pca_jacobian`;
 - ladder convenience: `bucket_sensitivity_ladder` applies independent bucketing to each component of a `SensitivityLadder`, including bilateral aggregation of cross-gamma blocks.
+
+### 7.9 Option-Adjusted Spread and Z-Spread
+
+The **Z-spread** and the **option-adjusted spread (OAS)** are the two canonical *spread* risk measures for bonds: a single number, in rate units, that captures the credit/liquidity premium a bond carries over the risk-free curve. They differ only in whether the bond has embedded optionality.
+
+#### Definitions
+
+For a bond with market dirty price $P^{\text{mkt}}$ priced off a discount curve $P(0,t) = e^{-\int_0^t f(0,u)\,du}$, both spreads are the constant continuously-compounded shift $s$ added to every point of the curve that makes the model reprice the bond exactly:
+
+$$
+\text{price}\big(\text{bond},\; t \mapsto P(0,t)\,e^{-s t}\big) \;=\; P^{\text{mkt}}.
+$$
+
+- **Z-spread** — the bond has *no* optionality, so the pricer is the deterministic discounted-cash-flow map $P(s) = \sum_i c_i\, P(0,t_i)\, e^{-s t_i}$. The Z-spread is the root of $P(s) = P^{\text{mkt}}$.
+- **OAS** — the bond has embedded options (callable/puttable). The pricer is now a *model* (here Hull-White) that reprices the option at each trial spread, so the recovered $s$ isolates the pure credit/liquidity component with the option value stripped out. Because the option is re-solved at every $s$, an OAS is only meaningful together with the model and its volatility.
+
+For an option-free bond the OAS collapses **exactly** to the Z-spread — there is no option to adjust for — which is a useful correctness cross-check: routing an option-free bond through the full short-rate OAS solver must return the closed-form Z-spread to solver tolerance.
+
+#### Why the two OAS conventions coincide under Hull-White
+
+There are two textbook definitions of OAS that in general disagree: (i) *shift the discounting curve only*, versus (ii) *re-fit the whole model to the shifted curve*. Under a one-factor Hull-White model fitted exactly to the initial curve, they **coincide exactly**, and the reason is worth recording.
+
+Hull-White splits the short rate as $r(t) = x(t) + \alpha(t)$, where $x$ is a zero-mean Ornstein–Uhlenbeck state with curve-independent dynamics and $\alpha$ carries the entire dependence on the initial curve,
+
+$$
+\alpha(t) = f^M(0,t) + \frac{\sigma^2}{2a^2}\big(1 - e^{-at}\big)^2 .
+$$
+
+A parallel spread sends every zero rate $r_i \to r_i + s$; because $-s\,t$ is exactly linear, the shift holds at *every* continuous time, so the instantaneous forward moves rigidly, $f^M(0,t) \to f^M(0,t) + s$, and therefore
+
+$$
+\alpha(t) \;\to\; \alpha(t) + s .
+$$
+
+The convexity term (which depends only on $a$ and $\sigma$) is untouched. The pricing PDE sees $r = x + \alpha(t) + s$ — a pure constant shift of the discount coefficient, with the $x$-dynamics completely unchanged. Re-fitting the model to the shifted curve produces the *same* shifted $\alpha$ and the *same* $x$-dynamics, so the two conventions are identical. In VALAX this is asserted directly: the average shift `hw_alpha_average(shifted) − hw_alpha_average(original)` equals $s$ to machine precision.
+
+#### Spread Greeks
+
+Differentiating the repricing map in the spread gives the spread-based risk measures. For an option-free bond these are exact autodiff derivatives of the analytic pricer:
+
+$$
+D_z = -\frac{1}{P}\frac{\partial P}{\partial z},
+\qquad
+\text{DV01}_z = -\frac{\partial P}{\partial z}\times 10^{-4},
+\qquad
+C_z = \frac{1}{P}\frac{\partial^2 P}{\partial z^2}.
+$$
+
+$\text{DV01}_z$ is the cash P&L for a one-basis-point widening of the spread (see the [DV01 discussion in §7.4](#74-sensitivity-ladders) on units), related to spread duration by $\text{DV01}_z = D_z\, P \times 10^{-4}$. Since $P(z) = \sum_i a_i e^{-z t_i}$ is a sum of decaying exponentials with positive weights, $C_z > 0$ always for an option-free bond. For a bond discounted off a single curve, a Z-spread shift is the *same* curve move as a parallel zero-rate shift, so $\text{DV01}_z$ numerically equals the bond's parallel-curve (IR) DV01; the *spread* framing is what separates credit/liquidity risk from pure rate risk in a report.
+
+For a bond with an embedded option the spread Greeks require the model, because the option is repriced at each spread. VALAX takes them as exact autodiff derivatives through the PDE exercise projection.
+
+#### The callable-convexity subtlety
+
+Textbooks describe a callable bond as exhibiting **negative** effective convexity as yields fall — the issuer's call caps price appreciation. That statement is about a bond's *price-versus-yield-to-call* curve flattening at the call price. Measured properly as the second derivative of the full term-structure model price with respect to a **parallel discount-curve spread**, in the exact-fit Hull-White framework a callable's effective convexity does **not** go strictly negative:
+
+$$
+P(s) \;=\; \mathbb{E}\Big[\textstyle\sum_i \text{CF}_i(s)\, e^{-\int (r+s)}\Big],
+$$
+
+and even when the bond is deep in-the-money to be called, the capped redemption is still a fixed near-term cash flow discounted by $e^{-s\,t}$ — a convex function of $s$. So the convexity floors at the *small positive* convexity of the near-term call stub rather than crossing zero.
+
+The economically real and **reproducible** signature is therefore **convexity compression**: the call annihilates the bond's convexity, taking it from the bullet's large positive value (e.g. $\sim 70$) down toward zero, and — unlike a bullet, whose convexity *rises* as rates fall — the callable's convexity *falls* toward zero as rates fall and the call bites. The same asymmetry shows up in duration, which the call *compresses* below the bullet's. VALAX's tests assert this compression, not a sign flip.
+
+#### The compounding-convention trap
+
+An OAS is only defined relative to a compounding convention. VALAX curves discount continuously, so `callable_bond_oas` returns a *continuous* spread. Tools such as QuantLib's `CallableFixedRateBond.OAS` quote the spread on a *periodic-compounding* basis with a stated frequency. The naive rate conversion $s_c = f\ln(1 + s_m/f)$ is only a first-order bridge: on a curve, the continuous-equivalent of a *compounded parallel curve shift* is maturity-dependent, so there is no single continuous parallel spread that exactly equals a compounded parallel spread. Confusing the two produces a plausible-looking few-basis-point systematic error. The safe cross-validation is therefore to request QuantLib's OAS on a **continuous** basis, at which point it and the VALAX OAS agree to well under a basis point (the residual being the tree-vs-PDE pricing gap divided by the bond's large spread sensitivity).
+
+#### VALAX implementation
+
+`valax/risk/oas.py` provides `bond_z_spread` (closed-form Z-spread), `callable_bond_oas` (Hull-White PDE OAS via an implicitly-differentiable `optimistix.Newton` root-find), the analytic spread Greeks `z_spread_duration` / `z_spread_dv01` / `z_spread_convexity`, the model-based `effective_duration` / `effective_convexity`, and the `continuous_to_compounded_spread` / `compounded_to_continuous_spread` convention helpers. It is validated against `ql.CallableFixedRateBond.OAS` on a continuous basis to $<0.3$ bp in `tests/test_quantlib_comparison/test_oas_ql.py`. See the [Fixed Income](../guide/fixed-income.md) and [Callable Bonds](../guide/callable-bonds.md) guides for end-to-end usage.

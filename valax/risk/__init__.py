@@ -91,3 +91,15 @@ from valax.risk.factors import (
     fit_rates_pca,
     zero_rate_returns_from_snapshots,
 )
+from valax.risk.oas import (
+    callable_bond_oas,
+    bond_z_spread,
+    price_under_spread,
+    effective_duration,
+    effective_convexity,
+    z_spread_duration,
+    z_spread_dv01,
+    z_spread_convexity,
+    continuous_to_compounded_spread,
+    compounded_to_continuous_spread,
+)

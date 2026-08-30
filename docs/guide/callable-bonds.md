@@ -140,7 +140,9 @@ callable = CallableBond(
     coupon_rate=jnp.array(0.055),  # 5.5% coupon
     face_value=jnp.array(100.0),
     call_dates=call_dates,
-    call_prices=jnp.array([102.0, 101.5, 101.0, 100.5, 100.0]),
+    # Call prices are quoted as a fraction of face (1.0 = par), matching the
+    # PDE/tree pricer's `exercise_prices * face_value` convention.
+    call_prices=jnp.array([1.02, 1.015, 1.01, 1.005, 1.0]),
     frequency=2,
     day_count="act_365",
 )
@@ -150,7 +152,7 @@ callable = CallableBond(
 |-----------|-------------|
 | `payment_dates` | Semi-annual coupon dates (ordinals) |
 | `call_dates` | Dates on which the issuer may call (subset of payment dates) |
-| `call_prices` | Clean call price at each call date (often declining schedule toward par) |
+| `call_prices` | Clean call price at each call date, as a **fraction of face** (1.0 = par; often a declining schedule toward par) |
 | `coupon_rate` | Annual coupon rate |
 
 !!! tip
@@ -158,6 +160,49 @@ callable = CallableBond(
     and effective convexity — no finite-difference bumps required. See
     [Lattice Methods](lattice.md) and [Short-Rate Models](short-rate.md) for the
     tree implementation.
+
+### Option-Adjusted Spread (OAS)
+
+The **OAS** is the constant continuously-compounded parallel shift on the model's
+discount curve that reprices the bond to its market price, with the embedded call
+repriced at every trial spread — so it isolates the credit/liquidity component
+*after* stripping out the option value. It is a one-parameter root-find over the
+Hull-White PDE pricer, implicitly differentiable, so effective duration and
+convexity come from `jax.grad` for free:
+
+```python
+import jax.numpy as jnp
+from valax.models.hull_white import HullWhiteModel
+from valax.pricing.pde import PDEConfig
+from valax.risk import callable_bond_oas, effective_duration, effective_convexity
+
+model = HullWhiteModel(
+    mean_reversion=jnp.array(0.03),
+    volatility=jnp.array(0.01),
+    initial_curve=curve,          # the base (risk-free) discount curve
+)
+config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
+
+oas  = callable_bond_oas(callable, model, jnp.array(99.0), config)  # market dirty price
+dur  = effective_duration(callable, model, config)
+cvx  = effective_convexity(callable, model, config)
+```
+
+For an option-free bond `callable_bond_oas` collapses exactly to the
+[Z-spread](fixed-income.md#z-spread-and-spread-dv01); the OAS is what generalises
+it once there is an option to adjust for.
+
+!!! warning "Two subtleties worth knowing"
+    - **Convexity compression, not a sign flip.** The textbook "negative convexity"
+      of a callable is a *price-vs-yield-to-call* statement. Measured as this
+      parallel-spread derivative, `effective_convexity` does **not** go strictly
+      negative — the call instead *compresses* convexity from the bullet's large
+      positive value toward zero as the call bites.
+    - **Compounding convention.** VALAX quotes OAS on a *continuous* basis. Tools
+      like QuantLib quote it on a *compounded* basis; the two differ by a few bp
+      and are not exactly reconcilable by a scalar formula on a non-flat curve.
+
+    Both points are derived in [Models & Theory §7.9](../theory/risk-measures.md#79-option-adjusted-spread-and-z-spread).
 
 ---
 

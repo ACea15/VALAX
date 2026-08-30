@@ -115,6 +115,72 @@ internally.
 
 ::: valax.risk.var.parametric_var
 
+## Spread risk: OAS & Z-spread
+
+Option-adjusted spread, Z-spread, and their autodiff spread-Greeks, in
+`valax/risk/oas.py`. The OAS is the constant continuously-compounded
+parallel shift on the model's discount curve that reprices a bond to its
+market price; for an option-free bond it collapses to the Z-spread. See
+[Models & Theory §7.9](../theory/risk-measures.md#79-option-adjusted-spread-and-z-spread)
+for the mathematics (including why, under Hull-White, the parallel-shift
+and re-fit definitions of OAS coincide, and why a callable's effective
+convexity does not go strictly negative when measured this way).
+
+### Option-adjusted spread
+
+`callable_bond_oas` root-finds the spread against the Hull-White PDE
+pricer via `optimistix.Newton`; it is implicitly differentiable, so
+`jax.grad` through it gives spread sensitivities. It dispatches on the
+instrument type, so it also serves option-free bonds (returning the
+Z-spread). `price_under_spread` is the underlying repricing map.
+
+::: valax.risk.oas.callable_bond_oas
+
+::: valax.risk.oas.price_under_spread
+
+### Z-spread (analytic, option-free)
+
+::: valax.risk.oas.bond_z_spread
+
+### Model-based effective risk
+
+Spread-Greeks of a bond under the short-rate model — the right tool for
+instruments with embedded optionality, where the option must be repriced
+at each spread. Derivatives are exact autodiff through the PDE exercise
+projection.
+
+::: valax.risk.oas.effective_duration
+
+::: valax.risk.oas.effective_convexity
+
+### Z-spread risk (analytic, option-free)
+
+Spread duration, spread DV01 (cash P&L per basis point of Z-spread), and
+spread convexity for option-free bonds, taken by autodiff of the analytic
+curve pricer. For a single-curve bullet a Z-spread shift is the same curve
+move as a parallel zero-rate shift, so these equal the bond's parallel-curve
+(IR) risk; the *spread* framing is what separates credit/liquidity from
+pure rate risk in a report.
+
+::: valax.risk.oas.z_spread_duration
+
+::: valax.risk.oas.z_spread_dv01
+
+::: valax.risk.oas.z_spread_convexity
+
+### Spread-convention conversions
+
+Convert a spread quoted as a rate between continuous and periodic
+compounding bases. Useful when reconciling with tools (e.g. QuantLib)
+that quote OAS on a compounded basis — though note the exact
+continuous-equivalent of a *compounded parallel curve shift* is
+maturity-dependent, so on a non-flat curve these are a first-order
+adjustment, not an exact OAS bridge.
+
+::: valax.risk.oas.continuous_to_compounded_spread
+
+::: valax.risk.oas.compounded_to_continuous_spread
+
 ## P&L attribution
 
 Decompose scenario P&L into risk-factor contributions using a

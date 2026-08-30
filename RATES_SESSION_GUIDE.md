@@ -34,7 +34,7 @@ Maturity: **production** (validated, differentiable, tested) / **partial** /
 | **Hull-White short-rate PDE** (bonds, callable/puttable, European **and Bermudan** swaptions) | **production** (QL-validated) | `valax/pricing/pde/hull_white.py` |
 | **LMM/BGM** MC (PCA, Rebonato vol) | partial (MC only) | `valax/models/lmm.py`, `valax/pricing/mc/lmm_paths.py` |
 | Bermudan swaption (LSM on LMM) | partial | `valax/pricing/mc/bermudan.py` |
-| CMS / range-accrual analytic | **partial (no convexity adj)** | `valax/pricing/analytic/rates_exotics.py` |
+| CMS / range-accrual analytic | **production** (Hagan convexity adj, QL-validated) | `valax/pricing/analytic/rates_exotics.py`, `valax/pricing/analytic/cms_convexity.py` |
 | Inflation (ZC/YoY swaps, caps) | partial | `valax/pricing/analytic/inflation.py`, `valax/curves/inflation.py` |
 | **SABR** smile: Hagan implied vol + single-smile & per-expiry **calibration** | **production** (QL-validated) | `valax/pricing/analytic/sabr.py`, `valax/calibration/sabr.py`, `valax/surfaces/sabr_surface.py` |
 | **G2++/HW-2F** (multi-factor Gaussian short rate) | **missing** | planned `valax/models/g2pp.py` (workstream 6) |
@@ -56,10 +56,21 @@ Maturity: **production** (validated, differentiable, tested) / **partial** /
    substrate. Bermudans no longer need a regression proxy — under Hull-White
    the tail-swap exercise value is analytic at every node, so the projection is
    exact.
-3b. **No OAS solver.** Now that callable bonds price on both the tree and the
-   PDE, option-adjusted spread is a short step: add a constant shift to the
-   model's discount curve and root-find it against a market price. Autodiff
-   then gives effective duration/convexity directly. Roadmap 3.2.
+3b. ~~**No OAS solver.**~~ — ✅ **delivered.** `valax/risk/oas.py` adds
+   `callable_bond_oas` (continuous parallel shift root-found against a market
+   price via `optimistix.Newton`, implicitly differentiable), `bond_z_spread`
+   (analytic option-free oracle), and `effective_duration` / `effective_convexity`
+   via autodiff. QL-validated against `ql.CallableFixedRateBond.OAS` on a
+   continuous basis to **< 0.3 bp** (`tests/test_quantlib_comparison/test_oas_ql.py`),
+   with the compounding-convention trap asserted material. ⚠️ **Finding:**
+   effective convexity *to a parallel curve spread* does **not** go strictly
+   negative for a callable in this exact-fit HW framework — the capped
+   redemption is still discounted convexly, so convexity floors at the
+   near-term call stub's small positive value. The real, reproducible signature
+   is **convexity compression** (bullet ~70 → callable ~0) plus duration
+   compression; the textbook "negative convexity" is a price-vs-yield-to-call
+   statement, not this term-structure OAS derivative. Tests assert the
+   compression, not a sign flip. Roadmap 3.2.
 
 4. **No multi-factor short rate and no skew-in-dynamics model.** Single-factor
    Hull-White is the only short-rate model, so tenor rates move in lockstep
@@ -71,8 +82,8 @@ Maturity: **production** (validated, differentiable, tested) / **partial** /
 5. ~~**Thin QuantLib validation.**~~ — ✅ **delivered** for swaptions, caps/floors
    and the HW callable/puttable tree, in
    `tests/test_quantlib_comparison/test_rates_pricers_ql.py`.
-   `test_cap_strip_on_caplet_vols_ql.py` remains a skipped placeholder (needs
-   workstream 5a).
+   `test_cap_strip_on_caplet_vols_ql.py` is now live (workstream 5a delivered),
+   and `test_oas_ql.py` validates the option-adjusted spread solver.
 
    **This paid for itself immediately.** On its first execution the tree
    comparison caught a real pricing bug: `callable_bond_price` compared the
@@ -166,11 +177,21 @@ pin what exists to a reference *before* building on it.
    pricers jit and differentiate as-is — which matters for putting a Bermudan
    inside a calibration objective.
 
-**→ Next up: OAS (small, closes the callable-bond story), then workstream 5 (SABR ↔ multi-curve seam), then 6 (G2++).**
+**→ Next up: workstream 6 (G2++/HW-2F).** ✅ OAS (§3b), workstream 5 (SABR ↔
+multi-curve seam) and CMS convexity are now delivered; G2++ is the remaining
+headline item, and its prerequisite (a workstream-5b swaption-vol quoting
+object) is satisfied. Workstream 7 (Cheyette) stays deferred behind it.**
 
 ---
 
-### 3b. OAS / Z-spread for callable and puttable bonds *(small, ~1 day)*
+### 3b. OAS / Z-spread for callable and puttable bonds — ✅ DELIVERED
+
+> **Status:** shipped in `valax/risk/oas.py` with `tests/test_risk/test_oas.py`
+> and `tests/test_quantlib_comparison/test_oas_ql.py`. The plan below is retained
+> for context. One deviation from the plan: test 6's "negative effective
+> convexity" is **not** reproducible as a parallel-spread derivative in this
+> exact-fit HW framework (see gap §2.3b for why); the test asserts convexity
+> *compression* toward zero instead. All other steps landed as designed.
 
 **What it is.** The option-adjusted spread (OAS) is the constant parallel shift
 `s` on the model's discount curve such that the model price equals the market
@@ -255,7 +276,9 @@ more accurate.
 
 ---
 
-5. **SABR ↔ multi-curve integration seam** *(high value, medium readiness — both
+5. **SABR ↔ multi-curve integration seam** — ✅ DELIVERED (normal/shifted SABR +
+   Bachelier inverter, swaption cube + optionlet surface, curve-aware pricing in
+   `valax/pricing/analytic/rates_smile.py`). *(high value, medium readiness — both
    halves already exist)*. Marry the mature-but-disjoint multi-curve framework
    and SABR calibrator into a single curve-aware smile-pricing path. SABR sits
    *between* two curve touchpoints (see theory §9.2–9.3): the **forward** it
@@ -372,6 +395,22 @@ more accurate.
    `ρ`/one factor to a degenerate limit must recover the HW-1F pricer already in
    the repo. **Deps:** workstream 1 (QL harness) + a swaption-vol quoting object
    from workstream 5b.
+
+   **Multi-curve design guardrails (bake in from day one, even though stochastic
+   basis is out of scope for G2++).** G2++ is a single-curve *dynamics* engine
+   (it evolves one discount curve); the tenor basis is deterministic on top. Two
+   disciplines keep it multi-curve-ready at ~zero cost and make the future
+   stochastic-basis extension additive rather than a rewrite:
+   - **Give the G2++ swaption/annuity pricer an optional `forward_curve`
+     (defaulting to the discount curve) from day one** — the exact pattern
+     workstream 5 established in `swaptions.py` (`_dual_curve_float_pv`,
+     `swap_rate(forward_curve=...)`, the `*_from_graph` wrappers). Then
+     "single-curve" is just the degenerate case, and multi-curve is a caller
+     passing a second curve.
+   - **Keep discounting strictly on `model.initial_curve` (OIS) and never let a
+     forward curve leak into a discount factor.** That single discipline is what
+     makes the deterministic-basis story correct and the stochastic-basis
+     extension additive later.
 
 7. **Cheyette / quasi-Gaussian (deferred, lower priority)** — a Markovian HJM
    model that adds **skew to the rate dynamics** (local vol on rates) while
