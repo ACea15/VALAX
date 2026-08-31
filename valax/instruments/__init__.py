@@ -38,6 +38,7 @@ from valax.instruments.rates import (
     CrossCurrencySwap,
     TotalReturnSwap,
     CMSSwap,
+    CMSSpreadSwap,
     CMSCapFloor,
     RangeAccrual,
 )

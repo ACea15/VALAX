@@ -67,15 +67,23 @@ from valax.instruments.options import (
     VarianceSwap,
     WorstOfBasketOption,
 )
-from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
+from valax.instruments.rates import (
+    BermudanSwaption,
+    Cap,
+    Caplet,
+    CMSSpreadSwap,
+    Swaption,
+)
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
 from valax.models.hull_white import HullWhiteModel, hw_bond_price
+from valax.models.g2pp import G2PPModel, g2pp_bond_price
 from valax.models.lmm import LMMModel
 from valax.models.local_vol import LocalVolModel
 from valax.models.multi_asset import MultiAssetGBMModel
 from valax.models.slv import SLVModel
 from valax.pricing.mc.hull_white_paths import HullWhitePathResult, generate_hull_white_paths
+from valax.pricing.mc.g2pp_paths import G2PPPathResult, generate_g2pp_paths
 from valax.pricing.mc.bermudan import LSMConfig, bermudan_swaption_lsm
 from valax.pricing.mc.dispatch import (
     MCConfig,
@@ -1140,6 +1148,294 @@ def _puttable_bond_hw(
         model, result, cf_times, cf_amounts, put_times, put_prices,
         T, n_steps, is_call=False, smoothing=smoothing,
     )
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Rates recipes (G2++ two-factor short-rate MC)
+#
+# Same contract as the Hull-White recipes: the exact two-factor conditional
+# scheme (no Euler bias) is used, and every cash flow is discounted with the
+# money-market numeraire accumulated along each path.
+#
+#   Optional market args:
+#     T       (float): Horizon in year fractions (defaults per instrument).
+#     n_steps (int)  : Number of time steps (default 100).
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _g2pp_path_sdf(
+    result: G2PPPathResult,
+    times: Float[Array, " n_times"],
+    T: Float[Array, ""],
+    n_steps: int,
+) -> Float[Array, "n_paths n_times"]:
+    """Path-wise stochastic discount factors at a set of event times.
+
+    Mirrors :func:`_hw_path_sdf` for :class:`G2PPPathResult`.
+
+    Args:
+        result: Output of :func:`generate_g2pp_paths`.
+        times: Event times in year fractions.
+        T: Simulation horizon used to generate the paths.
+        n_steps: Number of simulation steps (static).
+
+    Returns:
+        Discount factor for each path and event time.
+    """
+    idx = _hw_step_index(times, T, n_steps)
+    return jnp.exp(jnp.take(result.log_discount_factors, idx, axis=1))
+
+
+@register(FixedRateBond, G2PPModel)
+def _fixed_bond_g2pp(
+    *,
+    instrument: FixedRateBond,
+    model: G2PPModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Fixed-rate bond price under G2++ two-factor short-rate MC.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the last payment date).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
+
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_g2pp_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    sdf = _g2pp_path_sdf(result, cf_times, T, n_steps)
+    pv = jnp.sum(cf_amounts[None, :] * sdf, axis=1)
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(FloatingRateBond, G2PPModel)
+def _floating_bond_g2pp(
+    *,
+    instrument: FloatingRateBond,
+    model: G2PPModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Floating-rate note price under G2++ two-factor short-rate MC.
+
+    Uses the same par-at-reset floating-leg replication as the Hull-White
+    recipe: the floating coupons plus principal collapse to
+    ``face * D(0, t_settle)`` and the fixed spread is discounted explicitly.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to maturity).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    face = instrument.face_value
+
+    cf_times = year_fraction(ref, instrument.payment_dates, day_count)
+    prev_dates = jnp.concatenate(
+        [instrument.settlement_date[None], instrument.payment_dates[:-1]]
+    )
+    taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
+    spread_amounts = instrument.spread * face * taus
+
+    t_settle = year_fraction(ref, instrument.settlement_date, day_count)
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_g2pp_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    settle_sdf = _g2pp_path_sdf(result, t_settle[None], T, n_steps)[:, 0]
+    spread_sdf = _g2pp_path_sdf(result, cf_times, T, n_steps)
+
+    pv = face * settle_sdf + jnp.sum(spread_amounts[None, :] * spread_sdf, axis=1)
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(Swaption, G2PPModel)
+def _swaption_g2pp(
+    *,
+    instrument: Swaption,
+    model: G2PPModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """European swaption price under G2++ two-factor short-rate MC.
+
+    At expiry the swap value on unit notional is
+    :math:`1 - \\sum_i c_i P(T, t_i \\mid x, y)` (payer) computed from the
+    analytic affine ZCB conditional on each path's factors, floored at zero and
+    discounted by the path-wise money-market numeraire.  This provides the
+    MC <-> analytic triangulation for :func:`g2pp_swaption_price`.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the option expiry).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+
+    expiry_time = year_fraction(ref, instrument.expiry_date, day_count)
+    cashflow_times = year_fraction(ref, instrument.fixed_dates, day_count)
+
+    starts = jnp.concatenate(
+        [instrument.expiry_date[None], instrument.fixed_dates[:-1]]
+    )
+    taus = year_fraction(starts, instrument.fixed_dates, day_count)
+    cashflows = instrument.strike * taus
+    cashflows = cashflows.at[-1].add(1.0)
+
+    if T is None:
+        T = expiry_time
+
+    result = generate_g2pp_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    idx = _hw_step_index(expiry_time[None], T, n_steps)[0]
+    x_ex = result.factor_x[:, idx]                       # (n_paths,)
+    y_ex = result.factor_y[:, idx]
+    sdf_ex = jnp.exp(result.log_discount_factors[:, idx])
+
+    # Coupon bond value per path from the analytic affine ZCB.
+    zcb = g2pp_bond_price(
+        model, x_ex[:, None], y_ex[:, None], expiry_time, cashflow_times[None, :]
+    )                                                    # (n_paths, n_fixed)
+    coupon_bond = jnp.sum(cashflows[None, :] * zcb, axis=1)
+
+    swap_value = 1.0 - coupon_bond            # payer swap value at expiry
+    if not instrument.is_payer:
+        swap_value = -swap_value
+    payoff = jnp.maximum(swap_value, 0.0)
+
+    pv = instrument.notional * payoff * sdf_ex
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+def _g2pp_cms_rate(
+    model: G2PPModel,
+    x: Float[Array, " n_paths"],
+    y: Float[Array, " n_paths"],
+    t_fix: Float[Array, ""],
+    tenor: int,
+) -> Float[Array, " n_paths"]:
+    """Par swap rate of an annual ``tenor``-year swap fixed at ``t_fix``.
+
+    Computed per path from the analytic G2++ affine ZCB conditional on that
+    path's factors:
+
+    .. math::
+
+        S = \\frac{1 - P(t_\\text{fix}, t_\\text{fix} + \\text{tenor})}
+                 {\\sum_{j=1}^{\\text{tenor}} P(t_\\text{fix}, t_\\text{fix} + j)}
+
+    (annual accruals, unit year fraction per period).
+
+    Args:
+        model: G2++ model.
+        x: First factor at the fixing time, one per path.
+        y: Second factor at the fixing time, one per path.
+        t_fix: Fixing time in year fractions.
+        tenor: Underlying swap tenor in whole years (static).
+
+    Returns:
+        Per-path forward par swap rate.
+    """
+    js = jnp.arange(1, tenor + 1, dtype=jnp.float64)
+    maturities = t_fix + js                                   # (tenor,)
+    zcb = g2pp_bond_price(
+        model, x[:, None], y[:, None], t_fix, maturities[None, :]
+    )                                                         # (n_paths, tenor)
+    annuity = jnp.sum(zcb, axis=1)
+    return (1.0 - zcb[:, -1]) / annuity
+
+
+@register(CMSSpreadSwap, G2PPModel)
+def _cms_spread_swap_g2pp(
+    *,
+    instrument: CMSSpreadSwap,
+    model: G2PPModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """CMS-spread swap (steepener / flattener) under G2++ two-factor MC.
+
+    At each period's accrual start both CMS rates are computed analytically
+    from the path's factors, their spread net of the fixed strike accrues over
+    the period, and the coupon is discounted by the path-wise money-market
+    numeraire.  This is the decorrelation-sensitive payoff that motivates the
+    second factor.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the last payment date).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+
+    pay_times = year_fraction(ref, instrument.payment_dates, day_count)
+    starts = jnp.concatenate(
+        [instrument.start_date[None], instrument.payment_dates[:-1]]
+    )
+    fix_times = year_fraction(ref, starts, day_count)
+    taus = year_fraction(starts, instrument.payment_dates, day_count)
+
+    if T is None:
+        T = pay_times[-1]
+
+    result = generate_g2pp_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+
+    sign = 1.0 if instrument.pay_fixed else -1.0
+    n_periods = instrument.payment_dates.shape[0]
+
+    pv = jnp.zeros(config.n_paths, dtype=jnp.float64)
+    for i in range(n_periods):
+        fix_idx = _hw_step_index(fix_times[i][None], T, n_steps)[0]
+        x_fix = result.factor_x[:, fix_idx]
+        y_fix = result.factor_y[:, fix_idx]
+
+        s_long = _g2pp_cms_rate(
+            model, x_fix, y_fix, fix_times[i], instrument.cms_tenor_long
+        )
+        s_short = _g2pp_cms_rate(
+            model, x_fix, y_fix, fix_times[i], instrument.cms_tenor_short
+        )
+        coupon = sign * (s_long - s_short - instrument.fixed_rate) * taus[i]
+
+        pay_sdf = _g2pp_path_sdf(result, pay_times[i][None], T, n_steps)[:, 0]
+        pv = pv + instrument.notional * coupon * pay_sdf
+
     price, stderr = discounted_mean_and_stderr(
         pv, jnp.ones((), dtype=pv.dtype), config.n_paths
     )

@@ -86,6 +86,14 @@ HESTON_TRANSFORMS: dict[str, TransformSpec] = {
     "rho": correlation(),
 }
 
+G2PP_TRANSFORMS: dict[str, TransformSpec] = {
+    "mean_reversion_x": positive(),
+    "mean_reversion_y": positive(),
+    "volatility_x": positive(),
+    "volatility_y": positive(),
+    "correlation": correlation(),
+}
+
 
 # ── Model ↔ unconstrained conversion ────────────────────────────────
 

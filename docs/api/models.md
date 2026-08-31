@@ -140,6 +140,48 @@ for callables, puttables, Bermudan swaptions, and IR exotics:
 
 ::: valax.models.hull_white.hw_short_rate_variance
 
+## G2++ (two-factor Gaussian short-rate)
+
+The two-additive-factor Gaussian model (equivalent to two-factor Hull–White).
+A second stochastic factor lets rates of different maturities **decorrelate**,
+unlocking CMS-spread options, steepeners/flatteners and decorrelation-sensitive
+Bermudans that a one-factor model structurally cannot price:
+
+\[
+    r(t) = x(t) + y(t) + \varphi(t), \qquad
+    dx = -a\,x\,dt + \sigma\,dW_1, \quad
+    dy = -b\,y\,dt + \eta\,dW_2, \quad
+    dW_1\,dW_2 = \rho\,dt.
+\]
+
+!!! success "Exact fit"
+    At \(t = 0\) with \(x = y = 0\), `g2pp_bond_price` recovers the initial
+    curve \(P^M(0, T)\) to machine precision by construction, via the shift
+    \(\varphi\).
+
+!!! note "\(\rho\) is an input, not the decorrelation"
+    The tenor-rate decorrelation G2++ delivers is a model *output* bounded by
+    \(\rho\): it vanishes as \(|\rho| \to 1\) (the factors collapse to a single
+    shock) and is largest, typically with \(\rho\) strongly negative, when short
+    and long rates should move most independently. See
+    [G2++ theory §2](../theory/g2pp.md#2-decorrelation-and-to-what-extent).
+
+::: valax.models.G2PPModel
+
+### Analytics
+
+::: valax.models.g2pp.g2pp_bond_price
+
+::: valax.models.g2pp.g2pp_V
+
+::: valax.models.g2pp.g2pp_phi
+
+::: valax.models.g2pp.g2pp_B
+
+::: valax.models.g2pp.g2pp_factor_covariance
+
+::: valax.models.g2pp.g2pp_short_rate_variance
+
 ## LIBOR Market Model (LMM / BGM)
 
 Brace–Gatarek–Musiela LIBOR Market Model for forward-rate simulation:

@@ -29,6 +29,7 @@ from valax.pricing.analytic.hull_white_swaptions import (
     hw_swaption_price,
     hw_zcb_option_price,
 )
+from valax.pricing.analytic.g2pp_swaptions import g2pp_swaption_price
 from valax.pricing.analytic.digital import digital_option_price
 from valax.pricing.analytic.sabr import (
     sabr_implied_vol,

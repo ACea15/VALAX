@@ -93,6 +93,7 @@ nav:
           - "Hull-White MC: Exact Conditional Simulation": theory/hull-white-mc.md
           - "Hull-White Swaptions: Jamshidian Decomposition": theory/hull-white-swaptions.md
           - "Hull-White Finite Differences: Bermudans and Callables": theory/hull-white-pde.md
+          - "G2++: Two-Factor Gaussian and Decorrelation": theory/g2pp.md
   - "Risk: End-to-End": risk-overview.md
   - Risk Factors: risk-factors.md
   - Design Rationale: design-rationale.md

@@ -205,6 +205,8 @@ annual underlying swap. **No convexity adjustment** — see the
 
 ::: valax.instruments.CMSSwap
 
+::: valax.instruments.CMSSpreadSwap
+
 ::: valax.instruments.CMSCapFloor
 
 ::: valax.instruments.RangeAccrual

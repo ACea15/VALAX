@@ -52,6 +52,21 @@ See [theory](../theory/hull-white-swaptions.md#5-why-this-makes-hullwhite-calibr
 
 ::: valax.calibration.hw_swaption_prices
 
+## G2++
+
+Fits the five free G2++ parameters \((a, b, \sigma, \eta, \rho)\) jointly to a
+European swaption surface using the semi-analytic Brigo–Mercurio pricer, so the
+least-squares Jacobian is exact autodiff. Because the two mean reversions are
+only weakly identified by an ATM surface — and the objective has degenerate
+basins at \(\sigma \to 0\), \(\rho \to \pm 1\) — pinning \((a, b)\) via
+`fixed_params` and starting the vols and \(\rho\) from a sensible prior is the
+better-posed problem. See
+[G2++ theory §6](../theory/g2pp.md#6-calibration).
+
+::: valax.calibration.calibrate_g2pp
+
+::: valax.calibration.g2pp_swaption_prices
+
 ## Transforms
 
 Reparametrization utilities that map constrained parameters

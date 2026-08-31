@@ -133,6 +133,51 @@ class CMSSwap(eqx.Module):
     day_count: str = eqx.field(static=True, default="act_360")
 
 
+class CMSSpreadSwap(eqx.Module):
+    """CMS-spread swap — steepener / flattener on two swap-rate tenors.
+
+    Each period pays the spread between two constant-maturity swap rates of
+    different tenors (e.g. the 10Y minus the 2Y swap rate) against a fixed
+    rate.  With unit gearing the floating coupon for period :math:`i` is
+
+    .. math::
+
+        C_i = N\\,\\bigl(S^{\\text{long}}(t_i) - S^{\\text{short}}(t_i) - K\\bigr)
+              \\,\\tau_i
+
+    where the two CMS rates are observed at the accrual start.  This is the
+    canonical **decorrelation-sensitive** rates product: its risk depends on
+    the *joint* dynamics of short- and long-tenor rates, which a one-factor
+    model cannot represent but G2++ can.  A steepener receives the spread
+    (``pay_fixed=True``); a flattener pays it (``pay_fixed=False``).
+
+    Attributes:
+        start_date: Effective date / first accrual start (ordinal).
+        payment_dates: Period-end payment dates (ordinals, shape n).  The CMS
+            fixing for each period is observed at that period's accrual start
+            (the previous payment date, or ``start_date`` for the first).
+        fixed_rate: Fixed spread strike :math:`K` subtracted from the CMS
+            spread on the floating leg.
+        notional: Notional principal.
+        cms_tenor_long: Tenor of the long reference swap rate in years
+            (e.g. 10 for the 10Y rate).
+        cms_tenor_short: Tenor of the short reference swap rate in years
+            (e.g. 2 for the 2Y rate).
+        pay_fixed: ``True`` = pay fixed / receive spread (steepener),
+            ``False`` = receive fixed / pay spread (flattener).
+        day_count: Day count convention for accrual fractions.
+    """
+
+    start_date: Int[Array, ""]
+    payment_dates: Int[Array, " n"]
+    fixed_rate: Float[Array, ""]
+    notional: Float[Array, ""]
+    cms_tenor_long: int = eqx.field(static=True, default=10)
+    cms_tenor_short: int = eqx.field(static=True, default=2)
+    pay_fixed: bool = eqx.field(static=True, default=True)
+    day_count: str = eqx.field(static=True, default="act_360")
+
+
 class CMSCapFloor(eqx.Module):
     """CMS cap or floor — option on CMS rates.
 

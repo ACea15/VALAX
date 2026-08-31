@@ -119,6 +119,20 @@ automatically consistent with the curve the model was exact-fitted to.
 
 ::: valax.pricing.analytic.hw_zcb_option_price
 
+#### G2++ (Brigo–Mercurio semi-analytic)
+
+Model-consistent swaption pricing under the two-factor G2++ model. With two
+state variables Jamshidian's one-dimensional decomposition no longer applies, so
+the price is an exact **one-dimensional integral** over the first factor with a
+Jamshidian-style critical boundary on the second, evaluated by Gauss–Hermite
+quadrature. See [G2++: Two-Factor Gaussian](../theory/g2pp.md#3-european-swaptions-brigomercurio-integral).
+
+Discounting is taken from `model.initial_curve`. The `forward_curve` argument is
+reserved for a future deterministic-basis dual-curve extension and must be
+`None` (single-curve).
+
+::: valax.pricing.analytic.g2pp_swaption_price
+
 ### FX pricing
 
 ::: valax.pricing.analytic.fx_forward_rate
@@ -302,6 +316,15 @@ Rates (LMM):
 - `(Swaption, LMMModel)`
 - `(BermudanSwaption, LMMModel)`
 
+Rates (short-rate, exact conditional simulation):
+
+- `(FixedRateBond, HullWhiteModel)`, `(FloatingRateBond, HullWhiteModel)`,
+  `(CallableBond, HullWhiteModel)`, `(PuttableBond, HullWhiteModel)`
+- `(FixedRateBond, G2PPModel)`, `(FloatingRateBond, G2PPModel)`,
+  `(Swaption, G2PPModel)`
+- `(CMSSpreadSwap, G2PPModel)` — decorrelation-sensitive steepener/flattener;
+  both CMS rates are computed analytically per path from the G2++ affine ZCB.
+
 ### Legacy entry points
 
 Still exported for backward compatibility; new code should use
@@ -351,6 +374,16 @@ accumulation of \(\int r\,dt\) into the log discount factor). See
 ::: valax.pricing.mc.HullWhitePathResult
 
 ::: valax.pricing.mc.generate_hull_white_paths
+
+The G2++ generator samples the **exact** two-factor conditional Gaussian law
+(Cholesky of the \(2\times2\) conditional covariance) and integrates the
+deterministic forward part of the discount exactly, so it is unbiased in the
+factors and reprices the initial curve within Monte-Carlo error on flat and
+steep curves alike. See [G2++ Monte Carlo](../theory/g2pp.md#4-monte-carlo-exact-two-factor-scheme).
+
+::: valax.pricing.mc.G2PPPathResult
+
+::: valax.pricing.mc.generate_g2pp_paths
 
 ### Payoff functions (low-level)
 
