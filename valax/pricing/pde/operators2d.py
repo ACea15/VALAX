@@ -164,7 +164,7 @@ def build_operator_2d(
     diff_v: Float[Array, "n_x n_y"] | Float[Array, ""],
     drift_v: Float[Array, "n_x n_y"] | Float[Array, ""],
     mixed: Float[Array, "n_x n_y"] | Float[Array, ""],
-    discount: Float[Array, ""],
+    discount: Float[Array, "n_x n_y"] | Float[Array, ""],
 ) -> Operator2D:
     """Assemble an :class:`Operator2D` from per-node coefficient fields.
 
@@ -172,8 +172,11 @@ def build_operator_2d(
     :func:`~valax.pricing.pde.operators.build_operator_1d`: ``diff_*`` is the
     coefficient of the second derivative (the ``1/2`` is applied by the stencil),
     ``drift_*`` the coefficient of the first derivative, and ``mixed`` the
-    coefficient of the mixed second derivative ``V_xv`` (no ``1/2``). The scalar
-    ``discount`` is split evenly between ``A1`` and ``A2``.
+    coefficient of the mixed second derivative ``V_xv`` (no ``1/2``). The
+    ``discount`` is split evenly between ``A1`` and ``A2``; it may be a scalar
+    ``r`` (e.g. Heston) or a **per-node field** of shape ``(n_x, n_y)`` for a
+    state-dependent short rate (e.g. the ``r = x + y`` state part of a G2++
+    two-factor Gaussian model — the arithmetic broadcasts either way).
 
     Args:
         grid: The tensor-product grid.
@@ -182,7 +185,8 @@ def build_operator_2d(
         diff_v: Coefficient ``c_vv`` of ``V_vv`` (e.g. ``sigma^2 v``).
         drift_v: Coefficient ``c_v`` of ``V_v`` (e.g. ``kappa (theta - v)``).
         mixed: Coefficient ``c_xv`` of ``V_xv`` (e.g. ``rho sigma v``).
-        discount: Discount rate ``r`` (split ``r/2`` onto each axis).
+        discount: Discount rate ``r`` (split ``r/2`` onto each axis). Scalar or
+            an ``(n_x, n_y)`` per-node field for a state-dependent short rate.
 
     Returns:
         The assembled :class:`Operator2D`.

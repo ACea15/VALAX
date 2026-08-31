@@ -6,9 +6,11 @@ Maps a VALAX model onto the drift/diffusion/discount coefficients that
 covers the Black-Scholes model in log-spot space; local volatility (Dupire)
 adds a *time-dependent* 1-D operator via :func:`lv_operator_stack`; the Heston
 stochastic-volatility model adds a 2-D (ADI) operator via
-:func:`heston_operator_2d`; and Hull-White adds the short-rate operator stack
+:func:`heston_operator_2d`; Hull-White adds the short-rate operator stack
 :func:`hw_operator_stack`, whose *discount* coefficient is the state variable
-itself. Further models (SLV, G2++) are added later.
+itself; and the G2++ two-factor Gaussian short-rate model adds the 2-D operator
+:func:`g2pp_operator_2d`, whose discount is the *sum* of the two state
+variables ``x + y``. Further models (SLV) are added later.
 """
 
 import jax
@@ -17,6 +19,7 @@ from jax import Array, lax
 from jaxtyping import Float
 
 from valax.models.black_scholes import BlackScholesModel
+from valax.models.g2pp import G2PPModel
 from valax.models.heston import HestonModel
 from valax.models.hull_white import HullWhiteModel, hw_alpha_average
 from valax.models.local_vol import LocalVolModel
@@ -253,4 +256,85 @@ def heston_operator_2d(model: HestonModel, grid: Grid2D) -> Operator2D:
         drift_v=drift_v,
         mixed=mixed,
         discount=model.rate,
+    )
+
+
+def g2pp_operator_2d(model: G2PPModel, grid: Grid2D) -> Operator2D:
+    r"""Build the 2-D G2++ ADI operator on a centred ``(x, y)`` factor grid.
+
+    The solver works in the two **centred** Gaussian factors of the G2++
+    decomposition :math:`r(t) = x(t) + y(t) + \varphi(t)` (see
+    :func:`~valax.models.g2pp.g2pp_phi`), where
+
+    .. math::
+
+        dx(t) = -a\,x(t)\,dt + \sigma\,dW_1(t), \qquad
+        dy(t) = -b\,y(t)\,dt + \eta\,dW_2(t), \qquad
+        dW_1\,dW_2 = \rho\,dt .
+
+    A claim value :math:`V(t, x, y)` satisfies the backward equation
+
+    .. math::
+
+        V_\tau = \tfrac{1}{2}\sigma^2 V_{xx} + \tfrac{1}{2}\eta^2 V_{yy}
+            + \rho\sigma\eta\, V_{xy}
+            - a x\, V_x - b y\, V_y
+            - \bigl(x + y + \varphi(t)\bigr) V ,
+
+    which maps onto :func:`~valax.pricing.pde.operators2d.build_operator_2d` as
+
+    - ``diff_x = sigma^2``          (coefficient of ``V_xx``),
+    - ``drift_x = -a x``            (coefficient of ``V_x``),
+    - ``diff_v = eta^2``            (coefficient of ``V_yy``),
+    - ``drift_v = -b y``            (coefficient of ``V_y``),
+    - ``mixed = rho sigma eta``     (coefficient of ``V_xy``; a **constant**),
+    - ``discount = x + y``          (the **state** part of the short rate).
+
+    Only the state part ``x + y`` of the discount enters the operator here. The
+    deterministic, spatially-uniform shift :math:`\varphi(t)` is **factored out**
+    of the operator and applied as a per-step scalar discount during the
+    backward sweep (see :mod:`valax.pricing.pde.g2pp`): a spatially-constant
+    discount commutes with the spatial operator, so this splitting is exact and
+    keeps the operator time-independent (built once, no stacking). This is also
+    what lets the scheme reproduce the initial curve exactly, provided the
+    per-step :math:`\varphi` integral is done exactly.
+
+    The mixed coefficient :math:`\rho\sigma\eta` is a genuine constant (unlike
+    Heston's ``rho xi v``), and :func:`build_operator_2d` zeroes it on all four
+    edges as usual — the standard in't Hout & Foulon treatment of the
+    explicit-only cross term. Nothing is detached from autodiff: both factor
+    axes are anchored at the origin (the read-off is always at ``(0, 0)``), so
+    ``a, b, sigma, eta, rho`` stay fully differentiable through the coefficients.
+
+    Args:
+        model: G2++ model parameters.
+        grid: The tensor-product ``(x, y)`` centred-factor grid.
+
+    Returns:
+        The assembled :class:`~valax.pricing.pde.operators2d.Operator2D`.
+    """
+    a = model.mean_reversion_x
+    b = model.mean_reversion_y
+    sigma = model.volatility_x
+    eta = model.volatility_y
+    rho = model.correlation
+
+    x = grid.x.nodes[:, jnp.newaxis]  # (n_x, 1)
+    y = grid.y.nodes[jnp.newaxis, :]  # (1, n_y)
+
+    diff_x = sigma**2
+    drift_x = -a * x
+    diff_v = eta**2
+    drift_v = -b * y
+    mixed = rho * sigma * eta
+    discount = x + y  # state part only; phi(t) applied per step in the recipe.
+
+    return build_operator_2d(
+        grid,
+        diff_x=diff_x,
+        drift_x=drift_x,
+        diff_v=diff_v,
+        drift_v=drift_v,
+        mixed=mixed,
+        discount=discount,
     )

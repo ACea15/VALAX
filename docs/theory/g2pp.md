@@ -256,6 +256,65 @@ trips `optimistix` 0.1.0.
 
 ---
 
+## 8 · PDE (2-D finite differences)
+
+The headline decorrelation-sensitive exotic — the **Bermudan swaption** — has no
+closed form. VALAX prices it (and its European sibling) by solving the G2++
+backward PDE on the same 2-D ADI substrate built for Heston. For a claim value
+\(V(t, x, y)\) in the two centred factors,
+
+$$
+\frac{\partial V}{\partial t}
+  + \tfrac12\sigma^2 V_{xx} + \tfrac12\eta^2 V_{yy} + \rho\sigma\eta\, V_{xy}
+  - a x\, V_x - b y\, V_y
+  - \bigl(x + y + \varphi(t)\bigr) V = 0 ,
+$$
+
+read off at the origin \((x, y) = (0, 0)\) since both factors start at zero.
+
+**The cross term.** \(\rho\sigma\eta\, V_{xy}\) is the whole point of a two-factor
+model — it is what lets tenor rates decorrelate — and it is exactly the term the
+Heston recipe already handles. It enters as a *constant* mixed coefficient into
+`g2pp_operator_2d`, is stored as the explicit-only operator \(A_0\), and is
+zeroed on the four domain edges (the in't Hout–Foulon treatment). The
+Craig–Sneyd / Hundsdorfer–Verwer correctors recover second order in it.
+
+**Factoring \(\varphi(t)\) (the exact-fit discipline).** The deterministic shift
+is spatially uniform, so a discount \(-\varphi(t)V\) *commutes* with the spatial
+operator. Writing \(V = D(t)\,W\) with \(D'/D = \varphi\) factors it out: \(W\)
+solves the same PDE with the **state-only** discount \(x + y\) — a
+*time-independent* operator, built once, no per-step stacking — and the
+deterministic part re-enters as a per-step scalar factor
+\(\exp\!\big(-\!\int_{t_k}^{t_{k+1}}\varphi\,ds\big)\) applied along the sweep.
+The step integral is evaluated **exactly**: the market-forward part telescopes
+into a discount-factor ratio \(\ln P^M(0,t_k)/P^M(0,t_{k+1})\) and the
+convexity/cross parts have closed-form antiderivatives. This is the two-factor
+analogue of Hull–White's exact step-average; a midpoint sample would inject a
+curved-forward bias and break the model's exact fit to the initial curve. As a
+result the PDE reprices a plain coupon bond off its own input curve to ~1e-6.
+
+**Boundaries.** Neither factor axis has a closed-form far-field value once the
+instrument carries optionality, so both impose zero curvature
+(`apply_linearity_bc_2d`, the 2-D analogue of the Hull–White edge fold). The
+\((x, y)\) domain is sized from the factors' terminal covariance
+(`g2pp_factor_covariance`); the factors are zero-mean, so the grid is centred at
+the origin.
+
+**Exercise.** The European terminal payoff is \(\max(\text{swap PV}, 0)\); the
+Bermudan projects \(\max(\text{continuation}, \text{exercise})\) at each snapped
+exercise level through the stepper's `event_fn` seam. The exercise (tail-swap)
+value is computed *analytically* at every node from the affine bond price
+\(P(t, T\mid x, y) = A\,e^{-B_a x - B_b y}\), so exercise decisions carry no
+discretisation error — the only numerical error is in the continuation value.
+
+Registered recipes (via `pde_price_dispatch`): `FixedRateBond` (the option-free
+*calibration* of the scheme), `Swaption`, and `BermudanSwaption`. The European
+PDE agrees with the analytic §3 price to a few \(10^{-3}\), and both the
+European and Bermudan agree with QuantLib's independent `ql.FdG2SwaptionEngine`
+to within its ~1% grid tolerance.
+
+---
+
 ## References
 
 - Brigo, D. & Mercurio, F. (2006). *Interest Rate Models — Theory and Practice*, ch. 4 (§4.2).

@@ -12,3 +12,4 @@ from valax.pricing.pde.dispatch import (
 # Imports for side effects: populate the dispatcher registry.
 from valax.pricing.pde import recipes  # noqa: F401,E402
 from valax.pricing.pde import hull_white  # noqa: F401,E402
+from valax.pricing.pde import g2pp  # noqa: F401,E402

@@ -26,15 +26,23 @@ References:
     7 (2010) 303-320.
 """
 
+from typing import Callable, Optional
+
 import jax
 import jax.numpy as jnp
-from jaxtyping import Float
+from jaxtyping import Float, Int
 from jax import Array
 
 from valax.pricing.pde.boundary import Boundary2D
 from valax.pricing.pde.config import Scheme
 from valax.pricing.pde.linalg import tridiagonal_solve
 from valax.pricing.pde.operators2d import Operator2D
+
+# A discrete-event hook: given the forward time-level index just solved and the
+# solved field, return a possibly-modified field. Mirrors the 1-D stepper's
+# ``event_fn`` so short-rate discounting and Bermudan exercise projections plug
+# in the same way. See :func:`solve_backward_2d`.
+EventFn = Callable[[Int[Array, ""], Float[Array, "n_x n_y"]], Float[Array, "n_x n_y"]]
 
 
 def _batch_tridiag_solve(
@@ -120,6 +128,7 @@ def solve_backward_2d(
     scheme: Scheme,
     theta: float,
     rannacher_steps: int,
+    event_fn: Optional[EventFn] = None,
 ) -> Float[Array, "n_x n_y"]:
     """Backward-march the terminal field to ``t = 0`` with an ADI scheme.
 
@@ -136,6 +145,16 @@ def solve_backward_2d(
         theta: Implicitness parameter after the Rannacher start-up.
         rannacher_steps: Number of leading fully-implicit (``theta = 1``,
             plain Douglas) steps that damp the non-smooth payoff.
+        event_fn: Optional discrete-event hook applied *after* each solved step,
+            called as ``event_fn(level, values)`` where ``level`` is the
+            **forward** time-level index of the level just solved (``0`` at
+            ``t = 0`` up to ``n_time`` at expiry, so it runs over
+            ``n_time - 1 ... 0``). It is a traced scalar, so the hook must
+            select with :func:`jax.numpy.where` / array indexing rather than
+            Python control flow. Used by short-rate recipes to apply the
+            deterministic (spatially-uniform) part of the discount per step and
+            to project Bermudan exercise. Same convention as
+            :func:`~valax.pricing.pde.schemes.solve_backward_1d`.
 
     Returns:
         The solution field of shape ``(n_x, n_y)`` at ``t = 0``.
@@ -200,6 +219,11 @@ def solve_backward_2d(
 
         # Rannacher steps run plain (uncorrected) Douglas; select per step.
         u_new = jnp.where(do_correction, y2c, y2)
+        if event_fn is not None:
+            # Forward time-level index of the level just solved: the solved
+            # level sits at time-remaining (m+1)*dt, i.e. forward level
+            # n_time - m - 1. Same convention as the 1-D stepper.
+            u_new = event_fn(n_time - m - 1, u_new)
         return u_new, None
 
     steps = jnp.arange(n_time)

@@ -485,6 +485,23 @@ scattered with traced indices, so the pricers compose with `eqx.filter_jit` and
 
 ::: valax.pricing.pde.boundary.zero_boundary
 
+### G2++ two-factor short-rate PDE
+
+Interest-rate instruments under `G2PPModel`, solved on the 2-D ADI substrate in
+the two centred Gaussian factors \(x, y\) of \(r(t) = x(t) + y(t) + \varphi(t)\).
+The cross term \(\rho\sigma\eta\, V_{xy}\) — the source of tenor decorrelation —
+is handled as a constant mixed operator exactly as Heston's is; the deterministic
+shift \(\varphi(t)\) is factored out and applied as an exact per-step scalar
+discount so the scheme preserves the initial-curve fit. Recipes are registered
+for `FixedRateBond`, `Swaption` and the headline `BermudanSwaption`, reached
+through `pde_price_dispatch` like any other pair. See the theory note
+[G2++ PDE](../theory/g2pp.md#8-pde-2-d-finite-differences) for the
+discretisation, boundary treatment and validation.
+
+::: valax.pricing.pde.coefficients.g2pp_operator_2d
+
+::: valax.pricing.pde.boundary.apply_linearity_bc_2d
+
 ## Lattice
 
 ### CRR binomial tree

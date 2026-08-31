@@ -272,6 +272,95 @@ def apply_linearity_bc_1d(operator: Operator1D, grid: Grid1D) -> Operator1D:
     )
 
 
+def apply_linearity_bc_2d(operator: Operator2D, grid: Grid2D) -> Operator2D:
+    r"""Impose ``V_xx = V_yy = 0`` at all four edges of a 2-D ADI operator.
+
+    The two-dimensional analogue of :func:`apply_linearity_bc_1d`, for a
+    two-factor Gaussian short-rate PDE (G2++) whose state variables ``x`` and
+    ``y`` are both centred, zero-mean Ornstein-Uhlenbeck factors. Neither axis
+    has a closed-form far-field value once the instrument carries optionality
+    (a Bermudan swaption's continuation value at the domain edge depends on the
+    whole remaining exercise schedule), so instead of Dirichlet data each axis
+    imposes a zero-curvature *shape*.
+
+    The fold is applied **per axis, independently**: the log-``x`` linearity
+    condition is baked into the first / last rows of the tridiagonal operator
+    ``A1`` (axis 0), and the ``y`` linearity condition into the first / last
+    columns of ``A2`` (axis 1), exactly as :func:`apply_linearity_bc_1d` folds a
+    1-D operator and as :func:`apply_heston_variance_bc` folds the high-variance
+    row of ``A2``. The mixed operator ``A0`` needs no boundary data (it is
+    applied only explicitly and is already zeroed on all four edges by
+    :func:`~valax.pricing.pde.operators2d.build_operator_2d`).
+
+    Each folded edge row degrades the convection term to a one-sided (first
+    order) difference, which is harmless provided the domain is wide enough for
+    the edges to carry negligible probability — the same requirement the 1-D
+    fold imposes.
+
+    Args:
+        operator: The raw two-factor :class:`~valax.pricing.pde.operators2d.Operator2D`.
+        grid: The tensor-product grid the operator was built on.
+
+    Returns:
+        A new :class:`~valax.pricing.pde.operators2d.Operator2D` whose four edge
+        rows/columns impose zero curvature along their respective axes.
+    """
+    # --- x-axis (A1, tridiagonal along axis 0): fold rows 0 and n_x-1. ---
+    x = grid.x.nodes
+    x_lo, x_hi = boundary_coords(grid.x)
+    ratio_x_lo = (x[0] - x_lo) / (x[1] - x[0])
+    ratio_x_hi = (x_hi - x[-1]) / (x[-1] - x[-2])
+
+    a1_lower, a1_diag, a1_upper = (
+        operator.a1_lower,
+        operator.a1_diag,
+        operator.a1_upper,
+    )
+    al_first = a1_lower[0, :]
+    a1_diag = a1_diag.at[0, :].add(al_first * (1.0 + ratio_x_lo))
+    a1_upper = a1_upper.at[0, :].add(-al_first * ratio_x_lo)
+    a1_lower = a1_lower.at[0, :].set(0.0)
+
+    au_last = a1_upper[-1, :]
+    a1_diag = a1_diag.at[-1, :].add(au_last * (1.0 + ratio_x_hi))
+    a1_lower = a1_lower.at[-1, :].add(-au_last * ratio_x_hi)
+    a1_upper = a1_upper.at[-1, :].set(0.0)
+
+    # --- y-axis (A2, tridiagonal along axis 1): fold columns 0 and n_y-1. ---
+    y = grid.y.nodes
+    y_lo, y_hi = boundary_coords(grid.y)
+    ratio_y_lo = (y[0] - y_lo) / (y[1] - y[0])
+    ratio_y_hi = (y_hi - y[-1]) / (y[-1] - y[-2])
+
+    a2_lower, a2_diag, a2_upper = (
+        operator.a2_lower,
+        operator.a2_diag,
+        operator.a2_upper,
+    )
+    bl_first = a2_lower[:, 0]
+    a2_diag = a2_diag.at[:, 0].add(bl_first * (1.0 + ratio_y_lo))
+    a2_upper = a2_upper.at[:, 0].add(-bl_first * ratio_y_lo)
+    a2_lower = a2_lower.at[:, 0].set(0.0)
+
+    bu_last = a2_upper[:, -1]
+    a2_diag = a2_diag.at[:, -1].add(bu_last * (1.0 + ratio_y_hi))
+    a2_lower = a2_lower.at[:, -1].add(-bu_last * ratio_y_hi)
+    a2_upper = a2_upper.at[:, -1].set(0.0)
+
+    return eqx.tree_at(
+        lambda o: (
+            o.a1_lower,
+            o.a1_diag,
+            o.a1_upper,
+            o.a2_lower,
+            o.a2_diag,
+            o.a2_upper,
+        ),
+        operator,
+        (a1_lower, a1_diag, a1_upper, a2_lower, a2_diag, a2_upper),
+    )
+
+
 def knockout_boundary(
     inner: Boundary1D,
     *,
