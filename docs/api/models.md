@@ -52,7 +52,7 @@ under the forward measure:
     dynamics, \(\beta = 1\) gives lognormal. Equity typically uses
     \(\beta = 0.5\); rates often uses \(\beta = 0\). Pricing goes via
     Hagan's asymptotic implied-vol formula fed into Black-76 (see
-    [`sabr_price`](pricing.md#sabr_price)); calibration lives in
+    [`sabr_price`](pricing.md#valax.pricing.analytic.sabr_price)); calibration lives in
     [`calibrate_sabr`][valax.calibration.calibrate_sabr].
 
 ::: valax.models.SABRModel
@@ -68,7 +68,7 @@ surface by construction:
 
 with \(\sigma_{\text{loc}}\) extracted from the surface on demand via
 Gatheral's IV-space Dupire formula
-([`dupire_local_vol`](pricing.md#dupire_local_vol)). Any object
+([`dupire_local_vol`](pricing.md#valax.pricing.analytic.dupire_local_vol)). Any object
 exposing `total_variance(log_moneyness, expiry) -> Float[""]`
 (`SVIVolSurface`, `SABRVolSurface`, `GridVolSurface`) satisfies the
 duck-typed surface contract.
@@ -127,7 +127,7 @@ for callables, puttables, Bermudan swaptions, and IR exotics:
     At \(t = 0\) with \(r = f^M(0, 0)\), `hw_bond_price` recovers the
     initial curve \(P^M(0, T)\) to machine precision by construction.
     Used by `callable_bond_price` and `puttable_bond_price` in
-    [`valax.pricing.lattice`](pricing.md#callable--puttable-bonds) for
+    [`valax.pricing.lattice`](pricing.md#callable-puttable-bonds) for
     trinomial-tree backward induction.
 
 ::: valax.models.HullWhiteModel
@@ -222,9 +222,9 @@ risk-neutral measure:
 \]
 
 Powers the multi-asset MC recipes for
-[`SpreadOption`](instruments.md#spreadoption) (validating Margrabe /
+[`SpreadOption`](instruments.md#valax.instruments.SpreadOption) (validating Margrabe /
 Kirk analytical) and
-[`WorstOfBasketOption`](instruments.md#worstofbasketoption). The
+[`WorstOfBasketOption`](instruments.md#valax.instruments.WorstOfBasketOption). The
 Cholesky factor of `correlation` is computed inside
 `generate_correlated_gbm_paths`; for repeated repricing at a fixed
 correlation, wrap in `jax.jit` to amortize.

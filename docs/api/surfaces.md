@@ -15,7 +15,7 @@ surface.total_variance(log_moneyness, expiry) -> Float[Array, ""]
 returning total implied variance \(w(k, T) = \sigma_{\text{IV}}^2(k, T) \cdot T\)
 as a function of log-moneyness \(k = \ln(K / F(T))\). This is the
 duck-typed input expected by
-[`dupire_local_vol`](pricing.md#dupire_local_vol) and by SLV's leverage
+[`dupire_local_vol`](pricing.md#valax.pricing.analytic.dupire_local_vol) and by SLV's leverage
 function calibration
 ([`calibrate_slv_leverage`][valax.calibration.calibrate_slv_leverage]).
 The consistency identity

@@ -48,7 +48,7 @@ runs path generation + payoff + discounting, and returns an `MCResult`
 
 VALAX ships with **16 built-in recipes** (10 single-asset equity × GBM/Heston,
 4 rates × LMM, 2 multi-asset × `MultiAssetGBMModel`). See the coverage map
-in §2 and the built-in recipe list in the [API reference](../api/pricing.md#built-in-recipes-21).
+in §2 and the built-in recipe list in the [API reference](../api/pricing.md#built-in-recipes).
 
 To swap the model, just pass a different one:
 
@@ -245,7 +245,7 @@ Empirically, both schemes give indistinguishable vanilla-reprice
 accuracy at typical MC budgets (the noise floor dominates the
 constant-factor improvement). The default is Euler because it is
 cheaper for no measurable accuracy loss on the common case. See the
-[`generate_local_vol_paths`](../api/pricing.md#generate_local_vol_paths)
+[`generate_local_vol_paths`](../api/pricing.md#valax.pricing.mc.generate_local_vol_paths)
 module docstring for the full empirical sweep and
 [theory §4.4](../theory/volatility.md#44-local-volatility-dupire) for the weak-
 vs strong-order discussion.

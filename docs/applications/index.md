@@ -31,18 +31,18 @@ For the systems around VALAX in the bank stack (order-management, market data, s
 
 ## 2. The audience map — ranked by fit today
 
-Not every function in a financial institution is a good fit for VALAX today. Some are 🟢 immediate wins; some are 🟡 near-term with a roadmap dependency; some are 🔴 out of scope by design. The honest ranking:
+Not every function in a financial institution is a good fit for VALAX today. The grade is the strength of the *capability fit*: 🟢🟢🟢 an immediate, near-complete fit; 🟢🟢 a strong fit with a known roadmap gap; some are 🟡 potentially doable; 🔴 out of scope by design. The honest ranking:
 
 | Rank | Audience | Fit today | Why | Sub-page |
 |---|---|---|---|---|
-| 🥇 | **Market Risk & Model Validation** | 🟢🟢🟢 | Regulator-mandated need; no incumbent lock-in; batch cadence; `valax/risk/` is the most complete module in the library | [Market Risk & Model Validation](market-risk.md) |
-| 🥇 | **Quant Research / Structuring / Model R&D** | 🟢🟢🟢 | Differentiable pricing is a categorical advantage — enables deep hedging, neural surrogates, gradient-based calibration that C++ analytics libraries structurally cannot support | [Quant Research](quant-research.md) |
-| 🥈 | **Treasury / ALM** | 🟢🟢 | IRRBB Standardised Approach is a near-perfect fit; HQLA pricing is turnkey; multi-curve is the roadmap gap | [Treasury & ALM](treasury.md) |
-| 🥈 | **Regulatory reporting (FRTB / CCAR)** | 🟢🟢 | Bucketed sensitivities, PLA test, VaR backtesting all shipped; SBA aggregation on roadmap | [Regulatory: FRTB & CCAR](regulatory.md) |
-| 3 | **Front-office trading (execution)** | 🟡 | Latency-sensitive; incumbent-locked; needs a service layer + streaming market data that are Vision-tier items | — |
-| 3 | **Back office / operations** | 🔴 | Wrong domain — not what the library does, by design | — |
+| 1 | **Market Risk & Model Validation** | 🟢🟢🟢 | Regulator-mandated need; no incumbent lock-in; batch cadence; `valax/risk/` is the most complete module in the library | [Market Risk & Model Validation](market-risk.md) |
+| 2 | **Quant Research / Structuring / Model R&D** | 🟢🟢🟢 | Differentiable pricing is a categorical advantage — enables deep hedging, neural surrogates, gradient-based calibration that C++ analytics libraries structurally cannot support | [Quant Research](quant-research.md) |
+| 3 | **Front-office trading (pricing core)** | 🟢🟢 | The pricing/Greeks/calibration core is a genuine strength and the differentiator is *categorical* — differentiability into the decision layer (exact hedges in tradable instruments; frontier gradient-based hedging/quoting). Held back from 🟢🟢🟢 only by the intraday *service layer* being Vision-tier. Valuation core feeding a *separate* strategy/execution system — not the alpha, not the OMS | [Front-Office Trading](trading-desk.md) |
+| 4 | **Regulatory reporting (FRTB / CCAR)** | 🟢🟢 | Bucketed sensitivities, PLA test, VaR backtesting all shipped; SBA aggregation on roadmap | [Regulatory: FRTB & CCAR](regulatory.md) |
+| 5 | **Treasury / ALM** | 🟡 | IRRBB Standardised Approach is a near-perfect fit; HQLA pricing is turnkey; multi-curve is the roadmap gap | [Treasury & ALM](treasury.md) |
+| 6 | **Back office / operations** | 🔴 | Wrong domain — not what the library does, by design | — |
 
-There are two rank-1 audiences, and they represent two different theses about the library:
+The top two audiences (positions 1–2) represent two different theses about the library:
 
 - **Market Risk & Model Validation** is the strongest **commercial** adoption case — regulator-mandated need, no incumbent lock-in, budget in hand.
 - **Quant Research** is the strongest **technical** adoption case — differentiable pricing enables research directions that are structurally out of reach for C++ analytics libraries.
@@ -51,7 +51,7 @@ Both matter. A bank considering VALAX seriously should adopt in both simultaneou
 
 ---
 
-## 3. The four sub-pages
+## 3. The five sub-pages
 
 Each sub-page below is written for a specific audience — role, cadence, KPIs, and the buyer-tailored pitch. Read the one that matches your function first; skim the others for context.
 
@@ -67,11 +67,11 @@ The daily MRM production loop — sensitivity ladders, waterfall P&L explain, fu
 
 The argument that differentiable pricing is not a "nice implementation choice" but the primary source of research-productivity leverage: every new pricer ships with all Greeks; a new payoff is a Python function, not a class subtree; calibration is `optimistix.least_squares` on the autodiff Jacobian; neural surrogates and deep hedging become one-file prototypes rather than multi-quarter engineering projects. The paper-to-calibrated-prototype loop collapses from months to hours. This is the innovation-track adoption case and — arguably — the strongest technical fit of any audience.
 
-### 🥈 [Treasury & ALM](treasury.md)
+### 🥈 [Front-Office Trading](trading-desk.md)
 
-**For:** Head of ALM, Treasurers, banking-book risk teams, LCR/NSFR reporting teams, HQLA portfolio managers.
+**For:** front-office desks running an in-house intraday trading platform — desk quants, desk technology, desk risk.
 
-The IRRBB Standardised Approach walkthrough — the six BCBS 368 scenarios map 1-to-1 to VALAX primitives (`parallel_shift`, `steepener`, `flattener`, `key_rate_bump`) and ΔEVE + SOT + KRD bucketing are one call each. Plus HQLA / investment-portfolio pricing, cash-flow bucketing for LCR / NSFR, and the honest gap on behavioural models (deposit pass-through, prepayment) — which are the natural home for the JAX moat once someone builds them.
+The honest case for VALAX as the differentiable **pricing-and-risk core** of an intraday (not high-frequency) trading system — and, crucially, the honest case for *what is actually novel* about it. EOD batch repricing and bumped Greeks are a commodity every bank already has; intraday cadence is a useful but incremental improvement. The categorical claim is that the pricing graph is **differentiable into the decision layer**: exact hedges in tradable instruments via implicit diff through calibration (near-shipped), and gradient-based intraday optimal hedging / quoting where the control problem shares the pricer's graph (frontier — primitives shipped, product not). Supported by the three enabling strengths (fast `vmap`+`filter_jit` kernels, exact autodiff Greeks, warm-started robust calibration). Deliberately draws a hard boundary — strategy, sizing, and execution live in a *separate* system that consumes VALAX prices, Greeks, and Jacobians; the pricer is not the alpha and not the OMS.
 
 ### 🥈 [Regulatory: FRTB & CCAR](regulatory.md)
 
@@ -79,18 +79,24 @@ The IRRBB Standardised Approach walkthrough — the six BCBS 368 scenarios map 1
 
 The two flagship trading-book regulatory workflows — Basel III.1 FRTB (SBA and IMA, PLA, backtesting) and the Fed's annual CCAR / DFAST stress tests. Both start from the same VALAX pipeline; they differ only in how bucketing and scenarios are configured. Coverage-vs-roadmap tables are explicit about what ships today (autodiff Greeks, PLA test, bucketing, VaR backtest, ES) and what is on the roadmap (SBA correlation aggregation, multi-curve `MarketData`, automated IMA stress-period selection).
 
+### 🥈 [Treasury & ALM](treasury.md)
+
+**For:** Head of ALM, Treasurers, banking-book risk teams, LCR/NSFR reporting teams, HQLA portfolio managers.
+
+The IRRBB Standardised Approach walkthrough — the six BCBS 368 scenarios map 1-to-1 to VALAX primitives (`parallel_shift`, `steepener`, `flattener`, `key_rate_bump`) and ΔEVE + SOT + KRD bucketing are one call each. Plus HQLA / investment-portfolio pricing, cash-flow bucketing for LCR / NSFR, and the honest gap on behavioural models (deposit pass-through, prepayment) — which are the natural home for the JAX moat once someone builds them.
+
 ---
 
 ## 4. The strategic order-of-operations
 
-For a bank considering serious adoption, the sequence that maximises return and minimises risk:
+This is a different axis from the [fit ranking of § 2](#2-the-audience-map-ranked-by-fit-today): that ranks *capability fit today*, this ranks *adoption sequence*. Front-office trading can be a strong capability fit (🟢🟢) yet sit late here, because deploying it as an intraday service is Vision-tier. For a bank considering serious adoption, the sequence that maximises return and minimises risk:
 
 1. **Model Validation first.** SR 11-7 / TRIM already require an independent challenger; VALAX is architected to be one. The QuantLib comparison suite is a shipped evidence pack. Adoption here is the lowest-friction, highest-defensibility entry point.
 2. **Simultaneously: Quant Research adoption** — different budget, different buyer, provides the frontier-capability story (neural surrogates, deep hedging, differentiable calibration). The two teams cross-pollinate: research prototypes graduate into validated production without a rewrite because it is the same library.
 3. **Expand into MRM** once Model Validation is a happy internal reference. Same code path, adjacent workflow, natural cross-sell to the CRO.
 4. **Treasury / ALM** once multi-curve `MarketData` ships (roadmap top priority).
 5. **Regulatory reporting** falls out as an *output* of steps 1–4 — the FRTB PLA, VaR backtest, and CCAR waterfall are computations on top of the same pipeline.
-6. **Front-office trading** — Vision-tier. Pursue only after the service layer, market-data adapters, and JIT warm-up strategy described in [architecture/production.md](../architecture/production.md) are in place.
+6. **Front-office trading** — Vision-tier as a *deployed intraday service*, though the pricing/Greeks/calibration core is already strong. Pursue only after the service layer, market-data adapters, and JIT warm-up strategy described in [architecture/production.md § 8.1](../architecture/production.md#81-intraday-warm-serving-considerations-deferred) are in place — and only ever as the valuation core feeding a *separate* strategy/execution system. See [Front-Office Trading](trading-desk.md) for the honest boundary.
 7. **Back office** — never. Out of scope by design.
 
 The through-line: **do not start with trading, and do not start with regulatory reporting**. Start with the two functions that are structurally set up to benefit (Model Validation, Quant Research) and let the rest of the stack pull adoption naturally as the library becomes an internal reference.

@@ -148,7 +148,7 @@ reset date prices to face value).
 ### Callable / puttable / convertible bonds
 
 Priced via backward induction on a Hull–White trinomial tree; see
-[Callable / puttable bonds](pricing.md#callable--puttable-bonds).
+[Callable / puttable bonds](pricing.md#callable-puttable-bonds).
 Callable price is bounded above by the equivalent straight bond;
 puttable price is bounded below.
 

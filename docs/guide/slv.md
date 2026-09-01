@@ -2,7 +2,7 @@
 
 Stochastic-Local Volatility (SLV) is the industry workhorse for exotic equity option pricing — it combines a calibrated implied-vol surface (so all vanillas reprice exactly by construction, like Dupire local vol) with a stochastic volatility backbone (so forward-skew dynamics are realistic, unlike pure LV). VALAX implements the Heston × leverage variant: Heston stochastic volatility under a multiplicative deterministic leverage function calibrated by Markovian projection.
 
-This guide walks through the SDE, the two-pass calibration, the choice of estimator (particle vs kernel), the role of the fixed-point iteration, the MC discretisation, and an end-to-end worked example. See [theory §4.5](../theory/volatility.md#45-stochastic-local-volatility) for the underlying mathematics and [api/models.md#SLVModel](../api/models.md#slvmodel) / [api/surfaces.md#leverage-grid-slv](../api/surfaces.md#leverage-grid-slv) / [api/calibration.md#calibrate_slv](../api/calibration.md#calibrate_slv_leverage) for type-level reference.
+This guide walks through the SDE, the two-pass calibration, the choice of estimator (particle vs kernel), the role of the fixed-point iteration, the MC discretisation, and an end-to-end worked example. See [theory §4.5](../theory/volatility.md#45-stochastic-local-volatility) for the underlying mathematics and [api/models.md#SLVModel](../api/models.md#valax.models.SLVModel) / [api/surfaces.md#leverage-grid-slv](../api/surfaces.md#leverage-grid-slv) / [api/calibration.md#calibrate_slv](../api/calibration.md#valax.calibration.calibrate_slv_leverage) for type-level reference.
 
 ## When to use SLV
 

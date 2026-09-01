@@ -240,9 +240,9 @@ these errors; the day the corresponding constructor or validator
 raises, the test flips from `xfail` to `pass` with no test change.
 
 The xfail set is the **machine-readable, public backlog of missing
-safety checks** — see the
-[Arbitrage Detection — Session Backlog](roadmap.md#arbitrage-detection--session-backlog)
-in the roadmap. Removing one xfail is a real engineering deliverable.
+safety checks**: each reserved arbitrage exception in
+`valax.core.diagnostics` is paired with an `@pytest.mark.xfail`.
+Removing one xfail is a real engineering deliverable.
 
 ### 7.4 Versioned golden datasets, not implicit allclose
 

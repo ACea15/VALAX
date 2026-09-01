@@ -179,9 +179,9 @@ surface.total_variance(log_moneyness, expiry) -> Float[Array, ""]
 
 returning total variance $w(k, T) = \sigma_{\text{IV}}^2 \cdot T$ directly.
 This is the duck-typed input expected by
-[`dupire_local_vol`](../api/pricing.md#dupire_local_vol) and by SLV's
+[`dupire_local_vol`](../api/pricing.md#valax.pricing.analytic.dupire_local_vol) and by SLV's
 leverage-function calibration ([SLV guide](slv.md),
-[`calibrate_slv_leverage`](../api/calibration.md#calibrate_slv_leverage)).
+[`calibrate_slv_leverage`](../api/calibration.md#valax.calibration.calibrate_slv_leverage)).
 The consistency identity
 
 ```python
@@ -195,7 +195,7 @@ holds to machine precision.
 | Use case | Recommended surface | Why |
 |---|---|---|
 | Dupire local vol extraction | **`SVIVolSurface`** | $w(k)$ is closed-form $C^\infty$ in $k$; `jax.grad` gives exact $\partial w / \partial k$ and $\partial^2 w / \partial k^2$. |
-| SLV (supported, see [SLV guide](slv.md)) | `SVIVolSurface` | Same reasons; differentiability also flows through to leverage-grid calibration via [`calibrate_slv_leverage`](../api/calibration.md#calibrate_slv_leverage). |
+| SLV (supported, see [SLV guide](slv.md)) | `SVIVolSurface` | Same reasons; differentiability also flows through to leverage-grid calibration via [`calibrate_slv_leverage`](../api/calibration.md#valax.calibration.calibrate_slv_leverage). |
 | Quick prototyping on broker quotes | `GridVolSurface` (in log-moneyness) | No calibration needed; bilinear interpolation. |
 | Rates desks | `SABRVolSurface` | Industry standard for swaption cubes. |
 

@@ -122,6 +122,8 @@ The last row is the conceptually interesting one. Most asset managers optimize p
 
 These are the use cases that justify building VALAX in JAX rather than wrapping QuantLib. They become accessible *for free* once the operational layer exists, because they consume the same pure pricing functions.
 
+> This section is the **why**. The *committed* delivery of these capabilities — neural surrogates, learned vol surfaces, deep hedging, multi-dimensional PDE — is tracked in [Roadmap → Tier 5](roadmap.md#tier-5-ml-and-performance); *uncommitted, exploratory* numerical-methods research (high-order / FEM PDEs, nonlinear operators) is parked in [Research Ideas](research-ideas.md).
+
 ### Neural surrogate pricers
 - Train a small NN on `(market_state, instrument) → price` for slow exotics (Bermudans, autocallables, MBS).
 - **Differential ML**: train on Greeks too, using `jax.grad` of the slow ground-truth pricer as auxiliary labels.

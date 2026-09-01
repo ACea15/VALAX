@@ -1,4 +1,4 @@
-# Examples
+# Pricing
 
 VALAX ships with runnable example scripts in the `examples/` directory. Each file uses `# %%` cell markers for interactive execution in VS Code, PyCharm, or any IDE that supports the Python cell format.
 

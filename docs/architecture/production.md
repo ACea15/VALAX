@@ -639,6 +639,48 @@ The handlers are 5-line wrappers around the workflow drivers. We
 defer building these until §7 is proven; otherwise we'll be reshaping
 proto definitions every week.
 
+### 8.1 Intraday / warm-serving considerations (deferred)
+
+The primary target of this design is the **EOD batch**. A second
+deployment mode — a **long-lived, warm pricing service** that reprices
+a book or a quote universe on a seconds-to-minutes intraday loop —
+reuses the *same* pure kernel unchanged; everything it adds lives in
+the imperative shell, not in L0. It is the mode the [Front-Office
+Trading](../applications/trading-desk.md) application page assumes.
+(Full real-time *tick* handling remains a non-goal — see §1 and
+[roadmap 6.3](../roadmap.md#63-real-time-risk).)
+
+Three shell-level concerns turn "works in a notebook" into "works on
+the desk":
+
+1. **Pre-warm every kernel shape at start-up.** The first call to a
+   `jit`-compiled function pays cold-compilation cost (seconds). A
+   warm service compiles each function once at boot and keeps the
+   compiled executables — and the resident `MarketState` — alive in a
+   long-lived process, so no client request ever pays that cost.
+2. **Bucket work into fixed shapes.** XLA retraces when input shapes
+   change (trade count, path count, scenario count). The service must
+   pad and bucket into a small set of stable shapes so the hot path
+   never recompiles — the single most common cause of latency spikes.
+3. **Pin dtypes and backend, and mind GPU determinism.** For bitwise
+   reproducibility across nodes (§9), note the cuBLAS non-determinism
+   caveat; a warm GPU service trades some cross-node bit-identity for
+   throughput unless explicitly constrained.
+
+The honest latency regimes for this kernel:
+
+| Regime | Fit | Why |
+|---|---|---|
+| Overnight / EOD batch | 🟢 | The kernel *is* the batch — the design target of this document. |
+| Intraday refresh (seconds–minutes) | 🟢 with warm-up | Compiled kernels reprice a universe in sub-second-to-seconds on warm cache. |
+| Quote-response (tens–hundreds of ms) | 🟡 | Achievable for *bounded* universes with a resident, pre-warmed, shape-stable service. |
+| High-frequency (µs–low-ms) | 🔴 | Wrong tool — JAX trace/dispatch overhead and Python-hosted control flow are not built for it. |
+
+None of this is shipped: it is the design contract a warm-serving layer
+must satisfy when it is built, and the reason the front-office
+application is ranked a *pricing core* (🟢🟢) rather than a turnkey
+intraday service.
+
 ---
 
 ## 9. Reproducibility, determinism, and audit
