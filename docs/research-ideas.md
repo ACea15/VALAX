@@ -47,6 +47,46 @@ be worth recording — half of the value is capturing *why* it was interesting a
 
 ## Numerical methods
 
+### Exact-$y$ two-factor Cheyette PDE (the 5-D accumulator problem)
+
+**Context / motivation.** The two-factor Cheyette PDE
+(`valax/pricing/pde/cheyette.py`) ships as **frozen-$y$** (production, 2-D) plus
+an **exact-$y$ one-factor** validation solver (2-D). The natural next question is
+the *exact-$y$ two-factor* PDE, whose state
+$(x_1, x_2, y_{11}, y_{22}, y_{12})$ is **5-D**. It would remove the frozen-$y$
+approximation for the decorrelation-capable two-factor model and give a
+zero-Monte-Carlo-noise benchmark for the frozen-$y$ bias in 2F (as the exact-$y$
+1F solver already does for 1F).
+
+**The idea.** Exploit the structure: the three $y$-axes are **advection-only**
+(pure-drift accumulators, no Brownian term), so the PDE is degenerate parabolic —
+2 diffusive dimensions $(x_1, x_2)$ plus 3 hyperbolic ones. That means the
+$y$-axes need far less refinement than a diffusive axis and admit upwinding or
+semi-Lagrangian / method-of-characteristics stepping. A first spike could freeze
+only the small cross-accumulator $y_{12}$ and carry $(y_{11}, y_{22})$ exactly, a
+**4-D** compromise, before attempting the full 5-D solve.
+
+**Where it helps.** A deterministic (noise-free) measurement of the frozen-$y$
+bias for two-factor swaptions / Bermudans, and a research-grade oracle for
+decorrelation products where the skew and the two-factor structure interact.
+
+**Open questions & risks.** The binding constraint is **not** the forward FLOPs
+but reverse-mode autodiff through the time-marching `lax.scan`: a 5-D grid at
+$n \approx 48$/axis is $\sim 2.5\times10^8$ nodes ($\sim$2 GB per `float64`
+field), and gradient checkpointing stores several such copies — borderline on a
+single accelerator, and prohibitive inside a calibration loop. So this is a
+**single-shot, likely non-differentiable benchmark**, not a calibration engine;
+2-factor calibration stays on the frozen-$y$ engine. Upwinding on the degenerate
+$y$-axes (no diffusive smoothing) is the main scheme-design risk.
+
+**Rough cost / complexity.** Medium–large: a bespoke degenerate-parabolic
+stepper (the existing ADI substrate assumes diffusion on every axis), careful
+$y$-domain sizing, and memory engineering. Deliberately excluded from the shipped
+work; the frozen-$y$ 2F engine plus the exact-$y$ 1F oracle cover the practical
+needs.
+
+**Status.** unprioritized.
+
 ### High-order & finite-element methods for multi-dimensional PDE pricing
 
 **Context / motivation.** VALAX's PDE subsystem is a 1-D log-spot theta-scheme

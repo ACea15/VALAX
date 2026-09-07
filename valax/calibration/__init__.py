@@ -6,9 +6,12 @@ from valax.calibration.transforms import (
     bounded,
     unit_interval,
     correlation,
+    free,
     SABR_TRANSFORMS,
     HESTON_TRANSFORMS,
     G2PP_TRANSFORMS,
+    CHEYETTE_TRANSFORMS,
+    CHEYETTE_2F_TRANSFORMS,
     model_to_unconstrained,
     unconstrained_to_model,
 )
@@ -23,6 +26,11 @@ from valax.calibration.hull_white import (
 from valax.calibration.g2pp import (
     calibrate_g2pp,
     g2pp_swaption_prices,
+)
+from valax.calibration.cheyette import (
+    calibrate_cheyette,
+    calibrate_cheyette_2f,
+    cheyette_pde_prices,
 )
 from valax.calibration.heston import calibrate_heston
 from valax.calibration.slv import calibrate_slv, calibrate_slv_leverage

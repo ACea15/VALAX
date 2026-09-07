@@ -69,6 +69,19 @@ def correlation() -> TransformSpec:
     )
 
 
+def free() -> TransformSpec:
+    """x unconstrained: the identity transform.
+
+    For genuinely real-valued parameters such as the Cheyette local-volatility
+    skew :math:`\\beta`, which may take either sign. The optimizer works in the
+    same coordinate as the model, so no reparametrization is applied.
+    """
+    return TransformSpec(
+        to_unconstrained=lambda x: x,
+        from_unconstrained=lambda y: y,
+    )
+
+
 # ── Model-level transform specs ─────────────────────────────────────
 
 SABR_TRANSFORMS: dict[str, TransformSpec] = {
@@ -91,6 +104,22 @@ G2PP_TRANSFORMS: dict[str, TransformSpec] = {
     "mean_reversion_y": positive(),
     "volatility_x": positive(),
     "volatility_y": positive(),
+    "correlation": correlation(),
+}
+
+CHEYETTE_TRANSFORMS: dict[str, TransformSpec] = {
+    "mean_reversion": positive(),
+    "volatility": positive(),
+    "skew": free(),
+}
+
+CHEYETTE_2F_TRANSFORMS: dict[str, TransformSpec] = {
+    "mean_reversion_1": positive(),
+    "mean_reversion_2": positive(),
+    "volatility_1": positive(),
+    "volatility_2": positive(),
+    "skew_1": free(),
+    "skew_2": free(),
     "correlation": correlation(),
 }
 

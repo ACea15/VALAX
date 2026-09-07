@@ -502,6 +502,26 @@ discretisation, boundary treatment and validation.
 
 ::: valax.pricing.pde.boundary.apply_linearity_bc_2d
 
+### Cheyette quasi-Gaussian short-rate PDE
+
+The Cheyette (quasi-Gaussian) model priced on the same short-rate substrate, in
+two tiers. **Tier 1 (frozen-\(y\), production)** freezes the accumulator to its
+Gaussian-limit value \(\bar y(t)\), so one factor is a 1-D PDE and two factors a
+2-D ADI PDE reusing the Hull–White / G2++ machinery — the only new ingredient is
+a *spatially-varying* diffusion \(\tfrac12\sigma^2(1+\beta(\tilde x + m))^2\)
+carrying the skew. Recipes are registered for `FixedRateBond`, `Swaption`,
+`BermudanSwaption` (both factors) and `CallableBond` / `PuttableBond` (one
+factor), reached through `pde_price_dispatch`. **Tier 2 (exact-\(y\), one
+factor)** carries the accumulator as a real advection axis (`cheyette_exact_price`)
+for a bias-free, zero-Monte-Carlo-noise measurement of the frozen-\(y\) error.
+See the theory note [Cheyette §8 PDE](../theory/cheyette.md#8-pde-finite-differences).
+
+::: valax.pricing.pde.cheyette.cheyette_operator_stack
+
+::: valax.pricing.pde.cheyette.cheyette_operator_2d
+
+::: valax.pricing.pde.cheyette.cheyette_exact_price
+
 ## Lattice
 
 ### CRR binomial tree
