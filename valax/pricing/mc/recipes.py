@@ -78,12 +78,24 @@ from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
 from valax.models.hull_white import HullWhiteModel, hw_bond_price
 from valax.models.g2pp import G2PPModel, g2pp_bond_price
+from valax.models.cheyette import (
+    CheyetteModel,
+    CheyetteModel2F,
+    cheyette_bond_price,
+    cheyette_bond_price_2f,
+)
 from valax.models.lmm import LMMModel
 from valax.models.local_vol import LocalVolModel
 from valax.models.multi_asset import MultiAssetGBMModel
 from valax.models.slv import SLVModel
 from valax.pricing.mc.hull_white_paths import HullWhitePathResult, generate_hull_white_paths
 from valax.pricing.mc.g2pp_paths import G2PPPathResult, generate_g2pp_paths
+from valax.pricing.mc.cheyette_paths import (
+    CheyettePathResult,
+    Cheyette2FPathResult,
+    generate_cheyette_paths,
+    generate_cheyette_paths_2f,
+)
 from valax.pricing.mc.bermudan import LSMConfig, bermudan_swaption_lsm
 from valax.pricing.mc.dispatch import (
     MCConfig,
@@ -1434,6 +1446,542 @@ def _cms_spread_swap_g2pp(
         coupon = sign * (s_long - s_short - instrument.fixed_rate) * taus[i]
 
         pay_sdf = _g2pp_path_sdf(result, pay_times[i][None], T, n_steps)[:, 0]
+        pv = pv + instrument.notional * coupon * pay_sdf
+
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Rates recipes (Cheyette one-factor quasi-Gaussian short-rate MC)
+#
+# The Cheyette model adds a volatility *skew* to the rate dynamics via a
+# state-dependent local volatility.  The MC scheme is the integrating-factor
+# scan in valax.pricing.mc.cheyette_paths (no exact Gaussian sampling, since
+# the state is non-Gaussian), with the deterministic forward part of the
+# discount integrated exactly.  Every cash flow is discounted with the
+# money-market numeraire accumulated along each path.
+#
+#   Optional market args:
+#     T       (float): Horizon in year fractions (defaults per instrument).
+#     n_steps (int)  : Number of time steps (default 100).
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _cheyette_path_sdf(
+    result: CheyettePathResult,
+    times: Float[Array, " n_times"],
+    T: Float[Array, ""],
+    n_steps: int,
+) -> Float[Array, "n_paths n_times"]:
+    """Path-wise stochastic discount factors at a set of event times.
+
+    Mirrors :func:`_g2pp_path_sdf` for :class:`CheyettePathResult`.
+
+    Args:
+        result: Output of :func:`generate_cheyette_paths`.
+        times: Event times in year fractions.
+        T: Simulation horizon used to generate the paths.
+        n_steps: Number of simulation steps (static).
+
+    Returns:
+        Discount factor for each path and event time.
+    """
+    idx = _hw_step_index(times, T, n_steps)
+    return jnp.exp(jnp.take(result.log_discount_factors, idx, axis=1))
+
+
+@register(FixedRateBond, CheyetteModel)
+def _fixed_bond_cheyette(
+    *,
+    instrument: FixedRateBond,
+    model: CheyetteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Fixed-rate bond price under one-factor Cheyette short-rate MC.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the last payment date).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
+
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_cheyette_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    sdf = _cheyette_path_sdf(result, cf_times, T, n_steps)
+    pv = jnp.sum(cf_amounts[None, :] * sdf, axis=1)
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(FloatingRateBond, CheyetteModel)
+def _floating_bond_cheyette(
+    *,
+    instrument: FloatingRateBond,
+    model: CheyetteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Floating-rate note price under one-factor Cheyette short-rate MC.
+
+    Uses the same par-at-reset floating-leg replication as the Hull-White and
+    G2++ recipes: the floating coupons plus principal collapse to
+    ``face * D(0, t_settle)`` and the fixed spread is discounted explicitly.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to maturity).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    face = instrument.face_value
+
+    cf_times = year_fraction(ref, instrument.payment_dates, day_count)
+    prev_dates = jnp.concatenate(
+        [instrument.settlement_date[None], instrument.payment_dates[:-1]]
+    )
+    taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
+    spread_amounts = instrument.spread * face * taus
+
+    t_settle = year_fraction(ref, instrument.settlement_date, day_count)
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_cheyette_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    settle_sdf = _cheyette_path_sdf(result, t_settle[None], T, n_steps)[:, 0]
+    spread_sdf = _cheyette_path_sdf(result, cf_times, T, n_steps)
+
+    pv = face * settle_sdf + jnp.sum(spread_amounts[None, :] * spread_sdf, axis=1)
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+def _cheyette_forward_rate(
+    model: CheyetteModel,
+    result: CheyettePathResult,
+    t_fix: Float[Array, ""],
+    t_start: Float[Array, ""],
+    t_end: Float[Array, ""],
+    tau: Float[Array, ""],
+    T: Float[Array, ""],
+    n_steps: int,
+) -> Float[Array, " n_paths"]:
+    """Per-path simply-compounded forward rate over ``[t_start, t_end]``.
+
+    Observed at ``t_fix`` from the analytic Cheyette affine ZCB conditional on
+    each path's state:
+
+    .. math::
+
+        F = \\frac{1}{\\tau}\\Bigl(\\frac{P(t_\\text{fix}, t_\\text{start})}
+                                       {P(t_\\text{fix}, t_\\text{end})} - 1\\Bigr).
+
+    Args:
+        model: One-factor Cheyette model.
+        result: Simulated Cheyette paths.
+        t_fix: Fixing time in year fractions.
+        t_start: Accrual start time in year fractions.
+        t_end: Accrual end time in year fractions.
+        tau: Accrual fraction of the period.
+        T: Simulation horizon.
+        n_steps: Number of simulation steps (static).
+
+    Returns:
+        Per-path forward rate.
+    """
+    idx = _hw_step_index(t_fix[None], T, n_steps)[0]
+    x_fix = result.factor_x[:, idx]
+    y_fix = result.aux_y[:, idx]
+    p_start = cheyette_bond_price(model, x_fix, y_fix, t_fix, t_start)
+    p_end = cheyette_bond_price(model, x_fix, y_fix, t_fix, t_end)
+    return (p_start / p_end - 1.0) / tau
+
+
+@register(Caplet, CheyetteModel)
+def _caplet_cheyette(
+    *,
+    instrument: Caplet,
+    model: CheyetteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Caplet / floorlet under one-factor Cheyette short-rate MC.
+
+    The forward rate is observed at the fixing date from the analytic affine
+    ZCB conditional on each path's state, and the intrinsic value is discounted
+    by the path-wise money-market numeraire to the payment (end) date.  This is
+    the skew-sensitive vanilla that motivates the Cheyette local volatility.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the accrual end date).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+
+    t_fix = year_fraction(ref, instrument.fixing_date, day_count)
+    t_start = year_fraction(ref, instrument.start_date, day_count)
+    t_end = year_fraction(ref, instrument.end_date, day_count)
+    tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
+
+    if T is None:
+        T = t_end
+
+    result = generate_cheyette_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    fwd = _cheyette_forward_rate(
+        model, result, t_fix, t_start, t_end, tau, T, n_steps
+    )
+    if instrument.is_cap:
+        intrinsic = jnp.maximum(fwd - instrument.strike, 0.0)
+    else:
+        intrinsic = jnp.maximum(instrument.strike - fwd, 0.0)
+
+    pay_sdf = _cheyette_path_sdf(result, t_end[None], T, n_steps)[:, 0]
+    pv = instrument.notional * tau * intrinsic * pay_sdf
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(Cap, CheyetteModel)
+def _cap_cheyette(
+    *,
+    instrument: Cap,
+    model: CheyetteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Cap / floor strip under one-factor Cheyette short-rate MC.
+
+    Sums the discounted caplet/floorlet payoffs across the payment schedule,
+    each priced from the analytic affine ZCB conditional on the path state at
+    its fixing date.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the last accrual end date).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+
+    t_fix = year_fraction(ref, instrument.fixing_dates, day_count)
+    t_start = year_fraction(ref, instrument.start_dates, day_count)
+    t_end = year_fraction(ref, instrument.end_dates, day_count)
+    taus = year_fraction(instrument.start_dates, instrument.end_dates, day_count)
+
+    if T is None:
+        T = t_end[-1]
+
+    result = generate_cheyette_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+
+    n_periods = instrument.fixing_dates.shape[0]
+    pv = jnp.zeros(config.n_paths, dtype=jnp.float64)
+    for i in range(n_periods):
+        fwd = _cheyette_forward_rate(
+            model, result, t_fix[i], t_start[i], t_end[i], taus[i], T, n_steps
+        )
+        if instrument.is_cap:
+            intrinsic = jnp.maximum(fwd - instrument.strike, 0.0)
+        else:
+            intrinsic = jnp.maximum(instrument.strike - fwd, 0.0)
+        pay_sdf = _cheyette_path_sdf(result, t_end[i][None], T, n_steps)[:, 0]
+        pv = pv + instrument.notional * taus[i] * intrinsic * pay_sdf
+
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(Swaption, CheyetteModel)
+def _swaption_cheyette(
+    *,
+    instrument: Swaption,
+    model: CheyetteModel,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """European swaption price under one-factor Cheyette short-rate MC.
+
+    At expiry the swap value on unit notional is
+    :math:`1 - \\sum_i c_i P(T, t_i \\mid x, y)` (payer) from the analytic affine
+    ZCB conditional on each path's state, floored at zero and discounted by the
+    path-wise money-market numeraire.  With a non-zero skew this carries the
+    swaption smile that the Gaussian models cannot.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the option expiry).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+
+    expiry_time = year_fraction(ref, instrument.expiry_date, day_count)
+    cashflow_times = year_fraction(ref, instrument.fixed_dates, day_count)
+
+    starts = jnp.concatenate(
+        [instrument.expiry_date[None], instrument.fixed_dates[:-1]]
+    )
+    taus = year_fraction(starts, instrument.fixed_dates, day_count)
+    cashflows = instrument.strike * taus
+    cashflows = cashflows.at[-1].add(1.0)
+
+    if T is None:
+        T = expiry_time
+
+    result = generate_cheyette_paths(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    idx = _hw_step_index(expiry_time[None], T, n_steps)[0]
+    x_ex = result.factor_x[:, idx]
+    y_ex = result.aux_y[:, idx]
+    sdf_ex = jnp.exp(result.log_discount_factors[:, idx])
+
+    zcb = cheyette_bond_price(
+        model, x_ex[:, None], y_ex[:, None], expiry_time, cashflow_times[None, :]
+    )
+    coupon_bond = jnp.sum(cashflows[None, :] * zcb, axis=1)
+
+    swap_value = 1.0 - coupon_bond
+    if not instrument.is_payer:
+        swap_value = -swap_value
+    payoff = jnp.maximum(swap_value, 0.0)
+
+    pv = instrument.notional * payoff * sdf_ex
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Rates recipes (Cheyette two-factor quasi-Gaussian short-rate MC)
+#
+# The second factor adds decorrelation on top of the skew, so the headline
+# recipe is the decorrelation-sensitive CMS-spread swap; the bonds provide the
+# option-free martingale calibration of the scheme.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _cheyette2f_path_sdf(
+    result: Cheyette2FPathResult,
+    times: Float[Array, " n_times"],
+    T: Float[Array, ""],
+    n_steps: int,
+) -> Float[Array, "n_paths n_times"]:
+    """Path-wise stochastic discount factors for :class:`Cheyette2FPathResult`."""
+    idx = _hw_step_index(times, T, n_steps)
+    return jnp.exp(jnp.take(result.log_discount_factors, idx, axis=1))
+
+
+@register(FixedRateBond, CheyetteModel2F)
+def _fixed_bond_cheyette2f(
+    *,
+    instrument: FixedRateBond,
+    model: CheyetteModel2F,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Fixed-rate bond price under two-factor Cheyette short-rate MC.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the last payment date).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
+
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_cheyette_paths_2f(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    sdf = _cheyette2f_path_sdf(result, cf_times, T, n_steps)
+    pv = jnp.sum(cf_amounts[None, :] * sdf, axis=1)
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+@register(FloatingRateBond, CheyetteModel2F)
+def _floating_bond_cheyette2f(
+    *,
+    instrument: FloatingRateBond,
+    model: CheyetteModel2F,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """Floating-rate note price under two-factor Cheyette short-rate MC.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to maturity).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    face = instrument.face_value
+
+    cf_times = year_fraction(ref, instrument.payment_dates, day_count)
+    prev_dates = jnp.concatenate(
+        [instrument.settlement_date[None], instrument.payment_dates[:-1]]
+    )
+    taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
+    spread_amounts = instrument.spread * face * taus
+
+    t_settle = year_fraction(ref, instrument.settlement_date, day_count)
+    if T is None:
+        T = cf_times[-1]
+
+    result = generate_cheyette_paths_2f(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+    settle_sdf = _cheyette2f_path_sdf(result, t_settle[None], T, n_steps)[:, 0]
+    spread_sdf = _cheyette2f_path_sdf(result, cf_times, T, n_steps)
+
+    pv = face * settle_sdf + jnp.sum(spread_amounts[None, :] * spread_sdf, axis=1)
+    price, stderr = discounted_mean_and_stderr(
+        pv, jnp.ones((), dtype=pv.dtype), config.n_paths
+    )
+    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+
+
+def _cheyette2f_cms_rate(
+    model: CheyetteModel2F,
+    result: Cheyette2FPathResult,
+    idx: Int[Array, ""],
+    t_fix: Float[Array, ""],
+    tenor: int,
+) -> Float[Array, " n_paths"]:
+    """Par swap rate of an annual ``tenor``-year swap fixed at ``t_fix``.
+
+    Computed per path from the analytic two-factor Cheyette affine ZCB
+    conditional on that path's state at step ``idx``:
+
+    .. math::
+
+        S = \\frac{1 - P(t_\\text{fix}, t_\\text{fix} + \\text{tenor})}
+                 {\\sum_{j=1}^{\\text{tenor}} P(t_\\text{fix}, t_\\text{fix} + j)}.
+
+    Args:
+        model: Two-factor Cheyette model.
+        result: Simulated two-factor Cheyette paths.
+        idx: Time-grid step index of the fixing.
+        t_fix: Fixing time in year fractions.
+        tenor: Underlying swap tenor in whole years (static).
+
+    Returns:
+        Per-path forward par swap rate.
+    """
+    x1 = result.factor_x1[:, idx][:, None]
+    x2 = result.factor_x2[:, idx][:, None]
+    y11 = result.aux_y11[:, idx][:, None]
+    y22 = result.aux_y22[:, idx][:, None]
+    y12 = result.aux_y12[:, idx][:, None]
+    js = jnp.arange(1, tenor + 1, dtype=jnp.float64)
+    maturities = t_fix + js
+    zcb = cheyette_bond_price_2f(
+        model, x1, x2, y11, y22, y12, t_fix, maturities[None, :]
+    )
+    annuity = jnp.sum(zcb, axis=1)
+    return (1.0 - zcb[:, -1]) / annuity
+
+
+@register(CMSSpreadSwap, CheyetteModel2F)
+def _cms_spread_swap_cheyette2f(
+    *,
+    instrument: CMSSpreadSwap,
+    model: CheyetteModel2F,
+    config: MCConfig,
+    key: jax.Array,
+    T: float | None = None,
+    n_steps: int = 100,
+    **kwargs,
+) -> MCResult:
+    """CMS-spread swap (steepener / flattener) under two-factor Cheyette MC.
+
+    At each period's accrual start both CMS rates are computed analytically from
+    the path's factors, their spread net of the fixed strike accrues over the
+    period, and the coupon is discounted by the path-wise money-market
+    numeraire.  This is the decorrelation-sensitive payoff that motivates the
+    second factor — now on a skew-capable quasi-Gaussian base.
+
+    Optional market args:
+        T: Horizon in year fractions (defaults to the last payment date).
+        n_steps: Number of time steps (default 100).
+    """
+    ref = model.initial_curve.reference_date
+    day_count = instrument.day_count
+
+    pay_times = year_fraction(ref, instrument.payment_dates, day_count)
+    starts = jnp.concatenate(
+        [instrument.start_date[None], instrument.payment_dates[:-1]]
+    )
+    fix_times = year_fraction(ref, starts, day_count)
+    taus = year_fraction(starts, instrument.payment_dates, day_count)
+
+    if T is None:
+        T = pay_times[-1]
+
+    result = generate_cheyette_paths_2f(
+        model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
+    )
+
+    sign = 1.0 if instrument.pay_fixed else -1.0
+    n_periods = instrument.payment_dates.shape[0]
+
+    pv = jnp.zeros(config.n_paths, dtype=jnp.float64)
+    for i in range(n_periods):
+        fix_idx = _hw_step_index(fix_times[i][None], T, n_steps)[0]
+        s_long = _cheyette2f_cms_rate(
+            model, result, fix_idx, fix_times[i], instrument.cms_tenor_long
+        )
+        s_short = _cheyette2f_cms_rate(
+            model, result, fix_idx, fix_times[i], instrument.cms_tenor_short
+        )
+        coupon = sign * (s_long - s_short - instrument.fixed_rate) * taus[i]
+        pay_sdf = _cheyette2f_path_sdf(result, pay_times[i][None], T, n_steps)[:, 0]
         pv = pv + instrument.notional * coupon * pay_sdf
 
     price, stderr = discounted_mean_and_stderr(

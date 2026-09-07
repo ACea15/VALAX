@@ -35,11 +35,11 @@ Not every function in a financial institution is a good fit for VALAX today. The
 
 | Rank | Audience | Fit today | Why | Sub-page |
 |---|---|---|---|---|
-| 1 | **Market Risk & Model Validation** | 🟢🟢🟢 | Regulator-mandated need; no incumbent lock-in; batch cadence; `valax/risk/` is the most complete module in the library | [Market Risk & Model Validation](market-risk.md) |
+| 1 | **Market Risk & Model Validation** | 🟢🟢🟢 | Regulator-mandated need; no incumbent lock-in; batch cadence | [Market Risk & Model Validation](market-risk.md) |
 | 2 | **Quant Research / Structuring / Model R&D** | 🟢🟢🟢 | Differentiable pricing is a categorical advantage — enables deep hedging, neural surrogates, gradient-based calibration that C++ analytics libraries structurally cannot support | [Quant Research](quant-research.md) |
 | 3 | **Front-office trading (pricing core)** | 🟢🟢 | The pricing/Greeks/calibration core is a genuine strength and the differentiator is *categorical* — differentiability into the decision layer (exact hedges in tradable instruments; frontier gradient-based hedging/quoting). Held back from 🟢🟢🟢 only by the intraday *service layer* being Vision-tier. Valuation core feeding a *separate* strategy/execution system — not the alpha, not the OMS | [Front-Office Trading](trading-desk.md) |
 | 4 | **Regulatory reporting (FRTB / CCAR)** | 🟢🟢 | Bucketed sensitivities, PLA test, VaR backtesting all shipped; SBA aggregation on roadmap | [Regulatory: FRTB & CCAR](regulatory.md) |
-| 5 | **Treasury / ALM** | 🟡 | IRRBB Standardised Approach is a near-perfect fit; HQLA pricing is turnkey; multi-curve is the roadmap gap | [Treasury & ALM](treasury.md) |
+| 5 | **Treasury / ALM** | 🟡 | IRRBB Standardised Approach is a near-perfect fit; HQLA pricing is turnkey. | [Treasury & ALM](treasury.md) |
 | 6 | **Back office / operations** | 🔴 | Wrong domain — not what the library does, by design | — |
 
 The top two audiences (positions 1–2) represent two different theses about the library:
@@ -47,7 +47,6 @@ The top two audiences (positions 1–2) represent two different theses about the
 - **Market Risk & Model Validation** is the strongest **commercial** adoption case — regulator-mandated need, no incumbent lock-in, budget in hand.
 - **Quant Research** is the strongest **technical** adoption case — differentiable pricing enables research directions that are structurally out of reach for C++ analytics libraries.
 
-Both matter. A bank considering VALAX seriously should adopt in both simultaneously (see [§ 4](#4-the-strategic-order-of-operations) below).
 
 ---
 

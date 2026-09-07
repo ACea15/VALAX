@@ -24,5 +24,22 @@ from valax.models.g2pp import (
     g2pp_factor_covariance,
     g2pp_short_rate_variance,
 )
+from valax.models.cheyette import (
+    CheyetteModel,
+    CheyetteModel2F,
+    cheyette_G,
+    cheyette_market_df,
+    cheyette_instantaneous_forward,
+    cheyette_local_vol,
+    cheyette_local_vol_2f,
+    cheyette_y_gaussian,
+    cheyette_y_gaussian_2f,
+    cheyette_gaussian_mean,
+    cheyette_gaussian_mean_2f,
+    cheyette_short_rate,
+    cheyette_short_rate_2f,
+    cheyette_bond_price,
+    cheyette_bond_price_2f,
+)
 from valax.models.local_vol import LocalVolModel
 from valax.models.slv import SLVModel

@@ -182,6 +182,54 @@ Bermudans that a one-factor model structurally cannot price:
 
 ::: valax.models.g2pp.g2pp_short_rate_variance
 
+## Cheyette (quasi-Gaussian short-rate)
+
+The Markovian HJM model under a separable volatility. A **state-dependent**
+local volatility $\sigma_r(t, x)$ gives rates a volatility **skew** — the
+dynamic, low-dimensional smile the Gaussian short-rate models (Hull–White,
+G2++) structurally cannot produce, and which a lattice or PDE can roll backward
+for callable exotics:
+
+\[
+    r(t) = f^M(0, t) + x(t), \qquad
+    dx = (y - \kappa x)\,dt + \sigma_r(t, x)\,dW, \quad
+    dy = (\sigma_r^2 - 2\kappa y)\,dt,
+\]
+
+with the displaced-diffusion local vol $\sigma_r(t, x) = \sigma(1 + \beta x)$.
+The two-factor `CheyetteModel2F` adds decorrelation on top of the skew.
+
+!!! success "Exact fit"
+    With $r = f^M(0, t) + x$ and $x(0) = 0$, the convexity is carried
+    dynamically by the $y$-drift, so `cheyette_bond_price` recovers the initial
+    curve $P^M(0, T)$ at $t = 0$ to machine precision with no drift calibration.
+
+!!! note "Affine bond for any local vol"
+    $\sigma_r$ enters only the dynamics of $(x, y)$, never the bond formula, so
+    the zero-coupon bond stays affine:
+    $P(t, T) = \tfrac{P^M(0,T)}{P^M(0,t)} e^{-x G - \tfrac12 y G^2}$ with
+    $G = (1 - e^{-\kappa(T-t)})/\kappa$. At $\beta = 0$ the model reduces exactly
+    to Hull–White (2F to G2++) — the primary validation oracle. See
+    [Cheyette theory](../theory/cheyette.md).
+
+::: valax.models.CheyetteModel
+
+::: valax.models.CheyetteModel2F
+
+### Analytics
+
+::: valax.models.cheyette.cheyette_bond_price
+
+::: valax.models.cheyette.cheyette_bond_price_2f
+
+::: valax.models.cheyette.cheyette_G
+
+::: valax.models.cheyette.cheyette_local_vol
+
+::: valax.models.cheyette.cheyette_y_gaussian
+
+::: valax.models.cheyette.cheyette_gaussian_mean
+
 ## LIBOR Market Model (LMM / BGM)
 
 Brace–Gatarek–Musiela LIBOR Market Model for forward-rate simulation:

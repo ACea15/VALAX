@@ -102,6 +102,7 @@ nav:
           - "Hull-White Swaptions: Jamshidian Decomposition": theory/hull-white-swaptions.md
           - "Hull-White Finite Differences: Bermudans and Callables": theory/hull-white-pde.md
           - "G2++: Two-Factor Gaussian and Decorrelation": theory/g2pp.md
+          - "Cheyette: Quasi-Gaussian Skew": theory/cheyette.md
   - "Risk: End-to-End": risk-overview.md
   - Risk Factors: risk-factors.md
   - User Guide:

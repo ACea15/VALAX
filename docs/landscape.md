@@ -12,7 +12,7 @@ If you are evaluating VALAX for adoption, this is the page that answers *"what e
 
 A trading floor is not one piece of software. It is **twenty to forty distinct systems** wired together by contracts on identifiers, timestamps, calendars, and conventions. Some of those systems are commodity (the general ledger; collateral management). Some are competitive moats that every firm builds in-house (alpha signals; execution algos). And in the middle sits a small cluster of systems that are neither commodity nor signal-bearing, but absolutely load-bearing: **the pricing-and-risk engine**.
 
-That cluster is what computes a fair price, a Greek, a VaR number, a CVA charge, and an FRTB sensitivity. Every conversation a trading desk has with risk, with finance, with the regulator, and with its own P&L attribution flows through it. **VALAX is exactly this cluster** — and nothing else.
+That cluster is what computes a fair price, a Greek, a VaR number, a CVA charge, and an FRTB sensitivity. Every conversation a trading desk has with risk, with finance, with the regulator, and with its own P&L attribution flows through it. **VALAX is exactly this cluster**.
 
 We are not a market-data vendor. We are not an order-management system. We are not an alpha library. We are not a settlement platform. We are the differentiable pricing-and-risk kernel that all of those systems either feed or consume, designed so a single JIT-compiled function call serves the front-office quote, the EOD risk batch, the XVA inner loop, and the regulator's IMA backtest from the same line of code.
 

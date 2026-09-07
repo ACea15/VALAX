@@ -352,6 +352,17 @@ cashflow dates are not snapped — are in
 | Short-rate PDE (bonds, callables, swaptions) | ✅ Implemented | `valax/pricing/pde/hull_white.py` — QL-validated |
 | **Bermudan swaptions** under Hull-White | ✅ Implemented | On the PDE — exact exercise projection, no regression proxy |
 | OAS solver | 🟡 Roadmap | Trivial extension once we add a curve-shift parameter to the pricer |
-| G2++ (two-factor) | 🟡 Roadmap | Adds smile-fitting flexibility |
+| G2++ (two-factor Gaussian) | ✅ Implemented | Adds decorrelation — CMS-spread, steepeners, Bermudans; see [G2++ theory](../theory/g2pp.md) |
+| Cheyette (quasi-Gaussian) | ✅ Implemented | Adds a rate **skew** via a state-dependent local vol; 1F and 2F, MC recipes for bonds, caplets/caps, swaptions (skew) and CMS-spread (decorrelation) — see [Cheyette theory](../theory/cheyette.md) |
+
+Beyond Hull-White, VALAX ships two multi-factor short-rate models. **G2++** adds
+*decorrelation* (a second Gaussian factor), while **Cheyette** adds a *skew* to
+the rate dynamics through a state-dependent local volatility
+$\sigma_r(t, x) = \sigma(1 + \beta x)$ — its natural targets are the
+skew-sensitive vanillas (caplets, European swaptions) in one factor, and the
+skew-plus-decorrelation exotics (CMS-spread steepeners/flatteners) in two.
+Both reduce exactly to their Gaussian limits (Cheyette 1F → Hull-White, 2F →
+G2++), which is how they are validated in the absence of a QuantLib Cheyette
+engine.
 
 See the [Roadmap](../roadmap.md) for tracking.

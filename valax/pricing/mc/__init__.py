@@ -40,6 +40,12 @@ from valax.pricing.mc.sabr_paths import generate_sabr_paths
 from valax.pricing.mc.lmm_paths import LMMPathResult, generate_lmm_paths
 from valax.pricing.mc.hull_white_paths import HullWhitePathResult, generate_hull_white_paths
 from valax.pricing.mc.g2pp_paths import G2PPPathResult, generate_g2pp_paths
+from valax.pricing.mc.cheyette_paths import (
+    CheyettePathResult,
+    Cheyette2FPathResult,
+    generate_cheyette_paths,
+    generate_cheyette_paths_2f,
+)
 from valax.pricing.mc.multi_asset_paths import generate_correlated_gbm_paths
 from valax.pricing.mc.local_vol_paths import generate_local_vol_paths
 from valax.pricing.mc.slv_paths import generate_slv_paths
@@ -86,9 +92,13 @@ __all__ = [
     "generate_correlated_gbm_paths",
     "generate_local_vol_paths",
     "generate_slv_paths",
+    "generate_cheyette_paths",
+    "generate_cheyette_paths_2f",
     "LMMPathResult",
     "HullWhitePathResult",
     "G2PPPathResult",
+    "CheyettePathResult",
+    "Cheyette2FPathResult",
     # Payoffs
     "european_payoff",
     "asian_payoff",

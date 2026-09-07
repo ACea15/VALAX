@@ -255,3 +255,110 @@ calibrating quotes, then re-run the skew cross-check in
 **Status.** unprioritized. Directly motivated by the FD-Dupire skew gap
 documented in the LV PDE recipe (`valax/pricing/pde/recipes.py`) and its
 QuantLib cross-check (`tests/test_quantlib_comparison/test_local_vol_pde_ql.py`).
+
+---
+
+## Rates
+
+### Recovering textbook negative effective convexity for callable bonds
+
+**Context / motivation.** The OAS work (`valax/risk/oas.py`) set out to
+reproduce the classic callable-bond signature — **negative** effective convexity
+near the call boundary — as an autodiff second derivative of price w.r.t. a
+parallel OAS shift. It did not appear. In the exact-fit Hull-White framework the
+capped redemption is still discounted *convexly*, so effective convexity to a
+parallel curve spread floors at the small positive value of the near-term call
+stub rather than turning negative. The honest, reproducible signature is
+convexity *compression* (bullet ~70 → callable ~0) plus duration compression,
+and the tests assert that compression rather than a sign flip. The textbook
+"negative convexity" is a price-vs-yield-to-call statement, not this
+term-structure OAS derivative — but whether *some* tractable, differentiable
+framework recovers the sign flip as a first-class autodiff Greek is genuinely
+open.
+
+**The idea.** Investigate which risk-metric definition and/or model, if any,
+makes effective convexity go strictly negative as a computed derivative (not a
+yield-axis picture). Candidate axes to sweep:
+
+- **Shift convention.** Redefine the OAS bump against a *compounded* /
+  lognormal-quoted spread, or against yield rather than a continuous parallel
+  zero shift, and differentiate through that map.
+- **Curve-move shape.** Replace the parallel shift with a level/slope shock (or a
+  small PCA-shaped move) and look at convexity to the level factor.
+- **Model richness.** Repeat under G2++ (now delivered) so the exercise region
+  is two-factor — decorrelation may change the sign story that single-factor HW
+  forces.
+
+**Where it helps.** Would let a callable/MBS-style book display the risk metric
+practitioners expect (negative convexity) as an exact, GPU-friendly autodiff
+Greek, and would pin down *precisely* which convention the "negative convexity"
+folklore actually refers to — a clarification with teaching and validation value
+regardless of outcome.
+
+**Open questions & risks.** It may simply be **true** that no continuous
+parallel-spread definition yields negative convexity in an exact-fit Gaussian
+short-rate model — in which case the deliverable is a crisp *negative result*
+("compression, not sign flip, is the correct term-structure signature") rather
+than a new metric. Differentiating through a changed shift convention (compounded
+/ yield) reintroduces the compounding-convention trap already documented in the
+OAS work. Second derivatives through the exercise projection need a gamma sanity
+check against central differences (test-device only, per `AGENTS.md`).
+
+**Rough cost / complexity.** Small-to-moderate and mostly *analysis*: the pricer,
+OAS solver, and autodiff plumbing already exist, so this is a definition sweep
+plus a validation write-up, not a build. Highest-value output is likely a
+documented finding (extending gap §2.3b of the rates guide) rather than new code.
+
+**Status.** unprioritized. Emerged from the OAS deliverable
+(`valax/risk/oas.py`, `tests/test_risk/test_oas.py`); see gap §2.3b of the rates
+session guide for the reproduced compression-not-sign-flip result.
+
+### Stochastic tenor-basis with a low-dimensional shared basis factor
+
+**Context / motivation.** VALAX evolves a single discount curve (HW-1F, or two
+factors under G2++), and every tenor forward curve is that curve's implied
+forward plus a **deterministic** spread. The tenor bases therefore cannot move on
+their own — they are frozen functions of time layered on the rate dynamics. Real
+basis (1M/3M/6M/OIS) spreads *do* move, and decorrelate from the level of rates;
+products explicitly on the basis (tenor-basis swaps, basis options) have no
+volatility in the current framework.
+
+**The idea.** Add stochastic dynamics to the basis while keeping the factor count
+low. Rather than an independent driver per tenor (an over-parameterized,
+poorly-identified `n`-factors-for-`n`-tenors model), introduce **one shared basis
+factor** (optionally a second for basis-slope) with tenor-dependent loadings:
+`s_τ(t) = ℓ_τ · z(t)`, `z` mean-reverting and correlated with the rate factors.
+For a G2++ core this is a 2+1 factor model whose factor count is *independent of
+the number of tenors carried*. Kept affine/Gaussian, the multi-curve ZCB and
+swaption tractability that G2++ already has should largely survive.
+
+**Where it helps.** Prices and risks basis-sensitive instruments that are
+currently vol-less — tenor-basis swaps and basis swaptions/options — and lets the
+curve graph produce a *stochastic* basis for scenario/VaR generation instead of a
+frozen spread. Complements the deterministic-basis multi-curve bootstrap already
+shipped (`bootstrap_curve_graph`).
+
+**Open questions & risks.** **Calibratability is the real risk, not the math:**
+basis-swap *volatility* is not liquidly quoted across all tenor pairs, so
+per-tenor vol/correlation parameters are largely unidentifiable — which is the
+core argument *for* the low-factor form and *against* the full per-tenor model.
+Empirically bases are strongly co-moving, so even a single shared factor may
+capture most of the structure; the open question is whether a second (slope)
+factor earns its keep. Because the standard low-factor recipe is fairly
+well-established in the literature (Mercurio-style multi-curve LMM/HJM, spread
+formulations), this leans closer to a *deferred implementation* than a pure
+exploration — its uncertainty is **whether it is worth building for VALAX's
+audiences**, not how. Correlation between the basis factor and the rate factors
+adds a mixed term that must stay consistent with the existing dual-curve
+discounting discipline (discounting on OIS only).
+
+**Rough cost / complexity.** Moderate-to-large: a new model pytree
+(`G2PPModel`-style, extended with the basis factor + loadings), the analytic
+multi-curve ZCB/annuity under the extended dynamics, and a calibration story that
+honestly confronts the thin basis-vol data. Best gated behind a *demand* signal
+(a real basis-sensitive product or risk requirement) given the calibration
+uncertainty.
+
+**Status.** unprioritized. Surfaced from the G2++ multi-curve guardrails in the
+rates session guide (deterministic basis "on top" of a single-curve dynamics
+engine); the deterministic-basis half already ships via `bootstrap_curve_graph`.
