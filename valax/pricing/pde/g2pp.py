@@ -109,6 +109,11 @@ from valax.pricing.pde.coefficients import g2pp_operator_2d
 from valax.pricing.pde.config import PDEConfig2D
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.grids import Grid2D, centred_state_grid, read_off_2d
+from valax.pricing.pde.rates_payoffs import (
+    coupon_values_by_level,
+    snap_to_levels,
+    swap_tail_values,
+)
 from valax.pricing.pde.schemes2d import solve_backward_2d
 
 # Minimum fully-implicit (Rannacher) start-up steps. Every instrument here has a
@@ -124,55 +129,6 @@ _Event = Callable[[Int[Array, ""], Float[Array, "n_x n_y"]], Float[Array, "n_x n
 # Schedule helpers (local copies of the Hull-White recipe's, kept private
 # so the two short-rate PDE modules stay independent).
 # ─────────────────────────────────────────────────────────────────────
-
-
-def _snap_to_levels(
-    dates: Int[Array, " m"],
-    reference_date: Int[Array, ""],
-    day_count: str,
-    dt: Float[Array, ""],
-    n_time: int,
-) -> Int[Array, " m"]:
-    """Map ordinal dates to the nearest backward-sweep time level.
-
-    Levels count forward time: ``0`` at the reference date, ``n_time`` at the
-    horizon. Exercise decisions must land *at* a level; the snapping error is
-    second order because the exercise boundary is smooth in time.
-
-    Args:
-        dates: Event dates as integer ordinals.
-        reference_date: Curve reference date as an integer ordinal.
-        day_count: Day-count convention used to convert to year fractions.
-        dt: Time-step size in year fractions.
-        n_time: Number of backward time steps.
-
-    Returns:
-        The clipped time-level index of each date.
-    """
-    times = year_fraction(reference_date, dates, day_count)
-    return jnp.clip(jnp.round(times / dt).astype(jnp.int32), 0, n_time)
-
-
-def _swap_accruals(
-    start_date: Int[Array, ""],
-    payment_dates: Int[Array, " n"],
-    day_count: str,
-) -> Float[Array, " n"]:
-    """Year fractions for each fixed-leg accrual period.
-
-    The first period accrues from ``start_date`` (the swap start / option
-    exercise date); subsequent periods run between consecutive payment dates.
-
-    Args:
-        start_date: Swap effective date as an integer ordinal.
-        payment_dates: Fixed-leg payment dates as integer ordinals.
-        day_count: Day-count convention.
-
-    Returns:
-        The accrual factor for each fixed payment.
-    """
-    starts = jnp.concatenate([start_date[jnp.newaxis], payment_dates[:-1]])
-    return year_fraction(starts, payment_dates, day_count)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -282,15 +238,20 @@ def _swap_tail_values(
         The swap value at each grid node, shape ``(n_x, n_y)``.
     """
     reference_date = model.initial_curve.reference_date
-    t = year_fraction(reference_date, exercise_date, day_count)
-    payment_times = year_fraction(reference_date, payment_dates, day_count)
 
-    taus = _swap_accruals(exercise_date, payment_dates, day_count)
-    cashflows = (strike * taus).at[-1].add(1.0)
+    def bond_portfolio(t, payment_times, cashflows):
+        return _g2pp_coupon_bond_values(model, grid, t, payment_times, cashflows)
 
-    bond = _g2pp_coupon_bond_values(model, grid, t, payment_times, cashflows)
-    payer = notional * (1.0 - bond)
-    return payer if is_payer else -payer
+    return swap_tail_values(
+        bond_portfolio,
+        reference_date,
+        exercise_date,
+        payment_dates,
+        strike,
+        notional,
+        day_count,
+        is_payer,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -504,22 +465,20 @@ def _coupon_values_by_level(
     """
     reference_date = model.initial_curve.reference_date
     dt = horizon / config.n_time
-    payment_times = year_fraction(
-        reference_date, bond.payment_dates, bond.day_count
-    )
-    levels = jnp.clip(
-        jnp.round(payment_times / dt).astype(jnp.int32), 0, config.n_time
-    )
     coupon = bond.face_value * bond.coupon_rate / bond.frequency
 
     def factor(level_time, payment_time):
         return _g2pp_discount_grid(model, grid, level_time, payment_time)
 
-    factors = jax.vmap(factor)(levels * dt, payment_times)  # (n_cpn, n_x, n_y)
-    return (
-        jnp.zeros((config.n_time + 1, grid.n_x, grid.n_y))
-        .at[levels]
-        .add(coupon * factors)
+    return coupon_values_by_level(
+        factor,
+        reference_date,
+        bond.payment_dates,
+        bond.day_count,
+        coupon,
+        dt,
+        config.n_time,
+        (grid.n_x, grid.n_y),
     )
 
 
@@ -606,7 +565,7 @@ def _bermudan_swaption_g2pp(*, instrument, model, config) -> PDEResult:
         reference_date, instrument.exercise_dates[-1], day_count
     )
     dt = horizon / config.n_time
-    levels = _snap_to_levels(
+    levels = snap_to_levels(
         instrument.exercise_dates, reference_date, day_count, dt, config.n_time
     )
 

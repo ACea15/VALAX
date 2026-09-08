@@ -96,6 +96,11 @@ from valax.pricing.pde.grids import (
 )
 from valax.pricing.pde.operators import Operator1D, build_operator_1d
 from valax.pricing.pde.operators2d import Operator2D, build_operator_2d
+from valax.pricing.pde.rates_payoffs import (
+    coupon_values_by_level,
+    snap_to_levels,
+    swap_tail_values,
+)
 from valax.pricing.pde.schemes import solve_backward_1d, theta_for_scheme
 from valax.pricing.pde.schemes2d import solve_backward_2d
 
@@ -115,28 +120,6 @@ _Event2D = Callable[
 # Schedule helpers (local copies of the Hull-White / G2++ recipes', kept
 # private so the short-rate PDE modules stay independent).
 # ─────────────────────────────────────────────────────────────────────
-
-
-def _snap_to_levels(
-    dates: Int[Array, " m"],
-    reference_date: Int[Array, ""],
-    day_count: str,
-    dt: Float[Array, ""],
-    n_time: int,
-) -> Int[Array, " m"]:
-    """Map ordinal dates to the nearest backward-sweep time level."""
-    times = year_fraction(reference_date, dates, day_count)
-    return jnp.clip(jnp.round(times / dt).astype(jnp.int32), 0, n_time)
-
-
-def _swap_accruals(
-    start_date: Int[Array, ""],
-    payment_dates: Int[Array, " n"],
-    day_count: str,
-) -> Float[Array, " n"]:
-    """Year fractions for each fixed-leg accrual period."""
-    starts = jnp.concatenate([start_date[jnp.newaxis], payment_dates[:-1]])
-    return year_fraction(starts, payment_dates, day_count)
 
 
 def _ln_market_df(
@@ -319,17 +302,22 @@ def _cheyette_swap_tail_values(
         The swap value at each grid node.
     """
     reference_date = model.initial_curve.reference_date
-    t = year_fraction(reference_date, exercise_date, day_count)
-    payment_times = year_fraction(reference_date, payment_dates, day_count)
 
-    taus = _swap_accruals(exercise_date, payment_dates, day_count)
-    cashflows = (strike * taus).at[-1].add(1.0)
+    def bond_portfolio(t, payment_times, cashflows):
+        return _cheyette_coupon_bond_values(
+            model, nodes, t, payment_times, cashflows
+        )
 
-    bond = _cheyette_coupon_bond_values(
-        model, nodes, t, payment_times, cashflows
+    return swap_tail_values(
+        bond_portfolio,
+        reference_date,
+        exercise_date,
+        payment_dates,
+        strike,
+        notional,
+        day_count,
+        is_payer,
     )
-    payer = notional * (1.0 - bond)
-    return payer if is_payer else -payer
 
 
 def _bond_horizon(bond, model) -> Float[Array, ""]:
@@ -367,12 +355,6 @@ def _cheyette_coupon_values_by_level(
     """
     reference_date = model.initial_curve.reference_date
     dt = horizon / config.n_time
-    payment_times = year_fraction(
-        reference_date, bond.payment_dates, bond.day_count
-    )
-    levels = jnp.clip(
-        jnp.round(payment_times / dt).astype(jnp.int32), 0, config.n_time
-    )
     coupon = bond.face_value * bond.coupon_rate / bond.frequency
 
     def factor(level_time, payment_time):
@@ -384,9 +366,15 @@ def _cheyette_coupon_values_by_level(
             jnp.ones((1,)),
         )
 
-    factors = jax.vmap(factor)(levels * dt, payment_times)  # (n_cpn, n)
-    return (
-        jnp.zeros((config.n_time + 1, grid.n)).at[levels].add(coupon * factors)
+    return coupon_values_by_level(
+        factor,
+        reference_date,
+        bond.payment_dates,
+        bond.day_count,
+        coupon,
+        dt,
+        config.n_time,
+        (grid.n,),
     )
 
 
@@ -446,7 +434,7 @@ def _callable_style_price_1f(
     """Shared frozen-``y`` sweep for callable / puttable fixed-rate bonds."""
     horizon = _bond_horizon(bond, model)
     dt = horizon / config.n_time
-    levels = _snap_to_levels(
+    levels = snap_to_levels(
         exercise_dates,
         model.initial_curve.reference_date,
         bond.day_count,
@@ -554,7 +542,7 @@ def _bermudan_swaption_cheyette(*, instrument, model, config) -> PDEResult:
         reference_date, instrument.exercise_dates[-1], day_count
     )
     dt = horizon / config.n_time
-    levels = _snap_to_levels(
+    levels = snap_to_levels(
         instrument.exercise_dates, reference_date, day_count, dt, config.n_time
     )
 
@@ -786,17 +774,22 @@ def _cheyette_swap_tail_values_2f(
 ) -> Float[Array, "n_x n_y"]:
     """Value of the underlying swap at ``exercise_date``, at every node (2F)."""
     reference_date = model.initial_curve.reference_date
-    t = year_fraction(reference_date, exercise_date, day_count)
-    payment_times = year_fraction(reference_date, payment_dates, day_count)
 
-    taus = _swap_accruals(exercise_date, payment_dates, day_count)
-    cashflows = (strike * taus).at[-1].add(1.0)
+    def bond_portfolio(t, payment_times, cashflows):
+        return _cheyette_coupon_bond_values_2f(
+            model, grid, t, payment_times, cashflows
+        )
 
-    bond = _cheyette_coupon_bond_values_2f(
-        model, grid, t, payment_times, cashflows
+    return swap_tail_values(
+        bond_portfolio,
+        reference_date,
+        exercise_date,
+        payment_dates,
+        strike,
+        notional,
+        day_count,
+        is_payer,
     )
-    payer = notional * (1.0 - bond)
-    return payer if is_payer else -payer
 
 
 def _cheyette_coupon_values_by_level_2f(
@@ -809,22 +802,20 @@ def _cheyette_coupon_values_by_level_2f(
     """Coupon value to inject at each time level, per node (2F, frozen-``y``)."""
     reference_date = model.initial_curve.reference_date
     dt = horizon / config.n_time
-    payment_times = year_fraction(
-        reference_date, bond.payment_dates, bond.day_count
-    )
-    levels = jnp.clip(
-        jnp.round(payment_times / dt).astype(jnp.int32), 0, config.n_time
-    )
     coupon = bond.face_value * bond.coupon_rate / bond.frequency
 
     def factor(level_time, payment_time):
         return _cheyette_discount_grid_2f(model, grid, level_time, payment_time)
 
-    factors = jax.vmap(factor)(levels * dt, payment_times)
-    return (
-        jnp.zeros((config.n_time + 1, grid.n_x, grid.n_y))
-        .at[levels]
-        .add(coupon * factors)
+    return coupon_values_by_level(
+        factor,
+        reference_date,
+        bond.payment_dates,
+        bond.day_count,
+        coupon,
+        dt,
+        config.n_time,
+        (grid.n_x, grid.n_y),
     )
 
 
@@ -954,7 +945,7 @@ def _bermudan_swaption_cheyette_2f(*, instrument, model, config) -> PDEResult:
         reference_date, instrument.exercise_dates[-1], day_count
     )
     dt = horizon / config.n_time
-    levels = _snap_to_levels(
+    levels = snap_to_levels(
         instrument.exercise_dates, reference_date, day_count, dt, config.n_time
     )
 
@@ -1265,17 +1256,22 @@ def _cheyette_swap_tail_values_exact(
 ) -> Float[Array, "n_x n_y"]:
     """Value of the underlying swap at ``exercise_date``, every node (exact-``y``)."""
     reference_date = model.initial_curve.reference_date
-    t = year_fraction(reference_date, exercise_date, day_count)
-    payment_times = year_fraction(reference_date, payment_dates, day_count)
 
-    taus = _swap_accruals(exercise_date, payment_dates, day_count)
-    cashflows = (strike * taus).at[-1].add(1.0)
+    def bond_portfolio(t, payment_times, cashflows):
+        return _cheyette_coupon_bond_values_exact(
+            model, grid, t, payment_times, cashflows
+        )
 
-    bond = _cheyette_coupon_bond_values_exact(
-        model, grid, t, payment_times, cashflows
+    return swap_tail_values(
+        bond_portfolio,
+        reference_date,
+        exercise_date,
+        payment_dates,
+        strike,
+        notional,
+        day_count,
+        is_payer,
     )
-    payer = notional * (1.0 - bond)
-    return payer if is_payer else -payer
 
 
 def cheyette_exact_price(
@@ -1312,12 +1308,6 @@ def cheyette_exact_price(
         horizon = _bond_horizon(instrument, model)
         reference_date = model.initial_curve.reference_date
         dt = horizon / config.n_time
-        payment_times = year_fraction(
-            reference_date, instrument.payment_dates, instrument.day_count
-        )
-        levels = jnp.clip(
-            jnp.round(payment_times / dt).astype(jnp.int32), 0, config.n_time
-        )
         coupon = instrument.face_value * instrument.coupon_rate / instrument.frequency
 
         def build(grid: Grid2D):
@@ -1330,11 +1320,15 @@ def cheyette_exact_price(
                     jnp.ones((1,)),
                 )
 
-            factors = jax.vmap(factor)(levels * dt, payment_times)
-            coupons = (
-                jnp.zeros((config.n_time + 1, grid.n_x, grid.n_y))
-                .at[levels]
-                .add(coupon * factors)
+            coupons = coupon_values_by_level(
+                factor,
+                reference_date,
+                instrument.payment_dates,
+                instrument.day_count,
+                coupon,
+                dt,
+                config.n_time,
+                (grid.n_x, grid.n_y),
             )
             terminal = (
                 jnp.full(grid.shape, instrument.face_value)
