@@ -18,12 +18,14 @@ from valax.calibration.cheyette import (
     calibrate_cheyette_2f,
     cheyette_pde_prices,
 )
+import jax
+
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
-from valax.instruments.rates import Swaption
+from valax.instruments.rates import Caplet, Swaption
 from valax.models.cheyette import CheyetteModel, CheyetteModel2F
 from valax.pricing.analytic.swaptions import _annuity
-from valax.pricing.pde import PDEConfig, PDEConfig2D, Scheme
+from valax.pricing.pde import PDEConfig, PDEConfig2D, Scheme, pde_price_dispatch
 
 _ACT365 = "act_365"
 
@@ -138,6 +140,86 @@ class TestRoundTrip1F:
         reprice = cheyette_pde_prices(fit, strike_slice, "frozen", CFG_FROZEN_1F)
         rel = jnp.abs(reprice - market) / jnp.abs(market)
         assert float(jnp.max(rel)) < 1e-3
+
+
+def _caplet(fixing_year, strike, is_cap=True):
+    """Semiannual caplet fixing on 1 Jan of ``fixing_year``."""
+    fix = int(ymd_to_ordinal(fixing_year, 1, 1))
+    end = int(ymd_to_ordinal(fixing_year, 7, 1))
+    return Caplet(
+        fixing_date=jnp.int32(fix),
+        start_date=jnp.int32(fix),
+        end_date=jnp.int32(end),
+        strike=jnp.asarray(strike),
+        notional=jnp.array(1.0),
+        is_cap=is_cap,
+        day_count=_ACT365,
+    )
+
+
+def _caplet_atm(curve, fixing_year):
+    fix = jnp.int32(int(ymd_to_ordinal(fixing_year, 1, 1)))
+    end = jnp.int32(int(ymd_to_ordinal(fixing_year, 7, 1)))
+    tau = (end - fix).astype(jnp.float64) / 365.0
+    return float((curve(fix) / curve(end) - 1.0) / tau)
+
+
+@pytest.fixture(scope="module")
+def caplet_slice(curve):
+    """A caplet strike slice at one expiry — the natural skew-ID instrument.
+
+    Per the calibration module docstring, :math:`\\beta` is invisible at a
+    single (ATM) strike; a caplet strike slice is the cheapest instrument that
+    identifies the skew, and now prices on the same PDE as the swaptions.
+    """
+    k = _caplet_atm(curve, 2030)
+    return [_caplet(2030, k + dk) for dk in (-0.006, -0.003, 0.0, 0.003, 0.006)]
+
+
+class TestRoundTrip1FCapletSlice:
+    def test_recovers_vol_and_skew_from_caplets(self, curve, caplet_slice):
+        true = CheyetteModel(
+            mean_reversion=jnp.array(0.05),
+            volatility=jnp.array(0.012),
+            skew=jnp.array(0.25),
+            initial_curve=curve,
+        )
+        market = cheyette_pde_prices(true, caplet_slice, "frozen", CFG_FROZEN_1F)
+        guess = CheyetteModel(
+            mean_reversion=jnp.array(0.05),
+            volatility=jnp.array(0.008),
+            skew=jnp.array(0.0),
+            initial_curve=curve,
+        )
+        fit, _ = calibrate_cheyette(
+            caplet_slice, market, curve,
+            initial_guess=guess,
+            fixed_params={"mean_reversion": 0.05},
+            engine="frozen", config=CFG_FROZEN_1F, max_steps=200,
+        )
+        assert float(fit.volatility) == pytest.approx(0.012, rel=2e-2)
+        assert float(fit.skew) == pytest.approx(0.25, abs=2e-2)
+
+    def test_autodiff_flows_through_caplet_pde(self, curve):
+        """The least-squares Jacobian is exact autodiff through the caplet PDE.
+
+        A finite skew gradient of a caplet price is the minimal condition for
+        gradient-based calibration on a caplet slice to work at all.
+        """
+        caplet = _caplet(2030, _caplet_atm(curve, 2030) + 0.005)
+
+        def price(beta):
+            model = CheyetteModel(
+                mean_reversion=jnp.array(0.05),
+                volatility=jnp.array(0.011),
+                skew=beta,
+                initial_curve=curve,
+            )
+            return pde_price_dispatch(caplet, model, CFG_FROZEN_1F).price
+
+        g = float(jax.grad(price)(jnp.array(0.2)))
+        assert jnp.isfinite(g)
+        assert abs(g) > 0.0
 
 
 class TestRoundTrip1FExactEngine:
