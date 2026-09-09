@@ -110,6 +110,8 @@ from valax.pricing.pde.rates_payoffs import (
     caplet_fixing_values,
     caplet_values_by_level,
     coupon_values_by_level,
+    exercisable_terminal_and_event,
+    exercise_obstacle_by_level,
     snap_to_levels,
     swap_tail_values,
 )
@@ -302,39 +304,22 @@ def _callable_style_price(
     horizon = _bond_horizon(bond, model)
     dt = horizon / config.n_time
 
-    levels = snap_to_levels(
+    strike_at_level = exercise_obstacle_by_level(
         exercise_dates,
+        exercise_prices,
+        bond.face_value,
         model.initial_curve.reference_date,
         bond.day_count,
         dt,
         config.n_time,
-    )
-    # Non-exercise levels get a neutral obstacle: +inf caps nothing, -inf
-    # floors nothing.
-    neutral = jnp.inf if is_call else -jnp.inf
-    strike_at_level = (
-        jnp.full(config.n_time + 1, neutral)
-        .at[levels]
-        .set(exercise_prices * bond.face_value)
+        is_call,
     )
 
     def build(grid: Grid1D):
         coupons = _coupon_values_by_level(bond, model, grid, config, horizon)
-        # Redemption of principal plus the final coupon.
-        terminal = jnp.full(grid.n, bond.face_value) + coupons[config.n_time]
-
-        def event_fn(level, values):
-            # Exercise is decided *ex-coupon* — call/put prices are quoted
-            # ex-coupon, so a holder redeemed on a coupon date still collects
-            # that coupon. The coupon is added after the projection.
-            obstacle = strike_at_level[level]
-            exercised = (
-                jnp.minimum(values, obstacle) if is_call
-                else jnp.maximum(values, obstacle)
-            )
-            return exercised + coupons[level]
-
-        return terminal, event_fn
+        return exercisable_terminal_and_event(
+            coupons, bond.face_value, strike_at_level, is_call
+        )
 
     return _solve_hull_white(model, config, horizon, build)
 

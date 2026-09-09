@@ -95,7 +95,7 @@ from jax import Array
 from jaxtyping import Float, Int
 
 from valax.dates.daycounts import year_fraction
-from valax.instruments.bonds import FixedRateBond
+from valax.instruments.bonds import CallableBond, FixedRateBond, PuttableBond
 from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
 from valax.models.g2pp import (
     G2PPModel,
@@ -113,6 +113,8 @@ from valax.pricing.pde.rates_payoffs import (
     caplet_fixing_values,
     caplet_values_by_level,
     coupon_values_by_level,
+    exercisable_terminal_and_event,
+    exercise_obstacle_by_level,
     snap_to_levels,
     swap_tail_values,
 )
@@ -607,6 +609,79 @@ def _cap_g2pp(*, instrument, model, config) -> PDEResult:
         return terminal, lambda level, values: values + caplet_vals[level]
 
     return PDEResult(price=_solve_g2pp(model, config, horizon, build))
+
+
+def _callable_style_price_g2pp(
+    bond,
+    model: G2PPModel,
+    config: PDEConfig2D,
+    exercise_dates: Int[Array, " m"],
+    exercise_prices: Float[Array, " m"],
+    *,
+    is_call: bool,
+) -> Float[Array, ""]:
+    """Shared 2-D ADI sweep for callable / puttable fixed-rate bonds (G2++).
+
+    The exercise projection is a pointwise obstacle on the value function — the
+    issuer caps at the call price, the holder floors at the put price — decided
+    on the *ex-coupon* continuation value exactly as in the Hull-White recipe.
+    The ADI sweep supplies the fully-``\\varphi``-discounted continuation value
+    to the projection through the ``event_fn`` seam.
+    """
+    horizon = _bond_horizon(bond, model)
+    dt = horizon / config.n_time
+    strike_at_level = exercise_obstacle_by_level(
+        exercise_dates,
+        exercise_prices,
+        bond.face_value,
+        model.initial_curve.reference_date,
+        bond.day_count,
+        dt,
+        config.n_time,
+        is_call,
+    )
+
+    def build(grid: Grid2D):
+        coupons = _coupon_values_by_level(bond, model, grid, config, horizon)
+        return exercisable_terminal_and_event(
+            coupons, bond.face_value, strike_at_level, is_call
+        )
+
+    return _solve_g2pp(model, config, horizon, build)
+
+
+@register(CallableBond, G2PPModel)
+def _callable_bond_g2pp(*, instrument, model, config) -> PDEResult:
+    """Callable fixed-rate bond under G2++ via a 2-D finite-difference sweep.
+
+    The two-factor analogue of the Hull-White callable: the issuer redeems at
+    ``call_price`` whenever the ex-coupon continuation value exceeds it. The
+    decorrelation of short and long rates enters through the joint ``(x, y)``
+    continuation value.
+    """
+    price = _callable_style_price_g2pp(
+        instrument,
+        model,
+        config,
+        instrument.call_dates,
+        instrument.call_prices,
+        is_call=True,
+    )
+    return PDEResult(price=price)
+
+
+@register(PuttableBond, G2PPModel)
+def _puttable_bond_g2pp(*, instrument, model, config) -> PDEResult:
+    """Puttable fixed-rate bond under G2++ via a 2-D finite-difference sweep."""
+    price = _callable_style_price_g2pp(
+        instrument,
+        model,
+        config,
+        instrument.put_dates,
+        instrument.put_prices,
+        is_call=False,
+    )
+    return PDEResult(price=price)
 
 
 @register(BermudanSwaption, G2PPModel)

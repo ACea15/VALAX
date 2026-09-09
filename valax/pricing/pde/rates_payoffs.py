@@ -311,3 +311,94 @@ def caplet_values_by_level(
 
     vals = jax.vmap(caplet_val)(levels * dt, end_times, taus)
     return jnp.zeros((n_time + 1, *node_shape)).at[levels].add(vals)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Callable / puttable exercise projection
+# ─────────────────────────────────────────────────────────────────────
+
+
+def exercise_obstacle_by_level(
+    exercise_dates: Int[Array, " m"],
+    exercise_prices: Float[Array, " m"],
+    face_value: Float[Array, ""],
+    reference_date: Int[Array, ""],
+    day_count: str,
+    dt: Float[Array, ""],
+    n_time: int,
+    is_call: bool,
+) -> Float[Array, " n_levels"]:
+    """Per-level exercise obstacle for a callable/puttable bond.
+
+    Exercise dates snap to the nearest backward-sweep level and carry their
+    redemption amount (``exercise_price * face``) there. Non-exercise levels
+    get a **neutral** obstacle that never wins the projection: ``+inf`` for an
+    issuer call (a ``min`` caps nothing), ``-inf`` for a holder put (a ``max``
+    floors nothing).
+
+    Args:
+        exercise_dates: Call or put dates as integer ordinals.
+        exercise_prices: Redemption price at each exercise date, as a fraction
+            of face value.
+        face_value: Bond face value.
+        reference_date: Curve reference date as an integer ordinal.
+        day_count: Day-count convention.
+        dt: Time-step size in year fractions.
+        n_time: Number of backward time steps.
+        is_call: ``True`` for issuer-optimal (callable), ``False`` for
+            holder-optimal (puttable).
+
+    Returns:
+        The obstacle value at each time level, indexed ``0 .. n_time``.
+    """
+    levels = snap_to_levels(
+        exercise_dates, reference_date, day_count, dt, n_time
+    )
+    neutral = jnp.inf if is_call else -jnp.inf
+    return (
+        jnp.full(n_time + 1, neutral)
+        .at[levels]
+        .set(exercise_prices * face_value)
+    )
+
+
+def exercisable_terminal_and_event(
+    coupons: Float[Array, "n_levels ..."],
+    face_value: Float[Array, ""],
+    strike_at_level: Float[Array, " n_levels"],
+    is_call: bool,
+) -> tuple[Float[Array, "..."], Callable]:
+    r"""Terminal condition and exercise event for a callable/puttable bond.
+
+    The ordering within a step follows the trinomial tree: exercise is decided
+    on the *ex-coupon* continuation value and the coupon is added afterwards,
+    because call/put prices are quoted ex-coupon and a holder redeemed on a
+    coupon date still receives that coupon. The issuer caps the value at the
+    call price (``is_call``); the holder floors it at the put price.
+
+    Args:
+        coupons: Coupon value to inject per ``(time level, *node)`` (from
+            :func:`coupon_values_by_level`).
+        face_value: Bond face value (redeemed at the horizon).
+        strike_at_level: Per-level exercise obstacle (from
+            :func:`exercise_obstacle_by_level`).
+        is_call: ``True`` for issuer-optimal (callable), ``False`` for
+            holder-optimal (puttable).
+
+    Returns:
+        ``(terminal, event_fn)`` — the horizon condition (redemption plus final
+        coupon) and the per-level exercise-then-coupon event.
+    """
+    node_shape = coupons.shape[1:]
+    terminal = jnp.full(node_shape, face_value) + coupons[-1]
+
+    def event_fn(level, values):
+        obstacle = strike_at_level[level]
+        exercised = (
+            jnp.minimum(values, obstacle)
+            if is_call
+            else jnp.maximum(values, obstacle)
+        )
+        return exercised + coupons[level]
+
+    return terminal, event_fn
