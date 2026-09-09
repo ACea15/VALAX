@@ -63,7 +63,7 @@ from jaxtyping import Float, Int
 
 from valax.dates.daycounts import year_fraction
 from valax.instruments.bonds import CallableBond, FixedRateBond, PuttableBond
-from valax.instruments.rates import BermudanSwaption, Swaption
+from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
 from valax.models.cheyette import (
     CheyetteModel,
     CheyetteModel2F,
@@ -97,6 +97,8 @@ from valax.pricing.pde.grids import (
 from valax.pricing.pde.operators import Operator1D, build_operator_1d
 from valax.pricing.pde.operators2d import Operator2D, build_operator_2d
 from valax.pricing.pde.rates_payoffs import (
+    caplet_fixing_values,
+    caplet_values_by_level,
     coupon_values_by_level,
     snap_to_levels,
     swap_tail_values,
@@ -525,6 +527,71 @@ def _swaption_cheyette(*, instrument, model, config) -> PDEResult:
     return PDEResult(price=_solve_cheyette_1f(model, config, horizon, build))
 
 
+def _cheyette_discount_factor_1f(model: CheyetteModel, grid: Grid1D):
+    """Node-level valuer for a single frozen-``y`` ``P(t, T)`` (one factor)."""
+    def discount_factor(level_time, payment_time):
+        return _cheyette_coupon_bond_values(
+            model, grid.nodes, level_time, payment_time[jnp.newaxis], jnp.ones((1,))
+        )
+
+    return discount_factor
+
+
+@register(Caplet, CheyetteModel)
+def _caplet_cheyette(*, instrument, model, config) -> PDEResult:
+    """Caplet / floorlet under one-factor Cheyette (frozen-``y``).
+
+    A caplet is a European option on the accrual-end zero-coupon bond; a strike
+    slice of caplets is the natural skew-``\\beta`` identification instrument for
+    the calibrator. At :math:`\\beta = 0` this reduces to the Hull-White caplet.
+    """
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    horizon = year_fraction(reference_date, instrument.fixing_date, day_count)
+    end_time = year_fraction(reference_date, instrument.end_date, day_count)
+    tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
+
+    def build(grid: Grid1D):
+        bond = _cheyette_discount_factor_1f(model, grid)(horizon, end_time)
+        terminal = caplet_fixing_values(
+            bond, instrument.strike, tau, instrument.notional, instrument.is_cap
+        )
+        return terminal, None
+
+    return PDEResult(price=_solve_cheyette_1f(model, config, horizon, build))
+
+
+@register(Cap, CheyetteModel)
+def _cap_cheyette(*, instrument, model, config) -> PDEResult:
+    """Cap / floor under one-factor Cheyette (frozen-``y``), single sweep."""
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    horizon = year_fraction(
+        reference_date, instrument.fixing_dates[-1], day_count
+    )
+    dt = horizon / config.n_time
+
+    def build(grid: Grid1D):
+        caplet_vals = caplet_values_by_level(
+            _cheyette_discount_factor_1f(model, grid),
+            reference_date,
+            instrument.fixing_dates,
+            instrument.start_dates,
+            instrument.end_dates,
+            day_count,
+            instrument.strike,
+            instrument.notional,
+            instrument.is_cap,
+            dt,
+            config.n_time,
+            (grid.n,),
+        )
+        terminal = caplet_vals[config.n_time]
+        return terminal, lambda level, values: values + caplet_vals[level]
+
+    return PDEResult(price=_solve_cheyette_1f(model, config, horizon, build))
+
+
 @register(BermudanSwaption, CheyetteModel)
 def _bermudan_swaption_cheyette(*, instrument, model, config) -> PDEResult:
     """Bermudan swaption under one-factor Cheyette (frozen-``y``).
@@ -930,6 +997,64 @@ def _swaption_cheyette_2f(*, instrument, model, config) -> PDEResult:
     return PDEResult(price=_solve_cheyette_2f(model, config, horizon, build))
 
 
+def _cheyette_discount_factor_2f(model: CheyetteModel2F, grid: Grid2D):
+    """Node-level valuer for a single frozen-``y`` ``P(t, T)`` (two factors)."""
+    def discount_factor(level_time, payment_time):
+        return _cheyette_discount_grid_2f(model, grid, level_time, payment_time)
+
+    return discount_factor
+
+
+@register(Caplet, CheyetteModel2F)
+def _caplet_cheyette_2f(*, instrument, model, config) -> PDEResult:
+    """Caplet / floorlet under two-factor Cheyette (frozen-``y``)."""
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    horizon = year_fraction(reference_date, instrument.fixing_date, day_count)
+    end_time = year_fraction(reference_date, instrument.end_date, day_count)
+    tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
+
+    def build(grid: Grid2D):
+        bond = _cheyette_discount_factor_2f(model, grid)(horizon, end_time)
+        terminal = caplet_fixing_values(
+            bond, instrument.strike, tau, instrument.notional, instrument.is_cap
+        )
+        return terminal, None
+
+    return PDEResult(price=_solve_cheyette_2f(model, config, horizon, build))
+
+
+@register(Cap, CheyetteModel2F)
+def _cap_cheyette_2f(*, instrument, model, config) -> PDEResult:
+    """Cap / floor under two-factor Cheyette (frozen-``y``), single sweep."""
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    horizon = year_fraction(
+        reference_date, instrument.fixing_dates[-1], day_count
+    )
+    dt = horizon / config.n_time
+
+    def build(grid: Grid2D):
+        caplet_vals = caplet_values_by_level(
+            _cheyette_discount_factor_2f(model, grid),
+            reference_date,
+            instrument.fixing_dates,
+            instrument.start_dates,
+            instrument.end_dates,
+            day_count,
+            instrument.strike,
+            instrument.notional,
+            instrument.is_cap,
+            dt,
+            config.n_time,
+            (grid.n_x, grid.n_y),
+        )
+        terminal = caplet_vals[config.n_time]
+        return terminal, lambda level, values: values + caplet_vals[level]
+
+    return PDEResult(price=_solve_cheyette_2f(model, config, horizon, build))
+
+
 @register(BermudanSwaption, CheyetteModel2F)
 def _bermudan_swaption_cheyette_2f(*, instrument, model, config) -> PDEResult:
     """Bermudan swaption under two-factor Cheyette (frozen-``y``).
@@ -1275,7 +1400,7 @@ def _cheyette_swap_tail_values_exact(
 
 
 def cheyette_exact_price(
-    instrument: FixedRateBond | Swaption,
+    instrument: FixedRateBond | Swaption | Caplet,
     model: CheyetteModel,
     config: PDEConfig2D,
 ) -> PDEResult:
@@ -1288,13 +1413,14 @@ def cheyette_exact_price(
     2-D config; the calibrator selects it via ``engine="exact"``.
 
     Supports :class:`~valax.instruments.bonds.FixedRateBond` (the option-free
-    scheme calibration / exact-fit check) and
-    :class:`~valax.instruments.rates.Swaption` (European). The difference from
-    the frozen-``y`` price is a deterministic measurement of the frozen-``y``
-    bias; at :math:`\beta = 0` the two agree.
+    scheme calibration / exact-fit check),
+    :class:`~valax.instruments.rates.Swaption` (European) and
+    :class:`~valax.instruments.rates.Caplet` (the skew-``\beta`` slice
+    instrument). The difference from the frozen-``y`` price is a deterministic
+    measurement of the frozen-``y`` bias; at :math:`\beta = 0` the two agree.
 
     Args:
-        instrument: A ``FixedRateBond`` or European ``Swaption``.
+        instrument: A ``FixedRateBond``, European ``Swaption`` or ``Caplet``.
         model: One-factor Cheyette model.
         config: 2-D grid configuration for the ``(x, y)`` mesh.
 
@@ -1360,7 +1486,29 @@ def cheyette_exact_price(
 
         return PDEResult(price=_solve_cheyette_exact(model, config, horizon, build))
 
+    if isinstance(instrument, Caplet):
+        reference_date = model.initial_curve.reference_date
+        day_count = instrument.day_count
+        horizon = year_fraction(reference_date, instrument.fixing_date, day_count)
+        end_time = year_fraction(reference_date, instrument.end_date, day_count)
+        tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
+
+        def build(grid: Grid2D):
+            bond = _cheyette_coupon_bond_values_exact(
+                model, grid, horizon, end_time[jnp.newaxis], jnp.ones((1,))
+            )
+            terminal = caplet_fixing_values(
+                bond,
+                instrument.strike,
+                tau,
+                instrument.notional,
+                instrument.is_cap,
+            )
+            return terminal, None
+
+        return PDEResult(price=_solve_cheyette_exact(model, config, horizon, build))
+
     raise ValueError(
-        f"cheyette_exact_price supports FixedRateBond and Swaption, got "
-        f"{type(instrument).__name__}."
+        f"cheyette_exact_price supports FixedRateBond, Swaption and Caplet, "
+        f"got {type(instrument).__name__}."
     )

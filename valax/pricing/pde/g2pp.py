@@ -96,7 +96,7 @@ from jaxtyping import Float, Int
 
 from valax.dates.daycounts import year_fraction
 from valax.instruments.bonds import FixedRateBond
-from valax.instruments.rates import BermudanSwaption, Swaption
+from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
 from valax.models.g2pp import (
     G2PPModel,
     g2pp_B,
@@ -110,6 +110,8 @@ from valax.pricing.pde.config import PDEConfig2D
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.grids import Grid2D, centred_state_grid, read_off_2d
 from valax.pricing.pde.rates_payoffs import (
+    caplet_fixing_values,
+    caplet_values_by_level,
     coupon_values_by_level,
     snap_to_levels,
     swap_tail_values,
@@ -534,6 +536,75 @@ def _swaption_g2pp(*, instrument, model, config) -> PDEResult:
             instrument.is_payer,
         )
         return jnp.maximum(swap, 0.0), None
+
+    return PDEResult(price=_solve_g2pp(model, config, horizon, build))
+
+
+def _g2pp_discount_factor(model: G2PPModel, grid: Grid2D):
+    """Node-level valuer for a single ``P(t, T)`` under G2++."""
+    def discount_factor(level_time, payment_time):
+        return _g2pp_discount_grid(model, grid, level_time, payment_time)
+
+    return discount_factor
+
+
+@register(Caplet, G2PPModel)
+def _caplet_g2pp(*, instrument, model, config) -> PDEResult:
+    """Caplet / floorlet under G2++ via a 2-D finite-difference sweep.
+
+    A caplet is a European option on the accrual-end zero-coupon bond, so the
+    horizon is the fixing date and the terminal condition is the analytic ZCB
+    payoff at every ``(x, y)`` node; the ADI sweep discounts it home with the
+    deterministic :math:`\\varphi(t)` factoring applied per step.
+    """
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    horizon = year_fraction(reference_date, instrument.fixing_date, day_count)
+    end_time = year_fraction(reference_date, instrument.end_date, day_count)
+    tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
+
+    def build(grid: Grid2D):
+        bond = _g2pp_discount_factor(model, grid)(horizon, end_time)
+        terminal = caplet_fixing_values(
+            bond, instrument.strike, tau, instrument.notional, instrument.is_cap
+        )
+        return terminal, None
+
+    return PDEResult(price=_solve_g2pp(model, config, horizon, build))
+
+
+@register(Cap, G2PPModel)
+def _cap_g2pp(*, instrument, model, config) -> PDEResult:
+    """Cap / floor under G2++ via a single 2-D finite-difference sweep.
+
+    Each caplet's fixing-date value is injected at its (snapped) fixing level
+    and discounted home in one backward pass, so the cost is one ADI solve to
+    the last fixing rather than one per caplet.
+    """
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    horizon = year_fraction(
+        reference_date, instrument.fixing_dates[-1], day_count
+    )
+    dt = horizon / config.n_time
+
+    def build(grid: Grid2D):
+        caplet_vals = caplet_values_by_level(
+            _g2pp_discount_factor(model, grid),
+            reference_date,
+            instrument.fixing_dates,
+            instrument.start_dates,
+            instrument.end_dates,
+            day_count,
+            instrument.strike,
+            instrument.notional,
+            instrument.is_cap,
+            dt,
+            config.n_time,
+            (grid.n_x, grid.n_y),
+        )
+        terminal = caplet_vals[config.n_time]
+        return terminal, lambda level, values: values + caplet_vals[level]
 
     return PDEResult(price=_solve_g2pp(model, config, horizon, build))
 

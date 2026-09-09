@@ -93,7 +93,7 @@ from jaxtyping import Float, Int
 
 from valax.dates.daycounts import year_fraction
 from valax.instruments.bonds import CallableBond, FixedRateBond, PuttableBond
-from valax.instruments.rates import BermudanSwaption, Swaption
+from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
 from valax.models.hull_white import (
     HullWhiteModel,
     hw_B,
@@ -107,6 +107,8 @@ from valax.pricing.pde.config import PDEConfig
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.grids import Grid1D, centred_state_grid, read_off_1d
 from valax.pricing.pde.rates_payoffs import (
+    caplet_fixing_values,
+    caplet_values_by_level,
     coupon_values_by_level,
     snap_to_levels,
     swap_tail_values,
@@ -480,6 +482,81 @@ def _swaption_hw(*, instrument, model, config) -> PDEResult:
             instrument.is_payer,
         )
         return jnp.maximum(swap, 0.0), None
+
+    return PDEResult(price=_solve_hull_white(model, config, horizon, build))
+
+
+def _hw_discount_factor(model, grid):
+    """Node-level valuer for a single ``P(t, T)`` under Hull-White.
+
+    Recovers the short rate at each node as ``x + alpha(t)`` and evaluates the
+    analytic affine bond price — the same coefficient the coupon injection uses.
+    """
+    def discount_factor(level_time, payment_time):
+        rates = grid.nodes + hw_alpha(model, level_time)
+        return hw_bond_price(model, rates, level_time, payment_time)
+
+    return discount_factor
+
+
+@register(Caplet, HullWhiteModel)
+def _caplet_hw(*, instrument, model, config) -> PDEResult:
+    """Caplet / floorlet under Hull-White via finite differences.
+
+    A caplet is a European option on the single accrual-end zero-coupon bond
+    (see :mod:`~valax.pricing.pde.rates_payoffs`), so the horizon is the fixing
+    date and the terminal condition is the analytic ZCB payoff at every node;
+    the sweep then discounts it home. Validated against the closed-form
+    :func:`~valax.pricing.analytic.hull_white_swaptions.hw_zcb_option_price`.
+    """
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    horizon = year_fraction(reference_date, instrument.fixing_date, day_count)
+    end_time = year_fraction(reference_date, instrument.end_date, day_count)
+    tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
+
+    def build(grid: Grid1D):
+        bond = _hw_discount_factor(model, grid)(horizon, end_time)
+        terminal = caplet_fixing_values(
+            bond, instrument.strike, tau, instrument.notional, instrument.is_cap
+        )
+        return terminal, None
+
+    return PDEResult(price=_solve_hull_white(model, config, horizon, build))
+
+
+@register(Cap, HullWhiteModel)
+def _cap_hw(*, instrument, model, config) -> PDEResult:
+    """Cap / floor under Hull-White via a single finite-difference sweep.
+
+    The strip prices in one backward pass: each caplet's fixing-date value is
+    injected at its (snapped) fixing level and discounted home, so the cost is
+    one solve to the last fixing rather than one solve per caplet.
+    """
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    horizon = year_fraction(
+        reference_date, instrument.fixing_dates[-1], day_count
+    )
+    dt = horizon / config.n_time
+
+    def build(grid: Grid1D):
+        caplet_vals = caplet_values_by_level(
+            _hw_discount_factor(model, grid),
+            reference_date,
+            instrument.fixing_dates,
+            instrument.start_dates,
+            instrument.end_dates,
+            day_count,
+            instrument.strike,
+            instrument.notional,
+            instrument.is_cap,
+            dt,
+            config.n_time,
+            (grid.n,),
+        )
+        terminal = caplet_vals[config.n_time]
+        return terminal, lambda level, values: values + caplet_vals[level]
 
     return PDEResult(price=_solve_hull_white(model, config, horizon, build))
 
