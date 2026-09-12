@@ -63,7 +63,13 @@ from jaxtyping import Float, Int
 
 from valax.dates.daycounts import year_fraction
 from valax.instruments.bonds import CallableBond, FixedRateBond, PuttableBond
-from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
+from valax.instruments.rates import (
+    BermudanSwaption,
+    Cap,
+    Caplet,
+    CMSSpreadSwap,
+    Swaption,
+)
 from valax.models.cheyette import (
     CheyetteModel,
     CheyetteModel2F,
@@ -99,6 +105,7 @@ from valax.pricing.pde.operators2d import Operator2D, build_operator_2d
 from valax.pricing.pde.rates_payoffs import (
     caplet_fixing_values,
     caplet_values_by_level,
+    cms_spread_values_by_level,
     coupon_values_by_level,
     exercisable_terminal_and_event,
     exercise_obstacle_by_level,
@@ -1041,6 +1048,47 @@ def _cap_cheyette_2f(*, instrument, model, config) -> PDEResult:
         )
         terminal = caplet_vals[config.n_time]
         return terminal, lambda level, values: values + caplet_vals[level]
+
+    return PDEResult(price=_solve_cheyette_2f(model, config, horizon, build))
+
+
+@register(CMSSpreadSwap, CheyetteModel2F)
+def _cms_spread_swap_cheyette_2f(*, instrument, model, config) -> PDEResult:
+    """CMS-spread swap (steepener / flattener) under two-factor Cheyette.
+
+    The skew-capable analogue of the G2++ CMS-spread swap. Each period's coupon
+    is a linear function of two par swap rates observed at the accrual start,
+    built at every ``(x1, x2)`` node from the frozen-``y`` affine bond strip,
+    scaled from fixing to payment by the node discount factor, injected at the
+    (snapped) fixing level and discounted home in one backward pass. The
+    frozen-``y`` bias is the same one carried by every other 2F recipe here.
+    """
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    pay_times = year_fraction(
+        reference_date, instrument.payment_dates, day_count
+    )
+    horizon = pay_times[-1]
+    dt = horizon / config.n_time
+
+    def build(grid: Grid2D):
+        vals = cms_spread_values_by_level(
+            _cheyette_discount_factor_2f(model, grid),
+            reference_date,
+            instrument.start_date,
+            instrument.payment_dates,
+            day_count,
+            instrument.fixed_rate,
+            instrument.notional,
+            instrument.cms_tenor_long,
+            instrument.cms_tenor_short,
+            instrument.pay_fixed,
+            dt,
+            config.n_time,
+            (grid.n_x, grid.n_y),
+        )
+        terminal = vals[config.n_time]
+        return terminal, lambda level, values: values + vals[level]
 
     return PDEResult(price=_solve_cheyette_2f(model, config, horizon, build))
 

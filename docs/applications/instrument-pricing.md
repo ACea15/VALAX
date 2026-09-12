@@ -80,6 +80,7 @@ Vanilla contracts are documented on the pricing-method pages:
 | [Interest-rate swap](#interest-rate-swap) | Analytic | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
 | [Swaption](#swaption) | Analytic · MC · PDE | flat · `SwaptionCube` · Hull-White · LMM | SABR cube / HW→surface | annuity numeraire | ✅ |
 | [CMS swap](#cms-swap) | Analytic | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
+| [CMS-spread swap](#cms-spread-swap) | MC · PDE | G2++ · Cheyette-2F | HW → swaption surface | 2-factor decorrelation (steepener / flattener) | ✅ |
 | [CMS cap / floor](#cms-cap-floor) | Analytic | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |
 | [Range accrual](#range-accrual) | Analytic | `OptionletVolSurface` / scalar | SABR | snapshot digital replication | ✅ |
 | [OIS swap](#ois-swap) | Analytic | n-a (curves) | curve bootstrap | compounded overnight leg | ✅ |
@@ -203,6 +204,9 @@ European option to enter a payer/receiver swap at `expiry_date`. Under the **ann
 
 ### CMS swap
 One leg pays a **constant-maturity swap rate** (e.g. the 10y rate) fixed each period. Because a swap rate is a martingale only under its own annuity measure, its expectation under the payment measure needs a **convexity adjustment** (Hagan analytic or static replication), consuming the `SwaptionCube` smile. See [Theory §9.5](../theory/rate-derivatives.md#95-cms-and-convexity-adjustments).
+
+### CMS-spread swap
+A steepener / flattener whose coupon pays the spread between two constant-maturity swap rates of *different* tenors (e.g. 10y − 2y) net of a fixed strike, $C_i = N\,(S^{\text{long}}_i - S^{\text{short}}_i - K)\,\tau_i$. Its value depends on the **joint** distribution of short- and long-tenor rates — a decorrelation payoff a one-factor model structurally cannot express — so it is priced in a **two-factor** model (G2++ or two-factor Cheyette), never analytically as a single instrument. Two independent numerical routes agree within Monte-Carlo error: exact-conditional **Monte Carlo** (each CMS rate rebuilt analytically per path from the affine ZCB) and a **2-D ADI PDE** (each period's coupon injected at its fixing level as a linear function of the node state and discounted home in one sweep). See [Theory §9.5](../theory/rate-derivatives.md#95-cms-and-convexity-adjustments) and the [G2++ chapter](../theory/g2pp.md).
 
 ### CMS cap / floor
 A strip of options on the CMS rate, $ (\text{CMS}_i - K)^+ $, priced Black-76/Bachelier on the **convexity-adjusted** forward CMS rate with a per-period smile query. See [Theory §9.5](../theory/rate-derivatives.md#95-cms-and-convexity-adjustments).

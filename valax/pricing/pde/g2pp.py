@@ -96,7 +96,13 @@ from jaxtyping import Float, Int
 
 from valax.dates.daycounts import year_fraction
 from valax.instruments.bonds import CallableBond, FixedRateBond, PuttableBond
-from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
+from valax.instruments.rates import (
+    BermudanSwaption,
+    Cap,
+    Caplet,
+    CMSSpreadSwap,
+    Swaption,
+)
 from valax.models.g2pp import (
     G2PPModel,
     g2pp_B,
@@ -112,6 +118,7 @@ from valax.pricing.pde.grids import Grid2D, centred_state_grid, read_off_2d
 from valax.pricing.pde.rates_payoffs import (
     caplet_fixing_values,
     caplet_values_by_level,
+    cms_spread_values_by_level,
     coupon_values_by_level,
     exercisable_terminal_and_event,
     exercise_obstacle_by_level,
@@ -607,6 +614,47 @@ def _cap_g2pp(*, instrument, model, config) -> PDEResult:
         )
         terminal = caplet_vals[config.n_time]
         return terminal, lambda level, values: values + caplet_vals[level]
+
+    return PDEResult(price=_solve_g2pp(model, config, horizon, build))
+
+
+@register(CMSSpreadSwap, G2PPModel)
+def _cms_spread_swap_g2pp(*, instrument, model, config) -> PDEResult:
+    """CMS-spread swap (steepener / flattener) under G2++, single 2-D sweep.
+
+    The decorrelation-sensitive product that motivates the second factor. Each
+    period's coupon is a *linear* function of two par swap rates observed at the
+    accrual start, so — unlike a caplet — it injects additively with no kink:
+    the CMS-spread value is built at every ``(x, y)`` node from the affine bond
+    strip, scaled from fixing to payment by the node discount factor, injected
+    at the (snapped) fixing level, and discounted home in one backward pass.
+    """
+    reference_date = model.initial_curve.reference_date
+    day_count = instrument.day_count
+    pay_times = year_fraction(
+        reference_date, instrument.payment_dates, day_count
+    )
+    horizon = pay_times[-1]
+    dt = horizon / config.n_time
+
+    def build(grid: Grid2D):
+        vals = cms_spread_values_by_level(
+            _g2pp_discount_factor(model, grid),
+            reference_date,
+            instrument.start_date,
+            instrument.payment_dates,
+            day_count,
+            instrument.fixed_rate,
+            instrument.notional,
+            instrument.cms_tenor_long,
+            instrument.cms_tenor_short,
+            instrument.pay_fixed,
+            dt,
+            config.n_time,
+            (grid.n_x, grid.n_y),
+        )
+        terminal = vals[config.n_time]
+        return terminal, lambda level, values: values + vals[level]
 
     return PDEResult(price=_solve_g2pp(model, config, horizon, build))
 

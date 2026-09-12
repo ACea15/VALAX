@@ -591,7 +591,7 @@ PDE, **M** = Monte Carlo, **Q** = QuantLib comparison available.
 | European swaption                | A P M Q    | A P M Q   | P M         | P           |
 | Bermudan swaption                | P M Q      | P M Q     | P           | P           |
 | Callable / puttable bond         | P M Q      | P         | P           | P           |
-| CMS-spread swap                  | —          | A M       | —           | M           |
+| CMS-spread swap                  | —          | P M       | —           | P M         |
 
 Notes: the Cheyette PDE is the frozen-\(y\) production engine; the one-factor
 exact-\(y\) PDE (`cheyette_exact_price`) additionally prices the fixed-rate

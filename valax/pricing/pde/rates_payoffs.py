@@ -314,6 +314,115 @@ def caplet_values_by_level(
 
 
 # ─────────────────────────────────────────────────────────────────────
+# CMS-spread coupon injection
+# ─────────────────────────────────────────────────────────────────────
+
+
+def cms_rate_by_state(
+    discount_factor: DiscountFactor,
+    t_fix: Float[Array, ""],
+    tenor: int,
+) -> Float[Array, "..."]:
+    r"""Par swap rate of an annual ``tenor``-year swap fixed at ``t_fix``, per node.
+
+    Rebuilt at every grid node from the model's affine zero-coupon bonds — the
+    exact per-node analogue of the Monte-Carlo CMS rate:
+
+    .. math::
+
+        S = \frac{1 - P(t_\text{fix},\, t_\text{fix} + \text{tenor})}
+                 {\sum_{j=1}^{\text{tenor}} P(t_\text{fix},\, t_\text{fix} + j)}
+
+    with annual accruals and a unit year fraction per period (the convention
+    baked into the MC recipe). ``tenor`` is a static whole-year count, so the
+    zero-coupon strip unrolls at trace time.
+
+    Args:
+        discount_factor: Node-level valuer for a single :math:`P(t, T)`.
+        t_fix: Fixing time in year fractions.
+        tenor: Underlying swap tenor in whole years (static).
+
+    Returns:
+        The forward par swap rate at each grid node.
+    """
+    js = jnp.arange(1, tenor + 1, dtype=jnp.float64)
+    maturities = t_fix + js
+    fixings = jnp.broadcast_to(t_fix, maturities.shape)
+    zcb = jax.vmap(discount_factor)(fixings, maturities)  # (tenor, *node)
+    annuity = jnp.sum(zcb, axis=0)
+    return (1.0 - zcb[-1]) / annuity
+
+
+def cms_spread_values_by_level(
+    discount_factor: DiscountFactor,
+    reference_date: Int[Array, ""],
+    start_date: Int[Array, ""],
+    payment_dates: Int[Array, " n"],
+    day_count: str,
+    fixed_rate: Float[Array, ""],
+    notional: Float[Array, ""],
+    cms_tenor_long: int,
+    cms_tenor_short: int,
+    pay_fixed: bool,
+    dt: Float[Array, ""],
+    n_time: int,
+    node_shape: tuple[int, ...],
+) -> Float[Array, "n_levels ..."]:
+    r"""CMS-spread coupon value to inject at each time level, per grid node.
+
+    Each period's coupon
+    :math:`C_i = \pm N\,(S^\text{long} - S^\text{short} - K)\,\tau_i` is a
+    *linear* function of two par swap rates (:func:`cms_rate_by_state`) observed
+    at the accrual start, so — unlike a caplet — it carries no kink and injects
+    additively with no positive part. The CMS rates fix at the accrual start
+    (the previous payment date, or ``start_date`` for the first period) while
+    each coupon pays at the accrual end; the fixing snaps to the nearest time
+    level and the coupon is scaled by the node-level discount factor
+    :math:`P(t_\text{fix}, t_\text{pay})` from fixing to payment, so the backward
+    sweep discounts the whole strip home in one pass (mirroring
+    :func:`coupon_values_by_level`). ``pay_fixed`` selects a steepener
+    (:math:`+`, receive the spread) or a flattener (:math:`-`).
+
+    Args:
+        discount_factor: Node-level valuer for a single :math:`P(t, T)`.
+        reference_date: Curve reference date as an integer ordinal.
+        start_date: Swap effective date / first accrual start, as an ordinal.
+        payment_dates: Period-end payment dates as integer ordinals.
+        day_count: Day-count convention for the accrual fractions.
+        fixed_rate: Fixed spread strike :math:`K`.
+        notional: Notional principal.
+        cms_tenor_long: Long reference swap tenor in whole years (static).
+        cms_tenor_short: Short reference swap tenor in whole years (static).
+        pay_fixed: ``True`` for a steepener, ``False`` for a flattener.
+        dt: Time-step size in year fractions.
+        n_time: Number of backward time steps.
+        node_shape: Shape of the spatial grid (``(n_x, n_y)``).
+
+    Returns:
+        Coupon value indexed by ``(time level, *node)``; zero where no CMS
+        fixes.
+    """
+    pay_times = year_fraction(reference_date, payment_dates, day_count)
+    starts = jnp.concatenate([start_date[jnp.newaxis], payment_dates[:-1]])
+    fixing_times = year_fraction(reference_date, starts, day_count)
+    taus = year_fraction(starts, payment_dates, day_count)
+    levels = jnp.clip(
+        jnp.round(fixing_times / dt).astype(jnp.int32), 0, n_time
+    )
+    sign = 1.0 if pay_fixed else -1.0
+
+    def period_val(level_time, pay_time, tau):
+        s_long = cms_rate_by_state(discount_factor, level_time, cms_tenor_long)
+        s_short = cms_rate_by_state(discount_factor, level_time, cms_tenor_short)
+        coupon = sign * (s_long - s_short - fixed_rate) * tau
+        pay_factor = discount_factor(level_time, pay_time)
+        return notional * coupon * pay_factor
+
+    vals = jax.vmap(period_val)(levels * dt, pay_times, taus)
+    return jnp.zeros((n_time + 1, *node_shape)).at[levels].add(vals)
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Callable / puttable exercise projection
 # ─────────────────────────────────────────────────────────────────────
 
