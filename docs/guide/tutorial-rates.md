@@ -537,7 +537,7 @@ system this would cost you *N* bootstrap re-runs plus *N* re-pricings.
 | Multi-curve (OIS discount + tenor projection) | [Curves §5](curves.md#5-multi-curve-bootstrap) |
 | Non-NSS curve shapes, monotone-convex interpolation | [Theory §3](../theory/curves.md#3-curve-framework) |
 | Calibrating the swaption *cube* (SABR per slice) | [Volatility Surfaces](vol-surfaces.md), [Calibration §3](calibration.md#3-sabr-smile-calibration) |
-| Hull-White $(a, \sigma)$ from swaptions (Jamshidian) | [Short-Rate Models](short-rate.md) |
+| Hull-White $(a, \sigma)$ from swaptions (Jamshidian) | [Calibration](calibration.md) |
 | Pricing exotics — callable bonds, CMS, range accruals | [Callable Bonds](callable-bonds.md), [Interest Rate Exotics](rates-exotics.md) |
 | Reproducibility contract, arbitrage stress tests | [Reproducibility & Arbitrage Tests](reproducibility_and_arbitrage_tests.md) |
 | The full six-stage synthetic pipeline | [Synthetic Market Data](synthetic_market.md), `examples/08_end_to_end_workflow.py` |

@@ -975,4 +975,4 @@ residual equations, see [API: Bootstrap Instruments](../api/curves.md#bootstrap-
 - [Fixed Income guide](fixed-income.md) — using a curve to price bonds, extract YTM, duration, KRDs.
 - [Interest Rate Exotics guide](rates-exotics.md) — OIS swaps, XCCY, CMS, range accrual against a multi-curve set.
 - [Inflation Derivatives guide](inflation.md) — ZCIS, YYIS, inflation caps against an `InflationCurve`.
-- [Short-Rate Models guide](short-rate.md) — Hull-White workflow, which consumes a `DiscountCurve` for exact-fit $\theta(t)$.
+- [Lattice Methods](lattice.md#hull-white-trinomial-tree) — the Hull-White tree, which consumes a `DiscountCurve` for exact-fit $\theta(t)$.

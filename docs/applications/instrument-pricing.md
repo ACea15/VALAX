@@ -39,7 +39,7 @@ task-oriented *how-to* guide with runnable examples:
 | Asset class | How-to guide |
 |---|---|
 | Bonds & fixed income | [Fixed Income](../guide/fixed-income.md) · [Callable / Puttable / FRN / Convertible](../guide/callable-bonds.md) |
-| Interest-rate derivatives | [Rate Exotics](../guide/rates-exotics.md) · [Short-Rate Models](../guide/short-rate.md) |
+| Interest-rate derivatives | [Rate Exotics](../guide/rates-exotics.md) |
 | Equity options & exotics | [Equity Exotics](../guide/equity-exotics.md) |
 | FX derivatives | [FX](../guide/fx.md) |
 | Inflation derivatives | [Inflation](../guide/inflation.md) |
@@ -75,10 +75,10 @@ Vanilla contracts are documented on the pricing-method pages:
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [Caplet](#caplet-floorlet) | Analytic · MC | flat Black-76/Bachelier · `OptionletVolSurface` · LMM | SABR caplet strip | single forward per period | ✅ |
-| [Cap / Floor](#cap-floor) | Analytic · MC | flat · optionlet surface · LMM | SABR caplet strip | strip of independent caplets | ✅ |
+| [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | SABR caplet strip | single forward per period | ✅ |
+| [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | SABR caplet strip | strip of independent caplets | ✅ |
 | [Interest-rate swap](#interest-rate-swap) | Analytic | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
-| [Swaption](#swaption) | Analytic · MC · PDE | flat · `SwaptionCube` · Hull-White · LMM | SABR cube / HW→surface | annuity numeraire | ✅ |
+| [Swaption](#swaption) | Analytic · MC · PDE | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette · LMM | SABR cube / HW→surface | annuity numeraire | ✅ |
 | [CMS swap](#cms-swap) | Analytic | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
 | [CMS-spread swap](#cms-spread-swap) | MC · PDE | G2++ · Cheyette-2F | HW → swaption surface | 2-factor decorrelation (steepener / flattener) | ✅ |
 | [CMS cap / floor](#cms-cap-floor) | Analytic | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |
@@ -86,17 +86,17 @@ Vanilla contracts are documented on the pricing-method pages:
 | [OIS swap](#ois-swap) | Analytic | n-a (curves) | curve bootstrap | compounded overnight leg | ✅ |
 | [Cross-currency swap](#cross-currency-swap) | Analytic | n-a (curves + FX spot) | joint curve bootstrap | telescoping under CIP | ✅ |
 | [Total return swap](#total-return-swap) | Analytic | n-a (curves) | curve bootstrap | self-financing asset | ✅ |
-| [Bermudan swaption](#bermudan-swaption) | MC · PDE | Hull-White · LMM | HW→surface / LMM | early exercise | ✅ |
+| [Bermudan swaption](#bermudan-swaption) | MC · PDE | Hull-White · G2++ · Cheyette · LMM | HW→surface / LMM | early exercise | ✅ |
 
 ### Bonds & fixed income
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
 | [Zero-coupon bond](#zero-coupon-bond) | Analytic | n-a (curve) | curve bootstrap | single cash flow | ✅ |
-| [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | n-a · Hull-White | curve / HW | deterministic coupons | ✅ |
-| [Floating-rate bond](#floating-rate-note) | Analytic · MC | n-a (curves) · Hull-White | curve / HW | par-reset replication | ✅ |
-| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White | HW→swaptions | issuer-optimal call | ✅ |
-| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White | HW→swaptions | holder-optimal put | ✅ |
+| [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | n-a · Hull-White · G2++ · Cheyette | curve / HW | deterministic coupons | ✅ |
+| [Floating-rate bond](#floating-rate-note) | Analytic · MC | n-a (curves) · Hull-White · G2++ · Cheyette | curve / HW | par-reset replication | ✅ |
+| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | issuer-optimal call | ✅ |
+| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | holder-optimal put | ✅ |
 | [Convertible bond](#convertible-bond) | — | equity-credit | — | equity conversion option | 🟡 |
 
 ### FX derivatives

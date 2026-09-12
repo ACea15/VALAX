@@ -36,11 +36,11 @@ and cleaner Greeks near kinks/barriers — prefer the [PDE](pde.md).
 
 ---
 
-# Binomial Trees
+## Binomial Trees
 
 VALAX implements the Cox-Ross-Rubinstein (CRR) binomial tree for European and American option pricing.
 
-## Usage
+### Usage
 
 ```python
 import jax.numpy as jnp
@@ -61,7 +61,7 @@ amer = binomial_price(put, jnp.array(100.0), jnp.array(0.20),
                        BinomialConfig(n_steps=500, american=True))
 ```
 
-## CRR Parameters
+### CRR Parameters
 
 At each time step $\Delta t = T/N$:
 
@@ -69,7 +69,7 @@ $$u = e^{\sigma\sqrt{\Delta t}}, \quad d = 1/u, \quad p = \frac{e^{(r-q)\Delta t
 
 The tree recombines: an up move followed by a down move reaches the same node as down-then-up.
 
-## American Exercise
+### American Exercise
 
 When `american=True`, at each node the algorithm takes the maximum of the continuation value and the intrinsic value:
 
@@ -81,14 +81,14 @@ Key properties:
 - **American call without dividends = European call** — early exercise is never optimal.
 - **American call with dividends >= European call** — may be optimal to exercise before ex-dividend.
 
-## Configuration
+### Configuration
 
 | Parameter | Default | Description |
 |---|---|---|
 | `n_steps` | 200 | Number of time steps in the tree |
 | `american` | `False` | Enable American early exercise |
 
-## Greeks via Autodiff
+### Greeks via Autodiff
 
 ```python
 import jax
@@ -98,14 +98,14 @@ delta = jax.grad(lambda s: binomial_price(
 ))(spot)
 ```
 
-## Implementation Notes
+### Implementation Notes
 
 - The backward induction uses `jax.lax.scan` with fixed-shape arrays for JIT compatibility. At each step, `values[j] = disc * (p * values[j+1] + (1-p) * values[j])` is computed over the full array; unused trailing entries are harmless.
 - European prices converge to Black-Scholes within 0.5% at 500 steps.
 
 ---
 
-# Hull-White Trinomial Tree
+## Hull-White Trinomial Tree
 
 The Hull-White one-factor model is the standard short-rate model for pricing bonds with embedded optionality. VALAX provides:
 
@@ -114,7 +114,7 @@ The Hull-White one-factor model is the standard short-rate model for pricing bon
 3. **Trinomial tree** — a recombining tree for backward induction, with Arrow-Debreu forward propagation to calibrate $\alpha(t_i)$ at each step and match market discount factors exactly.
 4. **Callable and puttable bond pricing** — backward induction with exercise decisions: `callable_bond_price` (issuer calls when continuation > call price, reducing holder value) and `puttable_bond_price` (holder puts when continuation < put price, increasing holder value).
 
-## Model
+### Model
 
 ```python
 import jax.numpy as jnp
@@ -133,7 +133,40 @@ p = hw_bond_price(model, r=f0, t=jnp.array(0.0), T=jnp.array(5.0))
 # p ≈ curve(ymd_to_ordinal(2030, 1, 1))
 ```
 
-## Callable and Puttable Bonds
+### Tree construction
+
+`build_hull_white_tree` follows Hull & White (1994):
+
+1. **Symmetric *x*-tree** — with time step $\Delta t = T/N$ and state step
+   $\Delta x = \sigma\sqrt{3\Delta t}$, three branch types (normal / up / down)
+   are chosen so the transition probabilities stay non-negative.
+2. **Truncation** — above/below $j_{\max} \approx \lceil 0.1835/(a\,\Delta t)\rceil$
+   the tree switches to up- or down-branching, capping the state width.
+3. **Forward Arrow-Debreu sweep** — each shift $\alpha_i$ is solved in closed form
+   so the tree-implied $P(0, t_i)$ matches the market curve; the tree therefore
+   **reprices the initial curve exactly by construction**.
+
+```python
+from valax.pricing.lattice.hull_white_tree import build_hull_white_tree
+
+tree = build_hull_white_tree(model, T=10.0, n_steps=200)
+# tree.rates[i, j]    short rate at node (i, j)
+# tree.probs[j, k]    (up, mid, down) transition probabilities from state j
+# tree.targets[j, k]  destination state index for each branch
+# tree.alpha[i]       curve-fitting shifts
+```
+
+The bond pricers drive the backward induction internally, so you rarely touch
+these fields — they are exposed for inspection and for building custom rate
+exotics.
+
+!!! tip "Tree resolution vs. accuracy"
+    For semi-annual callables over 10 years, `n_steps=200` (≈ 18-day step) gives
+    prices accurate to a few basis points. Increase to `n_steps=500+` for
+    fine-grained call schedules or when computing convexity via
+    `jax.grad(jax.grad(...))`.
+
+### Callable and Puttable Bonds
 
 ```python
 from valax.instruments import CallableBond, PuttableBond
@@ -156,3 +189,32 @@ The tree is fully JAX-compatible: `jax.grad` through `callable_bond_price` with 
     (< 0.5% deviation from the 200-step price).  For OAS or calibration
     loops where speed matters, 50 steps gives a reasonable initial
     estimate.
+
+### Greeks and the `j_max` caveat
+
+Because the whole pipeline is pure JAX, `jax.grad` flows through both the tree
+construction and the backward induction — effective duration, convexity, and
+key-rate durations come with no finite-difference bumping (see
+[Callable Bonds → OAS](callable-bonds.md#option-adjusted-spread-oas) for the
+option-aware measures and how they generalise the Z-spread).
+
+!!! warning "Differentiating w.r.t. model parameters needs an explicit `j_max`"
+    The lattice half-width $j_{\max}$ sets array shapes, so it must be a concrete
+    Python `int`. `build_hull_white_tree` derives it from `mean_reversion` via
+    `float(a)`, which raises `ConcretizationTypeError` the moment `a` becomes a
+    tracer. Curve shifts leave `a` concrete and are unaffected, but
+    `eqx.filter_grad` over the model pytree is not — precompute the width and pass
+    it in:
+
+    ```python
+    from valax.pricing.lattice import hw_tree_j_max
+
+    j_max = hw_tree_j_max(float(model.mean_reversion), T / n_steps)
+    dP_dsigma = eqx.filter_grad(
+        lambda m: callable_bond_price(bond, m, n_steps=n_steps, j_max=j_max)
+    )(model).volatility
+    ```
+
+    Holding $j_{\max}$ fixed is also the *correct* sensitivity: it keeps the
+    lattice geometry constant so the derivative measures the parameter's effect,
+    not a discretisation that jumped a step.

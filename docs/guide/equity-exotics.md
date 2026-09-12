@@ -7,15 +7,21 @@ Each exotic below has unique payoff features that require specialized pricing
 methods.
 
 !!! info "Implementation status"
-    - **Implemented**: Spread option (Margrabe / Kirk), barrier, Asian, lookback,
+    - **Implemented**: Spread option (Margrabe / Kirk, + Monte Carlo), Worst-of
+      basket (Monte Carlo), Digital (analytic + PDE), barrier, Asian, lookback,
       variance swap (see [Analytical Pricing](analytical.md) and
       [Monte Carlo](monte-carlo.md)).
-    - **Planned**: Digital, Compound, Chooser, Autocallable, Worst-of-Basket, Cliquet.
-      See the [Roadmap (Tier 3.6)](../roadmap.md#36-equity-exotics) for tracking.
+    - **Planned**: Compound, Chooser, Autocallable, Cliquet — the instrument
+      pytrees are defined; pricers are on the
+      [Roadmap (Tier 3.6)](../roadmap.md#36-equity-exotics).
 
 ## Digital Option
 
-!!! warning "Planned"
+!!! success "Implemented (analytic + PDE)"
+    Analytic closed form: `valax.pricing.analytic.digital.digital_option_price`.
+    PDE (Crank–Nicolson + Rannacher damping): `pde_price_dispatch(DigitalOption,
+    BlackScholesModel, ...)`. A Monte-Carlo recipe (smoothed-Heaviside payoff) is
+    still on the roadmap.
 
 **Market context.** A digital (binary) option pays a **fixed cash amount** if the
 underlying finishes in-the-money, regardless of how far. Digitals are used in

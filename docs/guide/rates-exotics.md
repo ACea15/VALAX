@@ -43,6 +43,11 @@ rate** — SOFR (USD), €STR (EUR), SONIA (GBP), or TONAR (JPY) — rather than
 term IBOR rate. OIS swaps are the primary instrument for constructing the risk-free
 discount curve.
 
+!!! note "Pricing home"
+    The single-curve telescoping mechanics and a runnable `ois_swap_price` example
+    are owned by [Fixed Income → Floating Rate Notes & OIS Swaps](fixed-income.md);
+    this section adds the market context and the OIS-vs-IBOR contrast.
+
 ### Floating Leg Valuation
 
 The floating leg value for an accrual period $[t_{j_0}, t_{j_D}]$ with $D$ business

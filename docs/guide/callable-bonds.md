@@ -5,8 +5,11 @@ principal). VALAX's base fixed-rate bond and zero-coupon bond are documented in 
 [Fixed Income](fixed-income.md) guide. This page covers the extended set:
 floating-rate bonds, callable bonds, puttable bonds, and convertible bonds.
 
-Callable and puttable bonds are priced via the Hull-White trinomial tree — see the
-[Short-Rate Models](short-rate.md) guide for the end-to-end Hull-White workflow.
+Callable and puttable bonds are priced by backward induction under a Hull-White
+short-rate model — on the [trinomial tree](lattice.md#hull-white-trinomial-tree),
+the [Hull-White PDE](pde.md), or Hull-White [Monte Carlo](monte-carlo.md). The
+model construction and engine internals live on those solver pages; this page owns
+the instruments themselves and their risk measures.
 
 ## Floating Rate Bond (FRN)
 
@@ -158,8 +161,8 @@ callable = CallableBond(
 !!! tip
     Use `jax.grad` through the Hull-White tree pricer to compute effective duration
     and effective convexity — no finite-difference bumps required. See
-    [Lattice Methods](lattice.md) and [Short-Rate Models](short-rate.md) for the
-    tree implementation.
+    [Lattice Methods](lattice.md#hull-white-trinomial-tree) for the tree
+    implementation and its `j_max` autodiff caveat.
 
 ### Option-Adjusted Spread (OAS)
 
@@ -203,6 +206,30 @@ it once there is an option to adjust for.
       and are not exactly reconcilable by a scalar formula on a non-flat curve.
 
     Both points are derived in [Models & Theory §7.9](../theory/risk-measures.md#79-option-adjusted-spread-and-z-spread).
+
+### Monte-Carlo cross-check
+
+The same `CallableBond` also prices through the MC dispatcher against a
+`HullWhiteModel` — an independent check on the tree and PDE (the three share only
+the analytic ZCB formula):
+
+```python
+from valax.pricing.mc import MCConfig, mc_price_dispatch
+
+res = mc_price_dispatch(callable, model, MCConfig(n_paths=40_000, n_steps=60), key)
+print(f"{res.price:.4f} +/- {res.stderr:.4f}")
+```
+
+At each call date the issuer compares the analytic Hull-White PV of the
+*remaining* cash flows against the call price. Two conventions matter:
+
+- **Ex-coupon strike.** A holder called on a coupon date still receives that
+  coupon; the exercise test excludes it from the continuation value. Tree, PDE,
+  MC, and QuantLib agree on this.
+- **Myopic policy.** The MC rule ignores the value of deferring to a *later* call
+  date — exact for a single call, a valid but suboptimal policy for several.
+  Since the issuer minimises the holder's value, the MC price is an **upper
+  bound** on the tree/PDE price (a few basis points on a 5Y bond with two calls).
 
 ---
 

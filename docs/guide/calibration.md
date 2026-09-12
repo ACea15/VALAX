@@ -125,7 +125,7 @@ See [Analytical Pricing § FX Options](analytical.md#fx-options-garman-kohlhagen
 | Cap / floor straddles | Caplet vol stripping → caplet term structure | Black-76 caplet vols |
 | Eurodollar / SOFR options | Short-end caplet vol | Caplet vol stripping |
 
-**Calibration output.** A SABR swaption cube (today) and a calibrated `HullWhiteModel` (roadmap — see [Short-Rate Models §1](short-rate.md#2-build-the-model)). The Jamshidian decomposition turns each swaption into a portfolio of options on individual ZCBs, each priced by Black-76 on an integrated short-rate variance — fast enough to drive a least-squares fit of $(a, \sigma)$.
+**Calibration output.** A SABR swaption cube and a calibrated `HullWhiteModel` via `calibrate_hull_white`. The Jamshidian decomposition turns each swaption into a portfolio of options on individual ZCBs, each priced by Black-76 on an integrated short-rate variance — fast enough to drive a least-squares fit of $(a, \sigma)$; see [API: Calibration](../api/calibration.md).
 
 **What you can price with it.** `CallableBond`, `PuttableBond` ✅; `BermudanSwaption` (currently via LSM on LMM paths) ✅; CMS caps/floors, range accruals, callable structured notes 🟡.
 

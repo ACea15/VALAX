@@ -46,8 +46,9 @@ runs path generation + payoff + discounting, and returns an `MCResult`
 (`price`, `stderr`, `n_paths`). Use `float(result)` as a shortcut for
 `float(result.price)`.
 
-VALAX ships with **16 built-in recipes** (10 single-asset equity × GBM/Heston,
-4 rates × LMM, 2 multi-asset × `MultiAssetGBMModel`). See the coverage map
+VALAX ships a broad set of built-in recipes spanning equity (GBM / Heston /
+local-vol / SLV), rates (LMM and the Hull-White / G2++ / Cheyette short-rate
+models), and multi-asset (`MultiAssetGBMModel`) pricing. See the coverage map
 in §2 and the built-in recipe list in the [API reference](../api/pricing.md#built-in-recipes).
 
 To swap the model, just pass a different one:
@@ -113,8 +114,8 @@ not yet wired), 🟠 = needs a new path generator, 🔴 = needs major infra.
 
 | Instrument | MC pricing | Blocker |
 |-----------|:---:|---|
-| `FixedRateBond` / `FloatingRateBond` | ✅ | `HullWhiteModel` |
-| `CallableBond` / `PuttableBond` | ✅ | `HullWhiteModel` (analytic affine continuation value) |
+| `FixedRateBond` / `FloatingRateBond` | ✓ | `HullWhiteModel` |
+| `CallableBond` / `PuttableBond` | ✓ | `HullWhiteModel` (analytic affine continuation value) |
 | `ConvertibleBond` | 🔴 | Equity + rates + credit coupled MC |
 
 Callable and puttable bonds do **not** need a Longstaff-Schwartz regression:
@@ -124,6 +125,15 @@ date. The policy is myopic across multiple exercise dates (it ignores the
 option value of deferring), which makes the MC price an upper bound on the
 trinomial-tree price — see
 `tests/test_mc/test_hull_white_recipes.py::TestTreeTriangulation`.
+
+### Multi-factor short-rate (G2++, Cheyette)
+
+Beyond Hull-White, the MC dispatcher also prices under the two-factor **G2++** and
+the quasi-Gaussian **Cheyette** (1F / 2F) short-rate models — fixed/floating bonds,
+caplets/caps, European swaptions, and CMS-spread swaps — via exact-conditional path
+generators (`generate_g2pp_paths` and the Cheyette path generators). See
+[API: Pricing](../api/pricing.md) for the full registered recipe list and the
+[Calibration](calibration.md) guide for fitting these models.
 
 ### FX / Inflation / Credit
 
