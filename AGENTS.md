@@ -2,6 +2,8 @@
 
 VALAX is a JAX-native quantitative finance valuation engine (Python ≥3.11). See `CONTRIBUTING.md` for full detail.
 
+**Before assuming a feature's status, check the two canonical maps — never guess from memory:** the coverage matrix (`docs/applications/instrument-pricing.md`) and the roadmap (`docs/roadmap.md`). Keeping those two truthful is a hard requirement of every change (see *Definition of done* below).
+
 ## Build / lint / test
 - Install: `pip install -e ".[dev]"` (optional: `pip install -e ".[docs]"`, `pip install QuantLib` for `tests/test_quantlib_comparison/`).
 - Full suite: `pytest`. Benchmarks only: `pytest --benchmark-only`. Marker filter: `pytest -m "golden and detects"` (markers: `arbitrage`, `golden`, `detects`).
@@ -22,4 +24,30 @@ VALAX is a JAX-native quantitative finance valuation engine (Python ≥3.11). Se
 - **Tests**: closed-form to `atol≈1e-10`; autodiff Greeks vs FD `rtol≈1e-4`; MC within `2*stderr` of analytic; use `hypothesis` for invariants (parity, monotonicity); add a `@eqx.filter_jit` smoke test for every new pricing fn; add a QuantLib comparison when a QL counterpart exists.
 
 ## Layout
-- Source: `valax/{core,dates,curves,surfaces,instruments,models,calibration,market,greeks,risk,portfolio}/` (domain packages) and `valax/pricing/{analytic,mc,pde,lattice}/` (pricing impls grouped by numerical method).
+- **Source:** `valax/{core,dates,curves,surfaces,instruments,models,calibration,market,greeks,risk,portfolio}/` (domain packages) and `valax/pricing/{analytic,mc,pde,lattice}/` (pricing impls grouped by numerical method).
+- **Docs:** `docs/` served by MkDocs (nav lives in `mkdocs.yml`), grouped by audience — `applications/` (management-facing), `guide/` (how-to), `theory/` (the maths), `api/` (mkdocstrings autodoc), `architecture/` (design + validation), plus `roadmap.md`.
+
+## What exists — sources of truth
+Do not infer a feature's presence/absence from memory or from a single guide page. The authoritative maps are:
+- **Coverage matrix** — `docs/applications/instrument-pricing.md`: every instrument × pricing method × model input × calibration route × status. The single authoritative instrument→pricer map.
+- **Roadmap** — `docs/roadmap.md`: implemented (`[x]`) vs planned (`[ ]`) across tiers, each with the implementing symbol.
+- **Status legend** (used by both): ✅ implemented & tested · 🟡 instrument pytree defined but pricer not yet implemented · n-a (no vol input; priced by curve discounting).
+
+## Documentation (a first-class deliverable, not an afterthought)
+Docs go stale when code lands without doc updates — the failure mode this project has already paid for. Docs are governed by a **single-source-of-truth ownership model**; respect it so nothing is documented twice:
+- **Coverage matrix** (`applications/instrument-pricing.md`) — instrument *definitions* + the coverage matrix + links to theory. **No pricing derivations here.**
+- **Instrument guides** (`guide/{fixed-income,callable-bonds,rates-exotics,fx,inflation,equity-exotics,credit}.md`) — each instrument's payoff/cashflow maths and how-to recipe live on **exactly one** asset-class guide.
+- **Solver guides** (`guide/{analytical,monte-carlo,pde,lattice}.md`) — engine mechanics + that engine's model-coverage matrix + the vanilla contract for that engine. Do **not** re-derive an instrument's exotic payoff here; link to its instrument guide.
+- **Calibration** (`guide/{calibration,curves,why-multicurve,vol-surfaces,slv}.md`), **Theory** (`theory/`, the maths), **API** (`api/`, mkdocstrings autodoc of public symbols).
+- **No duplication.** Document each instrument, derivation, or selling point once and cross-link. If you catch yourself copying a formula, example, or status table between pages, replace the copy with a link.
+
+## Definition of done — adding/changing a pricer, instrument, model, calibration, or surface
+In the **same change** (not "later"), and stated with clear intent in the commit/PR body:
+1. **Coverage matrix** — add or adjust the row in `applications/instrument-pricing.md` so the method(s), model input, and ✅/🟡 status match the code exactly.
+2. **Owning guide** — document it on the one correct page (instrument guide for a new instrument; solver guide for a new engine/model recipe) with a runnable, JIT-safe example; cross-link from elsewhere rather than copy.
+3. **Roadmap** — flip `[ ]`→`[x]` (or add the line) naming the implementing symbol/module. Never leave an implemented feature unchecked; never mark an unbuilt one done. A change that only defines an instrument pytree with no pricer is 🟡, not ✅.
+4. **API** — export new public symbols (`__init__.py`) and confirm they render on the relevant `docs/api/*.md` autodoc page.
+5. **Theory** — add/extend the maths page when introducing new modelling.
+6. **Verify** — both `pytest` and `mkdocs build --strict` must be green (strict catches broken doc links and orphaned/missing nav entries).
+
+When **removing or renaming**, grep the docs for inbound links to the old path/anchor and fix them before deleting; `mkdocs build --strict` guards page-level links but not intra-page anchors. The coverage matrix and roadmap are the two files you must never forget to touch.
