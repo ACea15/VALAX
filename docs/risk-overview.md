@@ -2,7 +2,7 @@
 
 *A narrative guide to why risk exists, who consumes it, and how every number on a risk report falls out of one tiny pure-functional primitive.*
 
-This page sits between the abstract maths in [Models & Theory § 7](theory/risk-measures.md#7-risk-measures) and the concrete code in the [Risk & Scenarios guide](guide/risk.md). Read it first if you have not built a bank risk system before. Read it again if you are about to extend the engine — it is the map that tells you where each new factor, instrument, or test fits in.
+This page sits between the abstract maths in [Models & Theory § 7](theory/risk-measures.md#7-risk-measures) and the concrete code in the Risk how-to pages — start with [Scenarios & Shocks](risk-scenarios.md). Read it first if you have not built a bank risk system before. Read it again if you are about to extend the engine — it is the map that tells you where each new factor, instrument, or test fits in.
 
 ---
 
@@ -120,7 +120,7 @@ $$
 \delta_x = \frac{\partial V}{\partial x}, \qquad \gamma_{xy} = \frac{\partial^2 V}{\partial x \partial y}
 $$
 
-In VALAX they come from `jax.grad` and `jax.hessian` on the pricing function — one reverse-mode pass per order — and are collected into a `SensitivityLadder` by [`compute_ladder`](guide/risk.md#sensitivity-ladders-and-waterfall-pl). No bump-and-reprice. No finite differences. **The "Greeks" a trader sees and the "key-rate DV01" a regulator wants are literally the same array, sliced and bucketed differently** — see [Theory § 6](theory/greeks.md#6-greeks-and-automatic-differentiation) for the autodiff derivation and [Theory § 7.4](theory/risk-measures.md#74-sensitivity-ladders) for ladders.
+In VALAX they come from `jax.grad` and `jax.hessian` on the pricing function — one reverse-mode pass per order — and are collected into a `SensitivityLadder` by [`compute_ladder`](risk-ladders.md#sensitivity-ladders-and-waterfall-pl). No bump-and-reprice. No finite differences. **The "Greeks" a trader sees and the "key-rate DV01" a regulator wants are literally the same array, sliced and bucketed differently** — see [Theory § 6](theory/greeks.md#6-greeks-and-automatic-differentiation) for the autodiff derivation and [Theory § 7.4](theory/risk-measures.md#74-sensitivity-ladders) for ladders.
 
 ### 4.3 What's a bad day for my book?
 
@@ -129,7 +129,7 @@ This is **VaR and Expected Shortfall**. A "bad day" is the left tail of the dist
 - $\text{VaR}_\alpha$ = the loss exceeded with probability $1-\alpha$.
 - $\text{ES}_\alpha$ = the average loss conditional on exceeding $\text{VaR}_\alpha$.
 
-The distribution comes from a **P&L vector**: full-revaluation under many scenarios (historical or Monte Carlo) gives **HPL**; passing the same scenarios through the second-order ladder gives **RTPL** much faster. Both vectors plug straight into [`value_at_risk`](api/risk.md) and [`expected_shortfall`](api/risk.md). The conceptual derivation lives in [Theory § 7.1](theory/risk-measures.md#71-value-at-risk-var) and [§ 7.2](theory/risk-measures.md#72-expected-shortfall-cvar); the workflow code is in the [guide](guide/risk.md#full-revaluation-var).
+The distribution comes from a **P&L vector**: full-revaluation under many scenarios (historical or Monte Carlo) gives **HPL**; passing the same scenarios through the second-order ladder gives **RTPL** much faster. Both vectors plug straight into [`value_at_risk`](api/risk.md) and [`expected_shortfall`](api/risk.md). The conceptual derivation lives in [Theory § 7.1](theory/risk-measures.md#71-value-at-risk-var) and [§ 7.2](theory/risk-measures.md#72-expected-shortfall-cvar); the workflow code is in the [VaR & P&L guide](risk-var.md#full-revaluation-var).
 
 ### 4.4 Is the risk model honest?
 
@@ -166,7 +166,7 @@ A regulator looking at fifty banks needs to compare them. A clearing house compu
 | Internal limits | Whatever the bank chooses, often coarser (e.g. "short / belly / wings"). |
 | PCA factor risk | Three to five data-driven components per curve. |
 
-VALAX exposes both transformation flavours — **linear** (`aggregate`, `BucketMap`) for FRTB / SIMM-style summation, and **Jacobian** (`pushforward_sensitivities`, `pca_jacobian`, `level_slope_curvature_jacobian`) for smooth reparameterizations like PCA or SVI/SABR parameter Greeks. The mathematics is in [Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations); the practical recipes are in the [guide](guide/risk.md#risk-bucketing); the full registry of which factors live where is in [Risk Factors § 7](risk-factors.md#7-bucketing).
+VALAX exposes both transformation flavours — **linear** (`aggregate`, `BucketMap`) for FRTB / SIMM-style summation, and **Jacobian** (`pushforward_sensitivities`, `pca_jacobian`, `level_slope_curvature_jacobian`) for smooth reparameterizations like PCA or SVI/SABR parameter Greeks. The mathematics is in [Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations); the practical recipes are in the [Risk Bucketing guide](risk-bucketing.md#risk-bucketing); the full registry of which factors live where is in [Risk Factors § 7](risk-factors.md#7-bucketing).
 
 A useful aphorism for engineers new to the area: **internal risk models live in autodiff-natural raw-factor space; the outside world lives in bucket space. The job of the bucketing layer is to be the FX desk between the two.**
 
@@ -220,8 +220,8 @@ The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](ri
 Different audiences will follow different paths from here:
 
 - **Quants / pricing developers** → [Models & Theory](theory/index.md) for the math, [Risk Factors](risk-factors.md) for what's in the engine, [API: Risk](api/risk.md) for signatures.
-- **Risk system developers / engineers** → [Risk & Scenarios guide](guide/risk.md) for the workflow, [Risk Factors § 5 Instrument → Factor matrix](risk-factors.md#5-instrument-factor-matrix) for coverage, [Roadmap](roadmap.md) for the priorities.
-- **Front-office (trader / structurer)** → [Greeks guide](guide/greeks.md) and the *Sensitivity Ladders* section of the [Risk guide](guide/risk.md#sensitivity-ladders-and-waterfall-pl).
+- **Risk system developers / engineers** → [Scenarios & Shocks](risk-scenarios.md) for the workflow, [Risk Factors § 5 Instrument → Factor matrix](risk-factors.md#5-instrument-factor-matrix) for coverage, [Roadmap](roadmap.md) for the priorities.
+- **Front-office (trader / structurer)** → [Greeks (Theory § 6)](theory/greeks.md#6-greeks-and-automatic-differentiation) and the [Sensitivity Ladders](risk-ladders.md#sensitivity-ladders-and-waterfall-pl) page.
 - **Regulators / validators** → [Theory § 7.6–7.8](theory/risk-measures.md#76-var-backtesting) for the backtesting + PLA + bucketing maths, [Risk Factors](risk-factors.md) for the audit-trail of what is and is not modelled.
 
 ---

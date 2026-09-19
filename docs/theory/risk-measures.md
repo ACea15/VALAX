@@ -305,7 +305,7 @@ The most common PLA failures come from:
 
 VALAX's autodiff ladder addresses (2) and (3) directly: a full second-order ladder (10 rungs including vanna, volga, cross-gamma) is cheap enough to recompute daily, eliminating the linearisation bias and Greek-staleness failure modes.
 
-**VALAX implementation:** `valax/risk/backtesting.py` provides `pla_spearman()`, `pla_ks()`, `ks_statistic()`, and `pla_traffic_light()`. The companion guide section (`docs/guide/risk.md` § *FRTB PLA Test*) shows the end-to-end workflow on a 250-day window.
+**VALAX implementation:** `valax/risk/backtesting.py` provides `pla_spearman()`, `pla_ks()`, `ks_statistic()`, and `pla_traffic_light()`. The companion guide section (`docs/risk-backtesting.md` § *FRTB P&L Attribution Test*) shows the end-to-end workflow on a 250-day window.
 
 ### 7.8 Risk Bucketing: Linear and Jacobian Transformations
 

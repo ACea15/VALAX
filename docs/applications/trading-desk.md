@@ -111,10 +111,7 @@ def price_book(instruments, market) -> Float[Array, " n_products"]:
     return jax.vmap(price_one, in_axes=(0, None))(instruments, market)
 ```
 
-- **`vmap` collapses the product loop into an array axis.** A universe of 50 000 vanillas and light exotics is one kernel launch, not a Python loop over 50 000 objects.
-- **`@eqx.filter_jit` compiles once, runs many.** After the first (warm-up) call, every subsequent revaluation reuses the compiled XLA executable — the per-tick cost is the kernel runtime, not tracing.
-- **The same code runs on GPU with no changes.** JAX/XLA targets CPU, GPU, and TPU from one source; a desk can develop on CPU and deploy the identical kernel on a GPU when the universe grows.
-- **Scenario grids are just another `vmap` axis.** Pricing the universe across a grid of market perturbations — for pre-trade "what if", limit headroom, or intraday stress — nests one `vmap` inside another and still compiles to a single kernel.
+The mechanics — `vmap` collapsing the product loop into an array axis, `@eqx.filter_jit` compiling once and running many, the identical kernel on CPU/GPU/TPU, and scenario grids as just another `vmap` axis — are the `FO` view of [Applications § 2.2](index.md#22-batch-at-scale-vmap-jit-gpu).
 
 The practical payoff: the revaluation that a scalar C++ pricer runs as an overnight or minutes-long batch becomes a sub-second-to-seconds intraday refresh, because the batch *is* the unit of computation rather than an outer loop around it.
 
@@ -142,12 +139,10 @@ book_greeks = jax.vmap(jax.grad(price_one), in_axes=(0, None))(instruments, mark
 
 Why this matters specifically for an intraday desk:
 
-- **Hedging is driven by exact deltas, not noisy bumps.** Bump-and-reprice deltas carry finite-difference noise that is worst exactly where it hurts — near barriers, near expiry, in the wings. Autodiff deltas have none of it. That directly reduces hedge slippage and P&L attribution noise.
-- **The hedge ratio and the price come from the same graph.** There is no risk of the price and the delta being computed by two subtly different code paths — a recurring source of P&L-explain breaks in split analytics stacks.
-- **Cross-Greeks are free.** `jax.hessian` gives the full second-order matrix (gamma, vanna, volga, cross-gamma) with no per-Greek engineering. A desk running gamma/vega limits gets the whole ladder without building a bump matrix per risk factor.
+- **Exact deltas, same graph as the price, free cross-Greeks.** The `FO` payoff of exact autodiff risk — no finite-difference noise near barriers/expiry, no price-vs-delta drift between code paths, and the full second-order matrix (gamma, vanna, volga, cross-gamma) at no extra engineering — is set out in [Applications § 2.1](index.md#21-exact-autodiff-risk-no-bump-and-reprice).
 - **Sensitivities to *calibrated* inputs.** Because calibration is itself differentiable (see [§ 5](#5-calibration-robustness-the-differentiable-inner-loop)), you can propagate to sensitivities against the *raw market quotes* — the hedge instruments you can actually trade — via the quote Jacobian (`quote_jacobian` for curves), not just against model parameters.
 
-The [Greeks guide](../guide/greeks.md) and [`valax/greeks/`](../api/greeks.md) document the wrappers; the point for this audience is that a new product ships with its complete risk ladder the moment its price function exists.
+The [Greeks (Theory § 6)](../theory/greeks.md#6-greeks-and-automatic-differentiation) and [`valax/greeks/`](../api/greeks.md) document the wrappers; the point for this audience is that a new product ships with its complete risk ladder the moment its price function exists.
 
 ---
 
@@ -216,26 +211,9 @@ The through-line: **make the engine the trusted, boring, well-tested valuation-a
 
 ## 8. Coverage today vs. roadmap
 
-| Front-office need | Status | Component(s) |
-|---|---|---|
-| Differentiable pricer `V(instrument, market) → price` | ✅ | Every `valax/pricing/*` function |
-| Autodiff Greeks (delta/vega/rho + gamma/vanna/volga) | ✅ | `jax.grad` / `jax.hessian`, `valax/greeks/` |
-| Whole-universe batched revaluation | ✅ | `jax.vmap` + `@eqx.filter_jit` |
-| GPU / TPU execution (same code) | ✅ | JAX / XLA |
-| Intraday scenario / pre-trade "what-if" grids | ✅ | nested `vmap`, `apply_scenario`, `hypothetical_pnl_vector` |
-| Robust differentiable calibration (Heston, SABR, SLV) | ✅ | `optimistix` LM + `optax`, `valax/calibration/` |
-| Quote-level hedge Jacobian (risk in tradable instruments), via implicit diff through calibration | ✅ | `quote_jacobian` (`optimistix.ImplicitAdjoint`), `compute_ladder` |
-| Calibration-stability monitoring (`vmap` robustness sweep) | ✅ | pattern via `jax.vmap` over perturbed quotes |
-| Validation evidence (QuantLib cross-check, golden tests) | ✅ | `tests/test_quantlib_comparison/`, `tests/golden/` |
-| Intraday `MarketState` build + calibration diagnostics | 🟡 | Designed in [Productionisation § 5](../architecture/production.md#5-layer-2-3-build-and-calibration-workflow); not fully packaged |
-| Long-lived pricing **service** (gRPC/REST, resident state) | 🟡 | [Productionisation § 8](../architecture/production.md#8-layer-6-service-layer-deferred) — deferred |
-| Streaming / incremental market-data updates | 📋 | [Roadmap Real-Time Risk](../roadmap.md#63-real-time-risk) — out of scope for the current design |
-| JIT warm-up / shape-bucketing service harness | 📋 | Vision-tier; the productionisation prerequisite for quote-response latency |
-| **Gradient-based intraday optimal hedging / quoting** (control shares the pricer graph) | 📋 | **Frontier — the §2.2 novelty.** Primitives shipped (`diffrax`, `optax`, `eqx.filter_grad`, differentiable payoffs); packaged product not built. See [Vision](../vision.md) |
-| Strategy / signal generation | 🔴 | Out of scope by design — separate system |
-| Order management / execution / fills | 🔴 | Out of scope by design — separate system |
+The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#5-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `FO`).
 
-The pattern mirrors every other application page: **the pricing, Greek, and calibration primitives are shipped and strong; the intraday *service harness* around them is the build project.**
+The pattern mirrors every other application page: **the pricing, Greek, and calibration primitives are shipped and strong; the intraday _service harness_ around them — warm-up, shape-bucketing, resident service — is the build project**, and gradient-based intraday hedging/quoting ([§ 2.2](#22-gradient-based-intraday-decisions-the-pricer-and-the-control-problem-share-one-graph-frontier)) is the categorical frontier.
 
 ---
 
@@ -263,5 +241,5 @@ The pattern mirrors every other application page: **the pricing, Greek, and cali
 - **The risk / hedging pipeline the Greeks feed** → [Risk: End-to-End](../risk-overview.md).
 - **What it takes to make this a production service** → [Productionisation Design](../architecture/production.md).
 - **Where VALAX sits in the surrounding bank / desk stack** → [Where VALAX Fits](../landscape.md).
-- **Greeks, calibration, and vol-surface mechanics** → [Greeks](../guide/greeks.md), [Calibration](../guide/calibration.md), [Vol Surfaces](../guide/vol-surfaces.md).
+- **Greeks, calibration, and vol-surface mechanics** → [Greeks (Theory § 6)](../theory/greeks.md#6-greeks-and-automatic-differentiation), [Calibration](../guide/calibration.md), [Vol Surfaces](../guide/vol-surfaces.md).
 - **The forward direction — real-time risk, service layer** → [Vision](../vision.md), [Roadmap](../roadmap.md).

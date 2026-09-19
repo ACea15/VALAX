@@ -214,7 +214,7 @@ LCR (Liquidity Coverage Ratio, 30-day stress) and NSFR (Net Stable Funding Ratio
 
 **What VALAX offers for this today:**
 - Contractual cash-flow projection for bonds, FRNs, swaps, caps, and floors — schedule generation is in `valax/dates/schedule.py`.
-- The bucketing layer (`BucketMap`, `tenor_bucket_map`) is exactly the right primitive for the LCR tenor grid — see [Risk Bucketing](../guide/risk.md#risk-bucketing).
+- The bucketing layer (`BucketMap`, `tenor_bucket_map`) is exactly the right primitive for the LCR tenor grid — see [Risk Bucketing](../risk-bucketing.md#risk-bucketing).
 - `vmap` over a 500 000-loan banking book is what JAX is built for.
 
 **What it doesn't offer today:**
@@ -263,42 +263,15 @@ For a Treasury team evaluating VALAX, the honest framing: **the deterministic AL
 
 ## 9. Coverage today vs. roadmap
 
-Being explicit, because a Treasury pitch has to survive the head of ALM's first review:
+The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#5-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `TRE`).
 
-| Treasury need | Status | Component(s) |
-|---|---|---|
-| IRRBB 6-scenario ΔEVE (BCBS 368 Standardised) | ✅ | `parallel_shift`, `steepener`, `flattener`, `key_rate_bump`, `hypothetical_pnl_vector` |
-| KRD ladder + Basel tenor bucketing | ✅ | `compute_ladder`, `tenor_bucket_map`, `bucket_sensitivity_ladder` |
-| PCA factor reduction for banking-book VaR | ✅ | `pca_jacobian`, `pushforward_sensitivities` |
-| HQLA investment-portfolio pricing (fixed, floating, callable) | ✅ | `valax/instruments/bonds.py`, `valax/pricing/analytic/bonds.py`, callable-bond lattice |
-| Portfolio-level `vmap` stress across the banking book | ✅ | `portfolio_pnl` |
-| Deterministic replay for auditor / supervisory inspection | ✅ | Pure functions, integer-ordinal dates |
-| NII 12-month simulation engine (position walker) | 🟡 | All primitives present; orchestration layer not yet packaged |
-| LCR / NSFR cash-flow bucketing (contractual) | 🟡 | Schedule + bucketing primitives present; run-off factor library not shipped |
-| Multi-curve `MarketData` (OIS + SOFR + funding spread + XCCY) | 📋 | Top-priority roadmap item; unblocks realistic FTP and post-2008 banking-book discounting |
-| FTP curve arithmetic (base + liquidity + credit add-ons) | 📋 | Depends on multi-curve |
-| Prepayment models for retail mortgages | 📋 | Not on roadmap — natural JAX extension |
-| Deposit rate pass-through model | 📋 | Not on roadmap — natural JAX extension |
-| Non-maturity deposit behavioural life curves | 📋 | Not on roadmap — natural JAX extension |
-| Credit-adjusted own-funding discount curve | 📋 | Depends on multi-curve |
-
-**The through-line:** the *pricing and sensitivity* primitives Treasury needs are all there today. The *behavioural and structural* modelling is not — and this is a genuine boundary of the library's current scope, though architecturally it's the easiest kind of thing to add on top of `equinox.Module` + `jax.grad`.
+**The through-line:** the *pricing and sensitivity* primitives Treasury needs are all there today; the *behavioural and structural* modelling — deposit pass-through, prepayment, non-maturity-deposit life curves, FTP — is not, a genuine boundary of current scope, though architecturally the easiest kind of thing to add on top of `equinox.Module` + `jax.grad`.
 
 ---
 
 ## 10. Why the JAX foundation matters for Treasury specifically
 
-Treasury has three properties that make JAX a genuinely good fit — not just a "modern Python stack" but a specific technical advantage:
-
-| Design choice | Treasury payoff |
-|---|---|
-| **Autodiff KRDs and durations** | The banking book has 20+ tenor pillars per currency and 5+ currencies. KRDs from `jax.grad` are exact, deterministic, and reconcile bit-for-bit — no bump-width arguments with the auditor or the ITS return. |
-| **`vmap` over positions** | A retail banking book with 500 000 mortgages / loans is exactly what `vmap` was built for. Portfolio revaluation across the six IRRBB scenarios becomes one JIT call, not a nightly batch. |
-| **One `MarketData` pytree** | `jax.grad(V)(market)` returns sensitivities to *all* risk factors in one pass — future-proof against expanding the factor set (adding basis, credit, inflation, XCCY) without re-plumbing. |
-| **Bucketing as a matrix multiply** | The Treasury dashboard view, the IRRBB ITS return, the internal risk-appetite view, and the CFO's DV01 view are the same ladder × a different `A`. Adding a new report is a five-line change, not a new subsystem. |
-| **Differentiable everything** | Behavioural models (deposit pass-through, prepayment) can be gradient-calibrated to historical data with `optax` — a genuine analytical edge over opaque vendor models. |
-| **Pure functions + integer-ordinal dates** | Deterministic replay for supervisory inspection; the entire IRRBB batch fits inside `@eqx.filter_jit` with no Python `datetime` round-trips on the hot path. |
-| **JAX ecosystem** | Treasury increasingly needs to integrate with ML pipelines (deposit-flow prediction, prepayment forecasting). JAX puts the ALM engine in the same array framework as the ML models — no bindings, no serialisation boundary. |
+Treasury has properties that make JAX a genuinely good fit — not just a "modern Python stack" but a specific technical advantage: autodiff KRDs and durations, `vmap` over a 500 000-position book, one `MarketData` pytree, bucketing as a matrix multiply, `optax`-calibrated behavioural models, and deterministic pure functions. Each capability and its `TRE` payoff is enumerated in [Applications § 2](index.md#2-what-makes-valax-distinctive-capability-by-capability) (deeper *why* in [Design Rationale § 3](../design-rationale.md#3-the-seven-choices-valax-commits-to-and-what-each-one-buys)).
 
 The net effect: the same code path that produces a trader's DV01 on a swap at 14:31 produces the firm-wide EVE waterfall under the IRRBB Severely-Adverse scenario overnight, and the CFO's morning ITS return two hours later. One library, one mental model, three regulatory audiences.
 
@@ -326,5 +299,5 @@ The net effect: the same code path that produces a trader's DV01 on a swap at 14
 - **The trading-book companion to this page** → [Regulatory: FRTB & CCAR](regulatory.md).
 - **Fixed-income pricing (bonds, FRNs, swaps, caps)** → [Fixed Income](../guide/fixed-income.md), [Rates Exotics](../guide/rates-exotics.md), [Callable / Puttable Bonds](../guide/callable-bonds.md).
 - **Curve construction and multi-curve rationale** → [Yield Curves & Bootstrapping](../guide/curves.md), [Why Multi-Curve?](../guide/why-multicurve.md).
-- **Scenario framework and bucketing** → [Risk & Scenarios](../guide/risk.md), [PCA Curve Shocks](../guide/pca-rates.md).
+- **Scenario framework and bucketing** → [Scenarios & Shocks](../risk-scenarios.md), [PCA Curve Shocks](../guide/pca-rates.md).
 - **The forward direction — multi-curve, behavioural models, FTP** → [Vision](../vision.md) and [Roadmap](../roadmap.md).

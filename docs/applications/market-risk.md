@@ -34,12 +34,7 @@ For Model Validation this is decisive: a challenger in Python + JAX + XLA is *ge
 
 ### 1.2 Exact autodiff everywhere — a different cost model, not a feature
 
-The incumbent computes Greeks by bump-and-reprice. That single implementation choice is the root of several permanent taxes autodiff does not pay:
-
-- **The full first-order factor ladder is one reverse pass, not O(n_factors) repricings.** A book with hundreds of risk factors needs hundreds of bumped repricings per Greek order in a bump engine; `jax.grad(V)(market)` returns the sensitivity to *every* factor at once — categorically cheaper *and* exact at book scale.
-- **A clean RTPL directly helps pass FRTB PLA.** The PLA test compares risk-theoretical P&L (from sensitivities) against hypothetical P&L (from full reval). Bump noise inflates the residual and is a real, common cause of PLA failure; exact autodiff sensitivities remove that noise source, so the RTPL–HPL gap becomes a genuine model signal rather than a numerical artefact.
-- **No bump-width disputes in validation.** The most common champion-vs-challenger argument — "we agree on price but disagree on delta because of bump size" — cannot arise when the challenger delta is exact by construction.
-- **One ladder reconciles every audience by construction.** Trader Greeks, desk DV01, CRO cross-gamma, FRTB SBA, PLA RTPL, and the backtest are all slices of the *same* `jax.grad`/`jax.hessian` output — a property of the graph, not a nightly reconciliation job.
+The incumbent computes Greeks by bump-and-reprice; VALAX computes them by autodiff — not "the same numbers, faster" but a structurally cheaper *and* exact cost model. The generic capability and its `MRM` payoff — the whole factor ladder in one reverse pass, a bump-free RTPL that removes a common cause of FRTB PLA failure, no bump-width disputes in validation, and one ladder every audience slices — is set out in [Applications § 2.1](index.md#21-exact-autodiff-risk-no-bump-and-reprice) and [§ 2.3](index.md#23-one-market-state-object-one-code-path).
 
 None of this is about running the same computation faster. It is a structurally different — cheaper, exact — way of producing the risk numbers the regulator asks for.
 
@@ -151,7 +146,7 @@ MRM's daily production loop and Model Validation's challenger pricing consume th
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Every stage has a one-line VALAX primitive today. This is not aspirational — the guide walkthroughs in [Risk & Scenarios](../guide/risk.md) exercise this loop end-to-end on synthetic books. The core object is the `SensitivityLadder` (one `jax.grad` + `jax.hessian` pass): the trader's Greeks, the desk's DV01, the CRO's cross-gamma, the FRTB SBA number, and the PLA RTPL vector are all slices of it — **the ladder is the noun; every dashboard is a verb.**
+Every stage has a one-line VALAX primitive today. This is not aspirational — the guide walkthroughs in [Scenarios & Shocks](../risk-scenarios.md) exercise this loop end-to-end on synthetic books. The core object is the `SensitivityLadder` (one `jax.grad` + `jax.hessian` pass): the trader's Greeks, the desk's DV01, the CRO's cross-gamma, the FRTB SBA number, and the PLA RTPL vector are all slices of it — **the ladder is the noun; every dashboard is a verb.**
 
 ---
 
@@ -231,34 +226,16 @@ Every rung has a name a trader recognises; the `unexplained` residual is the hon
 
 ## 7. Coverage today vs. roadmap
 
-| MRM / Validation need | Status | Component(s) |
-|---|---|---|
-| First- and second-order sensitivity ladders (autodiff) | ✅ | `compute_ladder`, `SensitivityLadder` |
-| Waterfall P&L explain (10 rungs + unexplained) | ✅ | `waterfall_pnl_report`, `waterfall_pnl` |
-| Full-revaluation VaR / ES (vmapped) | ✅ | `hypothetical_pnl_vector`, `value_at_risk`, `expected_shortfall` |
-| Parametric delta-normal VaR | ✅ | `parametric_var` |
-| Historical, parametric, and named-stress scenarios | ✅ | `historical_scenarios`, `parametric_scenarios`, `stress_scenario`, `steepener`, `butterfly`, `flattener` |
-| Basel VaR backtest (Kupiec, Christoffersen, traffic light) | ✅ | `var_breaches`, `kupiec_pof`, `christoffersen_conditional_coverage`, `basel_traffic_light` |
-| FRTB PLA test (Spearman + KS + d558 zone) | ✅ | `pla_spearman`, `pla_ks`, `pla_traffic_light` |
-| Regulatory bucketing (FRTB / SIMM / sector / PCA) | ✅ | `tenor_bucket_map`, `equal_weight_bucket_map`, `pca_jacobian`, `bucket_sensitivity_ladder` |
-| Model Validation QuantLib comparison suite | ✅ | `tests/test_quantlib_comparison/` (14 modules) |
-| Deterministic replay for audit | ✅ | Pure functions + integer-ordinal dates |
-| Multi-curve `MarketData` (OIS + SOFR + basis + XCCY) | 📋 | Top-priority roadmap item |
-| Vol-surface risk factors (grid / SABR / SVI param risk) | ✅ / 📋 | Bucketing/Jacobian machinery shipped; full grid shocks planned |
-| SBA capital aggregation (inter-bucket correlations) | 📋 | Bucket-level Δ + γ computed; correlation formulas planned |
-| Named factor registry (`IR.OIS.USD.5Y`, …) | 📋 | Positional layout today; registry planned |
-| **Differentiable risk measures** (∂VaR/∂position, exact component/marginal ES, Euler allocation) | 📋 | **Frontier — §1.3.** Primitives shipped (`hypothetical_pnl_vector`, autodiff `value_at_risk`/`expected_shortfall`); allocator not packaged |
-| **Gradient-based reverse stress testing** (worst plausible scenario by ascent through the pricer) | 📋 | **Frontier — §1.3.** End-to-end differentiable pricer + `optimistix`/`optax` support it; optimiser not packaged |
-| Real-time streaming pricing service | 📋 | Vision-tier — service layer + market-data adapters |
+The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#5-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `MRM`).
 
-The daily MRM production loop and the Model Validation challenger pack are **both fully achievable today** with the shipped components. Multi-curve and SBA aggregation are the two roadmap items that would close the last gaps for a bank-wide production deployment.
+In brief: the daily MRM production loop and the Model Validation challenger pack are **both fully achievable today** with shipped components. **Multi-curve `MarketData`** and **SBA aggregation** are the two roadmap items that would close the last gaps for a bank-wide deployment, and the differentiable **risk-measure / reverse-stress** capabilities of [§ 1.3](#13-differentiable-risk-measures-and-reverse-stress-testing-the-frontier) are the categorical frontier.
 
 ---
 
 ## 8. Where to read next
 
 - **The engineering view of the pipeline these functions run on** → [Risk: End-to-End](../risk-overview.md).
-- **The concrete code walkthrough** → [Risk & Scenarios](../guide/risk.md).
+- **The concrete code walkthrough** → [Scenarios & Shocks](../risk-scenarios.md).
 - **The trading-book regulatory outputs** → [Regulatory: FRTB & CCAR](regulatory.md).
 - **The banking-book companion** → [Treasury & ALM](treasury.md).
 - **The innovation-track companion** → [Quant Research](quant-research.md).

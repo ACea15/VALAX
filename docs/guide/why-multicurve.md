@@ -74,6 +74,36 @@ A EUR/USD desk carries at least four, plus FX links:
 This collection of curves plus the identifier-keyed lookup is what
 [`CurveGraph`](../api/curves.md#valax.curves.CurveGraph) represents.
 
+## What this means for risk
+
+Multiple curves are not just a pricing nicety — each is an independent
+**risk factor**, and that changes how a book is measured and hedged:
+
+- **Independent shocks per curve.** A steepener on the OIS curve can
+  coincide with a flattener on the SOFR curve. Single-curve VaR cannot
+  represent that joint move; a `CurveGraph` with per-curve rate shocks
+  can.
+- **Basis is its own risk.** The spread between two curves (3M vs 6M,
+  SOFR vs OIS, or a cross-currency basis) is a hedgeable factor in its
+  own right. Hedging a SOFR swap with OIS instruments leaves residual
+  basis risk that a one-curve model reports as zero.
+- **Distinct hedge ratios.** Differentiating price w.r.t. OIS pillar
+  rates gives the OIS DV01; differentiating w.r.t. SOFR pillar rates
+  gives the SOFR DV01. These are different numbers, and you need both to
+  build the right hedge — exactly the quote-space Jacobian that
+  [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian)
+  delivers in one implicit-adjoint solve.
+
+On the risk side, `MarketData` already carries an optional
+[`curve_graph`](../api/curves.md#valax.curves.CurveGraph) and the
+`CurveGraph`-aware `bump_*` primitives (`bump_graph_curve`,
+`parallel_graph_shift`, `key_rate_graph_bump`) shock any named curve;
+routing these through `apply_scenario` / `MarketScenario` for full
+per-curve scenario sets is the remaining step (see the
+[Risk Factors roadmap](../risk-factors.md#4-roadmap)). The scenario and
+shock mechanics themselves live in
+[Scenarios & Shocks](../risk-scenarios.md).
+
 ## Why sequential bootstrap breaks down
 
 The pre-MC-Curves-2 code (`bootstrap_multi_curve`, now deprecated)

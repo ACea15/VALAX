@@ -2,7 +2,7 @@
 
 This page is the canonical catalogue of every **risk factor** in VALAX: the inputs that, when they move, change portfolio value, and against which the engine measures Greeks and runs P&L attribution / VaR / PLA.
 
-For the *workflow* (scenarios, shocks, VaR, backtests) see [Risk & Scenarios](guide/risk.md). For the underlying maths see [Models & Theory §7](theory/risk-measures.md#7-risk-measures). This page focuses on **what the factors are**, **where they live in the code**, and **what is and isn't yet implemented**.
+For the *workflow* (scenarios, shocks, VaR, backtests) see [Scenarios & Shocks](risk-scenarios.md). For the underlying maths see [Models & Theory §7](theory/risk-measures.md#7-risk-measures). This page focuses on **what the factors are**, **where they live in the code**, and **what is and isn't yet implemented**.
 
 ---
 
@@ -74,6 +74,34 @@ VALAX defaults to additive shocks; multiplicative spot shocks are opted in via `
 
 The rest of this document inventories every factor by category.
 
+### 1.5 How many factors — and why you reduce them
+
+A real bank VaR system tracks thousands to tens of thousands of risk factors. The exact number depends on the desk and portfolio:
+
+| Factor type | Typical count | Details |
+|---|---|---|
+| **IR curve pillars** (per curve) | 15-20 | Standard tenors: ON, 1W, 1M, 2M, 3M, 6M, 9M, 1Y, 2Y, 3Y, 5Y, 7Y, 10Y, 15Y, 20Y, 30Y |
+| **IR curves** (per currency) | 2-5 | OIS discount, SOFR/ESTR forward, basis, cross-currency basis |
+| **Currencies covered** | 10-30 | G10 + major EM |
+| **IR subtotal** | ~1,000-2,000 | 20 pillars x 3 curves x 20 currencies |
+| **Equity spots** | 100-5,000+ | Individual names or sector indices |
+| **Equity vol surfaces** | 500-10,000+ | 5-10 strikes x 5-8 expiries per underlier |
+| **FX spots** | 20-30 | Against USD or EUR |
+| **FX vol surfaces** | ~500 | 5 deltas x 8 expiries x 12 major pairs |
+| **Credit spreads** | 500-5,000 | By issuer x tenor bucket |
+| **Commodities** | 100-500 | Forward curves per commodity |
+| **Inflation** | 50-100 | Breakeven curves per currency |
+
+**Rates-only desk:** ~1,000-3,000 factors. **Multi-asset bank-wide VaR:** 5,000-50,000 factors. JP Morgan's firm-wide RiskMetrics system famously tracked 10,000+ factors.
+
+Nobody runs VaR on 10,000 raw factors with a full covariance matrix — it would be rank-deficient (you rarely have 10,000 independent daily observations). Industry uses dimensionality reduction:
+
+- **PCA on yield curves.** The first 3 principal components (level, slope, curvature) explain ~95-99% of yield-curve variance. Instead of shocking 20 pillar rates independently, shock 3-5 PC scores and reconstruct pillar moves — both more stable and more interpretable. See the [PCA Curve Shocks (Rates)](guide/pca-rates.md) guide for the end-to-end VALAX workflow, and [Risk Bucketing](risk-bucketing.md#jacobian-reparameterization) for the `pca_jacobian` reparameterization.
+- **Factor models for equities.** Decompose returns into systematic factors (market, sector, style) plus idiosyncratic. Shock the systematic factors jointly, add independent idiosyncratic noise (the Barra/Axioma approach).
+- **Filtered historical simulation.** Weight recent observations more heavily (EWMA), or fit a GARCH model per factor and standardize returns before drawing scenarios — captures volatility clustering without inflating the factor count.
+
+The bucketing and Jacobian machinery that turns this fine-grained factor space into a coarser standardized one is documented in [Risk Bucketing](risk-bucketing.md#risk-bucketing); see also §7 below.
+
 ---
 
 ## 2. Implemented Factors
@@ -109,7 +137,7 @@ Every factor in this section is automatically picked up by `compute_ladder()` an
 - `ladder.delta_div` ∈ ℝ^`n_assets`
 - second-order diagonal and cross blocks: `gamma_spot`, `gamma_rate`, `volga`, `vanna`, `cross_spot_rate`, `cross_vol_rate`
 
-See [Sensitivity Ladders](guide/risk.md#sensitivity-ladders-and-waterfall-pl) for the full schema.
+See [Sensitivity Ladders](risk-ladders.md#sensitivity-ladders-and-waterfall-pl) for the full schema.
 
 ---
 
@@ -282,7 +310,7 @@ See the [Risk API page](api/risk.md) for full signatures; the table below maps f
 | FX spot / vol | 📋 | 📋 | 📋 | Planned; see roadmap §4 item 3. |
 | Vol surface | 📋 | 📋 | 📋 | Planned; see roadmap §4 item 4. |
 
-For end-to-end use of these primitives in a P&L explain or backtest, see the [Risk & Scenarios guide](guide/risk.md).
+For end-to-end use of these primitives in a P&L explain or backtest, see the [VaR & P&L](risk-var.md) and [Backtesting & FRTB PLA](risk-backtesting.md) guides.
 
 ---
 
@@ -295,7 +323,7 @@ Every factor in this registry can be re-expressed in a **coarser coordinate syst
 | **Linear aggregation** (`BucketMap`) | $\delta_b = A\,\delta_x$, $\Delta x = A^{\!\top}\Delta b$, $\Sigma_b = A\,\Sigma_x A^{\!\top}$ | FRTB tenor vertices, ISDA SIMM buckets, sector / currency / rating aggregation. |
 | **Jacobian reparameterization** | $\delta_b = J^{\!\top}\delta_x$, $\Delta x = J\,\Delta b$, $\Sigma_b = J^{\!\top}\Sigma_x J$ | PCA factor reduction, level / slope / curvature, SVI / SABR parameter sensitivities. |
 
-Linear aggregation is the special case $J = A^{\!\top}$. The full implementation lives in `valax/risk/bucketing.py`; see [Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations) and the [Risk & Scenarios guide § Risk Bucketing](guide/risk.md#risk-bucketing).
+Linear aggregation is the special case $J = A^{\!\top}$. The full implementation lives in `valax/risk/bucketing.py`; see [Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations) and the [Risk Bucketing guide](risk-bucketing.md#risk-bucketing).
 
 ### Standard bucket schemes
 

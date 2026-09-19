@@ -479,7 +479,7 @@ Portfolio-level risk management and valuation adjustments.
 
 **Approach:** Scenario generation + batch repricing via `vmap`. Autodiff gives portfolio Greeks for parametric VaR. Full reval VaR benefits from JIT compilation and GPU acceleration — this is where JAX shines.
 
-**Status:** Core framework implemented in `valax/risk/`. Parametric (normal/t) and historical scenario generation, curve shocks (parallel, steepener, flattener, butterfly, key-rate), full-revaluation VaR/ES via vmapped repricing. Parametric VaR via delta-normal with autodiff gradients. See the [Risk guide](guide/risk.md).
+**Status:** Core framework implemented in `valax/risk/`. Parametric (normal/t) and historical scenario generation, curve shocks (parallel, steepener, flattener, butterfly, key-rate), full-revaluation VaR/ES via vmapped repricing. Parametric VaR via delta-normal with autodiff gradients. See the [Risk section overview](risk-overview.md).
 
 ### 4.2 Stress Testing and Scenario Analysis
 
@@ -580,6 +580,25 @@ entries 2-4 of [Numerical Pitfalls](architecture/numerical-pitfalls.md). The sam
 short-rate substrate now also carries the **two-factor G2++** (2-D) and
 **Cheyette** (1F/2F) PDEs — covering CMS-spread decorrelation and rate skew,
 alongside fixed-rate bonds, caplets/caps, and European/Bermudan swaptions.
+
+### 5.5 Portfolio and Multi-Device Scaling
+
+Scaling the engine from a single instrument to a whole book and across devices —
+see the [Scaling Up](scaling/index.md) section for the full design.
+
+- [x] **Homogeneous batch pricing / Greeks** — `jax.vmap` over a batched instrument pytree (`valax/portfolio/batch.py`; `risk/ladders.py`, `risk/var.py`)
+- [x] **Book-level aggregation & bucketing** — `SensitivityLadder`, `BucketMap`, PCA factor model (`valax/risk/{ladders,bucketing,factors}.py`)
+- [ ] **`Portfolio` container** — heterogeneous trade collection with per-trade pricing keys (design in [Productionisation](architecture/production.md))
+- [ ] **Heterogeneous dispatch-and-aggregate** — group a mixed book by `(instrument, model)`, price each group under one JIT kernel via the MC/PDE registry, aggregate to book value / Greeks
+- [ ] **Shape-stable / padded batching** — fixed-shape padding so the JIT cache is reused across differently-sized books
+- [ ] **Multi-device parallelism** — shard the instrument / scenario axis across GPUs/TPUs via `jax.sharding` `Mesh` / `shard_map` (today: single-device XLA + `vmap` only)
+- [ ] **GPU/TPU benchmark suite** — published GPU-vs-CPU throughput (roadmap P5.2)
+- [ ] **Unified market-quote container + quote-space (hedge-space) risk** — one container spanning all rate / FX / vol / credit quotes, with PV differentiated end-to-end through calibration (AAD via `optimistix` implicit diff + `quote_jacobian`) so book Greeks/vega come out as hedge-ratio sensitivities to tradeable quotes. Substrate exists (`quote_jacobian`, differentiable calibrations, `bucketing.pushforward_sensitivities`); the unified container + end-to-end wiring is the missing piece.
+
+**Why:** the JAX-native design makes book- and business-scale a composition
+problem (`vmap` / `jit` / `grad` stack over pure pytree pricers) rather than a
+rewrite. Single-device batching ships today; the heterogeneous book engine and
+multi-device sharding are the remaining pieces.
 
 ---
 

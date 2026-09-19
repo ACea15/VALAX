@@ -258,7 +258,7 @@ This gives you, for free:
 - **SABR-parameter vega** per expiry on a SABR cube.
 - **Hull-White $(a, \sigma)$ sensitivity** of a callable bond.
 
-See [Greeks & Risk Sensitivities](greeks.md) and the [end-to-end example](../examples.md) (`examples/08_end_to_end_workflow.py`) for a full walk-through from synthetic market quotes to calibrated SABR fit to portfolio-level Greeks.
+See [Greeks & Automatic Differentiation](../theory/greeks.md#6-greeks-and-automatic-differentiation) and the [end-to-end example](../examples.md) (`examples/08_end_to_end_workflow.py`) for a full walk-through from synthetic market quotes to calibrated SABR fit to portfolio-level Greeks.
 
 ## 6. How It Works
 

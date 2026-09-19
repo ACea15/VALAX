@@ -658,7 +658,7 @@ underlying theory.
 - **`vmap` across scenarios.** To reprice an instrument under 1000
   market scenarios, `vmap` the dispatcher over the scenario dimension.
   This is the foundation of the full-reval VaR/ES in
-  [Risk & Scenarios](risk.md).
+  [Scenarios & Shocks](../risk-scenarios.md).
 - **GPU.** Every MC pipeline in VALAX runs on GPU without source
   changes — `jax.config.update("jax_platform_name", "gpu")` or set
   `JAX_PLATFORMS=gpu`. See the [benchmarks page](../benchmarks.md)
@@ -668,6 +668,6 @@ underlying theory.
 
 - [Models & Theory §5.3](../theory/pricing-methods.md#53-monte-carlo-simulation) — risk-neutral expectation, SDE discretization, convergence, variance reduction, pathwise vs. likelihood-ratio Greeks.
 - [Models & Theory §6.3](../theory/greeks.md#63-pathwise-method-for-mc-greeks) — when pathwise differentiation works and when it doesn't.
-- [Greeks via Autodiff](greeks.md) — how `jax.grad` composes with the MC pipeline.
-- [Risk & Scenarios](risk.md) — vmapped MC pricing for VaR / ES.
+- [Greeks & Automatic Differentiation (Theory § 6)](../theory/greeks.md#6-greeks-and-automatic-differentiation) — how `jax.grad` composes with the MC pipeline.
+- [Scenarios & Shocks](../risk-scenarios.md) — vmapped MC pricing for VaR / ES.
 - [Roadmap](../roadmap.md) — execution order for the 🟡 / 🟠 / 🔴 items in the coverage map.

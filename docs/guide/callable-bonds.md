@@ -118,7 +118,7 @@ no finite-difference approximation:
 
 $$D_{\text{eff}} = -\frac{1}{P}\,\frac{\partial P}{\partial \Delta r}$$
 
-See [Greeks & Risk Sensitivities](greeks.md) for details on autodiff-based duration.
+See [Greeks & Automatic Differentiation](../theory/greeks.md#6-greeks-and-automatic-differentiation) for details on autodiff-based duration.
 
 ### Code Example
 
