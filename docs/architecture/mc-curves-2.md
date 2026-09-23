@@ -47,14 +47,29 @@ Shipped deliverables (see §4 task table below):
   basis-curve, and cross-currency items; `docs/architecture/production.md`
   §11.3 freezes the curve-id alphabet.
 
-Follow-ups (queued):
+Follow-ups:
 
-* **MC-Curves-2b** — Rewrite `bootstrap_multi_curve` internals over
-  the joint solver (semantic-preserving migration of the dual-curve
-  `SwapRate` interpretation) so `MultiCurveSet` becomes a view over
-  `CurveGraph`.  Design intent locked in (see the "Keeping
-  `MultiCurveSet`" discussion in [`guide/curves.md`](../guide/curves.md#54-deprecated-path-bootstrap_multi_curve));
-  execution deferred.
+* ✅ **MC-Curves-2b — shipped.** `bootstrap_multi_curve` internals are
+  now a thin translation layer over `bootstrap_curve_graph`, and
+  `MultiCurveSet` is a *view* over `CurveGraph`
+  (`MultiCurveSet.from_graph` / `MultiCurveSet.to_graph`).  The
+  sequential OIS-then-tenor pipeline (`_bootstrap_forward_curve`,
+  `_SwapData`, `_pack_swap_data`, `_dual_curve_swap_residuals`) is
+  deleted.  The semantic-preservation question that deferred this
+  work — the old sequential dual-curve reading of `SwapRate` on a
+  forward leg — is resolved by **translating** those quotes into
+  `IborSwapRate` with `float_dates == fixed_dates` and fixing dates
+  at the period starts, which is exactly the residual the old
+  `_dual_curve_swap_residuals` computed (`(DF_fwd(T_{i-1})/DF_fwd(T_i)
+  - 1) · DF_ois(T_i)` vs `r · τ_i · DF_ois(T_i)`).  Discount-leg and
+  forward-leg deposit/FRA quotes keep their single-curve residual on
+  their own curve.  Curve ids are synthetic and never leak
+  (`XXX.LEGACY.OIS`, `XXX.LEGACY.<TENOR>`, with a
+  `XXX.LEGACY.OIS.FWD<k>` fallback for free-form tenor labels), since
+  the two-tier signature carries no currency.  New behaviour the
+  sequential path never had: one Newton solve for every curve, and
+  `jax.grad` through the build via `ImplicitAdjoint`.  Tests:
+  `tests/test_curves/test_multi_curve.py`.
 
 MC-Curves-3 — partial progress:
 

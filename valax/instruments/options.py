@@ -17,6 +17,7 @@ class EuropeanOption(eqx.Module):
     strike: Float[Array, ""]
     expiry: Float[Array, ""]  # time to expiry in year fractions
     is_call: bool = eqx.field(static=True, default=True)
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class AmericanOption(eqx.Module):
@@ -40,6 +41,7 @@ class AmericanOption(eqx.Module):
     strike: Float[Array, ""]
     expiry: Float[Array, ""]
     is_call: bool = eqx.field(static=True, default=True)
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class EquityBarrierOption(eqx.Module):
@@ -71,6 +73,7 @@ class EquityBarrierOption(eqx.Module):
     is_up: bool = eqx.field(static=True, default=True)
     is_knock_in: bool = eqx.field(static=True, default=True)
     smoothing: float = eqx.field(static=True, default=0.0)
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class AsianOption(eqx.Module):
@@ -101,6 +104,7 @@ class AsianOption(eqx.Module):
     expiry: Float[Array, ""]
     is_call: bool = eqx.field(static=True, default=True)
     averaging: str = eqx.field(static=True, default="arithmetic")
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class LookbackOption(eqx.Module):
@@ -131,6 +135,7 @@ class LookbackOption(eqx.Module):
     is_call: bool = eqx.field(static=True, default=True)
     is_fixed_strike: bool = eqx.field(static=True, default=False)
     strike: Float[Array, ""] = eqx.field(default=None)
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class VarianceSwap(eqx.Module):
@@ -164,6 +169,7 @@ class VarianceSwap(eqx.Module):
     expiry: Float[Array, ""]
     strike_var: Float[Array, ""]
     notional_var: Float[Array, ""]
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class CompoundOption(eqx.Module):
@@ -199,6 +205,7 @@ class CompoundOption(eqx.Module):
     inner_strike: Float[Array, ""]
     outer_is_call: bool = eqx.field(static=True, default=True)
     inner_is_call: bool = eqx.field(static=True, default=True)
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class ChooserOption(eqx.Module):
@@ -222,6 +229,7 @@ class ChooserOption(eqx.Module):
     choose_date: Float[Array, ""]
     expiry: Float[Array, ""]
     strike: Float[Array, ""]
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class Autocallable(eqx.Module):
@@ -262,6 +270,7 @@ class Autocallable(eqx.Module):
     strike: Float[Array, ""]
     notional: Float[Array, ""]
     has_memory: bool = eqx.field(static=True, default=False)
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class WorstOfBasketOption(eqx.Module):
@@ -329,6 +338,7 @@ class Cliquet(eqx.Module):
     local_floor: Float[Array, ""]
     global_floor: Float[Array, ""]
     notional: Float[Array, ""]
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class DigitalOption(eqx.Module):
@@ -356,6 +366,7 @@ class DigitalOption(eqx.Module):
     expiry: Float[Array, ""]
     payout: Float[Array, ""]
     is_call: bool = eqx.field(static=True, default=True)
+    underlying_id: str = eqx.field(static=True, default="_default_")
 
 
 class SpreadOption(eqx.Module):

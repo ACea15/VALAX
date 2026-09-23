@@ -536,10 +536,39 @@ for a working four-curve example.
 `bootstrap_multi_curve` (and its return type `MultiCurveSet`) is retained for
 one deprecation cycle so existing user code continues to work.  It emits a
 `DeprecationWarning` on every call.  New code should call
-`bootstrap_curve_graph` directly.  The forthcoming MC-Curves-2b workstream
-will rewrite `bootstrap_multi_curve` internals over `bootstrap_curve_graph`
-so `MultiCurveSet` becomes a thin view over `CurveGraph`; both APIs are
-expected to coexist long-term.
+`bootstrap_curve_graph` directly.
+
+**Since MC-Curves-2b the deprecated path is no longer a separate solver.**
+`bootstrap_multi_curve` translates its two-tier input into `CurveSpec`s plus
+graph instruments and makes a single `bootstrap_curve_graph` call; the old
+sequential OIS-then-tenor pipeline (and its packed-swap residual machinery)
+has been deleted.  Three consequences for callers:
+
+- **Same numbers, one solve.** The calibration target is unchanged — discount
+  quotes price on the OIS curve alone; forward-leg deposits/FRAs keep their
+  single-curve DF relationship; forward-leg `SwapRate` quotes are reinterpreted
+  as `IborSwapRate` (floating schedule = fixed schedule, OIS discounting),
+  which is exactly the dual-curve par condition the sequential code solved.
+  Curves agree with an explicit joint-solver build to ≤ 1e-12.
+- **Gradients now flow.** Because the solve is one `optimistix.root_find` under
+  `ImplicitAdjoint`, `jax.grad` of a calibrated DF w.r.t. any input quote —
+  including the swap legs — is finite and cheap.
+- **`MultiCurveSet` is a view, not a copy.** `MultiCurveSet.to_graph()` and
+  `MultiCurveSet.from_graph(graph, discount_id, forward_ids)` convert between
+  the two-tier container and a `CurveGraph` while sharing the same
+  `DiscountCurve` objects:
+
+```python
+graph = mcs.to_graph(discount_id="USD.SOFR.OIS",
+                     forward_ids={"3M": "USD.SOFR.3M"})
+# ... use the graph-aware pricers / CurveGraph shocks ...
+mcs_again = MultiCurveSet.from_graph(
+    graph, "USD.SOFR.OIS", {"3M": "USD.SOFR.3M"},
+)
+```
+
+Both APIs are expected to coexist long-term: `CurveGraph` is the engine,
+`MultiCurveSet` the two-tier pedagogical lens on it.
 
 #### 5.4a Migrating from `bootstrap_multi_curve`
 
@@ -809,9 +838,11 @@ shipped the joint multi-curve Newton solver
 [`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph), the
 declarative curve descriptor `CurveSpec`, the implicit-adjoint quote-Jacobian
 helper [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian), and the
-`CurveBuildDiagnostics` container.  The pre-MC-Curves-2 sequential
-`bootstrap_multi_curve` is retained for one deprecation cycle and emits a
-`DeprecationWarning` on every call.
+`CurveBuildDiagnostics` container.  The two-tier `bootstrap_multi_curve`
+entry point is retained for one deprecation cycle and emits a
+`DeprecationWarning` on every call; since MC-Curves-2b its sequential
+internals are gone and it solves through the joint solver (see
+[§5.4](#54-deprecated-path-bootstrap_multi_curve)).
 
 The extended `CurveBuildDiagnostics` (MC-Curves-3) now ships production-grade
 convergence and well-posedness diagnostics: `residuals`, `max_abs_residual`,

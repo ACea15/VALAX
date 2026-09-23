@@ -5,6 +5,14 @@ take an instrument and market inputs and return a scalar JAX array.
 This is the shape that `jax.grad`, `jax.jit`, and `jax.vmap` expect —
 Greeks, batch pricing, and calibration all compose out of the box.
 
+!!! tip "One call convention over all of them"
+    Every pricer on this page is also reachable through the unified
+    [`price(instrument, model, market, method=...)`](core.md) entry point,
+    which binds an instrument's curve/underlying selectors against a
+    [`MarketState`](core.md#marketstate) and picks a method for you. The
+    explicit signatures below remain the primary API; the unified one is
+    what portfolio, risk, and multi-method comparison code should use.
+
 ## Analytical (closed-form)
 
 ### Equity vanillas

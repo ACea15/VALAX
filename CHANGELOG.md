@@ -12,6 +12,68 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Unified pricing signature and `MarketState` (pricing ontology, P2)
+
+- `valax/core/market_state.py`: **`MarketState`**, the calibrated market
+  container — a keyed `CurveGraph`, identifier-keyed vol surfaces, spots,
+  dividends, fixings, and the credit / inflation / FX corners in one
+  differentiable pytree. It *generalises* `MarketData` (one curve → keyed
+  graph; one scalar vol per asset → full surfaces) rather than renaming it:
+  `from_market_data` / `to_market_data` are a lossless two-way view, so the
+  `risk/var.py` scenario framework is untouched for one deprecation cycle.
+- `valax/core/pricing.py`: **`price(instrument, model, market, *, method,
+  config, key) -> PricingResult`** — one call convention replacing three
+  (loose analytic scalars, `(instrument, model, config, **market_args)`,
+  and `(instrument, market)`). **No pricer was rewritten.** Analytic and
+  lattice pricers are reached through thin adapters
+  (`valax/core/adapters.py`); the MC and PDE recipe registries are *bridged*,
+  not duplicated, so every recipe registered there is reachable through the
+  unified signature immediately and the registries cannot drift apart.
+- `method="auto"` keeps *availability* (the registry) separate from
+  *preference* (a policy table), falling back to `analytic → lattice → pde →
+  mc`. A subclass that only adds market selectors inherits its base class's
+  pricers (MRO resolution), which is the seam P3 will use.
+- `valax/core/resolve.py`: **`resolve`** binds an instrument's contractual
+  selectors (discount curve, projection curve, underlying) and a model's
+  surface reference against the market. Selectors are static strings with
+  sentinel defaults, so **single-curve pricing needs zero configuration** and
+  `forward_id=None` keeps the existing "project off the discount curve"
+  semantics bit-for-bit.
+- `model=None` is a first-class case for instruments priced by curve
+  discounting alone (fixed-rate bonds, vanilla and OIS swaps, FRNs).
+- Gates met (`tests/test_core/`): single-curve parity with the legacy calls to
+  ≤ 1e-10 with no selector configuration; MC/PDE prices bit-identical to the
+  dispatchers; `registered_pricers()` covers every pair in both legacy
+  registries; `jax.grad` through `price` yields market delta and model vega
+  together.
+- Design record: the five open questions in
+  `docs/architecture/pricing-ontology.md` are now resolved (one
+  `PricingResult` container; a separate auto-policy table; the surface-id
+  alphabet `<UNDERLYING>.<KIND>[.<QUALIFIER>]`; a one-release `MarketData`
+  view; `theta` + `dual_delta` promoted). New page: `docs/api/core.md`.
+
+### Changed — MC-Curves-2b: `bootstrap_multi_curve` runs on the joint solver
+
+- `valax/curves/multi_curve.py` no longer contains a solver. The deprecated
+  two-tier entry point translates its input into `CurveSpec`s plus graph
+  instruments and makes a single `bootstrap_curve_graph` call; the sequential
+  OIS-then-tenor pipeline (`_bootstrap_forward_curve`, `_SwapData`,
+  `_pack_swap_data`, `_dual_curve_swap_residuals`) is deleted.
+- The semantic question that deferred this work is resolved by *translation*:
+  a forward-leg `SwapRate` — which the sequential code read as "project on the
+  tenor curve, discount on OIS" — becomes an `IborSwapRate` with
+  `float_dates == fixed_dates` and fixing dates at the period starts, which is
+  exactly the residual the old code computed. Discount-leg and forward-leg
+  deposit/FRA quotes keep their single-curve residual.
+- `MultiCurveSet` is now a **view** over `CurveGraph`: `from_graph` /
+  `to_graph` convert between the shapes without copying or re-solving, so
+  legacy containers can use the graph-aware pricers and shock primitives.
+- New behaviour the sequential path never had: one Newton solve for every
+  curve, and `jax.grad` through the build via `ImplicitAdjoint` — including
+  w.r.t. swap-leg quotes. Curves match an explicit joint-solver build to
+  ≤ 1e-12 (`tests/test_curves/test_multi_curve.py`); all pre-existing
+  multi-curve tests pass unchanged.
+
 ### Added — Hull-White short-rate PDE: Bermudan swaptions and callables (roadmap PR-3)
 
 - `valax/pricing/pde/hull_white.py`: finite-difference pricing under

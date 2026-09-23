@@ -36,6 +36,14 @@ through a pricing function that consumes a `MarketData` returns
 sensitivities to every spot, vol, dividend, and curve pillar
 simultaneously.
 
+!!! note "`MarketData` is being generalised into `MarketState`"
+    [`valax.core.MarketState`](core.md#marketstate) subsumes this
+    container: a keyed `CurveGraph` instead of one curve, full vol
+    surfaces instead of a scalar per asset, plus credit / inflation / FX.
+    `MarketData` stays for one minor release as a two-way view
+    (`MarketState.from_market_data` / `.to_market_data`), so the scenario
+    and VaR framework on this page is unaffected.
+
 ::: valax.market.MarketData
 
 ::: valax.market.MarketScenario

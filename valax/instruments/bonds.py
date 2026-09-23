@@ -18,6 +18,8 @@ class ZeroCouponBond(eqx.Module):
 
     maturity: Int[Array, ""]
     face_value: Float[Array, ""]
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class FixedRateBond(eqx.Module):
@@ -41,6 +43,8 @@ class FixedRateBond(eqx.Module):
     face_value: Float[Array, ""]
     frequency: int = eqx.field(static=True, default=2)
     day_count: str = eqx.field(static=True, default="act_365")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class FloatingRateBond(eqx.Module):
@@ -80,6 +84,8 @@ class FloatingRateBond(eqx.Module):
     fixing_rates: Optional[Float[Array, " n"]] = None
     frequency: int = eqx.field(static=True, default=4)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class CallableBond(eqx.Module):
@@ -115,6 +121,8 @@ class CallableBond(eqx.Module):
     call_prices: Float[Array, " m"]
     frequency: int = eqx.field(static=True, default=2)
     day_count: str = eqx.field(static=True, default="act_365")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class PuttableBond(eqx.Module):
@@ -151,6 +159,8 @@ class PuttableBond(eqx.Module):
     put_prices: Float[Array, " m"]
     frequency: int = eqx.field(static=True, default=2)
     day_count: str = eqx.field(static=True, default="act_365")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class ConvertibleBond(eqx.Module):
@@ -187,3 +197,5 @@ class ConvertibleBond(eqx.Module):
     call_prices: Optional[Float[Array, " m"]] = None
     frequency: int = eqx.field(static=True, default=2)
     day_count: str = eqx.field(static=True, default="act_365")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)

@@ -22,7 +22,7 @@ Maturity: **production** (validated, differentiable, tested) / **partial** /
 |---|---|---|
 | **Multi-curve bootstrap** (joint Newton solver, OIS/tenor-basis/XCCY/FX/futures, quote Jacobians) | **production** | `valax/curves/bootstrap_graph.py`, `graph.py`, `instruments.py` |
 | Single-curve bootstrap | production | `valax/curves/bootstrap.py` |
-| `bootstrap_multi_curve` (sequential) | **deprecated** | `valax/curves/multi_curve.py` |
+| `bootstrap_multi_curve` (two-tier wrapper over the joint solver since MC-Curves-2b; `MultiCurveSet` is a `CurveGraph` view) | **deprecated** | `valax/curves/multi_curve.py` |
 | **Analytic caplets/caps** (Black-76 + Bachelier, dual-curve) | **production** | `valax/pricing/analytic/caplets.py` |
 | **Analytic swaptions** (Black-76 + Bachelier, dual-curve annuity) | **production** | `valax/pricing/analytic/swaptions.py` |
 | **Bonds** (YTM, duration, convexity, KRDs, floating, OIS) | production | `valax/pricing/analytic/{bonds,floating}.py` |

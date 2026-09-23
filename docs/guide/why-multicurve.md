@@ -106,8 +106,9 @@ shock mechanics themselves live in
 
 ## Why sequential bootstrap breaks down
 
-The pre-MC-Curves-2 code (`bootstrap_multi_curve`, now deprecated)
-proceeds in a fixed order:
+The pre-MC-Curves-2 code (`bootstrap_multi_curve`, now deprecated and,
+since MC-Curves-2b, re-implemented over the joint solver) proceeded in a
+fixed order:
 
 ```
 Step 1: Bootstrap OIS from OIS instruments               (one-curve solve)
@@ -249,8 +250,10 @@ tenor-basis and every cross-currency trade a desk carries.
   quote-sensitivity matrix in three parametrisations
   (`log_df` / `df` / `zero_rate`).
 - `bootstrap_multi_curve` retained one deprecation cycle with a
-  `DeprecationWarning`; `bootstrap_simultaneous` migrated to a thin
-  wrapper over the joint solver.
+  `DeprecationWarning`; both it (MC-Curves-2b) and
+  `bootstrap_simultaneous` are now thin wrappers over the joint
+  solver, and `MultiCurveSet` is a view over `CurveGraph`
+  (`from_graph` / `to_graph`).
 - Curve-identifier alphabet frozen as
   `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]` (see
   [`production.md` §11.3](../architecture/production.md#113-curve-graph-data-model)).
