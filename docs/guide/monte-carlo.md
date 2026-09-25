@@ -135,6 +135,43 @@ generators (`generate_g2pp_paths` and the Cheyette path generators). See
 [API: Pricing](../api/pricing.md) for the full registered recipe list and the
 [Calibration](calibration.md) guide for fitting these models.
 
+### Multi-curve: OIS discounting with a separate projection curve
+
+The Hull-White and G2++ rates recipes take two optional market arguments,
+`discount_curve` and `forward_curve`:
+
+```python
+result = mc_price_dispatch(
+    frn, hw_model, MCConfig(n_paths=100_000, n_steps=100), key,
+    discount_curve=ois,          # collateral / OIS discounting
+    forward_curve=sofr_3m,       # tenor curve the coupons project off
+)
+```
+
+Through the unified front door the instrument names its own curves and
+`price(...)` binds them for you:
+
+```python
+frn = FloatingRateBond(..., discount_id="USD.SOFR.OIS", forward_id="USD.LIBOR.3M")
+market = MarketState(
+    curves=CurveGraph(curves={"USD.SOFR.OIS": ois, "USD.LIBOR.3M": sofr_3m})
+)
+result = price(frn, hw_model, market, method="mc", config=config, key=key)
+```
+
+Discounting is honoured by **re-fitting** the exact-fit model to the trade's
+discount curve; projection is the **frozen tenor-basis overlay** — see
+[Multi-Curve Short Rates](../theory/multi-curve-short-rate.md) for the
+derivation and for the one thing it cannot price (basis volatility). Path-wise,
+a floating coupon becomes \(b_i \hat D(0, T_{i-1}) - \hat D(0, T_i)\), whose
+expectation is the analytic dual-curve leg; with every \(b_i = 1\) the sum
+telescopes back to the par-at-reset identity above, so single-curve prices are
+unchanged bit-for-bit.
+
+Both arguments default to `None`. The G2++ CMS-spread recipe rebuilds its par
+swap rates from the model's own bond strip and therefore **raises** on a
+distinct projection curve rather than silently ignoring it.
+
 ### FX / Inflation / Credit
 
 | Instrument | Status | Blocker |

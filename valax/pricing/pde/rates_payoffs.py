@@ -60,6 +60,7 @@ from jax import Array
 from jaxtyping import Float, Int
 
 from valax.dates.daycounts import year_fraction
+from valax.pricing.multicurve import apply_swap_basis
 
 # A closure valuing a cash-flow portfolio at the grid nodes: given the
 # valuation time, the payment times and the cash flows, it returns the node
@@ -141,6 +142,7 @@ def swap_tail_values(
     notional: Float[Array, ""],
     day_count: str,
     is_payer: bool,
+    basis: Float[Array, " n_cf"] | None = None,
 ) -> Float[Array, "..."]:
     r"""Value of the underlying swap at ``exercise_date``, at every grid node.
 
@@ -151,6 +153,26 @@ def swap_tail_values(
     analytically from the model's affine bond price via ``bond_portfolio``, so
     exercise decisions carry no discretisation error of their own.
 
+    **Dual curve.** When the floating leg projects off a curve distinct from
+    the discount curve, that telescoping replication no longer collapses.
+    Under the frozen tenor basis :math:`b_j` of
+    :func:`~valax.pricing.multicurve.tenor_basis` the floating leg is
+
+    .. math::
+
+        \sum_j \bigl(b_j P(T_0, T_{j-1}) - P(T_0, T_j)\bigr)
+          = b_1 + \sum_{j<n} (b_{j+1} - 1)\,P(T_0, T_j) - P(T_0, T_n),
+
+    using :math:`P(T_0, T_0) = 1`. Folding the extra :math:`(1 - b_{j+1})`
+    terms into the cash-flow vector keeps the payoff a *single* call to
+    ``bond_portfolio``, so the dual-curve tail costs exactly what the
+    single-curve one did; setting every :math:`b_j = 1` recovers the
+    single-curve expression term by term. ``basis=None`` skips the arithmetic
+    altogether, so a single-curve price is unchanged bit-for-bit.
+
+    The floating leg is assumed to pay on the fixed leg's schedule — the same
+    assumption the single-curve replication already makes.
+
     Args:
         bond_portfolio: Node-level valuer for :math:`\sum_i c_i P(t, T_i)`.
         reference_date: Curve reference date as an integer ordinal.
@@ -160,6 +182,9 @@ def swap_tail_values(
         notional: Notional principal.
         day_count: Day-count convention.
         is_payer: ``True`` for a payer swap, ``False`` for a receiver.
+        basis: Per-period frozen tenor basis, period :math:`j` spanning
+            :math:`(T_{j-1}, T_j)` with :math:`T_0` the exercise date.
+            ``None`` for single-curve projection.
 
     Returns:
         The swap value at each grid node.
@@ -170,8 +195,10 @@ def swap_tail_values(
     taus = swap_accruals(exercise_date, payment_dates, day_count)
     cashflows = (strike * taus).at[-1].add(1.0)
 
+    float_start, cashflows = apply_swap_basis(cashflows, basis)
+
     bond = bond_portfolio(t, payment_times, cashflows)
-    payer = notional * (1.0 - bond)
+    payer = notional * (float_start - bond)
     return payer if is_payer else -payer
 
 
@@ -233,6 +260,7 @@ def caplet_fixing_values(
     tau: Float[Array, ""],
     notional: Float[Array, ""],
     is_cap: bool,
+    basis: Float[Array, ""] | None = None,
 ) -> Float[Array, "..."]:
     r"""Fixing-date value of a single caplet/floorlet at every grid node.
 
@@ -240,17 +268,34 @@ def caplet_fixing_values(
     :math:`N\,(1 - P(T_0, T_1)(1 + K\tau))^+` at the fixing; a floorlet flips
     the sign inside the positive part.
 
+    **Dual curve.** The rate that fixes is projected off the forward curve
+    while the payment is discounted on the model's (discount) curve. Under
+    the frozen tenor basis :math:`b` of
+    :func:`~valax.pricing.multicurve.tenor_basis`,
+    :math:`1 + \tau F = b / P(T_0, T_1)`, so the fixing value becomes
+
+    .. math::
+
+        N\,\bigl(b - P(T_0, T_1)\,(1 + K\tau)\bigr)^+ ,
+
+    i.e. the basis simply displaces the strike side of the option. ``b = 1``
+    is the single-curve case, and ``basis=None`` keeps that expression
+    literally unchanged.
+
     Args:
         bond_at_fixing: :math:`P(T_0, T_1)` at every grid node.
         strike: Cap/floor rate :math:`K`.
         tau: Accrual fraction :math:`\tau` for the period.
         notional: Notional principal.
         is_cap: ``True`` for a caplet, ``False`` for a floorlet.
+        basis: Frozen tenor basis over :math:`(T_0, T_1)`, or ``None`` for
+            single-curve projection.
 
     Returns:
         The caplet/floorlet value at each grid node.
     """
-    moneyness = 1.0 - bond_at_fixing * (1.0 + strike * tau)
+    intrinsic = 1.0 if basis is None else basis
+    moneyness = intrinsic - bond_at_fixing * (1.0 + strike * tau)
     payoff = (
         jnp.maximum(moneyness, 0.0) if is_cap else jnp.maximum(-moneyness, 0.0)
     )
@@ -270,6 +315,7 @@ def caplet_values_by_level(
     dt: Float[Array, ""],
     n_time: int,
     node_shape: tuple[int, ...],
+    basis: Float[Array, " n_caplets"] | None = None,
 ) -> Float[Array, "n_levels ..."]:
     r"""Caplet fixing-value to inject at each time level, per grid node.
 
@@ -293,6 +339,9 @@ def caplet_values_by_level(
         dt: Time-step size in year fractions.
         n_time: Number of backward time steps.
         node_shape: Shape of the spatial grid (``(n,)`` or ``(n_x, n_y)``).
+        basis: Per-caplet frozen tenor basis over each accrual period (see
+            :func:`caplet_fixing_values`), or ``None`` for single-curve
+            projection.
 
     Returns:
         Caplet value indexed by ``(time level, *node)``; zero where no caplet
@@ -304,12 +353,19 @@ def caplet_values_by_level(
     levels = jnp.clip(
         jnp.round(fixing_times / dt).astype(jnp.int32), 0, n_time
     )
-
-    def caplet_val(level_time, end_time, tau):
+    def caplet_val(level_time, end_time, tau, b):
         bond = discount_factor(level_time, end_time)
-        return caplet_fixing_values(bond, strike, tau, notional, is_cap)
+        return caplet_fixing_values(bond, strike, tau, notional, is_cap, b)
 
-    vals = jax.vmap(caplet_val)(levels * dt, end_times, taus)
+    # ``basis is None`` is a *trace-time* branch, not a traced value: it keeps
+    # the single-curve arithmetic literally unchanged rather than multiplying
+    # through by a ones array.
+    if basis is None:
+        vals = jax.vmap(lambda lt, et, tau: caplet_val(lt, et, tau, None))(
+            levels * dt, end_times, taus
+        )
+    else:
+        vals = jax.vmap(caplet_val)(levels * dt, end_times, taus, basis)
     return jnp.zeros((n_time + 1, *node_shape)).at[levels].add(vals)
 
 

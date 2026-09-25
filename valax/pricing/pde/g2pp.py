@@ -67,6 +67,17 @@ the Hull-White edge treatment). The domain is sized from the factors' terminal
 covariance (:func:`~valax.models.g2pp.g2pp_factor_covariance`); the factors are
 zero-mean so the grid is centred at the origin.
 
+Multi-curve
+-----------
+Every recipe here accepts the optional ``discount_curve`` / ``forward_curve``
+market arguments described in :mod:`valax.pricing.pde.hull_white`: G2++ is
+likewise an exact-fit model, so the discount curve is honoured by re-fitting
+:math:`\\varphi` to it and the projection curve by the frozen tenor-basis
+overlay of :mod:`valax.pricing.multicurve`. Both default to ``None``, leaving
+single-curve prices untouched bit-for-bit. The CMS-spread recipe rebuilds its
+par swap rates from the model's own bond strip and therefore **rejects** a
+distinct projection curve rather than ignoring it.
+
 Registered recipes
 ------------------
 ================================  ==================================
@@ -115,6 +126,12 @@ from valax.pricing.pde.coefficients import g2pp_operator_2d
 from valax.pricing.pde.config import PDEConfig2D
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.grids import Grid2D, centred_state_grid, read_off_2d
+from valax.pricing.multicurve import (
+    require_single_curve,
+    swap_leg_basis,
+    tenor_basis,
+    with_discount_curve,
+)
 from valax.pricing.pde.rates_payoffs import (
     caplet_fixing_values,
     caplet_values_by_level,
@@ -225,6 +242,7 @@ def _swap_tail_values(
     notional: Float[Array, ""],
     day_count: str,
     is_payer: bool,
+    basis: Float[Array, " n_cf"] | None = None,
 ) -> Float[Array, "n_x n_y"]:
     r"""Value of the underlying swap at ``exercise_date``, at every grid node.
 
@@ -244,6 +262,9 @@ def _swap_tail_values(
         notional: Notional principal.
         day_count: Day-count convention.
         is_payer: ``True`` for a payer swap, ``False`` for a receiver.
+        basis: Per-period frozen tenor basis when the floating leg projects
+            off a curve distinct from the discount curve, else ``None``
+            (see :func:`~valax.pricing.multicurve.swap_leg_basis`).
 
     Returns:
         The swap value at each grid node, shape ``(n_x, n_y)``.
@@ -262,6 +283,7 @@ def _swap_tail_values(
         notional,
         day_count,
         is_payer,
+        basis,
     )
 
 
@@ -494,7 +516,9 @@ def _coupon_values_by_level(
 
 
 @register(FixedRateBond, G2PPModel)
-def _fixed_rate_bond_g2pp(*, instrument, model, config) -> PDEResult:
+def _fixed_rate_bond_g2pp(
+    *, instrument, model, config, discount_curve=None
+) -> PDEResult:
     """Option-free fixed-rate bond under G2++ — the scheme's calibration.
 
     The bond has no optionality, so the answer is fixed by the initial curve
@@ -502,7 +526,12 @@ def _fixed_rate_bond_g2pp(*, instrument, model, config) -> PDEResult:
     sharpest available check on the solver itself: any error here is pure
     numerics (mesh, ADI time-stepping, or the exact-fit :math:`\\varphi`
     treatment), with no model risk mixed in.
+
+    Optional market args:
+        discount_curve: Curve to discount on; re-fits the model to it.
+            Defaults to the model's own ``initial_curve``.
     """
+    model = with_discount_curve(model, discount_curve)
     horizon = _bond_horizon(instrument, model)
 
     def build(grid: Grid2D):
@@ -518,7 +547,9 @@ def _fixed_rate_bond_g2pp(*, instrument, model, config) -> PDEResult:
 
 
 @register(Swaption, G2PPModel)
-def _swaption_g2pp(*, instrument, model, config) -> PDEResult:
+def _swaption_g2pp(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """European swaption under G2++ via a 2-D finite-difference sweep.
 
     Redundant with the exact Gauss-Hermite decomposition in
@@ -526,7 +557,19 @@ def _swaption_g2pp(*, instrument, model, config) -> PDEResult:
     deliberately so: it shares the entire discretisation with the Bermudan
     recipe below, which has no closed form, so agreeing with the analytic price
     to grid tolerance validates that machinery against an exact answer.
+
+    Optional market args:
+        discount_curve: Curve the swap discounts on; re-fits the model to it.
+        forward_curve: Projection curve for the floating leg. ``None`` (the
+            default) projects off the discount curve — the single-curve case.
     """
+    model = with_discount_curve(model, discount_curve)
+    basis = swap_leg_basis(
+        model.initial_curve,
+        forward_curve,
+        instrument.expiry_date,
+        instrument.fixed_dates,
+    )
     horizon = year_fraction(
         model.initial_curve.reference_date,
         instrument.expiry_date,
@@ -543,6 +586,7 @@ def _swaption_g2pp(*, instrument, model, config) -> PDEResult:
             instrument.notional,
             instrument.day_count,
             instrument.is_payer,
+            basis,
         )
         return jnp.maximum(swap, 0.0), None
 
@@ -558,24 +602,43 @@ def _g2pp_discount_factor(model: G2PPModel, grid: Grid2D):
 
 
 @register(Caplet, G2PPModel)
-def _caplet_g2pp(*, instrument, model, config) -> PDEResult:
+def _caplet_g2pp(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """Caplet / floorlet under G2++ via a 2-D finite-difference sweep.
 
     A caplet is a European option on the accrual-end zero-coupon bond, so the
     horizon is the fixing date and the terminal condition is the analytic ZCB
     payoff at every ``(x, y)`` node; the ADI sweep discounts it home with the
     deterministic :math:`\\varphi(t)` factoring applied per step.
+
+    Optional market args:
+        discount_curve: Curve the payment discounts on; re-fits the model.
+        forward_curve: Projection curve for the fixing. ``None`` (the
+            default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     reference_date = model.initial_curve.reference_date
     day_count = instrument.day_count
     horizon = year_fraction(reference_date, instrument.fixing_date, day_count)
     end_time = year_fraction(reference_date, instrument.end_date, day_count)
     tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
+    basis = tenor_basis(
+        model.initial_curve,
+        forward_curve,
+        instrument.start_date,
+        instrument.end_date,
+    )
 
     def build(grid: Grid2D):
         bond = _g2pp_discount_factor(model, grid)(horizon, end_time)
         terminal = caplet_fixing_values(
-            bond, instrument.strike, tau, instrument.notional, instrument.is_cap
+            bond,
+            instrument.strike,
+            tau,
+            instrument.notional,
+            instrument.is_cap,
+            basis,
         )
         return terminal, None
 
@@ -583,19 +646,33 @@ def _caplet_g2pp(*, instrument, model, config) -> PDEResult:
 
 
 @register(Cap, G2PPModel)
-def _cap_g2pp(*, instrument, model, config) -> PDEResult:
+def _cap_g2pp(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """Cap / floor under G2++ via a single 2-D finite-difference sweep.
 
     Each caplet's fixing-date value is injected at its (snapped) fixing level
     and discounted home in one backward pass, so the cost is one ADI solve to
     the last fixing rather than one per caplet.
+
+    Optional market args:
+        discount_curve: Curve the payments discount on; re-fits the model.
+        forward_curve: Projection curve for the fixings. ``None`` (the
+            default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     reference_date = model.initial_curve.reference_date
     day_count = instrument.day_count
     horizon = year_fraction(
         reference_date, instrument.fixing_dates[-1], day_count
     )
     dt = horizon / config.n_time
+    basis = tenor_basis(
+        model.initial_curve,
+        forward_curve,
+        instrument.start_dates,
+        instrument.end_dates,
+    )
 
     def build(grid: Grid2D):
         caplet_vals = caplet_values_by_level(
@@ -611,6 +688,7 @@ def _cap_g2pp(*, instrument, model, config) -> PDEResult:
             dt,
             config.n_time,
             (grid.n_x, grid.n_y),
+            basis,
         )
         terminal = caplet_vals[config.n_time]
         return terminal, lambda level, values: values + caplet_vals[level]
@@ -619,7 +697,9 @@ def _cap_g2pp(*, instrument, model, config) -> PDEResult:
 
 
 @register(CMSSpreadSwap, G2PPModel)
-def _cms_spread_swap_g2pp(*, instrument, model, config) -> PDEResult:
+def _cms_spread_swap_g2pp(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """CMS-spread swap (steepener / flattener) under G2++, single 2-D sweep.
 
     The decorrelation-sensitive product that motivates the second factor. Each
@@ -628,7 +708,17 @@ def _cms_spread_swap_g2pp(*, instrument, model, config) -> PDEResult:
     the CMS-spread value is built at every ``(x, y)`` node from the affine bond
     strip, scaled from fixing to payment by the node discount factor, injected
     at the (snapped) fixing level, and discounted home in one backward pass.
+
+    Optional market args:
+        discount_curve: Curve the coupons discount on; re-fits the model.
+        forward_curve: **Not supported yet.** The CMS rates are rebuilt from
+            the model's own bond strip, so a distinct projection curve would
+            be silently ignored; a distinct curve is rejected instead.
     """
+    model = with_discount_curve(model, discount_curve)
+    require_single_curve(
+        model.initial_curve, forward_curve, "The G2++ CMS-spread PDE recipe"
+    )
     reference_date = model.initial_curve.reference_date
     day_count = instrument.day_count
     pay_times = year_fraction(
@@ -699,17 +789,22 @@ def _callable_style_price_g2pp(
 
 
 @register(CallableBond, G2PPModel)
-def _callable_bond_g2pp(*, instrument, model, config) -> PDEResult:
+def _callable_bond_g2pp(
+    *, instrument, model, config, discount_curve=None
+) -> PDEResult:
     """Callable fixed-rate bond under G2++ via a 2-D finite-difference sweep.
 
     The two-factor analogue of the Hull-White callable: the issuer redeems at
     ``call_price`` whenever the ex-coupon continuation value exceeds it. The
     decorrelation of short and long rates enters through the joint ``(x, y)``
     continuation value.
+
+    Optional market args:
+        discount_curve: Curve to discount on; re-fits the model to it.
     """
     price = _callable_style_price_g2pp(
         instrument,
-        model,
+        with_discount_curve(model, discount_curve),
         config,
         instrument.call_dates,
         instrument.call_prices,
@@ -719,11 +814,17 @@ def _callable_bond_g2pp(*, instrument, model, config) -> PDEResult:
 
 
 @register(PuttableBond, G2PPModel)
-def _puttable_bond_g2pp(*, instrument, model, config) -> PDEResult:
-    """Puttable fixed-rate bond under G2++ via a 2-D finite-difference sweep."""
+def _puttable_bond_g2pp(
+    *, instrument, model, config, discount_curve=None
+) -> PDEResult:
+    """Puttable fixed-rate bond under G2++ via a 2-D finite-difference sweep.
+
+    Optional market args:
+        discount_curve: Curve to discount on; re-fits the model to it.
+    """
     price = _callable_style_price_g2pp(
         instrument,
-        model,
+        with_discount_curve(model, discount_curve),
         config,
         instrument.put_dates,
         instrument.put_prices,
@@ -733,7 +834,9 @@ def _puttable_bond_g2pp(*, instrument, model, config) -> PDEResult:
 
 
 @register(BermudanSwaption, G2PPModel)
-def _bermudan_swaption_g2pp(*, instrument, model, config) -> PDEResult:
+def _bermudan_swaption_g2pp(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """Bermudan swaption under G2++ via a 2-D finite-difference sweep.
 
     The headline instrument for this pricer, and the reason G2++ exists: a
@@ -750,7 +853,13 @@ def _bermudan_swaption_g2pp(*, instrument, model, config) -> PDEResult:
 
     The horizon is the **last** exercise date; the option pays nothing before
     exercise, so between exercise dates the sweep is pure discounting.
+
+    Optional market args:
+        discount_curve: Curve the swap discounts on; re-fits the model to it.
+        forward_curve: Projection curve for the floating leg. ``None`` (the
+            default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     reference_date = model.initial_curve.reference_date
     day_count = instrument.day_count
     n_exercise = instrument.exercise_dates.shape[0]
@@ -762,6 +871,17 @@ def _bermudan_swaption_g2pp(*, instrument, model, config) -> PDEResult:
     levels = snap_to_levels(
         instrument.exercise_dates, reference_date, day_count, dt, config.n_time
     )
+    # Each exercise enters a different (shorter) tail swap, so each needs its
+    # own basis strip over that tail's accrual periods.
+    bases = [
+        swap_leg_basis(
+            model.initial_curve,
+            forward_curve,
+            instrument.exercise_dates[e],
+            instrument.fixed_dates[e:],
+        )
+        for e in range(n_exercise)
+    ]
 
     def build(grid: Grid2D):
         # ``n_exercise`` is a static shape, so this Python loop unrolls at trace
@@ -776,6 +896,7 @@ def _bermudan_swaption_g2pp(*, instrument, model, config) -> PDEResult:
                 instrument.notional,
                 day_count,
                 instrument.is_payer,
+                bases[e],
             )
             for e in range(n_exercise)
         ])  # (n_exercise, n_x, n_y)

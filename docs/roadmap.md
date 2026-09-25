@@ -296,6 +296,8 @@ New stochastic models that unlock entire product categories.
 - [ ] **CIR** — square-root diffusion, ensures positive rates
 - [ ] **Vasicek** — Ornstein-Uhlenbeck for rates (allows negative rates)
 - [x] **Calibration to swaption surface** — `calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette`
+- [x] **Multi-curve pricing in the MC and PDE short-rate solvers** (ontology P5.1) — `valax.pricing.multicurve` (`with_discount_curve`, `tenor_basis`, `swap_leg_basis`, `apply_swap_basis`): OIS discounting by re-fitting the exact-fit model to the trade's discount curve, plus a frozen deterministic tenor basis for projection. Wired into every Hull-White and G2++ recipe in `valax/pricing/pde/{hull_white,g2pp}.py` and `valax/pricing/mc/recipes.py`, and reached automatically from an instrument's `discount_id` / `forward_id` through `valax.core.price`. Single-curve prices are unchanged bit-for-bit. See [Multi-Curve Short Rates](theory/multi-curve-short-rate.md)
+- [ ] **Stochastic tenor basis** — a genuine multi-curve HJM / Mercurio extension with its own driver per tenor curve; needed for basis *vega* (basis swaptions, tenor-spread options), which the deterministic overlay prices at zero
 
 **Why:** Short-rate models are the backbone of rates desks for Bermudan swaptions, callable bonds, and path-dependent IR exotics. LMM alone is not enough.
 
@@ -580,6 +582,15 @@ entries 2-4 of [Numerical Pitfalls](architecture/numerical-pitfalls.md). The sam
 short-rate substrate now also carries the **two-factor G2++** (2-D) and
 **Cheyette** (1F/2F) PDEs — covering CMS-spread decorrelation and rate skew,
 alongside fixed-rate bonds, caplets/caps, and European/Bermudan swaptions.
+
+**Status (ontology P5.1, delivered).** The Hull-White and G2++ PDE *and* MC
+recipes are now **multi-curve**: they accept the trade's resolved
+`discount_curve` (honoured by re-fitting the exact-fit model to it) and
+`forward_curve` (a frozen deterministic tenor basis), both supplied
+automatically by `valax.core.price` from the instrument's `discount_id` /
+`forward_id`. The overlay lives in `valax/pricing/multicurve.py`; see
+[Multi-Curve Short Rates](theory/multi-curve-short-rate.md) for the derivation
+and its limits (no basis volatility).
 
 ### 5.5 Portfolio and Multi-Device Scaling
 

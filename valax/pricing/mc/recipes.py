@@ -103,6 +103,13 @@ from valax.pricing.mc.dispatch import (
     discounted_mean_and_stderr,
     register,
 )
+from valax.pricing.multicurve import (
+    apply_swap_basis,
+    require_single_curve,
+    swap_leg_basis,
+    tenor_basis,
+    with_discount_curve,
+)
 from valax.pricing.mc.lmm_paths import generate_lmm_paths
 from valax.pricing.mc.local_vol_paths import generate_local_vol_paths
 from valax.pricing.mc.multi_asset_paths import generate_correlated_gbm_paths
@@ -795,6 +802,15 @@ def _bermudan_lmm(
 #     T       (float): Horizon in year fractions (must cover bond maturity).
 #   Optional:
 #     n_steps defaults to 100 when not supplied.
+#
+# Multi-curve: the Hull-White and G2++ rates recipes below additionally take
+# `discount_curve` and (where a floating leg is projected) `forward_curve`,
+# supplied automatically by valax.core.pricing.price from the instrument's
+# discount_id / forward_id selectors.  Hull-White and G2++ are exact-fit
+# models, so honouring a discount curve means re-fitting the model to it
+# (valax.pricing.multicurve.with_discount_curve); projection is handled by the
+# frozen tenor-basis overlay in the same module.  Both default to None, which
+# is the single-curve case and leaves prices unchanged bit-for-bit.
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -874,6 +890,7 @@ def _fixed_bond_hw(
     key: jax.Array,
     T: float | None = None,
     n_steps: int = 100,
+    discount_curve=None,
     **kwargs,
 ) -> MCResult:
     """Fixed-rate bond price under Hull-White short-rate MC.
@@ -889,7 +906,11 @@ def _fixed_bond_hw(
         T: Horizon in year fractions.  Defaults to the year fraction of
             the last payment date.
         n_steps: Number of time steps (default 100).
+        discount_curve: Curve to discount on; re-fits the model to it
+            (:func:`~valax.pricing.multicurve.with_discount_curve`).
+            Defaults to the model's own ``initial_curve``.
     """
+    model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
 
@@ -919,6 +940,8 @@ def _floating_bond_hw(
     key: jax.Array,
     T: float | None = None,
     n_steps: int = 100,
+    discount_curve=None,
+    forward_curve=None,
     **kwargs,
 ) -> MCResult:
     """Floating-rate bond (FRN) price under Hull-White short-rate MC.
@@ -933,10 +956,25 @@ def _floating_bond_hw(
 
     where :math:`\\hat{D}` is the path-wise stochastic discount factor.
 
+    **Dual curve.** When the coupons project off a curve distinct from the
+    discount curve, that telescoping collapse no longer happens.  Under the
+    frozen tenor basis :math:`b_i` of :mod:`valax.pricing.multicurve` the
+    accrued floating coupon is
+    :math:`\\tau_i L_i = b_i / P(T_{i-1}, T_i) - 1`, whose path-wise
+    unbiased estimator is
+    :math:`b_i \\hat{D}(0, T_{i-1}) - \\hat{D}(0, T_i)` — the martingale
+    identity :math:`E_{T_{i-1}}[\\hat{D}(T_{i-1}, T_i)] = P(T_{i-1}, T_i)`.
+    With every :math:`b_i = 1` the sum telescopes back to the expression
+    above, so the single-curve path is left literally unchanged.
+
     Optional market args:
         T: Horizon in year fractions (defaults to maturity).
         n_steps: Number of time steps (default 100).
+        discount_curve: Curve to discount on; re-fits the model to it.
+        forward_curve: Projection curve for the floating coupons. ``None``
+            (the default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
     face = instrument.face_value
@@ -947,8 +985,12 @@ def _floating_bond_hw(
     )
     taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
     spread_amounts = instrument.spread * face * taus          # (n_pay,)
+    basis = tenor_basis(
+        model.initial_curve, forward_curve, prev_dates, instrument.payment_dates
+    )
 
     t_settle = year_fraction(ref, instrument.settlement_date, day_count)
+    prev_times = year_fraction(ref, prev_dates, day_count)
     if T is None:
         T = cf_times[-1]
 
@@ -956,16 +998,23 @@ def _floating_bond_hw(
         model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
     )
 
-    # Floating-leg replication.  The floating coupons between settlement and
-    # maturity are worth face * (D(settle) - D(T_N)); adding the principal
-    # redemption face * D(T_N) cancels the second term exactly, leaving the
-    # familiar "an FRN prices to par at reset" identity:
-    #
-    #     PV = face * D(0, t_settle)  +  spread coupons
-    settle_sdf = _hw_path_sdf(result, t_settle[None], T, n_steps)[:, 0]
     spread_sdf = _hw_path_sdf(result, cf_times, T, n_steps)
 
-    pv = face * settle_sdf + jnp.sum(spread_amounts[None, :] * spread_sdf, axis=1)
+    if basis is None:
+        # Floating-leg replication.  The floating coupons between settlement
+        # and maturity are worth face * (D(settle) - D(T_N)); adding the
+        # principal redemption face * D(T_N) cancels the second term exactly,
+        # leaving the familiar "an FRN prices to par at reset" identity:
+        #
+        #     PV = face * D(0, t_settle)  +  spread coupons
+        settle_sdf = _hw_path_sdf(result, t_settle[None], T, n_steps)[:, 0]
+        pv = face * settle_sdf
+    else:
+        reset_sdf = _hw_path_sdf(result, prev_times, T, n_steps)
+        floating = jnp.sum(basis[None, :] * reset_sdf - spread_sdf, axis=1)
+        pv = face * (floating + spread_sdf[:, -1])
+
+    pv = pv + jnp.sum(spread_amounts[None, :] * spread_sdf, axis=1)
 
     price, stderr = discounted_mean_and_stderr(
         pv, jnp.ones((), dtype=pv.dtype), config.n_paths
@@ -1082,6 +1131,7 @@ def _callable_bond_hw(
     T: float | None = None,
     n_steps: int = 100,
     smoothing: Float[Array, ""] | None = None,
+    discount_curve=None,
     **kwargs,
 ) -> MCResult:
     """Callable bond price under Hull-White short-rate MC.
@@ -1097,7 +1147,9 @@ def _callable_bond_hw(
         n_steps: Number of time steps (default 100).
         smoothing: Sigmoid width for the exercise indicator, in currency
             units.  Defaults to 0.1 % of each call price.
+        discount_curve: Curve to discount on; re-fits the model to it.
     """
+    model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
 
@@ -1130,6 +1182,7 @@ def _puttable_bond_hw(
     T: float | None = None,
     n_steps: int = 100,
     smoothing: Float[Array, ""] | None = None,
+    discount_curve=None,
     **kwargs,
 ) -> MCResult:
     """Puttable bond price under Hull-White short-rate MC.
@@ -1143,7 +1196,9 @@ def _puttable_bond_hw(
         n_steps: Number of time steps (default 100).
         smoothing: Sigmoid width for the exercise indicator, in currency
             units.  Defaults to 0.1 % of each put price.
+        discount_curve: Curve to discount on; re-fits the model to it.
     """
+    model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
 
@@ -1211,6 +1266,7 @@ def _fixed_bond_g2pp(
     key: jax.Array,
     T: float | None = None,
     n_steps: int = 100,
+    discount_curve=None,
     **kwargs,
 ) -> MCResult:
     """Fixed-rate bond price under G2++ two-factor short-rate MC.
@@ -1218,7 +1274,9 @@ def _fixed_bond_g2pp(
     Optional market args:
         T: Horizon in year fractions (defaults to the last payment date).
         n_steps: Number of time steps (default 100).
+        discount_curve: Curve to discount on; re-fits the model to it.
     """
+    model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
 
@@ -1245,6 +1303,8 @@ def _floating_bond_g2pp(
     key: jax.Array,
     T: float | None = None,
     n_steps: int = 100,
+    discount_curve=None,
+    forward_curve=None,
     **kwargs,
 ) -> MCResult:
     """Floating-rate note price under G2++ two-factor short-rate MC.
@@ -1252,11 +1312,16 @@ def _floating_bond_g2pp(
     Uses the same par-at-reset floating-leg replication as the Hull-White
     recipe: the floating coupons plus principal collapse to
     ``face * D(0, t_settle)`` and the fixed spread is discounted explicitly.
+    The dual-curve form (see :func:`_floating_bond_hw`) is identical.
 
     Optional market args:
         T: Horizon in year fractions (defaults to maturity).
         n_steps: Number of time steps (default 100).
+        discount_curve: Curve to discount on; re-fits the model to it.
+        forward_curve: Projection curve for the floating coupons. ``None``
+            (the default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
     face = instrument.face_value
@@ -1267,18 +1332,29 @@ def _floating_bond_g2pp(
     )
     taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
     spread_amounts = instrument.spread * face * taus
+    basis = tenor_basis(
+        model.initial_curve, forward_curve, prev_dates, instrument.payment_dates
+    )
 
     t_settle = year_fraction(ref, instrument.settlement_date, day_count)
+    prev_times = year_fraction(ref, prev_dates, day_count)
     if T is None:
         T = cf_times[-1]
 
     result = generate_g2pp_paths(
         model, T=T, n_steps=n_steps, n_paths=config.n_paths, key=key,
     )
-    settle_sdf = _g2pp_path_sdf(result, t_settle[None], T, n_steps)[:, 0]
     spread_sdf = _g2pp_path_sdf(result, cf_times, T, n_steps)
 
-    pv = face * settle_sdf + jnp.sum(spread_amounts[None, :] * spread_sdf, axis=1)
+    if basis is None:
+        settle_sdf = _g2pp_path_sdf(result, t_settle[None], T, n_steps)[:, 0]
+        pv = face * settle_sdf
+    else:
+        reset_sdf = _g2pp_path_sdf(result, prev_times, T, n_steps)
+        floating = jnp.sum(basis[None, :] * reset_sdf - spread_sdf, axis=1)
+        pv = face * (floating + spread_sdf[:, -1])
+
+    pv = pv + jnp.sum(spread_amounts[None, :] * spread_sdf, axis=1)
     price, stderr = discounted_mean_and_stderr(
         pv, jnp.ones((), dtype=pv.dtype), config.n_paths
     )
@@ -1294,6 +1370,8 @@ def _swaption_g2pp(
     key: jax.Array,
     T: float | None = None,
     n_steps: int = 100,
+    discount_curve=None,
+    forward_curve=None,
     **kwargs,
 ) -> MCResult:
     """European swaption price under G2++ two-factor short-rate MC.
@@ -1304,10 +1382,18 @@ def _swaption_g2pp(
     discounted by the path-wise money-market numeraire.  This provides the
     MC <-> analytic triangulation for :func:`g2pp_swaption_price`.
 
+    With a distinct projection curve the same expression holds with the
+    constant and the cash-flow vector adjusted by the frozen tenor basis
+    (:func:`~valax.pricing.multicurve.apply_swap_basis`).
+
     Optional market args:
         T: Horizon in year fractions (defaults to the option expiry).
         n_steps: Number of time steps (default 100).
+        discount_curve: Curve the swap discounts on; re-fits the model to it.
+        forward_curve: Projection curve for the floating leg. ``None`` (the
+            default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
 
@@ -1320,6 +1406,15 @@ def _swaption_g2pp(
     taus = year_fraction(starts, instrument.fixed_dates, day_count)
     cashflows = instrument.strike * taus
     cashflows = cashflows.at[-1].add(1.0)
+    float_start, cashflows = apply_swap_basis(
+        cashflows,
+        swap_leg_basis(
+            model.initial_curve,
+            forward_curve,
+            instrument.expiry_date,
+            instrument.fixed_dates,
+        ),
+    )
 
     if T is None:
         T = expiry_time
@@ -1338,7 +1433,7 @@ def _swaption_g2pp(
     )                                                    # (n_paths, n_fixed)
     coupon_bond = jnp.sum(cashflows[None, :] * zcb, axis=1)
 
-    swap_value = 1.0 - coupon_bond            # payer swap value at expiry
+    swap_value = float_start - coupon_bond    # payer swap value at expiry
     if not instrument.is_payer:
         swap_value = -swap_value
     payoff = jnp.maximum(swap_value, 0.0)
@@ -1397,6 +1492,8 @@ def _cms_spread_swap_g2pp(
     key: jax.Array,
     T: float | None = None,
     n_steps: int = 100,
+    discount_curve=None,
+    forward_curve=None,
     **kwargs,
 ) -> MCResult:
     """CMS-spread swap (steepener / flattener) under G2++ two-factor MC.
@@ -1410,7 +1507,15 @@ def _cms_spread_swap_g2pp(
     Optional market args:
         T: Horizon in year fractions (defaults to the last payment date).
         n_steps: Number of time steps (default 100).
+        discount_curve: Curve the coupons discount on; re-fits the model.
+        forward_curve: **Not supported yet.** The CMS rates are rebuilt from
+            the model's own bond strip, so a distinct projection curve would
+            be silently ignored; a distinct curve is rejected instead.
     """
+    model = with_discount_curve(model, discount_curve)
+    require_single_curve(
+        model.initial_curve, forward_curve, "The G2++ CMS-spread MC recipe"
+    )
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
 

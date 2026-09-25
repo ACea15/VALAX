@@ -330,6 +330,19 @@ def _format_available() -> str:
 # ── Legacy back-end bridging ─────────────────────────────────────────
 
 
+#: Market arguments forwarded only to recipes that name them **explicitly**.
+#:
+#: ``spot`` may go to a recipe that merely declares ``**market_args`` — it is
+#: the one argument the legacy convention always meant.  The curves may not:
+#: nearly every rates recipe carries a ``**kwargs``, so a var-kwargs match
+#: would hand a projection curve to a recipe that silently drops it, which is
+#: a wrong price with no signal.  Requiring the parameter by name makes
+#: multi-curve support an opt-in property of each recipe's signature, and
+#: :func:`valax.pricing.multicurve.require_single_curve` covers the payoffs
+#: that opt in only to reject.
+_EXPLICIT_ONLY_MARKET_ARGS = ("discount_curve", "forward_curve")
+
+
 def _recipe_market_args(recipe: Callable, resolved: ResolvedMarket) -> dict:
     """Market arguments a legacy recipe accepts, taken from the market.
 
@@ -337,6 +350,11 @@ def _recipe_market_args(recipe: Callable, resolved: ResolvedMarket) -> dict:
     they do not all accept the same ones (the PDE equity recipes take a
     bare ``spot`` and nothing else).  Rather than guess, the recipe's own
     signature is inspected and only what it declares is passed.
+
+    This is also how the resolved **discount** and **projection** curves
+    reach the MC/PDE back-ends (ontology report §12, P5.1a): a rates recipe
+    opts into multi-curve by naming ``discount_curve`` / ``forward_curve``
+    in its signature, and recipes that do not are left exactly as they were.
 
     Args:
         recipe: The registered recipe function.
@@ -348,17 +366,21 @@ def _recipe_market_args(recipe: Callable, resolved: ResolvedMarket) -> dict:
     candidates = {}
     if resolved.spot is not None:
         candidates["spot"] = resolved.spot
-    if not candidates:
-        return {}
+    candidates["discount_curve"] = resolved.discount_curve
+    candidates["forward_curve"] = resolved.forward_curve
 
     parameters = inspect.signature(recipe).parameters
     accepts_var_kwargs = any(
         p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
     )
+
+    def wanted(name: str) -> bool:
+        if name in _EXPLICIT_ONLY_MARKET_ARGS:
+            return name in parameters
+        return accepts_var_kwargs or name in parameters
+
     return {
-        name: value
-        for name, value in candidates.items()
-        if accepts_var_kwargs or name in parameters
+        name: value for name, value in candidates.items() if wanted(name)
     }
 
 

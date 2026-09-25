@@ -243,6 +243,57 @@ See [Hull-White Finite Differences](../theory/hull-white-pde.md) for the
 derivation and validation, and [Callable Bonds](callable-bonds.md) for how the
 tree, PDE and Monte-Carlo engines compare on the same instrument.
 
+## 5.7 Multi-curve: OIS discounting with a separate projection curve
+
+Every Hull-White and G2++ recipe takes two optional market arguments,
+`discount_curve` and `forward_curve`:
+
+```python
+from valax.pricing.pde import PDEConfig, pde_price_dispatch
+
+config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
+result = pde_price_dispatch(
+    payer_swaption, hw_model, config,
+    discount_curve=ois,          # collateral / OIS discounting
+    forward_curve=sofr_3m,       # tenor curve the floating leg projects off
+)
+```
+
+Or, through the unified front door, by letting the instrument name its own
+curves — `price(...)` resolves `discount_id` / `forward_id` on the
+`MarketState` and forwards them for you:
+
+```python
+from valax.core.market_state import MarketState
+from valax.core.pricing import price
+from valax.curves.graph import CurveGraph
+
+swaption = Swaption(..., discount_id="USD.SOFR.OIS", forward_id="USD.LIBOR.3M")
+market = MarketState(
+    curves=CurveGraph(curves={"USD.SOFR.OIS": ois, "USD.LIBOR.3M": sofr_3m})
+)
+result = price(swaption, hw_model, market, method="pde", config=config)
+```
+
+Two mechanisms are at work, and they are different in kind:
+
+- **Discounting is a re-fit, not a re-weighting.** Hull-White and G2++ are
+  exact-fit models, so their `initial_curve` *is* the discount curve; passing
+  `discount_curve` re-fits \(\alpha\) (resp. \(\varphi\)) to it via
+  `valax.pricing.multicurve.with_discount_curve`. The calibrated dynamics are
+  untouched.
+- **Projection is a deterministic overlay.** A one-factor short rate produces
+  one term structure, so the tenor basis is *frozen* at its time-zero value
+  and enters each payoff as a constant multiplier. See
+  [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md) for the
+  derivation and — importantly — for what it cannot price (basis volatility).
+
+Both default to `None`, which is the single-curve case: the recipes then run
+the arithmetic they always ran, so single-curve prices are unchanged
+bit-for-bit. The G2++ CMS-spread recipe rebuilds its par swap rates from the
+model's own bond strip and therefore **raises** on a distinct projection curve
+rather than silently ignoring it.
+
 ## 6. When to use PDE
 
 - **Low-dimensional problems** (single underlying, or one spot + one variance
@@ -262,6 +313,8 @@ single asset, the [binomial tree](lattice.md) is a lightweight alternative.
   early-exercise rationale, delivery phases.
 - [Hull-White Finite Differences](../theory/hull-white-pde.md) — the short-rate
   PDE: state variable, boundary treatment, discrete events, validation.
+- [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md) — the frozen
+  tenor-basis overlay behind `discount_curve` / `forward_curve`.
 - [Numerical Pitfalls](../architecture/numerical-pitfalls.md) — a register of
   discretisation bugs this solver has actually shipped and fixed, each with the
   debugging playbook that localised it. Read before adding a scheme or a

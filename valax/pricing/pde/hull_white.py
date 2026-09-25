@@ -63,6 +63,23 @@ convergence is visible rather than swamped. Exercise dates are still snapped —
 an exercise decision has to happen *at* a time level — but that error is
 second order, because the exercise boundary is smooth in time.
 
+Multi-curve
+-----------
+Every recipe here accepts two optional market arguments, supplied
+automatically by the unified :func:`valax.core.pricing.price` from the
+instrument's ``discount_id`` / ``forward_id`` selectors:
+
+``discount_curve``
+    The curve the trade discounts on. Hull-White *is* an exact-fit
+    short-rate model, so honouring it means re-fitting the model to that
+    curve (:func:`~valax.pricing.multicurve.with_discount_curve`).
+``forward_curve``
+    The projection curve for floating legs and rate fixings, handled by the
+    frozen tenor-basis overlay of :mod:`valax.pricing.multicurve`.
+
+Both default to ``None``, which is the single-curve case and leaves the
+arithmetic — and therefore the price — untouched bit-for-bit.
+
 Registered recipes
 ------------------
 ================================  ==================================
@@ -106,6 +123,11 @@ from valax.pricing.pde.coefficients import hw_operator_stack
 from valax.pricing.pde.config import PDEConfig
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.grids import Grid1D, centred_state_grid, read_off_1d
+from valax.pricing.multicurve import (
+    swap_leg_basis,
+    tenor_basis,
+    with_discount_curve,
+)
 from valax.pricing.pde.rates_payoffs import (
     caplet_fixing_values,
     caplet_values_by_level,
@@ -333,6 +355,7 @@ def _swap_tail_values(
     notional: Float[Array, ""],
     day_count: str,
     is_payer: bool,
+    basis: Float[Array, " n_cf"] | None = None,
 ) -> Float[Array, " n"]:
     r"""Value of the underlying swap at ``exercise_date``, at every grid node.
 
@@ -351,6 +374,9 @@ def _swap_tail_values(
         notional: Notional principal.
         day_count: Day-count convention.
         is_payer: ``True`` for a payer swap, ``False`` for a receiver.
+        basis: Per-period frozen tenor basis when the floating leg projects
+            off a curve distinct from the discount curve, else ``None``
+            (see :func:`~valax.pricing.multicurve.swap_leg_basis`).
 
     Returns:
         The swap value at each grid node.
@@ -369,6 +395,7 @@ def _swap_tail_values(
         notional,
         day_count,
         is_payer,
+        basis,
     )
 
 
@@ -378,7 +405,9 @@ def _swap_tail_values(
 
 
 @register(FixedRateBond, HullWhiteModel)
-def _fixed_rate_bond_hw(*, instrument, model, config) -> PDEResult:
+def _fixed_rate_bond_hw(
+    *, instrument, model, config, discount_curve=None
+) -> PDEResult:
     """Option-free fixed-rate bond under Hull-White — the scheme's calibration.
 
     The bond has no optionality, so the answer is fixed by the initial curve
@@ -386,7 +415,12 @@ def _fixed_rate_bond_hw(*, instrument, model, config) -> PDEResult:
     sharpest available check on the solver itself: any error here is pure
     numerics (mesh, time-stepping, or the exact-fit shift), with no model risk
     mixed in.
+
+    Optional market args:
+        discount_curve: Curve to discount on; re-fits the model to it.
+            Defaults to the model's own ``initial_curve``.
     """
+    model = with_discount_curve(model, discount_curve)
     horizon = _bond_horizon(instrument, model)
 
     def build(grid: Grid1D):
@@ -402,16 +436,21 @@ def _fixed_rate_bond_hw(*, instrument, model, config) -> PDEResult:
 
 
 @register(CallableBond, HullWhiteModel)
-def _callable_bond_hw(*, instrument, model, config) -> PDEResult:
+def _callable_bond_hw(
+    *, instrument, model, config, discount_curve=None
+) -> PDEResult:
     """Callable fixed-rate bond under Hull-White.
 
     The issuer redeems at ``call_price`` whenever the ex-coupon continuation
     value exceeds it, which caps the bond's value to the holder below that of
     an otherwise identical bullet.
+
+    Optional market args:
+        discount_curve: Curve to discount on; re-fits the model to it.
     """
     price = _callable_style_price(
         instrument,
-        model,
+        with_discount_curve(model, discount_curve),
         config,
         instrument.call_dates,
         instrument.call_prices,
@@ -421,16 +460,21 @@ def _callable_bond_hw(*, instrument, model, config) -> PDEResult:
 
 
 @register(PuttableBond, HullWhiteModel)
-def _puttable_bond_hw(*, instrument, model, config) -> PDEResult:
+def _puttable_bond_hw(
+    *, instrument, model, config, discount_curve=None
+) -> PDEResult:
     """Puttable fixed-rate bond under Hull-White.
 
     The holder redeems at ``put_price`` whenever the ex-coupon continuation
     value falls below it, which floors the bond's value above that of an
     otherwise identical bullet.
+
+    Optional market args:
+        discount_curve: Curve to discount on; re-fits the model to it.
     """
     price = _callable_style_price(
         instrument,
-        model,
+        with_discount_curve(model, discount_curve),
         config,
         instrument.put_dates,
         instrument.put_prices,
@@ -440,7 +484,9 @@ def _puttable_bond_hw(*, instrument, model, config) -> PDEResult:
 
 
 @register(Swaption, HullWhiteModel)
-def _swaption_hw(*, instrument, model, config) -> PDEResult:
+def _swaption_hw(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """European swaption under Hull-White via finite differences.
 
     Redundant with the exact Jamshidian decomposition in
@@ -448,7 +494,19 @@ def _swaption_hw(*, instrument, model, config) -> PDEResult:
     deliberately so: it shares the entire discretisation with the Bermudan
     recipe below, which has no closed form, so agreeing with Jamshidian to grid
     tolerance validates that machinery against an exact answer.
+
+    Optional market args:
+        discount_curve: Curve the swap discounts on; re-fits the model to it.
+        forward_curve: Projection curve for the floating leg. ``None`` (the
+            default) projects off the discount curve — the single-curve case.
     """
+    model = with_discount_curve(model, discount_curve)
+    basis = swap_leg_basis(
+        model.initial_curve,
+        forward_curve,
+        instrument.expiry_date,
+        instrument.fixed_dates,
+    )
     horizon = year_fraction(
         model.initial_curve.reference_date,
         instrument.expiry_date,
@@ -465,6 +523,7 @@ def _swaption_hw(*, instrument, model, config) -> PDEResult:
             instrument.notional,
             instrument.day_count,
             instrument.is_payer,
+            basis,
         )
         return jnp.maximum(swap, 0.0), None
 
@@ -485,7 +544,9 @@ def _hw_discount_factor(model, grid):
 
 
 @register(Caplet, HullWhiteModel)
-def _caplet_hw(*, instrument, model, config) -> PDEResult:
+def _caplet_hw(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """Caplet / floorlet under Hull-White via finite differences.
 
     A caplet is a European option on the single accrual-end zero-coupon bond
@@ -493,17 +554,34 @@ def _caplet_hw(*, instrument, model, config) -> PDEResult:
     date and the terminal condition is the analytic ZCB payoff at every node;
     the sweep then discounts it home. Validated against the closed-form
     :func:`~valax.pricing.analytic.hull_white_swaptions.hw_zcb_option_price`.
+
+    Optional market args:
+        discount_curve: Curve the payment discounts on; re-fits the model.
+        forward_curve: Projection curve for the fixing. ``None`` (the
+            default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     reference_date = model.initial_curve.reference_date
     day_count = instrument.day_count
     horizon = year_fraction(reference_date, instrument.fixing_date, day_count)
     end_time = year_fraction(reference_date, instrument.end_date, day_count)
     tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
+    basis = tenor_basis(
+        model.initial_curve,
+        forward_curve,
+        instrument.start_date,
+        instrument.end_date,
+    )
 
     def build(grid: Grid1D):
         bond = _hw_discount_factor(model, grid)(horizon, end_time)
         terminal = caplet_fixing_values(
-            bond, instrument.strike, tau, instrument.notional, instrument.is_cap
+            bond,
+            instrument.strike,
+            tau,
+            instrument.notional,
+            instrument.is_cap,
+            basis,
         )
         return terminal, None
 
@@ -511,19 +589,33 @@ def _caplet_hw(*, instrument, model, config) -> PDEResult:
 
 
 @register(Cap, HullWhiteModel)
-def _cap_hw(*, instrument, model, config) -> PDEResult:
+def _cap_hw(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """Cap / floor under Hull-White via a single finite-difference sweep.
 
     The strip prices in one backward pass: each caplet's fixing-date value is
     injected at its (snapped) fixing level and discounted home, so the cost is
     one solve to the last fixing rather than one solve per caplet.
+
+    Optional market args:
+        discount_curve: Curve the payments discount on; re-fits the model.
+        forward_curve: Projection curve for the fixings. ``None`` (the
+            default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     reference_date = model.initial_curve.reference_date
     day_count = instrument.day_count
     horizon = year_fraction(
         reference_date, instrument.fixing_dates[-1], day_count
     )
     dt = horizon / config.n_time
+    basis = tenor_basis(
+        model.initial_curve,
+        forward_curve,
+        instrument.start_dates,
+        instrument.end_dates,
+    )
 
     def build(grid: Grid1D):
         caplet_vals = caplet_values_by_level(
@@ -539,6 +631,7 @@ def _cap_hw(*, instrument, model, config) -> PDEResult:
             dt,
             config.n_time,
             (grid.n,),
+            basis,
         )
         terminal = caplet_vals[config.n_time]
         return terminal, lambda level, values: values + caplet_vals[level]
@@ -547,7 +640,9 @@ def _cap_hw(*, instrument, model, config) -> PDEResult:
 
 
 @register(BermudanSwaption, HullWhiteModel)
-def _bermudan_swaption_hw(*, instrument, model, config) -> PDEResult:
+def _bermudan_swaption_hw(
+    *, instrument, model, config, discount_curve=None, forward_curve=None
+) -> PDEResult:
     """Bermudan swaption under Hull-White via finite differences.
 
     The headline instrument for this pricer: a Bermudan swaption has no closed
@@ -562,7 +657,13 @@ def _bermudan_swaption_hw(*, instrument, model, config) -> PDEResult:
 
     The horizon is the **last** exercise date; the option pays nothing before
     exercise, so between exercise dates the sweep is pure discounting.
+
+    Optional market args:
+        discount_curve: Curve the swap discounts on; re-fits the model to it.
+        forward_curve: Projection curve for the floating leg. ``None`` (the
+            default) projects off the discount curve.
     """
+    model = with_discount_curve(model, discount_curve)
     reference_date = model.initial_curve.reference_date
     day_count = instrument.day_count
     n_exercise = instrument.exercise_dates.shape[0]
@@ -574,6 +675,17 @@ def _bermudan_swaption_hw(*, instrument, model, config) -> PDEResult:
     levels = snap_to_levels(
         instrument.exercise_dates, reference_date, day_count, dt, config.n_time
     )
+    # Each exercise enters a different (shorter) tail swap, so each needs its
+    # own basis strip over that tail's accrual periods.
+    bases = [
+        swap_leg_basis(
+            model.initial_curve,
+            forward_curve,
+            instrument.exercise_dates[e],
+            instrument.fixed_dates[e:],
+        )
+        for e in range(n_exercise)
+    ]
 
     def tail_values(grid: Grid1D) -> Float[Array, "n_exercise n"]:
         # ``n_exercise`` is a static shape, so this Python loop unrolls at
@@ -588,6 +700,7 @@ def _bermudan_swaption_hw(*, instrument, model, config) -> PDEResult:
                 instrument.notional,
                 day_count,
                 instrument.is_payer,
+                bases[e],
             )
             for e in range(n_exercise)
         ])

@@ -1,6 +1,6 @@
 # Pricing Ontology & Unified Signature — Migration Report (Design)
 
-> **Status:** **P1–P5 shipped ✅ (P5.1 tracked).** The ontology, signatures,
+> **Status:** **P1–P5 and P5.1 shipped ✅.** The ontology, signatures,
 > invariants, and sensitivity stack below are the agreed target architecture;
 > the open questions of §11 are resolved. P2 (the core types `MarketState`,
 > `resolve`, `PricingResult`, and the unified `price(...)` registry, landed as
@@ -8,10 +8,12 @@
 > instruments), P4 (unified market/model/contract greeks in
 > `valax/greeks/market_greeks.py`), and P5 (the model↔market id-binding on the
 > short-rate models — `curve_id`, `from_market`, `with_market_curve`) are
-> implemented and tested — no pricer rewrites, nothing breaking. The remaining
-> full curve *de-embedding* (drop `initial_curve`, resolve at price time) is
-> tracked as **P5.1**, since it needs the MC/PDE dispatch to accept a market.
-> See §8 for the phase table.
+> implemented and tested — no pricer rewrites, nothing breaking. **P5.1** then
+> carried the resolved curves into the MC and PDE dispatch and gave the
+> Hull-White / G2++ recipes a genuine discount/projection split via the
+> deterministic tenor-basis overlay `valax/pricing/multicurve.py` (§12).
+> `initial_curve` remains embedded on the models as the *default* discount
+> curve, now overridable per trade. See §8 for the phase table.
 >
 > **Author intent:** unify the pricing/risk call conventions behind one
 > forward-carried contract that scales as instruments, models, and
@@ -309,9 +311,10 @@ bump, given field type/method)*.
 | **P2** ✅ | Core types + unified dispatch (thin, adapters only). `valax/core/market_state.py` (`MarketState`), `valax/core/pricing.py` (`PricingResult`, unified registry, `price(...)`), `valax/core/resolve.py`, `valax/core/adapters.py`. | **Shipped, no pricer rewrites.** Analytic/lattice pricers registered as adapters; the MC and PDE registries are *bridged* (a recipe registered there is reachable through `price` immediately — they cannot drift). `model=None` covers curve-discounted instruments. Tests: `tests/test_core/`. |
 | **P3** ✅ | Static market-selector fields on instruments, defaulted to the sentinel. | **Shipped.** `discount_id`/`forward_id` on all rates + bond classes, `underlying_id` on single-underlying equity options (multi-asset baskets + fx/credit deferred). Read by `resolve` via `getattr` defaults, so single-curve trades are unaffected (§5); generalises `curves_touched`. Tests: `tests/test_core/test_pricing.py`. |
 | **P4** ✅ | Unified greeks + quote/model sensitivities. `valax/greeks/market_greeks.py`. | **Shipped.** `market_gradient`/`model_gradient` (∇ over `price`), `spot_delta`, `curve_pillar_deltas` + `bucketed_curve_deltas` (the `J_bucket` leg via `risk.bucketing.aggregate`), `dual_delta`, and `theta` with the autodiff (analytic/lattice) vs FD-bump (PDE/MC) policy of §6.2; rates valuation-date-roll theta raises pending P4.1. Scalar `autodiff.py` untouched. Tests: `tests/test_greeks/test_market_greeks.py`. |
-| **P5** ✅ | Model↔market id-binding on the short-rate models. `models/hull_white.py`, `g2pp.py`. | **Shipped (additive).** Static `curve_id` + `from_market(market, …, curve_id)` (binds & records the linkage) + `with_market_curve(market)` re-binder; `initial_curve` stays embedded so every existing pricer/test is untouched. Tests: `tests/test_models/test_market_binding.py`. **P5.1** (drop `initial_curve`, resolve at price time) deferred — needs MC/PDE dispatch to take a market. |
+| **P5** ✅ | Model↔market id-binding on the short-rate models. `models/hull_white.py`, `g2pp.py`. | **Shipped (additive).** Static `curve_id` + `from_market(market, …, curve_id)` (binds & records the linkage) + `with_market_curve(market)` re-binder; `initial_curve` stays embedded so every existing pricer/test is untouched. Tests: `tests/test_models/test_market_binding.py`. |
+| **P5.1** ✅ | Multi-curve in the MC/PDE solvers. `valax/pricing/multicurve.py` (new), `valax/core/pricing.py` (bridge), `pde/rates_payoffs.py`, `pde/{hull_white,g2pp}.py`, `mc/recipes.py`. | **Shipped (additive).** The dispatch bridge forwards the resolved `discount_curve`/`forward_curve` to any recipe that *names* them; Hull-White and G2++ honour the discount curve by re-fitting and the projection curve through a frozen deterministic tenor basis. `None` is a trace-time branch, so single-curve prices are bit-for-bit unchanged. Cheyette/LMM and the CMS-spread recipes stay single-curve (the latter refuse a distinct projection curve). Full §12. Tests: `tests/test_pricing/test_multicurve.py`, `tests/test_{pde,mc}/test_multicurve.py`. |
 
-**Dependency order:** P1 → P2 → {P3, P4} → P5. P3 and P4 can proceed in
+**Dependency order:** P1 → P2 → {P3, P4} → P5 → P5.1. P3 and P4 can proceed in
 parallel once P2 lands.
 
 ---
@@ -332,6 +335,10 @@ parallel once P2 lands.
   lattice pricers, plus the model-free (`model=None`) curve-discounted route.
 - ✅ `valax/greeks/market_greeks.py` — market/model/contract greeks + theta
   policy (P4).
+- ✅ `valax/pricing/multicurve.py` — the deterministic tenor-basis overlay
+  (`with_discount_curve`, `tenor_basis`, `swap_leg_basis`, `apply_swap_basis`,
+  `require_single_curve`) behind the MC/PDE discount/projection split (P5.1).
+- ✅ `docs/theory/multi-curve-short-rate.md` — the modelling note for P5.1.
 - Mirrored tests: ✅ `tests/test_core/test_pricing.py`,
   ✅ `tests/test_core/test_market_state.py`, ✅ `tests/test_core/test_resolve.py`,
   ✅ `tests/test_greeks/test_market_greeks.py`.
@@ -446,11 +453,17 @@ wide thing pluggable.*
 
 ---
 
-## 12. Follow-up plan — multi-curve in the MC/PDE solvers (P5.1)
+## 12. Multi-curve in the MC/PDE solvers (P5.1) — **shipped ✅**
 
-**Status:** 📋 planned, not started.
+**Status:** **shipped** for Hull-White and G2++ (PDE *and* MC), additively and
+non-breaking. The overlay lives in `valax/pricing/multicurve.py`; the theory is
+`docs/theory/multi-curve-short-rate.md`; tests are
+`tests/test_pricing/test_multicurve.py`, `tests/test_pde/test_multicurve.py`
+and `tests/test_mc/test_multicurve.py`. Cheyette, LMM, and the CMS-spread
+recipes remain single-curve — the CMS recipes *reject* a distinct projection
+curve rather than ignoring it (§12.8).
 
-### 12.1 Where multi-curve is / isn't wired today
+### 12.1 Where multi-curve is / isn't wired
 
 - ✅ **Analytic** rates pricers consume the dual curves. The model-free
   adapters call `swap_price / ois_swap_price / floating_rate_bond_price`
@@ -458,13 +471,14 @@ wide thing pluggable.*
   (`valax/core/adapters.py`), and the standalone `graph_pricing.py`
   `*_from_graph` wrappers do the same. So OIS-discounting + a distinct
   tenor projection curve works through `price(...)` for the analytic path.
-- ❌ **MC and PDE** solvers are single-curve. Grepping
-  `valax/pricing/{mc,pde}/` for `CurveGraph | forward_curve | forward_id |
-  MarketState` returns nothing, and the unified bridge's
-  `_recipe_market_args` forwards **only `spot`** — the resolved discount /
-  forward curves never reach a recipe. Rates products priced via HW/G2PP
-  PDE or MC discount **and** project off the model's single embedded
-  `initial_curve`.
+- ✅ **MC and PDE**, *since P5.1*. Previously the unified bridge's
+  `_recipe_market_args` forwarded **only `spot`**, so the resolved curves
+  never reached a recipe and HW/G2PP products discounted **and** projected
+  off the model's single embedded `initial_curve`. Now a recipe opts in by
+  naming `discount_curve` / `forward_curve` in its signature, and the bridge
+  forwards them from the `ResolvedMarket`.
+- ⛔️ **Cheyette / LMM** recipes are untouched and remain single-curve: they
+  do not declare the parameters, so the bridge does not forward them.
 
 ### 12.2 Why this is more than plumbing
 
@@ -479,58 +493,102 @@ treat the projection-minus-discount basis as a deterministic spread the
 stochastic factors do not touch. (A fully stochastic-basis multi-curve
 short-rate / HJM setup is out of scope for P5.1.)
 
-### 12.3 Phased sub-tasks
+### 12.3 What shipped
 
-- **P5.1a — dispatch takes curves (plumbing, no behaviour change).**
-  Extend `mc_price_dispatch` / `pde_price_dispatch` (and the unified
-  `_price_via_legacy` bridge) to forward `discount_curve` /
-  `forward_curve` from the `ResolvedMarket` to any recipe whose signature
-  declares them — the signature-inspection in `_recipe_market_args`
-  already exists, so recipes that don't accept them are unaffected.
-- **P5.1b — discount/projection split in the rates recipes.** In the
-  HW/G2PP PDE (`pde/hull_white.py`, `pde/g2pp.py`) and MC
-  (`mc/recipes.py`) rates recipes, discount on the passed
-  `discount_curve` (default = `model.initial_curve`, preserving current
-  single-curve results **bit-for-bit**) and project floating legs off
-  `forward_curve` (default = the model curve).
-- **P5.1c — deterministic tenor-basis + docs/tests.** Add the basis
-  overlay, the theory note, and the solver-guide recipe.
+- **P5.1a — dispatch takes curves.** `_recipe_market_args`
+  (`valax/core/pricing.py`) now forwards `discount_curve` /
+  `forward_curve` from the `ResolvedMarket`, but **only to a recipe that
+  names them explicitly**. A `**market_args` catch-all deliberately does
+  *not* qualify: nearly every rates recipe carries one, so a var-kwargs
+  match would hand a projection curve to a recipe that silently drops it —
+  a wrong price with no signal. Opting in is a property of the signature.
+- **P5.1b/c — the overlay.** `valax/pricing/multicurve.py`:
+  - `with_discount_curve(model, curve)` — re-fits an exact-fit short-rate
+    model to the trade's discount curve (the price-time analogue of
+    `with_market_curve`); returns the model *unchanged* for `None` or for
+    the curve it already carries, which is what makes single-curve
+    bit-for-bit rather than merely close.
+  - `tenor_basis(...)` / `swap_leg_basis(...)` — the frozen multiplicative
+    basis `b = (F(T_s)/F(T_e)) / (D(T_s)/D(T_e))`, returning `None` (not a
+    vector of ones) in the single-curve case.
+  - `apply_swap_basis(...)` — the one implementation of the dual-curve
+    floating-leg algebra, shared by the PDE payoff layer and the MC
+    swaption recipes.
+  - `require_single_curve(...)` — the explicit refusal for payoffs that
+    cannot project yet.
+  `pde/rates_payoffs.py` gained an optional `basis=` on `swap_tail_values`,
+  `caplet_fixing_values` and `caplet_values_by_level`; every HW/G2PP recipe
+  in `pde/{hull_white,g2pp}.py` and `mc/recipes.py` was wired.
 
-### 12.4 Target modules
+### 12.4 Modules touched
 
-`valax/pricing/mc/dispatch.py`, `valax/pricing/pde/dispatch.py`,
-`valax/core/pricing.py` (bridge), `valax/pricing/pde/{hull_white,g2pp}.py`,
-`valax/pricing/mc/recipes.py`; tests under `tests/test_pde/`,
-`tests/test_mc/`.
+`valax/pricing/multicurve.py` (new), `valax/core/pricing.py` (bridge),
+`valax/pricing/pde/rates_payoffs.py`,
+`valax/pricing/pde/{hull_white,g2pp}.py`, `valax/pricing/mc/recipes.py`,
+plus docstring contracts on `valax/pricing/{mc,pde}/dispatch.py`. Tests:
+`tests/test_pricing/test_multicurve.py`, `tests/test_pde/test_multicurve.py`,
+`tests/test_mc/test_multicurve.py`.
 
 ### 12.5 Definition of done (per `AGENTS.md`)
 
-Coverage matrix note if a method column changes; solver guides
-(`guide/monte-carlo.md`, `guide/pde.md`) gain the multi-curve recipe;
-roadmap line; theory note on the deterministic-basis approximation;
-`pytest` + `mkdocs build --strict` green.
+✅ theory page `docs/theory/multi-curve-short-rate.md` (nav-wired);
+✅ solver guides `guide/pde.md` §5.7 and `guide/monte-carlo.md` §2 gained
+the multi-curve recipe; ✅ roadmap Tier 2.1 + the Tier 5.4 status note;
+✅ `docs/api/pricing.md` autodoc for the new public symbols plus a
+multi-curve note on the short-rate engine coverage matrix; coverage matrix
+(`applications/instrument-pricing.md`) unchanged — no instrument or method
+column moved; ✅ `pytest` and `mkdocs build --strict` green.
 
-### 12.6 Acceptance criteria
+### 12.6 Acceptance criteria — results
 
-1. **Single-curve non-regression (hard gate):** with `discount_curve ==
-   forward_curve` (or both defaulted to `model.initial_curve`), every
-   HW/G2PP PDE and MC price equals the current single-curve number to
-   `atol≈1e-12` (bit-for-bit where the code path is unchanged).
-2. **Discounting correctness:** a linear swap's NPV under the HW-PDE /
-   MC path with an OIS discount curve distinct from the projection curve
-   equals the **analytic dual-curve** `swap_price(swap, ois, proj)` to
-   MC/PDE discretisation tolerance (a swap NPV is model-independent, so
-   this isolates the discount/projection split from the model).
-3. **Optionality:** a payer swaption under HW with OIS≠projection prices
-   between its single-curve-OIS and single-curve-projection bounds and
-   moves monotonically in the basis.
+1. **Single-curve non-regression (hard gate) ✅.** `basis=None` and
+   `discount_curve=None` are *trace-time* branches, so the single-curve
+   code path is literally the pre-existing one. Asserted with exact
+   equality (not a tolerance) for the HW/G2PP PDE swaption, the HW cap, and
+   the HW/G2PP MC FRN; the ~600 existing rates tests are unchanged.
+2. **Discounting / projection correctness ✅.** Payer-minus-receiver
+   swaption parity *is* the forward swap value and is model-independent, so
+   it isolates the discount/projection split exactly; it matches the
+   textbook dual-curve NPV computed straight off the two curves to
+   `rel ≈ 1e-4` under both the HW and G2++ PDEs. Independently, the HW and
+   G2++ MC floating-rate note — a linear product — reproduces the analytic
+   `floating_rate_bond_price(bond, ois, proj)` within sampling error, and
+   its *basis increment* (dual minus single, common random numbers) matches
+   the analytic increment to `rel ≈ 2e-3`. An option-free bond repriced on
+   a distinct discount curve matches `fixed_rate_bond_price` on that curve,
+   which pins down the model re-fit.
+3. **Optionality ✅, with a correction to the criterion as originally
+   written.** The payer swaption rises monotonically in the basis and
+   collapses onto the single-curve price at zero basis — but it is **not**
+   bracketed by the two single-curve prices. With the projection curve above
+   OIS, the dual-curve trade keeps the *higher* OIS discount factors and
+   gains the *higher* projected forwards, so both effects push the same way
+   and the dual-curve price exceeds both single-curve legs. The test asserts
+   that instead.
 
-### 12.7 Risks
+### 12.7 Risks (retired)
 
-Touches the MC/PDE recipe internals and the dispatch contract — the
-single-curve non-regression gate (12.6.1) is the guard. Keep every new
-curve argument optional and defaulted so existing callers and the ~600
-rates tests are untouched.
+The change touched the MC/PDE recipe internals and the dispatch contract;
+the single-curve non-regression gate was the guard and held. Every new
+curve argument is optional and defaults to `None`, so existing callers are
+untouched.
+
+### 12.8 Known limits
+
+- **No basis volatility.** The basis is frozen, so a basis swaption or a
+  tenor-spread option is worth zero under this overlay. A stochastic-basis
+  multi-curve HJM extension is tracked on the roadmap (Tier 2.1) and in
+  `docs/research-ideas.md`.
+- **CMS-spread recipes (G2++ PDE and MC) rebuild their par swap rates from
+  the model's own bond strip**, so they accept `discount_curve` but raise on
+  a distinct `forward_curve`.
+- **Cheyette and LMM recipes are untouched** and remain single-curve.
+- **Day-count caveat (pre-existing, surfaced by the tests).** The short-rate
+  recipes build their *time axis* from the instrument's `day_count`, while a
+  `DiscountCurve` uses its own. For an `act_360` trade on an `act_365` curve
+  the two differ by ~1.4 %, which is why the curve-level oracles in
+  `tests/test_pde/test_multicurve.py` use `act_365` instruments. Orthogonal
+  to multi-curve, but worth a separate look.
 
 ---
 

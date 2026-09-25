@@ -135,9 +135,11 @@ the price is an exact **one-dimensional integral** over the first factor with a
 Jamshidian-style critical boundary on the second, evaluated by Gauss–Hermite
 quadrature. See [G2++: Two-Factor Gaussian](../theory/g2pp.md#3-european-swaptions-brigomercurio-integral).
 
-Discounting is taken from `model.initial_curve`. The `forward_curve` argument is
-reserved for a future deterministic-basis dual-curve extension and must be
-`None` (single-curve).
+Discounting is taken from `model.initial_curve`. The `forward_curve` argument on
+this *analytic* pricer is reserved for a future extension and must be `None`;
+for a dual-curve G2++ swaption today, use the PDE or MC recipe, which implement
+the deterministic tenor basis of
+[`valax.pricing.multicurve`](#multi-curve-overlay-for-the-short-rate-solvers).
 
 ::: valax.pricing.analytic.g2pp_swaption_price
 
@@ -568,6 +570,33 @@ the caplet/cap/floor and two-factor callable/puttable recipes cheap to add.
 
 ::: valax.pricing.pde.rates_payoffs.exercisable_terminal_and_event
 
+## Multi-curve overlay for the short-rate solvers
+
+Hull–White and G2++ are exact-fit-to-*one*-curve models, so multi-curve pricing
+(OIS discounting with a distinct projection curve) needs a modelling decision
+rather than plumbing. `valax.pricing.multicurve` holds that decision once: the
+discount curve is honoured by **re-fitting** the model to it, and projection by
+a **frozen multiplicative tenor basis** read off the two curves. Both are
+supplied to the recipes as the optional `discount_curve` / `forward_curve`
+market arguments, automatically from an instrument's `discount_id` /
+`forward_id` selectors when going through
+[`price`](core.md#the-unified-signature).
+
+`None` is the single-curve case throughout, and is a *trace-time* branch rather
+than a multiplication by one, so single-curve prices are unchanged
+bit-for-bit. See [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md)
+for the derivation and the limits of the approximation (no basis volatility).
+
+::: valax.pricing.multicurve.with_discount_curve
+
+::: valax.pricing.multicurve.tenor_basis
+
+::: valax.pricing.multicurve.swap_leg_basis
+
+::: valax.pricing.multicurve.apply_swap_basis
+
+::: valax.pricing.multicurve.require_single_curve
+
 ## Cross-engine reconciliation
 
 `price_all_engines` runs whichever of the analytic / PDE / MC / QuantLib
@@ -600,6 +629,12 @@ PDE, **M** = Monte Carlo, **Q** = QuantLib comparison available.
 | Bermudan swaption                | P M Q      | P M Q     | P           | P           |
 | Callable / puttable bond         | P M Q      | P         | P           | P           |
 | CMS-spread swap                  | —          | P M       | —           | P M         |
+
+**Multi-curve.** The Hull–White and G2++ engines accept a trade's own
+`discount_curve` and `forward_curve` (see
+[the overlay above](#multi-curve-overlay-for-the-short-rate-solvers)); the
+Cheyette engines and the CMS-spread recipes are single-curve and reject a
+distinct projection curve rather than ignoring it.
 
 Notes: the Cheyette PDE is the frozen-\(y\) production engine; the one-factor
 exact-\(y\) PDE (`cheyette_exact_price`) additionally prices the fixed-rate

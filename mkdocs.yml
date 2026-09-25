@@ -132,6 +132,7 @@ nav:
           - "Hull-White Finite Differences: Bermudans and Callables": theory/hull-white-pde.md
           - "G2++: Two-Factor Gaussian and Decorrelation": theory/g2pp.md
           - "Cheyette: Quasi-Gaussian Skew": theory/cheyette.md
+          - "Multi-Curve Short Rates: the Deterministic Tenor Basis": theory/multi-curve-short-rate.md
   - Risk:
       - Overview: risk-overview.md
       - Risk Factors: risk-factors.md
