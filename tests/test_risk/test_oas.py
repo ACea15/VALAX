@@ -1,7 +1,8 @@
 """Tests for option-adjusted spread / Z-spread (:mod:`valax.risk.oas`).
 
-The suite follows the ladder in ``RATES_SESSION_GUIDE.md`` §3b, each test acting
-as an oracle for the next:
+The suite is a ladder, each test acting as an oracle for the next (the
+modelling background is ``docs/theory/risk-measures.md`` §7.4 and the recipe is
+``docs/guide/callable-bonds.md``):
 
 1. **``hw_alpha`` shift identity** — a parallel curve shift ``s`` moves the
    exact-fit shift ``alpha(t)`` by exactly ``s``; free, exact, and it proves the

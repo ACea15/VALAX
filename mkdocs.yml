@@ -107,7 +107,6 @@ nav:
       - JAX Patterns: architecture/jax-patterns.md
       - PDE Solvers Design: architecture/pde-design.md
       - Numerical Pitfalls: architecture/numerical-pitfalls.md
-      - MC-Curves-2 Handoff: architecture/mc-curves-2.md
       - Pricing Ontology & Unified Signature (Design): architecture/pricing-ontology.md
       - Validation:
           - Pricing Examples: examples.md

@@ -1395,8 +1395,10 @@ real desks.
 - **Deliverable:** every quote type a real curve build needs is
   representable as a `BootstrapInstrument`. ✅
 
-For the next-session handoff (state snapshot, open questions, initial
-task plan for MC-Curves-2), see [`mc-curves-2.md`](mc-curves-2.md).
+MC-Curves-2 has since shipped; for the current status of the wider
+multi-curve workstream — what ships end to end, and the remaining gaps
+in risk, calibration, surfaces and the curve build — see
+[Multi-Curve Framework](../roadmap.md#multi-curve-framework-what-ships-whats-left).
 
 #### MC-Curves-2 — Joint global solver
 *Estimated effort: ~2 weeks*

@@ -98,7 +98,7 @@ $$
 
 The market-standard evaluation is **Hagan static replication**: express the CMS payoff as an integral over a continuum of payer/receiver swaptions and price each on the swaption smile (typically SABR). The adjustment grows with volatility, maturity, and payment delay.
 
-**VALAX implementation status:** `valax/pricing/analytic/rates_exotics.py` prices `cms_swap_price` and `cms_cap_floor_price_black76` at the **baseline (zero convexity adjustment)** level; the Hagan/SABR replication is a documented gap (see the roadmap and the temporary `RATES_SESSION_GUIDE.md`). This is the cleanest example in the library of a pricer that is *structurally* correct but *not yet market-accurate* — and of why the smile, not just the curve, eventually matters for rates.
+**VALAX implementation status:** shipped. `valax/pricing/analytic/cms_convexity.py` provides both evaluations — `_hagan_analytic` (the closed-form quadratic-payoff approximation) and `_hagan_replication` (static replication over the swaption smile) — surfaced as `cms_convexity_adjustment` and `cms_convexity_adjusted_rates`. `cms_swap_price` and `cms_cap_floor_price_black76` in `rates_exotics.py` consume the adjusted rates, and the zero-adjustment baseline remains selectable for comparison. Validated against QuantLib's `AnalyticHaganPricer`.
 
 ### 9.6 Model Choice for Rate Derivatives
 
@@ -111,4 +111,4 @@ The market-standard evaluation is **Hagan static replication**: express the CMS 
 
 The recurring limitation of one-factor short-rate models is that a **single volatility parameter cannot fit the swaption grid** — Jamshidian calibration matches a *level*, not a smile. G2++/HW-2F and the market models trade tractability for that flexibility.
 
-**Calibration status.** VALAX has the *pricers* (caps, swaptions, HW ZCB and tree) but **not yet the rate-model calibrators**: Hull-White→swaption-surface (Jamshidian) and LMM caplet/swaption stripping are on the roadmap. The generic SABR calibrator of Section [8](calibration.md#8-calibration-theory) applies directly to a swaption smile once a swaption-vol quoting object exists. The concrete sequencing — validate the existing pricers against QuantLib, add Hull-White Monte-Carlo, then the Jamshidian calibrator, then the short-rate PDE — is captured in the temporary `RATES_SESSION_GUIDE.md` at the repository root.
+**Calibration status.** The short-rate calibrators have shipped: `calibrate_hull_white` (Jamshidian swaption surface), `calibrate_g2pp`, and `calibrate_cheyette` / `calibrate_cheyette_2f`, alongside the swaption cube and cap/floor optionlet surface objects the smile calibrators feed on. The generic SABR calibrator of Section [8](calibration.md#8-calibration-theory) applies directly to a swaption smile. The one model still without a calibrator is **LMM** — caplet/swaption volatility stripping remains open, tracked at [Roadmap Tier 2.6](../roadmap.md#26-libor-market-model-lmm-bgm).

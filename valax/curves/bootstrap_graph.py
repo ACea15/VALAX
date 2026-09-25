@@ -39,8 +39,8 @@ Autodiff notes:
   is fully differentiable.
 
 See ``production.md`` §11.4 for the design spec and
-``docs/architecture/mc-curves-2.md`` for the session-handoff notes
-that motivated this module.
+``docs/roadmap.md`` ("Multi-Curve Framework — What Ships, What's Left")
+for the status of the wider multi-curve workstream.
 """
 
 from __future__ import annotations
@@ -424,8 +424,8 @@ def bootstrap_curve_graph(
     References:
         * ``docs/architecture/production.md`` §11.4 for the design
           spec.
-        * ``docs/architecture/mc-curves-2.md`` for the session-handoff
-          notes.
+        * ``docs/roadmap.md`` ("Multi-Curve Framework — What Ships,
+          What's Left") for the workstream status.
         * ``docs/theory.md`` §3.7, §3.8 for the no-arbitrage identities
           that each instrument's residual encodes.
     """

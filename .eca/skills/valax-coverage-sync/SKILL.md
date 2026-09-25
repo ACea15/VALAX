@@ -22,7 +22,7 @@ Edit in this order so no new contradictions are created:
 
 1. `docs/applications/instrument-pricing.md` — the coverage matrix (legend ✅/🟡/n-a).
 2. `docs/roadmap.md` — flip `[ ]`→`[x]` (or add the line) naming the symbol; update Current-State tables and the Instrument Coverage Matrix.
-3. Propagate to derived lists so they agree: `docs/applications/index.md` (section 5), `docs/risk-factors.md`, `docs/risk-overview.md`, `docs/guide/{pde,lattice,monte-carlo,calibration}.md`, `docs/api/pricing.md`, `docs/architecture/{production,mc-curves-2}.md`.
+3. Propagate to derived lists so they agree: `docs/applications/index.md` (section 5), `docs/risk-factors.md`, `docs/risk-overview.md`, `docs/guide/{pde,lattice,monte-carlo,calibration}.md`, `docs/api/pricing.md`, `docs/architecture/production.md`.
 
 ## Procedure
 

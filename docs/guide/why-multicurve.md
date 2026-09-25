@@ -270,6 +270,7 @@ tenor-basis and every cross-currency trade a desk carries.
   formalises the joint system.
 - **Design** — [`production.md` §11](../architecture/production.md#11-multi-curve-framework)
   documents the data model, joint-solver interface, and phased delivery.
-- **Roadmap** — [`roadmap.md` §1.1](../roadmap.md#11-multi-curve-bootstrapping)
-  tracks what's shipped and what's next (MC-Curves-3: extended diagnostics,
-  monotone-convex interpolation, HW convexity, CSA).
+- **Roadmap** — [Multi-Curve Framework — What Ships, What's Left](../roadmap.md#multi-curve-framework-what-ships-whats-left)
+  is the canonical status page: the end-to-end picture plus every
+  remaining gap (risk, calibration, vol surfaces, curve build). Tier 1.1
+  covers the build side only.

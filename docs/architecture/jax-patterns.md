@@ -584,7 +584,9 @@ catches 80% of real bugs.
 In-tree references that walk through specific applications:
 
 - **MC architecture overview** — [`architecture/overview.md`](overview.md)
-- **MC dispatcher design** — [`architecture/mc-curves-2.md`](mc-curves-2.md)
+- **Multi-curve solver design** — [`architecture/production.md` §11](production.md#11-multi-curve-framework),
+  with workstream status in
+  [`roadmap.md`](../roadmap.md#multi-curve-framework-what-ships-whats-left)
 - **Why VALAX is JAX-native** — [`design-rationale.md`](../design-rationale.md)
   §3 and §4 connect the architectural commitment to JAX with the specific
   pain points it lets VALAX skip.

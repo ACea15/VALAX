@@ -118,6 +118,248 @@ Stages:
 ~1000 sampled markets agreeing with QuantLib at every stage of the
 pricing chain.
 
+## Multi-Curve Framework — What Ships, What's Left
+
+The canonical status page for the multi-curve workstream (formerly the
+MC-Curves-1/2/2b/3 session notes). The design lives in
+[`production.md` §11](architecture/production.md#11-multi-curve-framework);
+the narrative rationale in [Why the Multi-Curve Framework](guide/why-multicurve.md);
+the short-rate overlay in
+[Multi-Curve Short Rates](theory/multi-curve-short-rate.md).
+
+**The boundary is sharp.** The `CurveGraph` flows cleanly through
+**build → `MarketState` → `resolve` → analytic / MC / PDE rates pricers**.
+It stops at **risk, calibration, surfaces, and portfolio**:
+
+```
+quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ analytic          ✅
+                   │                                      ├─ MC/PDE (HW, G2++) ✅
+                   │                                      ├─ HW lattice        ❌
+            quote_jacobian ✅                             └─ Cheyette / LMM    ❌
+                   ┊
+                   ┊ (never composed)
+                   ▼
+            greeks 🟡 ── risk ❌ ── calibration ❌ ── surfaces ❌ ── portfolio ❌
+```
+
+So a book can be **priced** multi-curve today, but not **risk-managed**,
+**calibrated**, or **surface-built** multi-curve.
+
+### Shipped
+
+- [x] **Joint curve build** — `bootstrap_curve_graph` + `CurveSpec` +
+  `CurveBuildDiagnostics` (`valax/curves/bootstrap_graph.py`, `graph.py`);
+  11 quote types in `valax/curves/instruments.py`; tenor-basis and
+  EUR/USD four-curve builds verified end-to-end
+- [x] **Quote-sensitivity Jacobian** — `quote_jacobian` via
+  `optimistix.ImplicitAdjoint`, covering every registered quote scalar
+  (`.rate`, `.spread`, `.futures_rate`, `.quoted_forward`, `.far_rate`,
+  `.jump_size`)
+- [x] **Curve-id alphabet frozen** — `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]`,
+  enforced by `valax.curves.graph._CURVE_ID_RE`; `_default_` grandfathered
+- [x] **Legacy paths migrated** — `bootstrap_simultaneous` and
+  `bootstrap_multi_curve` are thin wrappers over the joint solver;
+  `MultiCurveSet` is a view over `CurveGraph` (`from_graph` / `to_graph`)
+- [x] **Market container** — `valax.core.MarketState` holds the graph;
+  `valax.core.resolve` binds `discount_id` / `forward_id` per trade
+- [x] **Instrument selectors (rates + bonds)** — `discount_id` /
+  `forward_id` on 11 classes in `instruments/rates.py` and 6 in
+  `instruments/bonds.py`
+- [x] **Analytic rates pricers dual-curve** — `analytic/{floating,swaptions,caplets,rates_exotics,rates_smile,graph_pricing}.py`
+- [x] **MC and PDE dual-curve for Hull-White and G2++** (ontology P5.1) —
+  `valax/pricing/multicurve.py`; see
+  [Tier 2.1](#21-short-rate-models)
+- [x] **Graph shock primitives** — `bump_graph_curve`,
+  `parallel_graph_shift`, `key_rate_graph_bump` in `valax/risk/shocks.py`
+
+### Remaining work
+
+#### 1. Risk pipeline is single-curve *(largest gap)*
+
+The whole point of multi-curve is that OIS and projection curves are
+**distinct risk factors** and the basis is itself hedgeable
+([Why Multi-Curve § What this means for risk](guide/why-multicurve.md#what-this-means-for-risk)).
+None of that is reachable today.
+
+- [ ] **Per-curve scenario axis** — `MarketScenario.rate_shocks` /
+  `ScenarioSet` (`valax/market/scenario.py`) carry one
+  `Float[Array, " n_pillars"]` vector with no curve identity; every
+  generator in `valax/risk/scenarios.py` assumes the fixed factor order
+  `[spots, vols, rates, dividends]` with a single rate block
+- [ ] **Route graph shocks through `apply_scenario`** — it shocks only
+  `base.discount_curve` and passes `curve_graph` through **unshocked**
+  (source comment admits it); `bump_graph_curve` and friends are exported
+  but have **no caller** outside their own module and
+  `tests/test_risk/test_shocks.py`
+- [ ] **Stop dropping the graph in the VaR path** —
+  `reprice_under_scenario`, `parametric_var` and `pnl_attribution`
+  (`valax/risk/var.py`) rebuild `MarketData(...)` without `curve_graph`,
+  so it silently defaults to `None`
+- [ ] **Route the risk engine through `price(...)` and retire
+  `wrap_equity_pricing_fn`** — the risk layer still bridges into the
+  loose-scalar convention with its own adapter instead of calling the
+  unified front door. Doing so is what makes "every Greek is one
+  `jax.grad` through one function" true, and it subsumes the three items
+  above. See
+  [pricing ontology §14.2](architecture/pricing-ontology.md#142-still-open)
+- [ ] **`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` risk factor** — already
+  tracked as 🚧 in [Risk Factors § 3](risk-factors.md)
+- [ ] **Graph-level greeks API** — `curve_pillar_deltas`
+  (`valax/greeks/market_greeks.py`) resolves exactly one `curve_id` per
+  call and `bucketed_curve_deltas` takes a flat pillar vector with no
+  curve identity. Per-curve ladders are obtainable one at a time; there is
+  no `dict[curve_id, ladder]` API and no graph-aware bucketing
+- [ ] **Compose `quote_jacobian` with `∇_MarketState price`** — the
+  `J_build` leg of the [pricing ontology §6.3](architecture/pricing-ontology.md#63-the-jacobian-stack-bucketing-sits-between-market-and-reported-risk)
+  Jacobian stack is still only a diagram; `market_greeks` explicitly
+  defers it ("left for the caller, since the build lives outside `price`")
+
+#### 2. Calibration is single-curve
+
+Zero references to `CurveGraph` or `MarketState` anywhere in
+`valax/calibration/`. Every rates calibrator takes one
+`curve: DiscountCurve` used for discounting **and** projection.
+
+- [ ] **Dual-curve rates calibration** — `calibrate_hull_white`,
+  `calibrate_g2pp`, `calibrate_cheyette` should accept
+  `discount_curve` + `forward_curve` (or a `MarketState`). Until then a
+  model fitted on a blended curve is being used by the P5.1 dual-curve
+  pricers, which violates the ontology's consistency invariant
+  ([§3.2](architecture/pricing-ontology.md#32-consistency-invariant-state-it-in-code-docs))
+- [ ] **Curve-aware equity calibration** — `calibrate_heston`,
+  `calibrate_sabr`, `calibrate_slv` take loose scalars
+  (`rate`, `dividend`, `forward`), never a curve object
+
+#### 3. Vol-surface construction is curve-free
+
+`valax/surfaces/` has **zero** references to `DiscountCurve`.
+`build_sabr_caplet_surface` and `calibrate_swaption_cube` take a
+caller-supplied pre-computed `forwards` array.
+
+- [ ] **Cap → caplet (optionlet) stripping** — does not exist in any form.
+  This is *the* canonical dual-curve operation: project off the tenor
+  curve, discount off OIS. Its absence puts the quotes→surface leg of the
+  chain outside the framework entirely
+- [ ] **Dual-curve swaption-cube calibration** — same gap for
+  `calibrate_swaption_cube`
+
+#### 4. FX / credit / inflation carry no selectors
+
+- [ ] **`discount_id` / `forward_id` on `instruments/{fx,credit,inflation}.py`**
+  — deferred at ontology P3; these classes silently fall back to
+  `_default_` with no way to name a curve
+- [ ] **Extend `ResolvedMarket`** (`valax/core/resolve.py`) to bind survival
+  curves, inflation curves, and FX spot / second-currency discount curves;
+  it binds only `discount_curve`, `forward_curve`, `spot`, `surface`,
+  `fixings`, `reference_date` today
+- [ ] **True multi-curve cross-currency** — `cross_currency_swap_price`
+  takes two curves but its own docstring states *"single-curve-per-currency
+  projection: each currency's floating leg is forecasted off its own
+  discount curve"*. XCCY is the multi-curve instrument par excellence
+- [ ] **Per-leg index descriptors — the architectural ceiling on the
+  current selectors.** A singular `forward_id` expresses the *single-index*
+  case only. A single-currency tenor basis swap needs **three** curves (OIS
+  discount + two projections), CMS-spread three, cross-currency four or
+  more. The fix is per-leg descriptors (`SwapLeg(index_id=...)` +
+  `legs: tuple[SwapLeg, ...]`), which is the same structure the cashflow
+  engine needs — build it once, with
+  [Tier 1.4](#14-trade-representation-and-cashflow-engine), not twice.
+  Background in
+  [pricing ontology §14.2](architecture/pricing-ontology.md#142-still-open)
+
+#### 5. Single-curve chokepoints
+
+- [ ] **`valax/pricing/lattice/hull_white_tree.py`** — reads
+  `model.initial_curve`, no `forward_curve` parameter. After P5.1 the
+  tree↔PDE↔MC triangulation (load-bearing validation here) only holds
+  single-curve, so a dual-curve callable bond has no independent oracle
+- [ ] **`valax/risk/oas.py`** — `bond_z_spread`, `z_spread_duration`,
+  `z_spread_dv01`, `z_spread_convexity` all take one `curve: DiscountCurve`
+- [ ] **`valax/portfolio/batch.py`** — `batch_price` / `batch_greeks` take
+  scalar `rates`, no curve object at all; pre-dates the curve layer
+- [ ] **`valax/risk/factors.py`** — `curve: DiscountCurve` at two sites
+- [ ] **`MarketData.curve_graph` is inert** — consumed only by the
+  `MarketState` round-trip and the `apply_scenario` pass-through; no
+  pricer or risk function reads it
+
+#### 6. Curve build (absorbed from the retired MC-Curves-3 notes)
+
+- [ ] **Alternative interpolation modes on `CurveSpec.interp`** —
+  `log_linear_df` is the only accepted value (`_SUPPORTED_INTERP` in
+  `valax/curves/graph.py` raises otherwise). Wanted: `linear_zero`,
+  `monotone_convex` (Hagan-West), `tension_spline`. The dispatch site
+  already exists. Log-linear is stable and monotone but produces
+  discontinuous forward rates at pillars
+- [ ] **Genuine turn-of-year step interpolation** — `TurnInstrument` ships
+  as a quote type, but a sharp jump needs an interpolation mode admitting
+  discontinuities; today it is approximated by two tightly-spaced pillars
+- [ ] **Hull-White futures convexity** — `hull_white_convexity_adj(model)`;
+  the plug-in framework is in `valax/curves/convexity.py`
+  (`no_convexity_adj`, `constant_convexity_adj`), blocked on threading a
+  calibrated `HullWhiteModel` into the curve build
+- [ ] **CSA / collateralised discounting** — currency-of-collateral
+  selection and FX-implied foreign-collateralised discount curves. No
+  machinery and no design note exist; `CurveSpec.currency` is declared but
+  consumed by nothing
+- [ ] **Business-day calendars and roll conventions** — see
+  [Tier 1.3](#13-business-calendars-and-holiday-schedules); `valax/dates/`
+  is holiday-agnostic, so every bootstrap pillar is an unadjusted date
+- [ ] **Over-determined bootstrap** — an `optimistix.least_squares` variant
+  of `bootstrap_curve_graph` with per-quote weights
+- [ ] **Fixings seasoning** — `OISSwapRate` and the futures residual do
+  `del fixings` (MVP: telescope only); partially-seasoned swaps ignore
+  realised fixings. `index_id` is reserved for this
+- [ ] **Constrained curves** — forward-rate positivity, calendar-spread
+  no-arbitrage for inflation curves
+
+#### 7. Modelling
+
+- [ ] **Stochastic tenor basis** — the P5.1 overlay freezes the basis, so
+  basis vega is structurally zero (a basis swaption or tenor-spread option
+  prices at zero). Needs a multi-curve HJM / Mercurio extension with its
+  own driver per tenor curve. See
+  [Multi-Curve Short Rates § 3.3](theory/multi-curve-short-rate.md)
+- [ ] **Cheyette and LMM dual-curve recipes** — untouched by P5.1; they do
+  not declare `discount_curve` / `forward_curve`, so the dispatch bridge
+  correctly does not forward them
+- [ ] **CMS-spread projection** — the G2++ PDE and MC recipes rebuild par
+  swap rates from the model's own bond strip and therefore *reject* a
+  distinct projection curve rather than ignoring it
+
+#### 8. Test coverage holes
+
+Curve construction, `resolve`, and the analytic / MC / PDE pricing paths
+are well covered (`tests/test_curves/`, `tests/test_pricing/test_graph_pricing.py`,
+`tests/test_{pde,mc,pricing}/test_multicurve.py`). Absent entirely:
+
+- [ ] **Multi-curve risk tests** — `tests/test_risk/test_shocks.py` is the
+  only risk file touching a graph, and `test_curve_graph_carried_through`
+  actively asserts the graph comes back *unchanged*
+- [ ] **Multi-curve calibration tests** — none under `tests/test_calibration/`
+- [ ] **Multi-curve greeks tests** — `tests/test_greeks/test_market_greeks.py`
+  runs entirely against single-curve markets; nothing asserts separate
+  OIS vs projection ladders
+- [ ] **Multi-curve surface tests** — none under `tests/test_surfaces/`
+- [ ] **Portfolio tests** — there is no `tests/test_portfolio/` package at all
+
+### Recommended sequence
+
+1. **Multi-curve risk** (§1) — highest leverage by a distance: it is the
+   stated purpose of the framework, the shock primitives already exist
+   unused, and it is the only item with an explicit "still needed" note in
+   the docs. Fold the graph-level greeks API in, since both want the same
+   per-curve plumbing.
+2. **Dual-curve calibration** (§2) — smaller, and it closes the
+   consistency gap that P5.1 opened between how models are fitted and how
+   they are now priced.
+3. **Caplet stripping** (§3) — unlocks the quotes→surface→exotic chain and
+   is the honest prerequisite for a dual-curve vol story.
+
+Items in §6 are independently shippable and mostly self-contained; §7 is
+research-scale.
+
+---
+
 ## Production Priority Roadmap (Snapshot — reconciled against the codebase)
 
 The tier-based feature inventory below is comprehensive but feature-area oriented. This section reorganizes the most critical work into **execution priorities** — what a bank evaluating VALAX would need to see, in roughly the order it should be built.
@@ -236,6 +478,11 @@ These are foundational pieces that block almost everything else. They should be 
 - [ ] **Hull-White futures convexity** (`hull_white_convexity_adj`) — plug-in framework in place, closed-form factory pending
 - [ ] **CSA / collateralised discounting** and FX-implied foreign-currency-collateralised discount curves
 
+> The full multi-curve picture — what ships end-to-end, and the gaps in
+> risk, calibration, surfaces and portfolio — lives in
+> [Multi-Curve Framework — What Ships, What's Left](#multi-curve-framework-what-ships-whats-left).
+> This tier covers the **build** side only.
+
 **Why:** Every rates product needs proper forward curves. Manual pillar specification doesn't scale.
 
 **Approach:** Root-finding via `optimistix.root_find` on the system of bootstrapping equations. Each instrument (deposit, swap) provides one equation. The curve is a pytree — autodiff gives the Jacobian for free.
@@ -337,6 +584,40 @@ New stochastic models that unlock entire product categories.
 **Approach:** Two-pass calibration: (1) calibrate Heston to vanillas, (2) compute leverage function via MC particle method. Leverage function stored as a 2D grid pytree (`valax/surfaces/leverage.py::LeverageGrid`).
 
 **Open follow-up.** Sub-100 bp Dupire-consistency accuracy requires Fokker-Planck PDE calibration (cf. QuantLib's `HestonSLVProcess`); the particle-method ceiling at moderate budgets is ~100-250 bp. Tracked as an open follow-up.
+
+### 2.6 LIBOR Market Model (LMM / BGM)
+
+- [x] **Model pytree** — `LMMModel` with `PiecewiseConstantVol` / `RebonatoVol`
+      abcd parametric volatility and `ExponentialCorrelation` /
+      `TwoParameterCorrelation` correlation structures (`valax/models/lmm.py`)
+- [x] **PCA factor reduction** — `compute_loading_matrix` (full-rank Cholesky,
+      or the top-k PCA loading matrix for a reduced-factor simulation)
+- [x] **Path generation** — `generate_lmm_paths` (`valax/pricing/mc/lmm_paths.py`)
+- [x] **MC recipes** — caplet, cap, and European swaption under `LMMModel`
+- [x] **Bermudan swaption via Longstaff-Schwartz** — `bermudan_swaption_lsm`
+      (see [Tier 3.1](#31-bermudan-swaptions))
+- [ ] **Calibration — the headline gap.** There is no `calibrate_lmm`. LMM is
+      the only model in the library with no calibrator, so its parameters must
+      be supplied by hand and it cannot be fitted to market. Needs **caplet /
+      swaption volatility stripping**: fit the `RebonatoVol` abcd surface and
+      the correlation parameters to a cap/floor optionlet surface and a
+      swaption cube. Converges with
+      [Multi-Curve Framework §3](#3-vol-surface-construction-is-curve-free) —
+      the stripping routine that section calls for is the same one this needs.
+      Expect the Levenberg-Marquardt arity trap documented in the
+      [calibration guide](guide/calibration.md#solvers)
+- [ ] **Dual-curve recipes** — the LMM recipes do not declare
+      `discount_curve` / `forward_curve`, so they remain single-curve; see
+      [Multi-Curve Framework §7](#7-modelling)
+- [ ] **Lognormal only** — no shifted or stochastic-volatility (SABR-LMM)
+      variant, so LMM cannot carry rate skew; skew lives only in the static
+      SABR smile. The dynamic-skew alternatives that *did* ship are the
+      Cheyette models ([Tier 2.1](#21-short-rate-models))
+
+**Why:** LMM models observable forward rates directly and is the market
+standard for callable rate exotics where the full forward-curve dynamics
+matter. Without a calibrator it is currently a simulation engine rather than a
+pricing model.
 
 ### 2.5 Jump-Diffusion Models
 

@@ -855,24 +855,14 @@ and the residual-Jacobian condition number (`jacobian_condition_number`).  See
 (`MoneyMarketFuture`), `.quoted_forward` (`FXForward`), `.far_rate`
 (`FXSwap`), and `.jump_size` (`TurnInstrument`).
 
-From the [roadmap (Tier 1.1)](../roadmap.md#11-multi-curve-bootstrapping)
-and the production design, items still pending (MC-Curves-3+):
-
-- **Alternative interpolation methods**: linear on zero rates, cubic splines
-  on log-DF, monotone-convex (Hagan-West), tension splines.  The log-linear
-  baseline is stable and monotone but produces discontinuous forward rates at
-  pillars; `CurveSpec.interp` is already the dispatch site.
-- **Hull-White-derived futures convexity adjustment** — gated on the
-  short-rate-model integration with the curve build.  The plug-in framework
-  is in place ([`valax/curves/convexity.py`](../api/curves.md#convexity-adjustment-plug-ins));
-  only the closed-form factory is missing.
-- **CSA / collateralised discounting** — currency-of-collateral selection and
-  FX-implied foreign-currency-collateralised discount curves.  Design note
-  still to be written.
-- **Business-day calendars, holidays, roll conventions** — schedules today
-  ignore holidays entirely.
-- **Constrained curves** (forward-rate positivity, calendar-spread
-  no-arbitrage for inflation curves).
+What is still pending on the **build** side — alternative interpolation
+modes on `CurveSpec.interp`, turn-of-year step interpolation,
+Hull-White-derived futures convexity, CSA / collateralised discounting,
+business-day calendars, an over-determined least-squares variant, fixings
+seasoning, and constrained curves — is enumerated once in
+[Roadmap → Multi-Curve Framework § Curve build](../roadmap.md#6-curve-build-absorbed-from-the-retired-mc-curves-3-notes),
+which is also the single owner of the *downstream* gaps (risk,
+calibration, vol surfaces, portfolio).
 
 Contributions welcome — see `CONTRIBUTING.md` at the repository root.
 
@@ -880,8 +870,8 @@ Contributions welcome — see `CONTRIBUTING.md` at the repository root.
 
 Each `BootstrapInstrument` exposes a `residual(graph, fixings, ref_date)`
 method that returns zero when the curve graph correctly reprices the quote.
-The forthcoming joint solver
-([MC-Curves-2](../architecture/production.md#114-joint-global-solver))
+The joint solver
+([`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph))
 collects these residuals from a list of instruments and finds the curve graph
 that zeroes them out simultaneously.
 

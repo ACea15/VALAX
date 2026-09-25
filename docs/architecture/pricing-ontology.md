@@ -198,7 +198,7 @@ single-curve degeneracy — the migration must preserve it end to end:
 - `CurveGraph` already degenerates to single-curve via the grandfathered
   `_default_` sentinel; `bootstrap_simultaneous` is a thin wrapper over
   `bootstrap_curve_graph` with `CurveSpec(curve_id="_default_")`
-  (see [MC-Curves-2 Handoff](mc-curves-2.md)).
+  (see [Multi-Curve Framework](../roadmap.md#multi-curve-framework-what-ships-whats-left)).
 - `graph_pricing.py` wrappers already reproduce single-curve behaviour
   **bit-for-bit** when `forward_id=None`.
 
@@ -604,8 +604,14 @@ run — but every one uses the **pre-ontology low-level APIs**
 (`black_scholes_price(call, spot, vol, rate, dividend)`,
 `swap_price(swap, curve)`, `greeks(black_scholes_price, …)`;
 `09_pca_rates_pnl.py` uses the legacy `MarketData`). Nothing showcases the
-unified `price(instrument, model, market)` front door, and **no test
-executes the examples**, so they can rot silently.
+unified `price(instrument, model, market)` front door.
+
+*Correction to an earlier draft of this section:* the examples are **not**
+unguarded. `.github/workflows/examples.yml` exit-code-runs every
+`examples/*.py` and `examples/comparisons/*.py` on each push and PR. The
+real gaps are narrower: there is no **local** `pytest` guard (so `pytest`
+alone will not catch a broken example before CI does), and the CI glob
+misses `examples/pitfalls/`.
 
 ### 13.2 Deliverables
 
@@ -617,13 +623,15 @@ executes the examples**, so they can rot silently.
   - unified sensitivities — `market_greeks(...)`, `spot_delta`, and
     `curve_pillar_deltas` → `bucketed_curve_deltas` onto FRTB tenors;
   - a multi-curve swap priced via `discount_id` / `forward_id` selectors
-    against a `CurveGraph` `MarketState` (analytic — note the MC/PDE
-    multi-curve caveat from §12);
+    against a `CurveGraph` `MarketState`, and — since P5.1 — the same
+    selectors carrying through to a Hull-White MC / PDE trade (§12);
   - `HullWhiteModel.from_market(...)` pricing a bond, then
     `with_market_curve(shocked)` to reprice under a shocked curve.
 - **New smoke-test guard `tests/test_examples/test_examples_run.py`** —
-  `runpy`-execute each example; mark the MC/PDE-heavy ones `slow`. Closes
-  the "examples can rot" gap and makes any future example migration safe.
+  `runpy`-execute each example; mark the MC/PDE-heavy ones `slow`. Brings
+  the guard local (CI already covers it) and lets a migration session
+  iterate without a push. Widen the `examples.yml` glob to
+  `examples/pitfalls/` at the same time.
 
 ### 13.3 What *not* to do
 
@@ -637,3 +645,89 @@ optional dogfooding, not required (`MarketData` remains a supported view).
 New example runs clean (`python examples/10_unified_pricing.py`); the
 smoke test passes; if any docs page lists the examples, add the new one;
 `mkdocs build --strict` green.
+
+---
+
+## 14. Predecessor note — what it got right, what is left
+
+This document's ancestor was a root-level working note,
+`PRICING_MARKET_BOUNDARY.md` ("Pricing ↔ Market Boundary — Design Plan"),
+written before any of P1–P5.1 landed. Its own §9.6 said to *"migrate this
+doc's durable parts into `docs/architecture/`"*; this section is that
+migration, and the note has been deleted.
+
+It is worth recording rather than silently dropping, because the note
+called the architecture correctly a long way out: the four-way
+`(instrument, model, market, config)` separation, the two-tier
+facade-over-kernels rule, curve selection by **id** rather than by a
+singular `forward_curve` argument, and the insistence that the
+explicit-argument kernels survive untouched — all of that is what shipped.
+
+### 14.1 Supersession map
+
+| Note § | Proposal | Outcome |
+|---|---|---|
+| §2 | `price(instrument, model, market, config)` | ✅ shipped as §2.3 / `valax/core/pricing.py`, with `method` / `config` / `key` as named keyword arguments rather than one positional `config` |
+| §3 | Two-tier facade over unchanged Tier-1 kernels | ✅ shipped — `valax/core/adapters.py` plus the MC/PDE registry *bridge*; no pricer was rewritten, honouring the note's §10 non-goal exactly |
+| §4 | A `Market` pytree (graph + surfaces + fixings + FX) | ✅ shipped as `valax.core.MarketState`, a superset (adds credit and inflation curves) |
+| §5 | Instrument index descriptors | 🟡 **partial** — `discount_id` / `forward_id` on rates + bonds (P3). The per-leg `SwapLeg` / `legs` tuple was **not** built; see §14.2 |
+| §6 | Model names its curve, does not own it | 🟡 **partial** — P5 added static `curve_id` + `from_market` / `with_market_curve`; `initial_curve` is still embedded |
+| §7.1 | Curve authority | ⚠️ **shipped differently** — see §14.3 |
+| §7.2 | Static/dynamic pytree hygiene audit | ❌ never run as an explicit pass; see §14.2 |
+| §7.3 | Differentiability granularity via `grad` through `market` | ✅ P4 — `market_gradient` / `model_gradient` |
+| §7.4 | Typed accessors, no god object | ✅ `MarketState.curve()` / `.surface()` / `.spot()` / `.dividend()` and `core/resolve.py` |
+| §7.5 | One `Market` type, not one per asset class | ✅ resolved — one `MarketState`; `MarketData` survives one release as a two-way view (Q4) |
+| §7.6 | Where fixings live | 🟡 `MarketState.fixings` exists and `resolve` carries it, but **no pricer reads it**; see §14.2 |
+| §8, §9.4 | Risk engine targets the facade; `wrap_*` adapters deleted | ❌ **not done** — see §14.2 |
+| §9.1–3, §9.5 | Rollout steps | ✅ delivered as P2 → P3 → P5.1 |
+| §11 | Four "next steps" | superseded: §7.1 and §7.5 are settled, the `Market` prototype shipped, the facade is live across every product family, and G2++ landed |
+
+### 14.2 Still open
+
+- [ ] **Port the risk engine to `price(...)` and retire the `wrap_*`
+  adapters.** `valax/risk/var.py::wrap_equity_pricing_fn` is still the
+  bridge from the loose-scalar convention into `reprice_under_scenario`,
+  and the risk engine still does not call `price`. This is the note's
+  single biggest unrealised payoff — "every Greek is one `jax.grad`
+  through one function" — and it is the same work as the multi-curve risk
+  gap in [Roadmap → Multi-Curve Framework §1](../roadmap.md#1-risk-pipeline-is-single-curve-largest-gap).
+- [ ] **Per-leg index descriptors for genuinely multi-index products.**
+  A singular `forward_id` covers the single-index case only. A
+  single-currency tenor basis swap needs **three** curves (OIS discount +
+  two projections), CMS-spread three, cross-currency four or more. The
+  note's `SwapLeg(index_id=...)` + `legs: tuple[SwapLeg, ...]` design is
+  the answer, and it converges with the P1.2 cashflow/leg engine
+  ([Roadmap Tier 1.4](../roadmap.md#14-trade-representation-and-cashflow-engine)) —
+  they should be built as one thing, not twice.
+- [ ] **Static/dynamic pytree hygiene audit.** The note called this
+  "non-negotiable for JIT": confirm no string id leaks into traced code
+  across `MarketState`, `CurveGraph`, and the instrument selectors. The
+  convention has been followed by hand throughout, but the audit itself
+  was never run, and nothing enforces it.
+- [ ] **Full curve de-embedding.** §6's endpoint — the model carries only
+  `curve_id` and the exact-fit shift is computed at price time — remains
+  unbuilt; see §14.3 for why it is now less urgent.
+- [ ] **Pricer-side fixings.** `FixingHistory` is consumed only by the
+  curve-bootstrap instruments; seasoned FRNs still use an unrelated
+  `fixing_rates` NaN array on the instrument pytree. Unifying those
+  belongs with the leg engine above.
+
+### 14.3 Where the shipped design diverged
+
+The note's §7.1 recommended making the **market authoritative**: strip
+`initial_curve` off the short-rate models entirely and recompute the
+exact-fit `α` / `φ` at price time from `market.graph[discount_id]`. Its
+stated upside was that a scenario shock to OIS would auto-refit the model.
+
+What shipped is the **hybrid** of §3.1: the model keeps `initial_curve` as
+its *default* discount curve and records a static `curve_id` (P5), and
+P5.1 lets a trade override it per-price via
+`valax.pricing.multicurve.with_discount_curve`, which re-fits the model to
+the resolved discount curve. That delivers the auto-refit property the
+note wanted, at the point where it matters, **without** a breaking change
+to every model constructor, pricer, and test that reads
+`model.initial_curve` — and without paying the refit on every price when
+nothing has moved.
+
+So §7.1's *goal* is met and its *mechanism* was not adopted. Full
+de-embedding stays on the list (§14.2) as a tidy-up, not as a blocker.

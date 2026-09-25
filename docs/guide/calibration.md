@@ -184,8 +184,27 @@ Three backends are available:
 | Solver | Method | Best for |
 |--------|--------|----------|
 | `"levenberg_marquardt"` | Least-squares (optimistix) | Default — fast, exploits Jacobian |
-| `"bfgs"` | Quasi-Newton (optimistix) | Fallback when LM struggles |
+| `"bfgs"` | Quasi-Newton (optimistix) | Residuals that close over a *sequence* of instrument pytrees (see below) |
 | `"optax_adam"` | Gradient descent (optax) | Research / experimentation |
+
+!!! warning "Writing a new calibrator: the Levenberg-Marquardt arity trap"
+
+    `optimistix` 0.1.0's Levenberg-Marquardt raises **`List arity mismatch`**
+    when the residual function closes over a *sequence* of instrument pytrees
+    — which is the natural shape for any calibrator fitting a surface (a list
+    of swaptions, a strip of caplets, a cube of quotes).
+
+    This is why the short-rate calibrators
+    (`calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette`) default to
+    **line-searched BFGS** rather than LM. Plain undamped Gauss-Newton is not a
+    substitute: it overshoots from distant starting points.
+
+    The smile calibrators (`calibrate_sabr`, `calibrate_heston`) are unaffected
+    — their residuals close over plain arrays of strikes and quotes, so LM
+    remains the default and the faster choice there.
+
+    Any new surface- or cube-stripping calibrator will hit this. Budget for it
+    rather than rediscovering it.
 
 ```python
 # Use BFGS instead

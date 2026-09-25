@@ -295,7 +295,7 @@ for years in (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0):
 - **Square system.** `bootstrap_simultaneous` requires exactly one
   instrument per pillar. With over-determined quote sets you must either
   drop instruments or move to a least-squares fit (roadmap; see
-  [MC-Curves-2](../architecture/mc-curves-2.md)).
+  [Multi-Curve Framework § Curve build](../roadmap.md#6-curve-build-absorbed-from-the-retired-mc-curves-3-notes)).
 - **Log-linear interpolation between pillars** (built into `DiscountCurve`).
   The Newton solve happens in **log-DF space**, guaranteeing positive DFs
   at every iterate. Forward rates between pillars are constant; if your
