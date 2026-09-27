@@ -1,7 +1,7 @@
 """Multi-curve (OIS discounting + tenor projection) in the short-rate MC.
 
 Companion to ``tests/test_pde/test_multicurve.py``; the acceptance criteria are
-``docs/architecture/pricing-ontology.md`` §12.6.  The floating-rate note is the
+``PRICING_ONTOLOGY.md`` §12.6.  The floating-rate note is the
 load-bearing instrument here: its PV is *linear*, so it does not depend on the
 model's dynamics at all, and the Hull-White / G2++ MC price must therefore
 reproduce the analytic dual-curve

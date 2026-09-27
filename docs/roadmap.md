@@ -110,6 +110,25 @@ Stages:
 2. **Calibration agreement** — curve bootstrap, SABR smile fit, and
    QL-calibrates-VALAX-reprices Heston. Comparison is in observable
    space (DFs, smiles, prices), never parameter space.
+   - [ ] **Cover *every* calibrator, and log the results.** Today only
+     SABR has a QL comparison (`test_sabr_calibration_ql.py`). The
+     short-rate calibrators (`calibrate_hull_white`, `calibrate_g2pp`,
+     `calibrate_cheyette`) have **no** QL cross-check in either the
+     single- or the dual-curve mode, so their agreement with market
+     convention rests on internal oracles only (PDE agreement and
+     payer/receiver parity — strong on *self*-consistency, silent on
+     convention). Each run should be **recorded** (fitted parameters,
+     observable-space residuals, seed, QL version) so drift is visible
+     over time rather than re-discovered.
+   - [ ] **Two known items to settle with QL specifically.** (a) G2++
+     `∂price/∂σ_x` is *negative* for a payer swaption at
+     `ρ = −0.7` with well-separated mean reversions — autodiff and
+     finite differences agree, so it is the formula's behaviour, not an
+     AD artefact, and it is plausibly the genuine effect of the negative
+     cross-variance term; QL is the independent arbiter. (b) VALAX's
+     dual-curve overlay freezes the tenor basis, which need not match
+     QL's convention — a mismatch there would be convention, not error,
+     and should be characterised before it is treated as a bug.
 3. **Chain validation** — calibrated surface flows through VALAX and
    QL pricers; tests the quote→surface→exotic pipeline that desks
    actually run.
@@ -128,8 +147,9 @@ the short-rate overlay in
 [Multi-Curve Short Rates](theory/multi-curve-short-rate.md).
 
 **The boundary is sharp.** The `CurveGraph` flows cleanly through
-**build → `MarketState` → `resolve` → analytic / MC / PDE rates pricers**.
-It stops at **risk, calibration, surfaces, and portfolio**:
+**build → `MarketState` → `resolve` → analytic / MC / PDE rates pricers**, and
+now through **short-rate calibration**. It stops at **risk, surfaces, and
+portfolio**:
 
 ```
 quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ analytic          ✅
@@ -139,11 +159,14 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
                    ┊
                    ┊ (never composed)
                    ▼
-            greeks 🟡 ── risk ❌ ── calibration ❌ ── surfaces ❌ ── portfolio ❌
+            greeks 🟡 ── risk ❌ ── calibration 🟡 ── surfaces ❌ ── portfolio ❌
+                                     (HW/G2++ ✅,
+                                      Cheyette refuses)
 ```
 
-So a book can be **priced** multi-curve today, but not **risk-managed**,
-**calibrated**, or **surface-built** multi-curve.
+So a book can be **priced** multi-curve today and its short-rate models
+**calibrated** multi-curve, but it cannot yet be **risk-managed** or
+**surface-built** multi-curve.
 
 ### Shipped
 
@@ -171,6 +194,10 @@ So a book can be **priced** multi-curve today, but not **risk-managed**,
   [Tier 2.1](#21-short-rate-models)
 - [x] **Graph shock primitives** — `bump_graph_curve`,
   `parallel_graph_shift`, `key_rate_graph_bump` in `valax/risk/shocks.py`
+- [x] **Dual-curve analytic short-rate swaptions and calibration** —
+  `hw_swaption_price` / `g2pp_swaption_price` accept a projection curve, and
+  `calibrate_hull_white` / `calibrate_g2pp` / `swaption_prices_from_vols`
+  accept `forward_curve=`; see § 2 below
 
 ### Remaining work
 
@@ -200,8 +227,8 @@ None of that is reachable today.
   loose-scalar convention with its own adapter instead of calling the
   unified front door. Doing so is what makes "every Greek is one
   `jax.grad` through one function" true, and it subsumes the three items
-  above. See
-  [pricing ontology §14.2](architecture/pricing-ontology.md#142-still-open)
+  above. Tracked as the top backlog item in `PRICING_ONTOLOGY.md` § 0.1
+  (repo root)
 - [ ] **`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` risk factor** — already
   tracked as 🚧 in [Risk Factors § 3](risk-factors.md)
 - [ ] **Graph-level greeks API** — `curve_pillar_deltas`
@@ -210,22 +237,35 @@ None of that is reachable today.
   curve identity. Per-curve ladders are obtainable one at a time; there is
   no `dict[curve_id, ladder]` API and no graph-aware bucketing
 - [ ] **Compose `quote_jacobian` with `∇_MarketState price`** — the
-  `J_build` leg of the [pricing ontology §6.3](architecture/pricing-ontology.md#63-the-jacobian-stack-bucketing-sits-between-market-and-reported-risk)
-  Jacobian stack is still only a diagram; `market_greeks` explicitly
-  defers it ("left for the caller, since the build lives outside `price`")
+  `J_build` leg of the Jacobian stack (`PRICING_ONTOLOGY.md` § 6.3) is not
+  packaged; `market_greeks` explicitly defers it ("left for the caller, since
+  the build lives outside `price`"). The manual composition is shown in
+  [Tutorial — Unified Pricing § 9](guide/tutorial-unified-pricing.md#from-quotes-to-hedge-ratios)
 
-#### 2. Calibration is single-curve
+#### 2. Calibration is single-curve *(closed for the short-rate models)*
 
-Zero references to `CurveGraph` or `MarketState` anywhere in
-`valax/calibration/`. Every rates calibrator takes one
-`curve: DiscountCurve` used for discounting **and** projection.
-
-- [ ] **Dual-curve rates calibration** — `calibrate_hull_white`,
-  `calibrate_g2pp`, `calibrate_cheyette` should accept
-  `discount_curve` + `forward_curve` (or a `MarketState`). Until then a
-  model fitted on a blended curve is being used by the P5.1 dual-curve
-  pricers, which violates the ontology's consistency invariant
-  ([§3.2](architecture/pricing-ontology.md#32-consistency-invariant-state-it-in-code-docs))
+- [x] **Dual-curve rates calibration (Hull-White, G2++)** —
+  `calibrate_hull_white` and `calibrate_g2pp` take `forward_curve=` (and
+  `curve_id=` to record the market linkage), projecting through the frozen
+  tenor basis while discounting on `curve`; `swaption_prices_from_vols` takes
+  it too, so *both* legs of the residual see both curves. Required extending
+  the closed forms first: `hw_swaption_price` (Jamshidian, via a `par_value`
+  on `hw_critical_rate`) and `g2pp_swaption_price` — the latter previously
+  *raised* on a projection curve. Validated against the dual-curve PDE recipes
+  and by model-independent payer/receiver parity
+  (`tests/test_pricing/test_dual_curve_swaptions.py`,
+  `tests/test_calibration/test_dual_curve_calibration.py`). See the
+  [calibration guide § 6](guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)
+- [ ] **Dual-curve Cheyette calibration** — `calibrate_cheyette` /
+  `calibrate_cheyette_2f` currently **raise** on a distinct `forward_curve`
+  rather than silently ignoring it, because the Cheyette PDE engine has no
+  discount/projection split at all. Needs the engine work in
+  [§ 7 Modelling](#7-modelling) first, then the calibrator is a one-line
+  pass-through
+- [ ] **`MarketState`-native calibration entry points** — the calibrators take
+  explicit curves (the kernel convention); a facade taking a `MarketState` +
+  `discount_id` / `forward_id` would remove the last manual step between the
+  market container and a calibrated model
 - [ ] **Curve-aware equity calibration** — `calibrate_heston`,
   `calibrate_sabr`, `calibrate_slv` take loose scalars
   (`rate`, `dividend`, `forward`), never a curve object
@@ -264,8 +304,7 @@ caller-supplied pre-computed `forwards` array.
   `legs: tuple[SwapLeg, ...]`), which is the same structure the cashflow
   engine needs — build it once, with
   [Tier 1.4](#14-trade-representation-and-cashflow-engine), not twice.
-  Background in
-  [pricing ontology §14.2](architecture/pricing-ontology.md#142-still-open)
+  Background in `PRICING_ONTOLOGY.md` § 0.1 (repo root)
 
 #### 5. Single-curve chokepoints
 
@@ -321,7 +360,9 @@ caller-supplied pre-computed `forwards` array.
   [Multi-Curve Short Rates § 3.3](theory/multi-curve-short-rate.md)
 - [ ] **Cheyette and LMM dual-curve recipes** — untouched by P5.1; they do
   not declare `discount_curve` / `forward_curve`, so the dispatch bridge
-  correctly does not forward them
+  correctly does not forward them. This blocks dual-curve Cheyette
+  *calibration* too (§ 2 above), which refuses rather than ignores a
+  projection curve until the engine supports one
 - [ ] **CMS-spread projection** — the G2++ PDE and MC recipes rebuild par
   swap rates from the model's own bond strip and therefore *reject* a
   distinct projection curve rather than ignoring it

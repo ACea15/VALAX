@@ -1,4 +1,28 @@
-# Pricing Ontology & Unified Signature — Migration Report (Design)
+# Pricing Ontology & Unified Signature — Implementation Tracker
+
+> **This file is a working note, not documentation.** It is deliberately
+> outside `docs/` and is *not* wired into MkDocs. Its job is to track
+> **what is built and what is still to build** behind the unified
+> `price(instrument, model, market)` contract, and to record *why* the
+> design is what it is.
+>
+> **If you want to learn or use the contract, read the docs instead:**
+>
+> | You want | Read |
+> |---|---|
+> | Tutorial: the contract, worked examples, recipes | `docs/guide/tutorial-unified-pricing.md` |
+> | API reference: `price`, `MarketState`, `resolve` | `docs/api/core.md` |
+> | Unified sensitivities API | `docs/api/greeks.md` |
+> | What is priced by what, per instrument | `docs/applications/instrument-pricing.md` |
+> | Library-wide planned vs shipped | `docs/roadmap.md` |
+>
+> Do **not** copy the contract or the examples back into this file, and do
+> not copy this file's backlog into the docs — the roadmap is the only
+> planned-vs-shipped list the docs carry.
+>
+> **Start here: [§0 Outstanding work](#0-outstanding-work-the-backlog).**
+
+---
 
 > **Status:** **P1–P5 and P5.1 shipped ✅.** The ontology, signatures,
 > invariants, and sensitivity stack below are the agreed target architecture;
@@ -19,6 +43,126 @@
 > forward-carried contract that scales as instruments, models, and
 > calibration routes grow — *without* rewriting existing pricers and
 > *without* imposing multi-curve on single-curve trades.
+
+---
+
+## 0. Outstanding work (the backlog)
+
+Everything still to build, consolidated from §12.8, §13 and §14.2 so this
+one list is the thing to read before opening a session. Ordered roughly by
+payoff. Tick an item here **and** flip the corresponding `docs/roadmap.md`
+line in the same change (`AGENTS.md` definition of done).
+
+### 0.1 Highest payoff
+
+- [ ] **Port the risk engine to `price(...)` and retire the `wrap_*`
+  adapters.** `valax/risk/var.py::wrap_equity_pricing_fn` is still the
+  bridge from the loose-scalar convention into `reprice_under_scenario`,
+  and the risk engine never calls `price`. This is the single biggest
+  unrealised payoff of the whole migration — "every Greek is one
+  `jax.grad` through one function" — and it is the same work as the
+  multi-curve risk gap in
+  [roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-pipeline-is-single-curve-largest-gap).
+  (§14.2)
+- [ ] **Close the quote-space (hedge-space) loop.** Compose
+  `∇_MarketState price` (`valax/greeks/market_greeks.py`) with
+  `valax/curves/bootstrap_graph.py::quote_jacobian` and
+  `risk/bucketing.pushforward_sensitivities` so reported risk lands in
+  quote space, not pillar space. The `J_bucket` leg shipped; the
+  `J_build` leg is still left to the caller. (§6.3)
+- [ ] **Per-leg index descriptors for genuinely multi-index products.** A
+  singular `forward_id` covers the single-index case only: a
+  single-currency tenor basis swap needs three curves (OIS + two
+  projections), CMS-spread three, cross-currency four or more. Build the
+  `SwapLeg(index_id=...)` + `legs: tuple[SwapLeg, ...]` design *together
+  with* the cashflow/leg engine of
+  [roadmap Tier 1.4](docs/roadmap.md#14-trade-representation-and-cashflow-engine)
+  — one thing, not twice. (§14.2)
+
+### 0.2 Correctness / coverage gaps
+
+- [ ] **Basis volatility.** The P5.1 tenor basis is frozen, so a basis
+  swaption or tenor-spread option is worth exactly zero under the
+  overlay. Needs a stochastic-basis multi-curve HJM extension (roadmap
+  Tier 2.1, `docs/research-ideas.md`). (§12.8)
+- [ ] **Multi-curve for the CMS-spread recipes** (G2++ PDE and MC). They
+  rebuild par swap rates from the model's own bond strip, so they accept
+  `discount_curve` but *raise* on a distinct `forward_curve`. (§12.8)
+- [ ] **Multi-curve for the Cheyette and LMM recipes** — untouched, still
+  single-curve (they do not name the curve parameters, so the dispatch
+  bridge does not forward them). (§12.8) This also blocks dual-curve
+  Cheyette *calibration*, which refuses rather than ignores a projection
+  curve.
+- [x] **Dual-curve calibration for the exact-fit short-rate models** —
+  closed the consistency hole where P5.1 priced dual-curve while every
+  calibrator fitted single-curve (the basis leaked into `σ`: measured at a
+  62 % bias in the fitted vol for a 50 bp basis). Required extending the
+  *closed forms* first — `hw_swaption_price` (Jamshidian, `par_value` on
+  `hw_critical_rate`) and `g2pp_swaption_price` (eq. 4.31 boundary + strike
+  leg), the latter previously raising — then threading `forward_curve` +
+  `curve_id` through `calibrate_hull_white`, `calibrate_g2pp` and
+  `swaption_prices_from_vols`. Docs: `docs/guide/calibration.md` § 6,
+  `docs/theory/multi-curve-short-rate.md` § 5.1.
+- [ ] **QuantLib cross-check for the rates calibrators** — none of the
+  short-rate calibrators has a QL comparison in either mode; the current
+  gates are internal (PDE agreement, payer/receiver parity), so they prove
+  self-consistency, not convention. Results should be *logged* per run.
+  Tracked in `docs/roadmap.md` (QuantLib Validation Pyramid, stage 2).
+- [ ] **Rates theta as a valuation-date roll.** `greeks/market_greeks.py::theta`
+  raises `NotImplementedError` for date-based instruments; implement the
+  `reference_date` roll (carry-and-roll repricing, never a derivative of
+  an integer date). (§6.2)
+- [ ] **`resolve` for FX and credit instruments.** `discount_id` /
+  `forward_id` landed on rates + bonds and `underlying_id` on
+  single-underlying equity options; `valax/instruments/{fx,credit}.py` and
+  multi-asset baskets are deferred — they need currency and
+  survival-curve handling `resolve` does not do yet
+  ([roadmap](docs/roadmap.md)). (§9)
+- [ ] **Pricer-side fixings.** `MarketState.fixings` is carried through
+  `resolve` but **no pricer reads it**: seasoned FRNs still use an
+  unrelated `fixing_rates` NaN array on the instrument pytree. Unify with
+  the leg engine above. (§14.2)
+- [ ] **Day-count mismatch between recipe time axis and curve** (pre-existing,
+  surfaced by the P5.1 tests): the short-rate recipes build their time axis
+  from the instrument's `day_count` while `DiscountCurve` uses its own —
+  ~1.4 % for an `act_360` trade on an `act_365` curve. Orthogonal to
+  multi-curve, worth its own pass. (§12.8)
+
+### 0.3 Hygiene / tidy-up
+
+- [ ] **Static/dynamic pytree hygiene audit.** Confirm no string id leaks
+  into traced code across `MarketState`, `CurveGraph` and the instrument
+  selectors. The convention has been followed by hand, but the audit was
+  never run and nothing enforces it. (§14.2)
+- [ ] **Full curve de-embedding.** The endpoint of §3.1: the model carries
+  only `curve_id` and the exact-fit shift is computed at price time.
+  P5 + P5.1 already deliver the *behaviour* (see §14.3), so this is a
+  tidy-up, not a blocker. (§14.2)
+- [ ] **Retire `MarketData`.** Q4 granted it one minor release as a two-way
+  view; once `risk/var.py` targets `price(...)` (§0.1) it can go, along
+  with `docs/api/market.md`'s deprecation note. (§4, §11-Q4)
+- [ ] **End-to-end unified example + local example guard** — see §13. New
+  `examples/10_unified_pricing.py` exercising `MarketState` → `price`
+  (auto/mc/pde) → `market_greeks` → multi-curve selectors → Hull-White
+  `from_market`/`with_market_curve`, plus
+  `tests/test_examples/test_examples_run.py` (`runpy` smoke, MC/PDE ones
+  marked `slow`) and widening the `examples.yml` glob to
+  `examples/pitfalls/`. The docs tutorial
+  (`docs/guide/tutorial-unified-pricing.md`) now covers the same ground
+  prose-side, so this is about the *executable* guard.
+- [ ] **Guard the tutorial's snippets too.** Every code block in
+  `docs/guide/tutorial-unified-pricing.md` was executed in document order when
+  the page was written (and the quoted numbers are that run's output), but
+  nothing re-runs them, so the page can rot silently. Cheapest fix: extract
+  the fenced `python` blocks and `exec` them in sequence from the same
+  `tests/test_examples/` module as the examples guard, with the one
+  intentionally-raising block whitelisted.
+
+### 0.4 Done (for orientation)
+
+P1 spec · P2 core types + unified dispatch · P3 instrument selectors ·
+P4 unified greeks · P5 model↔market id-binding · P5.1 multi-curve MC/PDE.
+Detail in §8; acceptance results in §10 and §12.6.
 
 ---
 
@@ -95,6 +239,10 @@ existing `PDEResult`/`MCResult`: `price` + optional `stderr`/diagnostics),
 | `bucket` | `bucket(sensitivities, bucket_map) -> RiskLadder` | `risk/bucketing.py` |
 
 ### 2.3 The unified pricing signature (the headline decision)
+
+*The signature as **shipped**, with worked examples, is documented in
+`docs/guide/tutorial-unified-pricing.md` and `docs/api/core.md`. Repeated
+here only so the decision and the alternative it beat stay legible.*
 
 ```python
 price(
@@ -198,7 +346,7 @@ single-curve degeneracy — the migration must preserve it end to end:
 - `CurveGraph` already degenerates to single-curve via the grandfathered
   `_default_` sentinel; `bootstrap_simultaneous` is a thin wrapper over
   `bootstrap_curve_graph` with `CurveSpec(curve_id="_default_")`
-  (see [Multi-Curve Framework](../roadmap.md#multi-curve-framework-what-ships-whats-left)).
+  (see [Multi-Curve Framework](docs/roadmap.md#multi-curve-framework-what-ships-whats-left)).
 - `graph_pricing.py` wrappers already reproduce single-curve behaviour
   **bit-for-bit** when `forward_id=None`.
 
@@ -323,7 +471,11 @@ parallel once P2 lands.
 
 **Create:**
 
-- ✅ `docs/architecture/pricing-ontology.md` — this report (P1).
+- ✅ `PRICING_ONTOLOGY.md` — this note (P1). Originally written into
+  `docs/architecture/pricing-ontology.md`; moved out of the docs tree once
+  its user-facing half became the tutorial
+  `docs/guide/tutorial-unified-pricing.md`, because a phase-by-phase
+  migration ledger is a contributor artefact, not documentation.
 - ✅ `valax/core/market_state.py` — `MarketState` (+ the two-way `MarketData`
   view and the surface-id alphabet).
 - ✅ `valax/core/pricing.py` — `PricingResult`, unified registry keyed
@@ -376,9 +528,13 @@ parallel once P2 lands.
 - `docs/applications/instrument-pricing.md` — no matrix change (signature
   refactor, not a new instrument/pricer) unless coverage changes.
 - Owning guide pages + `docs/api/*` autodoc for new public symbols
-  (`MarketState`, `price`, `market_greeks`).
-- `mkdocs build --strict` must stay green (this page is wired into nav under
-  *Architecture & Validation*).
+  (`MarketState`, `price`, `market_greeks`). The contract's owning guide is
+  `docs/guide/tutorial-unified-pricing.md` — a new method, selector, or
+  named greek belongs there, with a runnable example.
+- `mkdocs build --strict` must stay green. **This file is not part of the
+  docs build** (it lives at the repo root, outside `docs/`), so nothing here
+  is link-checked: keep its cross-references repo-root-relative and verify
+  them by hand.
 
 ---
 
@@ -594,8 +750,11 @@ untouched.
 
 ## 13. Follow-up plan — end-to-end examples
 
-**Status:** 📋 planned, not started. *(Owner note: revisit in its own
-session.)*
+**Status:** 📋 **partially superseded.** The *prose* half landed as the docs
+tutorial `docs/guide/tutorial-unified-pricing.md`, which walks the contract
+end to end with runnable snippets. What remains is the **executable** half
+below: `examples/10_unified_pricing.py` and the local `runpy` smoke guard.
+Tracked in §0.3.
 
 ### 13.1 Motivation
 
@@ -690,14 +849,14 @@ explicit-argument kernels survive untouched — all of that is what shipped.
   and the risk engine still does not call `price`. This is the note's
   single biggest unrealised payoff — "every Greek is one `jax.grad`
   through one function" — and it is the same work as the multi-curve risk
-  gap in [Roadmap → Multi-Curve Framework §1](../roadmap.md#1-risk-pipeline-is-single-curve-largest-gap).
+  gap in [Roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-pipeline-is-single-curve-largest-gap).
 - [ ] **Per-leg index descriptors for genuinely multi-index products.**
   A singular `forward_id` covers the single-index case only. A
   single-currency tenor basis swap needs **three** curves (OIS discount +
   two projections), CMS-spread three, cross-currency four or more. The
   note's `SwapLeg(index_id=...)` + `legs: tuple[SwapLeg, ...]` design is
   the answer, and it converges with the P1.2 cashflow/leg engine
-  ([Roadmap Tier 1.4](../roadmap.md#14-trade-representation-and-cashflow-engine)) —
+  ([Roadmap Tier 1.4](docs/roadmap.md#14-trade-representation-and-cashflow-engine)) —
   they should be built as one thing, not twice.
 - [ ] **Static/dynamic pytree hygiene audit.** The note called this
   "non-negotiable for JIT": confirm no string id leaks into traced code

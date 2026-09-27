@@ -12,6 +12,90 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Dual-curve rates calibration (OIS discounting + tenor projection)
+
+Closes the consistency hole between pricing and calibration: since P5.1 the
+MC/PDE short-rate engines priced dual-curve, but *every* rates calibrator fitted
+single-curve, so the tenor basis leaked into the fitted volatility. Measured on
+a 50 bp basis, the old single-curve residual mis-fits Hull-White `σ` by **62 %**
+(0.016661 vs 0.010261) — a model that reprices its own calibration set and is
+wrong everywhere else. This violated the model/market consistency invariant that
+`price(instrument, model, market)` documents.
+
+- **Analytic dual-curve swaptions (the prerequisite).** Because the basis is
+  deterministic, a dual-curve swap stays an affine combination of discount
+  bonds, so both closed forms extend without losing their closed form:
+  `hw_swaption_price(swaption, model, forward_curve=None)` — Jamshidian's
+  critical rate now solves `CB(r*) = float_start` rather than `= 1`, via a new
+  `par_value` argument on `hw_critical_rate`; and
+  `g2pp_swaption_price(..., forward_curve=...)`, which previously **raised
+  `NotImplementedError`**, now solves its `ȳ(x)` boundary to `float_start` and
+  scales the eq.-(4.31) strike term by it. Both reuse
+  `valax.pricing.multicurve.{swap_leg_basis,apply_swap_basis}`, so there remains
+  exactly one implementation of the basis algebra shared with the MC/PDE
+  recipes.
+- **Calibration.** `calibrate_hull_white` and `calibrate_g2pp` take
+  `forward_curve=` (projection) and `curve_id=` (records the discount curve's
+  `MarketState` identifier on the fitted model, so `with_market_curve` can
+  re-bind it under a shocked market). `curve` remains the discount curve the
+  model is exact-fitted to. `swaption_prices_from_vols` takes `forward_curve=`
+  too — both legs of the residual must see both curves, since the same quoted
+  vol implies a different price once the forward swap rate is projected off a
+  different curve.
+- **Honest refusal where the engine cannot comply.** `calibrate_cheyette` and
+  `calibrate_cheyette_2f` accept `forward_curve` only to **raise** via
+  `require_single_curve`: the Cheyette PDE has no discount/projection split, and
+  a silently single-curve fit would be a wrong calibration with no signal.
+- **Fixed — `cap_price_black76` silently ignored `forward_curve`.** It accepted
+  the argument (its Bachelier sibling and both caplet pricers handle it) but
+  projected off the discount curve unconditionally, returning a single-curve
+  price for a dual-curve request. Regression-tested against the caplet strip.
+- **Single-curve is unchanged, bit-for-bit.** The basis is a *trace-time*
+  branch (`None` ⇒ `float_start = 1.0` and untouched cash flows), verified by
+  exact equality against the pre-change implementations across 18 payer/receiver
+  × strike × expiry/tenor configurations per model — not a tolerance. Multi-curve
+  is an upgrade, not a replacement.
+- **Validation** (`tests/test_pricing/test_dual_curve_swaptions.py`,
+  `tests/test_calibration/test_dual_curve_calibration.py`): payer-minus-receiver
+  parity equals the dual-curve forward swap value to ~2e-14 (model-independent,
+  so it isolates the discount/projection split); the closed forms agree with the
+  independent dual-curve PDE recipes to 1.5e-5 (HW) and 5.6e-5 (G2++); prices
+  are monotone in the basis and collapse exactly onto single-curve at zero
+  basis; dual-curve round-trips recover the generating parameters; and a
+  single-curve fit of dual-curve targets is asserted to *miss*, pinning the bug
+  this closes. Gradients flow to the projection curve's pillars, so basis risk
+  is autodiff rather than bumped.
+- Docs: new [calibration guide § 6](docs/guide/calibration.md), theory § 5.1 on
+  why the closed forms extend cheaply, coverage-matrix and roadmap updates, and
+  a roadmap item for the missing **QuantLib** cross-check of the rates
+  calibrators (none exists in either mode; current gates prove self-consistency,
+  not convention).
+
+### Changed — Pricing ontology: tutorial in the docs, ledger out of them
+
+- **New page `docs/guide/tutorial-unified-pricing.md`** (nav: *Examples →
+  Tutorial — The Unified Pricing Contract*) — the user-facing contract, taught
+  rather than specified: the four arguments and what each owns, one trade
+  through all four engines, method selection, `model=None` curve discounting,
+  `discount_id` / `forward_id` selectors turning a single-curve trade
+  multi-curve, keyed multi-asset markets and the surface-id alphabet,
+  `from_market` / `with_market_curve` model binding, the three sensitivity
+  families (including the theta autodiff-vs-bump policy and pillars → buckets →
+  quote-space), `register_pricer`, and a table of the failure modes with their
+  actual messages. Every snippet was executed in document order; the numbers in
+  the prose are its real output.
+- **`docs/architecture/pricing-ontology.md` → `PRICING_ONTOLOGY.md`** (repo
+  root, outside the MkDocs build). The migration report was half contract, half
+  phase-by-phase ledger; the contract half is now the tutorial, and what remains
+  is a contributor artefact — so it reads as one, led by a new **§0 Outstanding
+  work** backlog consolidating the old §12.8 / §13 / §14.2 items into a single
+  checklist.
+- Inbound references rewired: `mkdocs.yml` nav, `docs/api/core.md` (which now
+  defers the how-to material to the tutorial instead of restating it),
+  `docs/api/greeks.md`, `docs/roadmap.md`, `docs/theory/multi-curve-short-rate.md`,
+  and the docstring path references in `valax/core/`, `valax/greeks/`,
+  `valax/pricing/multicurve.py`. No code behaviour changed.
+
 ### Added — Unified pricing signature and `MarketState` (pricing ontology, P2)
 
 - `valax/core/market_state.py`: **`MarketState`**, the calibrated market
@@ -47,7 +131,7 @@ under `[Unreleased]` and are grouped by feature area for discoverability.
   registries; `jax.grad` through `price` yields market delta and model vega
   together.
 - Design record: the five open questions in
-  `docs/architecture/pricing-ontology.md` are now resolved (one
+  `PRICING_ONTOLOGY.md` are now resolved (one
   `PricingResult` container; a separate auto-policy table; the surface-id
   alphabet `<UNDERLYING>.<KIND>[.<QUALIFIER>]`; a one-release `MarketData`
   view; `theta` + `dual_delta` promoted). New page: `docs/api/core.md`.

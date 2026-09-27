@@ -17,6 +17,16 @@ pip install -e ".[dev]"
 
 ## First Steps
 
+The snippets below call the low-level pricers directly — the shortest path to a
+number, and the right level when you know exactly which formula you want.
+
+!!! tip "There is also one front door for everything"
+    `valax.core.price(instrument, model, market)` prices any registered
+    instrument/model pair on any engine, resolves the curves a trade names, and
+    is the call every Greek differentiates. If you would rather learn that
+    first, start with
+    [Tutorial — The Unified Pricing Contract](guide/tutorial-unified-pricing.md).
+
 ### Price a European Option
 
 ```python

@@ -107,7 +107,6 @@ nav:
       - JAX Patterns: architecture/jax-patterns.md
       - PDE Solvers Design: architecture/pde-design.md
       - Numerical Pitfalls: architecture/numerical-pitfalls.md
-      - Pricing Ontology & Unified Signature (Design): architecture/pricing-ontology.md
       - Validation:
           - Pricing Examples: examples.md
           - QuantLib Validation Pyramid: architecture/quantlib-validation-pyramid.md
@@ -142,6 +141,7 @@ nav:
       - Backtesting & FRTB PLA: risk-backtesting.md
       - PCA Curve Shocks (Rates): guide/pca-rates.md
   - Examples:
+      - Tutorial — The Unified Pricing Contract: guide/tutorial-unified-pricing.md
       - Tutorial — Rates End-to-End: guide/tutorial-rates.md
   - API Reference:
       - Core — Market State & Pricing: api/core.md

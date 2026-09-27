@@ -27,6 +27,7 @@ References:
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 
 import equinox as eqx
@@ -61,6 +62,7 @@ def swaption_prices_from_vols(
     curve: DiscountCurve,
     market_vols: Float[Array, " n_quotes"],
     normal: bool = False,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, " n_quotes"]:
     """Convert quoted swaption volatilities to prices.
 
@@ -68,25 +70,39 @@ def swaption_prices_from_vols(
     applies the existing Black-76 / Bachelier pricers so the vol convention
     lives in exactly one place.
 
+    With a distinct ``forward_curve`` the forward swap rate is projected off
+    that curve while the annuity is discounted on ``curve`` — so the *same*
+    quoted volatility implies a different price than it would single-curve.
+    Getting this leg right matters as much as the model leg: a dual-curve model
+    fitted to single-curve target prices is inconsistent in the opposite
+    direction.
+
     Args:
         swaptions: Swaption contracts, one per quote.
-        curve: Discount curve used for the annuity and forward swap rate.
+        curve: Discount curve used for the annuity and, when no projection
+            curve is given, the forward swap rate.
         market_vols: Quoted volatility for each swaption.
         normal: ``True`` for Bachelier (normal) quotes, ``False`` for
             Black-76 (lognormal).
+        forward_curve: Optional projection curve for the underlying swaps'
+            floating legs.  ``None`` is the single-curve convention.
 
     Returns:
         Market price of each swaption.
     """
     pricer = swaption_price_bachelier if normal else swaption_price_black76
     return jnp.stack(
-        [pricer(sw, curve, market_vols[i]) for i, sw in enumerate(swaptions)]
+        [
+            pricer(sw, curve, market_vols[i], forward_curve)
+            for i, sw in enumerate(swaptions)
+        ]
     )
 
 
 def hw_swaption_prices(
     model: HullWhiteModel,
     swaptions: Sequence[Swaption],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, " n_quotes"]:
     """Hull-White model price for each swaption on the surface.
 
@@ -96,13 +112,17 @@ def hw_swaption_prices(
     cheap.
 
     Args:
-        model: Hull-White model.
+        model: Hull-White model; its ``initial_curve`` is the discount curve.
         swaptions: Swaption contracts, one per quote.
+        forward_curve: Optional projection curve, applied through the frozen
+            tenor-basis overlay.  ``None`` is single-curve.
 
     Returns:
         Model price of each swaption.
     """
-    return jnp.stack([hw_swaption_price(sw, model) for sw in swaptions])
+    return jnp.stack(
+        [hw_swaption_price(sw, model, forward_curve) for sw in swaptions]
+    )
 
 
 def _hw_price_residuals(
@@ -116,9 +136,16 @@ def _hw_price_residuals(
     residuals would let the longest-dated quotes dominate the fit and would
     leave the Jacobian badly conditioned.
     """
-    transforms, template, swaptions, market_prices, weights, scale = args
+    (
+        transforms, template, swaptions, market_prices, weights, scale,
+        forward_curve,
+    ) = args
     model = unconstrained_to_model(raw_params, transforms, template)
-    return weights * (hw_swaption_prices(model, swaptions) - market_prices) / scale
+    return (
+        weights
+        * (hw_swaption_prices(model, swaptions, forward_curve) - market_prices)
+        / scale
+    )
 
 
 def _hw_sse(
@@ -139,8 +166,26 @@ def calibrate_hull_white(
     relative: bool = True,
     solver: str = "bfgs",
     max_steps: int = 256,
+    forward_curve: DiscountCurve | None = None,
+    curve_id: str | None = None,
 ) -> tuple[HullWhiteModel, optimistix.Solution]:
     r"""Fit Hull-White :math:`(a, \sigma)` to a swaption surface.
+
+    **Single- and dual-curve.** By default this is the single-curve fit it
+    always was, bit-for-bit.  Passing ``forward_curve`` makes ``curve`` the
+    *discount* (e.g. OIS) curve and projects the underlying swaps' floating
+    legs off the projection curve, through the same frozen tenor-basis overlay
+    the MC/PDE recipes use — so the fitted model is consistent with the engine
+    that will later price with it.  Multi-curve is an upgrade, not a
+    replacement.
+
+    .. warning::
+
+       Convert your target vols with the *same* curve pair
+       (``swaption_prices_from_vols(..., forward_curve=...)``).  Fitting a
+       dual-curve model to single-curve target prices pushes the basis into
+       :math:`\sigma` and is exactly the inconsistency this argument exists to
+       remove.
 
     Args:
         swaptions: Swaption contracts, one per market quote.
@@ -173,6 +218,14 @@ def calibrate_hull_white(
             Levenberg-Marquardt raises ``List arity mismatch`` when it
             recombines the Jacobian's static/dynamic partition in that case.
         max_steps: Maximum optimiser iterations.
+        forward_curve: Optional projection curve for the underlying swaps'
+            floating legs.  ``None`` (the default) is the single-curve fit.
+        curve_id: Optional identifier of the discount curve in the
+            :class:`~valax.core.market_state.MarketState` it came from.  When
+            given it is recorded on the fitted model, so the
+            model-to-market linkage is explicit and
+            :meth:`~valax.models.hull_white.HullWhiteModel.with_market_curve`
+            can re-bind the model under a shocked market.
 
     Returns:
         Tuple of the fitted model and the ``optimistix`` solution carrying
@@ -199,6 +252,12 @@ def calibrate_hull_white(
             lambda m: m.initial_curve, initial_guess, curve
         )
 
+    # Record which market curve the model is bound to.  ``curve_id`` is a
+    # *static* field, so it is not a pytree leaf and ``eqx.tree_at`` cannot
+    # reach it; ``dataclasses.replace`` rebuilds the (frozen) module instead.
+    if curve_id is not None:
+        initial_guess = dataclasses.replace(initial_guess, curve_id=curve_id)
+
     if fixed_mean_reversion is not None:
         initial_guess = eqx.tree_at(
             lambda m: m.mean_reversion,
@@ -221,6 +280,7 @@ def calibrate_hull_white(
     y0 = model_to_unconstrained(initial_guess, transforms)
     args = (
         transforms, initial_guess, tuple(swaptions), market_prices, weights, scale,
+        forward_curve,
     )
 
     if solver == "bfgs":

@@ -296,3 +296,94 @@ class TestCapBachelier:
     def test_jit(self, cap, flat_curve):
         p = jax.jit(cap_price_bachelier)(cap, flat_curve, jnp.array(0.005))
         assert jnp.isfinite(p)
+
+
+# ── Dual-curve projection ─────────────────────────────────────────────
+
+@pytest.fixture
+def projection_curve(ref_date):
+    """Tenor curve 50 bp above the 5% discount curve."""
+    pillars = jnp.array([
+        int(ymd_to_ordinal(2025 + i, 1, 1)) for i in range(6)
+    ], dtype=jnp.int32)
+    times = (pillars - int(ref_date)).astype(jnp.float64) / 365.0
+    return DiscountCurve(
+        pillar_dates=pillars,
+        discount_factors=jnp.exp(-0.055 * times),
+        reference_date=ref_date,
+    )
+
+
+class TestDualCurveProjection:
+    """``forward_curve`` must project the forwards, never be ignored.
+
+    ``cap_price_black76`` accepted ``forward_curve`` and silently dropped it,
+    so a dual-curve cap request returned a single-curve price with no signal —
+    the failure mode the overlay elsewhere guards against explicitly.  These
+    tests pin the contract for the whole family.
+    """
+
+    @pytest.mark.parametrize(
+        "pricer", [cap_price_black76, cap_price_bachelier]
+    )
+    def test_projection_curve_changes_the_price(
+        self, pricer, cap, flat_curve, projection_curve
+    ):
+        vol = jnp.array(0.20) if pricer is cap_price_black76 else jnp.array(0.005)
+        single = pricer(cap, flat_curve, vol)
+        dual = pricer(cap, flat_curve, vol, forward_curve=projection_curve)
+        # Projection above discounting raises the forwards, so a cap is worth
+        # strictly more.
+        assert float(dual) > float(single)
+
+    @pytest.mark.parametrize(
+        "pricer", [cap_price_black76, cap_price_bachelier]
+    )
+    def test_none_and_self_projection_are_single_curve(
+        self, pricer, cap, flat_curve
+    ):
+        vol = jnp.array(0.20) if pricer is cap_price_black76 else jnp.array(0.005)
+        base = float(pricer(cap, flat_curve, vol))
+        assert float(pricer(cap, flat_curve, vol, forward_curve=None)) == base
+        assert float(
+            pricer(cap, flat_curve, vol, forward_curve=flat_curve)
+        ) == base
+
+    @pytest.mark.parametrize(
+        "cap_pricer,caplet_pricer,vol",
+        [
+            (cap_price_black76, caplet_price_black76, 0.20),
+            (cap_price_bachelier, caplet_price_bachelier, 0.005),
+        ],
+    )
+    def test_cap_equals_sum_of_caplets_dual_curve(
+        self, cap_pricer, caplet_pricer, vol, cap, flat_curve, projection_curve
+    ):
+        """The strip and the single-caplet pricers must agree dual-curve too.
+
+        The caplet pricers already handled ``forward_curve`` correctly, so this
+        is the independent oracle for the cap-level fix.
+        """
+        strip = cap_pricer(
+            cap, flat_curve, jnp.array(vol), forward_curve=projection_curve
+        )
+        pieces = sum(
+            float(
+                caplet_pricer(
+                    Caplet(
+                        fixing_date=cap.fixing_dates[i],
+                        start_date=cap.start_dates[i],
+                        end_date=cap.end_dates[i],
+                        strike=cap.strike,
+                        notional=cap.notional,
+                        is_cap=cap.is_cap,
+                        day_count=cap.day_count,
+                    ),
+                    flat_curve,
+                    jnp.array(vol),
+                    forward_curve=projection_curve,
+                )
+            )
+            for i in range(cap.start_dates.shape[0])
+        )
+        assert float(strip) == pytest.approx(pieces, rel=1e-10)

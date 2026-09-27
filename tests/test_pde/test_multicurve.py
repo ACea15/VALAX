@@ -5,7 +5,7 @@ means the deterministic tenor-basis overlay of :mod:`valax.pricing.multicurve`:
 discount with the model re-fitted to the trade's discount curve, project
 floating legs off a separate curve whose basis to the discount curve is frozen
 at its time-zero value.  The tests below are the acceptance criteria of
-``docs/architecture/pricing-ontology.md`` §12.6:
+``PRICING_ONTOLOGY.md`` §12.6:
 
 1. **Single-curve non-regression (the hard gate).**  Passing no curves, or
    passing the model's own curve, must reproduce the pre-existing number

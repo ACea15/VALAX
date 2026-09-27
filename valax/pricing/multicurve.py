@@ -62,7 +62,7 @@ single-curve case, and the recipes encode it as ``basis=None`` so the
 arithmetic is *identical*, not merely algebraically equal — the
 non-regression gate of the migration report.
 
-See ``docs/architecture/pricing-ontology.md`` §12 for the phase plan this
+See ``PRICING_ONTOLOGY.md`` §12 for the phase plan this
 module implements.
 """
 
@@ -274,5 +274,5 @@ def require_single_curve(
         f"discount curve under the deterministic tenor-basis overlay.  Drop "
         f"the instrument's `forward_id` (or point it at the discount curve) "
         f"to price it single-curve, or use the analytic route.  See "
-        f"docs/architecture/pricing-ontology.md §12."
+        f"PRICING_ONTOLOGY.md §12."
     )

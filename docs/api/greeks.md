@@ -24,8 +24,10 @@ come from `jax.grad`; theta is computed by bumping the instrument's
 
 ## Unified market / model / contract greeks
 
-Sensitivities over the ontology's `price(instrument, model, market)`
-(pricing-ontology P4). One backward pass through the unified pricer yields a
+Sensitivities over the unified
+[`price(instrument, model, market)`](core.md#the-unified-signature) call — see
+[tutorial § 8](../guide/tutorial-unified-pricing.md#8-sensitivities-through-the-same-call)
+for the walkthrough. One backward pass through the unified pricer yields a
 pytree-shaped gradient for **market greeks** (`market_gradient`, `spot_delta`,
 `curve_pillar_deltas`) and **model greeks** (`model_gradient`); **contract
 greeks** (`dual_delta`, `theta`) differentiate the instrument's own leaves,

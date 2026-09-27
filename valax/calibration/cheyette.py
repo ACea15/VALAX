@@ -60,6 +60,7 @@ from valax.calibration.transforms import (
 )
 from valax.curves.discount import DiscountCurve
 from valax.models.cheyette import CheyetteModel, CheyetteModel2F
+from valax.pricing.multicurve import require_single_curve
 from valax.pricing.pde import PDEConfig, PDEConfig2D, Scheme, pde_price_dispatch
 from valax.pricing.pde.cheyette import cheyette_exact_price
 
@@ -159,8 +160,16 @@ def calibrate_cheyette(
     engine: str = "frozen",
     config: PDEConfig | PDEConfig2D | None = None,
     max_steps: int = 256,
+    forward_curve: DiscountCurve | None = None,
 ) -> tuple[CheyetteModel, optimistix.Solution]:
     r"""Fit one-factor Cheyette :math:`(\kappa, \sigma, \beta)` through the PDE.
+
+    **Single-curve only.** The Cheyette PDE engine has no discount/projection
+    split (unlike the Hull-White and G2++ recipes), so ``curve`` both discounts
+    and projects.  Passing a distinct ``forward_curve`` *raises* rather than
+    being silently dropped — a dual-curve fit that quietly ignored the
+    projection curve would be a wrong calibration with no signal.  Dual-curve
+    Cheyette is tracked on the roadmap.
 
     Args:
         instruments: Calibration instruments, one per market quote (e.g.
@@ -203,6 +212,7 @@ def calibrate_cheyette(
         )
     if engine not in ("frozen", "exact"):
         raise ValueError(f"Unknown engine: {engine!r} (use 'frozen' or 'exact').")
+    require_single_curve(curve, forward_curve, "Cheyette calibration")
 
     if config is None:
         config = (
@@ -269,12 +279,17 @@ def calibrate_cheyette_2f(
     solver: str = "bfgs",
     config: PDEConfig2D | None = None,
     max_steps: int = 256,
+    forward_curve: DiscountCurve | None = None,
 ) -> tuple[CheyetteModel2F, optimistix.Solution]:
     r"""Fit two-factor Cheyette through the frozen-``y`` 2-D ADI PDE.
 
     Two factors are always calibrated on the **frozen-``y``** engine — the
     exact-``y`` two-factor PDE is 5-D and not tractable in a calibration loop
     (see ``docs/research-ideas.md``).
+
+    **Single-curve only**, for the same reason as
+    :func:`calibrate_cheyette`: a distinct ``forward_curve`` raises rather than
+    being silently ignored.
 
     Args:
         instruments: Calibration instruments, one per market quote.
@@ -306,6 +321,8 @@ def calibrate_cheyette_2f(
             f"Got {len(instruments)} instruments but "
             f"{market_prices.shape[0]} market prices."
         )
+
+    require_single_curve(curve, forward_curve, "Cheyette 2F calibration")
 
     if config is None:
         config = _DEFAULT_CONFIG_FROZEN_2F

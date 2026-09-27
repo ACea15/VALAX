@@ -2,9 +2,14 @@
 
 `valax.core` owns the two objects every other package leans on: the
 **calibrated market container** (`MarketState`) and the **unified pricing
-verb** (`price`). Together they are phase P2 of the
-[Pricing Ontology](../architecture/pricing-ontology.md) — one call
-convention replacing three, with *no pricer rewritten*.
+verb** (`price`) — one call convention replacing three, with *no pricer
+rewritten*.
+
+!!! tip "Learning it rather than looking it up?"
+    This page is the reference. The guided walkthrough — the contract, the
+    selectors, worked multi-curve and sensitivity examples, and how to
+    register your own pricer — is
+    [Tutorial — The Unified Pricing Contract](../guide/tutorial-unified-pricing.md).
 
 ```python
 from valax.core import MarketState, price
@@ -16,40 +21,19 @@ result.price, result.method                    # 10.4506, "analytic"
 
 ## The unified signature
 
-```python
-price(
-    instrument,          # contract data + static market selectors
-    model,               # dynamics + calibrated params (None ⇒ pure discounting)
-    market,              # MarketState
-    *,
-    method="auto",       # "analytic" | "lattice" | "pde" | "mc" | "auto"
-    config=None,         # PDEConfig / MCConfig / BinomialConfig
-    key=None,            # PRNG key, required for method="mc"
-) -> PricingResult
-```
-
 Growth happens in the **dispatch**, never in the signature: new methods
-and new `(instrument, model)` pairs register; `price`'s parameters do
-not change.
-
-Three properties worth knowing before you use it:
-
-- **Single-curve needs zero configuration.** An instrument that declares
-  no selectors resolves to the `"_default_"` curve with no projection
-  curve — the pre-existing single-curve semantics, bit-for-bit.
-- **The MC and PDE registries are bridged, not duplicated.** Every
-  recipe in `valax/pricing/{mc,pde}/` is reachable through `price` the
-  moment it is registered there, so the registries cannot drift apart.
-- **`model=None` is a first-class case** for instruments priced by curve
-  discounting alone (fixed-rate bonds, vanilla and OIS swaps, FRNs).
+and new `(instrument, model)` pairs register; `price`'s parameters do not
+change. What the four arguments own, why single-curve trades need zero
+configuration, and how `model=None` covers curve-discounted instruments are
+walked through in
+[the tutorial](../guide/tutorial-unified-pricing.md#1-the-contract).
 
 ### Method selection
 
-Availability and preference are separate (resolved question Q2 of the
-ontology): the registry answers *what can be priced*, the policy table
-answers *what should be*. `method="auto"` takes the policy entry when
-there is one and it is available, else the first available method in
-`analytic → lattice → pde → mc`.
+Availability and preference are separate: the registry answers *what can be
+priced*, the policy table answers *what should be*. `method="auto"` takes the
+policy entry when there is one and it is available, else the first available
+method in `analytic → lattice → pde → mc`.
 
 ::: valax.core.price
 
@@ -64,22 +48,11 @@ there is one and it is available, else the first available method in
 ### Registering a pricer
 
 Adapters are thin: unpack the [`ResolvedMarket`](#valax.core.ResolvedMarket)
-and call a pricer that already exists.
-
-```python
-from valax.core import PricingResult, register_pricer
-
-@register_pricer(MyInstrument, MyModel, "analytic")
-def _my_pricer(*, instrument, model, market, resolved, config, key):
-    return PricingResult(
-        price=my_closed_form(instrument, resolved.discount_curve, model),
-        method="analytic",
-    )
-```
-
-A subclass that only *adds* market selectors inherits its base class's
-pricers — resolution walks the MRO, so the most specific registration
-wins.
+and call a pricer that already exists. A subclass that only *adds* market
+selectors inherits its base class's pricers — resolution walks the MRO, so the
+most specific registration wins. Worked example and the rules that keep the
+registry honest:
+[tutorial § 10](../guide/tutorial-unified-pricing.md#10-extending-register-your-own-pricer).
 
 ::: valax.core.register_pricer
 
@@ -125,8 +98,9 @@ resolution happens at trace time and stays out of the gradient path.
 
 ## See also
 
-- [Pricing Ontology & Unified Signature](../architecture/pricing-ontology.md)
-  — the design this implements, its invariants, and the remaining phases.
+- [Tutorial — The Unified Pricing Contract](../guide/tutorial-unified-pricing.md)
+  — the same API as a walkthrough, with runnable examples and the failure
+  modes explained.
 - [API → Pricing](pricing.md) — the pricers `price` dispatches to.
 - [API → Market Data](market.md) — the legacy `MarketData` container and
   the synthetic-market generators.

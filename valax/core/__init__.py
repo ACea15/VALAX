@@ -1,6 +1,6 @@
 """Core types, the calibrated market container, and the unified pricer.
 
-The pricing ontology (``docs/architecture/pricing-ontology.md``) names
+The pricing ontology (``PRICING_ONTOLOGY.md``) names
 four nouns and six verbs.  This package owns the two that every other
 package depends on: the **`MarketState`** noun and the **`price`** verb,
 plus the `resolve` binding that connects an instrument's static market

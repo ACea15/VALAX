@@ -3,8 +3,9 @@
 Three call conventions used to coexist — loose positional scalars for the
 analytic pricers, ``(instrument, model, config, **market_args)`` for the
 MC/PDE dispatchers, and ``(instrument, market)`` for the risk layer.  This
-module collapses them into the single contract specified in
-``docs/architecture/pricing-ontology.md`` §2.3:
+module collapses them into a single contract.  The user-facing walkthrough is
+``docs/guide/tutorial-unified-pricing.md`` (reference:
+``docs/api/core.md``); the design record is ``PRICING_ONTOLOGY.md`` §2.3:
 
 .. code-block:: python
 

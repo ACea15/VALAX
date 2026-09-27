@@ -44,7 +44,7 @@ The table below summarises the full pipeline VALAX supports today (✅) or plans
 | **Equity smile (per slice)** | Listed vanilla calls/puts on a single expiry (broker smile / OPRA chain) | [`calibrate_sabr`](#3-sabr-smile-calibration), [`calibrate_svi_slice`](vol-surfaces.md#svi-surface) | `SABRModel` or `SVIParams` for one expiry | European, American, digital, barrier, compound, chooser, Asian, lookback options |
 | **Equity surface** | Vanilla calls/puts across an (expiry × strike) grid | [`calibrate_sabr_surface`](vol-surfaces.md#sabr-surface), [`calibrate_svi_surface`](vol-surfaces.md#svi-surface), [`GridVolSurface`](vol-surfaces.md#grid-surface) | `SABRVolSurface`, `SVIVolSurface`, `GridVolSurface` | Autocallables, worst-of, cliquet, variance swap, all path-dependent exotics |
 | **Equity stochastic vol** | Listed vanilla call prices (mid) across expiries and strikes | [`calibrate_heston`](#4-heston-stochastic-vol-calibration) | `HestonModel` ($v_0, \kappa, \theta, \xi, \rho$) | Forward-starting options, cliquets, variance swaps, VIX-style products (MC) |
-| **Rates volatility** | ATM swaption straddles, swaption cube ($K \times T_\text{exp} \times T_\text{tail}$), caps/floors | SABR per smile ✅; Hull-White Jamshidian fit 🟡 | SABR swaption cube; `HullWhiteModel` $(a, \sigma)$ | Callable / puttable bonds ✅, Bermudan swaptions, CMS spread options, range accruals |
+| **Rates volatility** | ATM swaption straddles, swaption cube ($K \times T_\text{exp} \times T_\text{tail}$), caps/floors | SABR per smile ✅; [`calibrate_hull_white`](#6-dual-curve-rates-calibration-ois-discounting) (Jamshidian) and `calibrate_g2pp` ✅, single- **or** dual-curve | SABR swaption cube; `HullWhiteModel` $(a, \sigma)$; `G2PPModel` | Callable / puttable bonds ✅, Bermudan swaptions, CMS spread options, range accruals |
 | **FX volatility** | ATM straddles, 25Δ and 10Δ risk reversals + butterflies (broker strangles) | [`calibrate_sabr`](#3-sabr-smile-calibration) on the strike grid implied by the broker convention | FX `SABRVolSurface` / `SVIVolSurface` | FX vanilla, FX barrier, quanto, TARF (planned) |
 | **Credit** | Par CDS spreads at standard IMM tenors (6M, 1Y, 3Y, 5Y, 7Y, 10Y) | Survival-curve bootstrap 🟡 | `SurvivalCurve` (piece-wise constant hazard) | Off-market CDS, index tranches (CDO), CVA |
 
@@ -279,7 +279,175 @@ This gives you, for free:
 
 See [Greeks & Automatic Differentiation](../theory/greeks.md#6-greeks-and-automatic-differentiation) and the [end-to-end example](../examples.md) (`examples/08_end_to_end_workflow.py`) for a full walk-through from synthetic market quotes to calibrated SABR fit to portfolio-level Greeks.
 
-## 6. How It Works
+## 6. Dual-Curve Rates Calibration (OIS Discounting)
+
+Post-2008 a swaption is discounted on OIS and its underlying swap projects a
+*tenor* curve carrying a basis. The short-rate calibrators support that
+directly.
+
+!!! info "Multi-curve is an upgrade, not a replacement"
+    Every calibrator defaults to the single-curve fit it always performed, and
+    the single-curve code path is reached by a **trace-time** branch, so its
+    numbers are unchanged bit-for-bit. Dual-curve is opt-in per call, one
+    keyword: `forward_curve=`. The same principle holds across the library —
+    see [Why Multi-Curve?](why-multicurve.md) and the
+    [pricing contract](tutorial-unified-pricing.md#5-selectors-single-curve-for-free-multi-curve-on-purpose).
+
+### Why it has to be a calibration feature
+
+Hull-White and G2++ price dual-curve through a frozen deterministic tenor basis
+([theory](../theory/multi-curve-short-rate.md)). If you *price* dual-curve but
+*calibrate* single-curve, the basis has nowhere to go but into the fitted
+volatility — you get a model that reprices your calibration set and is wrong
+everywhere else. That violates the
+[model/market consistency invariant](tutorial-unified-pricing.md#7-models-that-reference-the-market).
+
+Both legs of the residual must see both curves:
+
+| Leg | Function | What the projection curve changes |
+|---|---|---|
+| **Market targets** | `swaption_prices_from_vols(..., forward_curve=...)` | The forward swap rate $S$; the annuity still discounts on OIS |
+| **Model prices** | `calibrate_hull_white(..., forward_curve=...)` | The floating leg's value at expiry, hence the exercise boundary |
+
+### Recipe
+
+??? note "Setup — the two curves and a small swaption grid"
+
+    ```python
+    import jax
+    jax.config.update("jax_enable_x64", True)
+
+    import jax.numpy as jnp
+    from valax.curves import DiscountCurve
+    from valax.dates import ymd_to_ordinal
+    from valax.instruments.rates import Swaption
+
+    REF = ymd_to_ordinal(2025, 1, 1)
+
+
+    def flat_curve(rate, n_years=21):
+        pillars = jnp.array(
+            [int(ymd_to_ordinal(2025 + i, 1, 1)) for i in range(n_years)],
+            dtype=jnp.int32,
+        )
+        times = (pillars - int(REF)).astype(jnp.float64) / 365.0
+        return DiscountCurve(
+            pillar_dates=pillars,
+            discount_factors=jnp.exp(-rate * times),
+            reference_date=REF,
+            day_count="act_365",
+        )
+
+
+    def swaption(expiry_years, tail_years, strike=0.032):
+        return Swaption(
+            expiry_date=jnp.int32(int(ymd_to_ordinal(2025 + expiry_years, 1, 1))),
+            fixed_dates=jnp.array(
+                [int(ymd_to_ordinal(2025 + expiry_years + i, 1, 1))
+                 for i in range(1, tail_years + 1)], dtype=jnp.int32),
+            strike=jnp.array(strike),
+            notional=jnp.array(1_000_000.0),
+            is_payer=True,
+            day_count="act_365",
+        )
+    ```
+
+    `act_365` on both the curves and the trades is deliberate: the short-rate
+    machinery builds its time axis from the *instrument's* day count while the
+    curve uses its own, so matching them keeps the arithmetic clean.
+
+```python
+import jax.numpy as jnp
+from valax.calibration import (
+    calibrate_hull_white, hw_swaption_prices, swaption_prices_from_vols,
+)
+
+ois = flat_curve(0.030)         # discounting
+projection = flat_curve(0.035)  # 3M projection — a 50 bp basis
+
+surface = [swaption(e, t) for e, t in ((1, 5), (2, 5), (3, 5), (2, 10), (5, 10))]
+market_vols = jnp.array([0.24, 0.23, 0.22, 0.22, 0.20])
+
+# 1. Quoted vols -> target prices, using BOTH curves.
+targets = swaption_prices_from_vols(
+    surface, ois, market_vols, forward_curve=projection
+)
+
+# 2. Fit: discount on OIS, project off the tenor curve.
+model, sol = calibrate_hull_white(
+    surface, targets, ois,
+    fixed_mean_reversion=jnp.array(0.08),
+    forward_curve=projection,
+    curve_id="USD.SOFR.OIS",     # record the market linkage
+)
+
+float(model.volatility)   # 0.010261
+model.curve_id            # 'USD.SOFR.OIS'
+
+# 3. Fit quality on its own targets.
+model_prices = hw_swaption_prices(model, surface, projection)
+# max relative error 5.9% — one factor cannot fit a whole surface exactly
+```
+
+`calibrate_g2pp` takes the same two keywords. `curve` is always the **discount**
+curve (the model stays exact-fitted to it); `forward_curve` only ever projects.
+
+### How much does ignoring the basis cost?
+
+Running the *old* single-curve residual against those same dual-curve targets,
+for the 50 bp basis above:
+
+| | $\sigma$ |
+|---|---|
+| Dual-curve fit (correct) | 0.010261 |
+| Single-curve residual on dual-curve targets | 0.016661 |
+
+A **62 % error in the fitted volatility** — the basis absorbed into the vol,
+exactly the failure this closes. (The effect is large here because a flat 50 bp
+basis moves a 3.2 %-strike payer swaption a long way in the money; the direction
+is general even where the magnitude is smaller.) A round-trip on
+model-generated targets recovers $\sigma = 0.012000$ from a truth of 0.012.
+
+### Recording the market linkage
+
+Passing `curve_id` writes the discount curve's identifier onto the fitted model,
+so a calibrated model can be re-bound to a shocked
+[`MarketState`](../api/core.md#marketstate) without refitting:
+
+```python
+from valax.core import MarketState
+from valax.curves.graph import CurveGraph
+
+shocked = MarketState(
+    curves=CurveGraph(curves={"USD.SOFR.OIS": flat_curve(0.040)})
+)
+rebound = model.with_market_curve(shocked)   # same params, re-fitted curve
+
+float(rebound.volatility) == float(model.volatility)   # True
+```
+
+Without `curve_id` the model carries the `"_default_"` sentinel, which is
+correct for a single-curve world and unchanged from before.
+
+### Scope
+
+| Calibrator | Dual-curve |
+|---|---|
+| `calibrate_hull_white` | ✅ frozen tenor basis |
+| `calibrate_g2pp` | ✅ frozen tenor basis |
+| `calibrate_cheyette`, `calibrate_cheyette_2f` | ❌ — **raises**, does not ignore |
+
+The Cheyette PDE engine has no discount/projection split at all, so passing
+`forward_curve` raises rather than silently returning a single-curve fit. A
+wrong calibration with no signal is the one outcome worse than an unsupported
+feature; dual-curve Cheyette is tracked on the
+[roadmap](../roadmap.md#7-modelling).
+
+Because the basis enters analytically, the least-squares Jacobian remains exact
+autodiff — including sensitivity to the *projection* curve's pillars, which is
+what makes basis risk differentiable rather than bumped.
+
+## 7. How It Works
 
 ### Parameter Transforms
 

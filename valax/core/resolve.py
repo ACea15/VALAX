@@ -1,6 +1,6 @@
 """Late binding of instrument/model market selectors to a ``MarketState``.
 
-The ontology (``docs/architecture/pricing-ontology.md`` §3.1, §3.4) says
+The ontology (``PRICING_ONTOLOGY.md`` §3.1, §3.4) says
 a model should *reference* market observables by static string id rather
 than embed copies of them, and an instrument should carry its own
 **contractual** selectors — which curve *this trade* discounts on, which

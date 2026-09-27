@@ -1,7 +1,8 @@
 """Unified sensitivities over the ontology's ``price(instrument, model, market)``.
 
-P4 of the pricing-ontology migration (``docs/architecture/pricing-ontology.md``
-§6).  Where :mod:`valax.greeks.autodiff` differentiates a *scalar-argument*
+Walkthrough: ``docs/guide/tutorial-unified-pricing.md`` §8; design record:
+``PRICING_ONTOLOGY.md``
+§6.  Where :mod:`valax.greeks.autodiff` differentiates a *scalar-argument*
 analytic pricer, this module differentiates the **unified**
 :func:`valax.core.pricing.price` and so gives sensitivities for every method
 (analytic / lattice / PDE / MC) and every asset class behind one API.

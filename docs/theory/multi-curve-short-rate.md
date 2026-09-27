@@ -151,7 +151,8 @@ means re-fitting the model to that curve, which is what
 
 The calibrated dynamics — mean reversion, volatility, correlation — are
 intrinsic and carry over unchanged. Note the consistency invariant of the
-[pricing ontology](../architecture/pricing-ontology.md#32-consistency-invariant-state-it-in-code-docs):
+unified pricing contract
+([tutorial § 7](../guide/tutorial-unified-pricing.md#7-models-that-reference-the-market)):
 a model is only valid against the market it was calibrated to, or a
 scenario-shocked version of it.
 
@@ -160,17 +161,42 @@ scenario-shocked version of it.
 | Engine / model | Discount curve | Projection curve |
 |---|---|---|
 | Analytic rates pricers | ✅ | ✅ |
+| Hull-White analytic swaption (Jamshidian) | ✅ | ✅ |
+| G2++ analytic swaption (eq. 4.31 quadrature) | ✅ | ✅ |
 | Hull-White PDE (bonds, swaptions, Bermudans, caps) | ✅ | ✅ |
 | G2++ PDE (bonds, swaptions, Bermudans, caps) | ✅ | ✅ |
 | Hull-White MC (bonds, FRN, callables) | ✅ | ✅ (FRN) |
 | G2++ MC (bonds, FRN, swaptions) | ✅ | ✅ |
 | G2++ CMS-spread (PDE and MC) | ✅ | ❌ — **rejected, not ignored** |
 | Cheyette, LMM | — | — |
+| **Calibration** — `calibrate_hull_white`, `calibrate_g2pp` | ✅ | ✅ |
+| **Calibration** — `calibrate_cheyette`, `calibrate_cheyette_2f` | ✅ | ❌ — **rejected, not ignored** |
 
 The CMS-spread recipes rebuild their par swap rates from the model's own bond
 strip, so a distinct projection curve would be silently dropped. They raise
 instead: a wrong price with no signal is the one outcome worse than an
-unsupported feature.
+unsupported feature. The Cheyette calibrators refuse for the same reason —
+their PDE engine has no discount/projection split to honour.
+
+### 5.1 Why the closed forms extend so cheaply
+
+Because the basis is *deterministic*, a dual-curve swap is still an affine
+combination of discount bonds: the floating leg is worth ``float_start``
+instead of par at expiry, and each fixed cash flow picks up
+:math:`1 - b_{i+1}` (:func:`valax.pricing.multicurve.apply_swap_basis`). So
+
+- **Hull-White** keeps Jamshidian exactly: the critical rate now solves
+  :math:`CB(r^\star) = \text{float\_start}` rather than :math:`= 1`, and the
+  decomposition into zero-coupon bond options is otherwise untouched.
+- **G2++** keeps the eq. (4.31) quadrature: the :math:`\bar y(x)` boundary
+  solves to ``float_start`` and the strike term :math:`\Phi(\mp h_1)` is scaled
+  by it.
+
+That is the whole extension — no new integrals, no loss of closed form, and the
+same basis algebra as the MC/PDE recipes. Consequently **calibration stays
+cheap and its Jacobian stays exact autodiff**, which is what makes dual-curve
+fitting practical rather than merely possible. A stochastic basis would break
+this affine structure and is a different modelling exercise (§3.3).
 
 ## References
 

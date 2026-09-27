@@ -131,17 +131,21 @@ def cap_price_black76(
 
     Args:
         cap: Cap/floor contract.
-        curve: Discount curve.
+        curve: Discount curve (also projects the forwards when
+            ``forward_curve`` is not given).
         vol: Flat Black volatility (scalar) or per-caplet vols (shape n).
+        forward_curve: Optional projection curve for the forward rates.
+            Defaults to ``curve`` (single-curve setup).
 
     Returns:
         Cap or floor price.
     """
     T = year_fraction(curve.reference_date, cap.fixing_dates, cap.day_count)
     tau = year_fraction(cap.start_dates, cap.end_dates, cap.day_count)
+    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = curve(cap.start_dates)
-    df_end = curve(cap.end_dates)
+    df_start = fwd(cap.start_dates)
+    df_end = fwd(cap.end_dates)
     F = (df_start / df_end - 1.0) / tau
     P = curve(cap.end_dates)
 

@@ -10,7 +10,7 @@ signature
 
     price(instrument, model, market, *, method="auto", config=None, key=None)
 
-described in ``docs/architecture/pricing-ontology.md``.
+described in ``PRICING_ONTOLOGY.md``.
 
 Relationship to :class:`~valax.market.data.MarketData`
 ------------------------------------------------------
