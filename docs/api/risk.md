@@ -5,9 +5,11 @@ is fully differentiable — `jax.grad` flows through `apply_scenario`
 into the underlying `MarketData` fields, which is what powers
 `parametric_var`'s delta-normal computation.
 
-For `MarketData`, `MarketScenario`, `ScenarioSet`, `zero_scenario`,
-and `stack_scenarios`, see [Market Data](market.md). This page covers
-the perturbation and measurement layer built on top.
+For `MarketData`, `MarketScenario`, `ScenarioSet`, `KeyedScenario`,
+`zero_scenario`, and `stack_scenarios`, see [Market Data](market.md).
+This page covers the perturbation and measurement layer built on top —
+both the legacy positional shocks on a `MarketData` and the keyed shocks
+on a `MarketState`.
 
 ## Shock application
 
@@ -64,7 +66,35 @@ analogue of an IR key-rate bump.
 
 ### Full scenario application
 
+`apply_scenario` is the **legacy** (positional) container-level shock: it
+maps the four flat `MarketScenario` vectors onto a `MarketData`. Because
+`rate_shocks` carries no curve identity it can only move the default
+curve — `discount_curve` plus the `"_default_"` entry of an attached
+`curve_graph`, which are the same curve seen through two views. Named
+projection / basis curves on the graph are carried through unshocked; use
+the keyed API below for those.
+
 ::: valax.risk.shocks.apply_scenario
+
+## Keyed shocks on a `MarketState`
+
+The keyed counterpart: `shock` applies a
+[`KeyedScenario`](market.md#keyed-scenarios-for-marketstate) to a
+[`MarketState`](core.md#marketstate), addressing curves, surfaces, spots
+and dividends **by identifier**. Curve moves are routed through
+`bump_graph_curve` above, so an OIS shock and a projection-curve (basis)
+shock are two separately expressible scenarios on one graph. Vol moves go
+through `shift_surface`, a parallel shift that is uniform across every
+surface type. The result is a new pytree (`eqx.tree_at`, never mutation)
+and is differentiable in both the base market and the shock magnitudes.
+
+The guide walkthrough, including the surface design fork and what it
+implies for the sensitivity ladders, is in
+[Scenarios & Shocks § Keyed scenarios](../risk-scenarios.md#keyed-scenarios-on-a-marketstate).
+
+::: valax.risk.state_shocks.shock
+
+::: valax.risk.state_shocks.shift_surface
 
 ## Scenario generation
 

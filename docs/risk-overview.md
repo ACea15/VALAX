@@ -90,6 +90,13 @@ Every number in §2 is produced by the same chain of transformations. From left 
    Capital:    bucketed Δ at FRTB vertices → SBA formula (planned)
 ```
 
+The container in that picture is `MarketData` because the VaR engine still
+consumes it. The calibrated container the unified pricer takes —
+`MarketState`, with a keyed `CurveGraph` and vol surfaces — has its own
+scenario layer (`KeyedScenario` + `shock`, shocks addressed by curve /
+surface / asset id); see
+[Scenarios & Shocks § Keyed scenarios](risk-scenarios.md#keyed-scenarios-on-a-marketstate).
+
 Three things are worth stressing about this picture:
 
 1. **There is only one pricing function.** Everything else (Greeks, ladders, scenarios, VaR, backtests) is a *derived* quantity. If `V(market)` is wrong, every downstream number is wrong; if `V(market)` is right and differentiable, every downstream number is right by construction.

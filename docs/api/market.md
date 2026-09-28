@@ -54,6 +54,27 @@ simultaneously.
 
 ::: valax.market.stack_scenarios
 
+### Keyed scenarios (for `MarketState`)
+
+`MarketScenario` above is positional: four flat vectors laid out over a
+`MarketData`. `KeyedScenario` is the same idea addressed **by
+identifier** — curve id, surface id, asset id — which is what
+[`MarketState`](core.md#marketstate) needs, since it holds a whole
+`CurveGraph` (so "rates" is not one block) and stores vols as surface
+objects (so a vol shock is not one scalar per asset). Absent key = no
+shock; unknown key = error. Apply one with
+[`valax.risk.shock`](risk.md#keyed-shocks-on-a-marketstate); the
+narrative and the design fork behind the vol leg are in
+[Scenarios & Shocks § Keyed scenarios](../risk-scenarios.md#keyed-scenarios-on-a-marketstate).
+
+::: valax.market.KeyedScenario
+
+::: valax.market.zero_keyed_scenario
+
+::: valax.market.keyed_from_market_scenario
+
+::: valax.market.stack_keyed_scenarios
+
 ## Synthetic data — configuration & seeds
 
 ### Config

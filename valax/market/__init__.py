@@ -7,6 +7,12 @@ from valax.market.scenario import (
     stack_scenarios,
     zero_scenario,
 )
+from valax.market.keyed_scenario import (
+    KeyedScenario,
+    keyed_from_market_scenario,
+    stack_keyed_scenarios,
+    zero_keyed_scenario,
+)
 
 # Synthetic-market generators (Stage 1–6 of the end-to-end workflow).
 # Re-exported here so user code can simply ``from valax.market import

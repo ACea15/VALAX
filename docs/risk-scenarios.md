@@ -148,6 +148,146 @@ shocked_market = apply_scenario(base, scenario)
 # shocked_market.discount_curve has bumped zero rates
 ```
 
+Because `rate_shocks` is one unkeyed pillar vector, it can only move the
+**default** curve: `discount_curve`, plus the `"_default_"` entry of an
+attached `curve_graph` — the same curve seen through the legacy and the
+graph view, so the two always move together. Named projection / basis
+curves on the graph are carried through *unshocked*; an unkeyed vector
+cannot say which curve it means. That is what the keyed scenario below is
+for.
+
+!!! warning "Named graph curves are held fixed, loudly"
+    `reprice_under_scenario`, `portfolio_pnl`, `parametric_var` and
+    `pnl_attribution` thread the `curve_graph` all the way to the pricer
+    (they used to drop it, silently repricing a dual-curve book
+    single-curve). If the graph carries curves a `MarketScenario` cannot
+    address, they emit a `UserWarning` naming them: the risk to those
+    curves is *not* in the reported number.
+
+## Keyed scenarios on a `MarketState`
+
+[`MarketState`](api/core.md#marketstate) — the container the unified
+`price(instrument, model, market)` takes — is keyed, not positional: it
+holds a whole [`CurveGraph`](api/curves.md#valax.curves.CurveGraph) (so
+"rates" is not one block), vol **surface objects** rather than one scalar
+per asset, and identifier-keyed spots. `KeyedScenario` + `shock` are the
+scenario layer for it:
+
+```python
+import jax.numpy as jnp
+from valax.core import MarketState
+from valax.market import KeyedScenario
+from valax.risk import shock
+
+state = MarketState.single_curve(          # zero-config single curve
+    base.discount_curve,
+    spot=jnp.array(100.0),
+    vol=jnp.array(0.20),
+    dividend=jnp.array(0.02),
+)
+
+scenario = KeyedScenario(
+    spot_shocks={"_default_": jnp.array(5.0)},      # +5 spot
+    vol_shocks={"_default_": jnp.array(0.01)},      # +1 vol point, parallel
+    curve_shocks={"_default_": jnp.full(4, 0.0010)},  # +10bp, all pillars
+    dividend_shocks={"_default_": jnp.array(0.0)},
+)
+
+shocked = shock(state, scenario)           # a NEW MarketState
+```
+
+Three rules make it safe to use:
+
+- **Absent key = no shock.** `KeyedScenario()` is the no-op scenario, so
+  a scenario only names what it moves.
+- **Unknown key = `KeyError`.** A shock that addresses nothing is never
+  silently dropped — the failure mode this API exists to remove.
+- **`"_default_"` is zero-config.** The sentinel resolves the sole entry
+  of a one-entry table, so a single-curve / single-asset market needs no
+  identifiers at all, and reduces to exactly today's numbers (a
+  `MarketScenario` lifted with `keyed_from_market_scenario` produces a
+  bit-identical shocked market).
+
+### Per-curve moves are the point
+
+Curve shocks are keyed by curve id and routed through `bump_graph_curve`,
+so OIS and projection curves are finally *distinct* risk factors — a pure
+basis widening is one scenario:
+
+```python
+from valax.curves import CurveGraph, DiscountCurve, zero_rate
+
+times = (pillars - ref).astype(jnp.float64) / 365.0
+fwd_3m = DiscountCurve(                     # 50bp above OIS
+    pillar_dates=pillars,
+    discount_factors=jnp.exp(-0.055 * times),
+    reference_date=ref,
+)
+dual = MarketState(curves=CurveGraph(curves={
+    "USD.SOFR.OIS": base.discount_curve,
+    "USD.SOFR.3M": fwd_3m,
+}))
+
+basis_widening = KeyedScenario(curve_shocks={
+    "USD.SOFR.3M":  jnp.full(4,  0.0025),   # forwards up 25bp
+    "USD.SOFR.OIS": jnp.full(4, -0.0025),   # discounting down 25bp
+})
+widened = shock(dual, basis_widening)
+
+before = zero_rate(dual.curves["USD.SOFR.3M"], pillars[2]) - zero_rate(
+    dual.curves["USD.SOFR.OIS"], pillars[2])
+after = zero_rate(widened.curves["USD.SOFR.3M"], pillars[2]) - zero_rate(
+    widened.curves["USD.SOFR.OIS"], pillars[2])
+print(f"2Y basis: {before * 1e4:.1f}bp → {after * 1e4:.1f}bp")  # 50.0bp → 100.0bp
+```
+
+Everything not named is shared with the base market, untouched: `shock`
+rebuilds only the affected branches via `eqx.tree_at` and never mutates.
+`jax.grad` flows to the shock magnitudes themselves (shock-space
+sensitivities) as well as to the base market, and the whole path is
+`eqx.filter_jit`-safe.
+
+### Vol shocks: parallel shift, not node shock
+
+Under `MarketState` a vol is a duck-typed **surface object**
+(`GridVolSurface`, `SVIVolSurface`, `SABRVolSurface`, `SwaptionCube`,
+`ConstantVol`, ...), so "bump the vol" needs a definition. Two were
+possible:
+
+| | Representation | Expressiveness | Works for |
+|---|---|---|---|
+| (a) | shock surface **nodes** | a whole smile/term-structure move | grids only — SVI / SABR leaves are model parameters, not vols |
+| (b) | wrap in a **parallel-shift decorator** | one number per surface | every surface type |
+
+**VALAX ships (b)** — [`ShiftedVolSurface`](api/surfaces.md#shifted-surface-scenario-decorator),
+applied by `shift_surface` — because a scenario must mean the same thing
+for every surface a book can hold, and because the shock magnitude then
+stays a single differentiable scalar. A `ConstantVol` is shifted *in
+place* (`vol + shift`), which is bit-for-bit the legacy
+`vols + vol_shocks` arithmetic and keeps `MarketState.to_market_data()`
+working; repeated shifts accumulate instead of nesting wrappers. Option
+(a) is not lost: node-level moves remain available per surface type via
+`eqx.tree_at(lambda s: s.vols, surface, ...)` and are the natural thing to
+plug into `shift_surface` later.
+
+**Consequence for the ladders.** (b) keeps the vol axis one scalar per
+surface, which is exactly the shape
+[`SensitivityLadder`](risk-ladders.md)'s `delta_vol`, `vanna` and `volga`
+fields already assume — so they are unchanged by this work, but their
+*meaning* under a `MarketState` is a per-surface **parallel-shift vega**
+(a bucket vega), not a node vega. Had (a) been chosen, those three fields
+would have had to become identifier-keyed per-node arrays. Node-level vega
+ladders therefore remain future work, tracked in the
+[roadmap](roadmap.md#1-risk-engine-is-still-single-curve-largest-gap).
+
+!!! note "The VaR engine still consumes the legacy view"
+    `reprice_under_scenario` / `portfolio_pnl` / `value_at_risk` take a
+    `MarketData` and a `MarketScenario` and have not moved onto
+    `price(...)` yet, so `KeyedScenario` is today the scenario
+    representation for `MarketState`-based repricing and greeks rather
+    than a drop-in for the VaR loop. `keyed_from_market_scenario` bridges
+    the two representations in the meantime.
+
 ## Pricing Functions for Risk
 
 The risk engine accepts any pricing function with the signature:

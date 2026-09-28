@@ -169,18 +169,23 @@ a `(n_pillars_total, n_quotes)` sensitivity matrix through
 `optimistix.ImplicitAdjoint` at the cost of one linear solve per
 quote — this is what a production KRD / basis DV01 / xccy DV01
 pipeline stands on.  `apply_scenario` shocks the single
-`MarketData.discount_curve`; the shock primitives below close the
-gap for the `MultiCurveSet` view, and the `CurveGraph`-aware
+`MarketData.discount_curve` (plus the `"_default_"` entry of an
+attached graph, which is the same curve); the shock primitives below
+close the gap for the `MultiCurveSet` view, and the `CurveGraph`-aware
 variants (`bump_graph_curve`, `parallel_graph_shift`,
 `key_rate_graph_bump` in `valax/risk/shocks.py`) bump any named
 curve on a graph — including one carried on the optional
-`MarketData.curve_graph` field.
+`MarketData.curve_graph` field.  Since keyed scenarios landed, a
+*named* curve is addressable from a scenario too:
+`KeyedScenario(curve_shocks={curve_id: bumps})` applied with
+`valax.risk.shock` to a `MarketState`
+([guide](risk-scenarios.md#keyed-scenarios-on-a-marketstate)).
 
 | Factor ID | Description | What is needed | Pricing engines that will consume it |
 |---|---|---|---|
-| `IR.OIS.<ccy>.<pillar>` ✅ *(via `bump_discount_curve` on `MultiCurveSet`, or `bump_graph_curve` on `CurveGraph`)* | OIS / collateral discount-curve zero rate. | `bump_discount_curve` ✅ and `bump_graph_curve` ✅ in `valax/risk/shocks.py`; `MarketData.curve_graph` ✅ carries an optional `CurveGraph`. **Still needed:** routing graph shocks through `apply_scenario` / `MarketScenario`. | All analytic rates pricers (dual-curve via the optional `forward_curve` argument; see [`guide/curves.md` §8](guide/curves.md#8-what-is-not-yet-implemented)). |
+| `IR.OIS.<ccy>.<pillar>` ✅ *(via `bump_discount_curve` on `MultiCurveSet`, or `bump_graph_curve` on `CurveGraph`)* | OIS / collateral discount-curve zero rate. | `bump_discount_curve` ✅ and `bump_graph_curve` ✅ in `valax/risk/shocks.py`; `MarketData.curve_graph` ✅ carries an optional `CurveGraph`; `KeyedScenario.curve_shocks` + `valax.risk.shock` ✅ address any graph curve from a scenario. **Still needed:** keyed scenario *generators* and a per-curve covariance layout, so a projection curve carries its own VaR / P&L rung. | All analytic rates pricers (dual-curve via the optional `forward_curve` argument; see [`guide/curves.md` §8](guide/curves.md#8-what-is-not-yet-implemented)). |
 | `IR.FWD.<ccy>.<tenor>.<pillar>` ✅ *(via `bump_forward_curve` or `bump_graph_curve`)* | Tenor-specific forward curve (e.g. 3M SOFR forwards). | `bump_forward_curve(mcs, tenor, rate_bumps)` and `parallel_basis_shift` ✅ on `MultiCurveSet`; `bump_graph_curve(graph, curve_id, rate_bumps)` / `parallel_graph_shift` / `key_rate_graph_bump` ✅ on `CurveGraph`. | `pricing/analytic/floating.py` (FRN, OIS swap), `pricing/analytic/swaptions.py`, `pricing/analytic/caplets.py` — all with optional `forward_curve` |
-| `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` 🚧 | Forward-curve basis (e.g. 3M vs 6M, SOFR vs OIS). Derived: shock the forward curve while holding discount fixed. | Already achievable via `bump_forward_curve`; needs a named factor identifier and helper that takes a basis as input rather than a raw zero-rate bump.  With `quote_jacobian` the delta w.r.t. a `TenorBasisSwap.spread` is available directly through the calibrated `CurveGraph`. | Basis swaps, dual-curve XCCY |
+| `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` 🚧 | Forward-curve basis (e.g. 3M vs 6M, SOFR vs OIS). Derived: shock the forward curve while holding discount fixed. | Already achievable via `bump_forward_curve`, and expressible as a single scenario on a `MarketState` — `KeyedScenario(curve_shocks={...})` per curve id, see [Scenarios & Shocks § Per-curve moves](risk-scenarios.md#per-curve-moves-are-the-point); still needs a named factor identifier and a helper that takes a basis as input rather than a raw zero-rate bump.  With `quote_jacobian` the delta w.r.t. a `TenorBasisSwap.spread` is available directly through the calibrated `CurveGraph`. | Basis swaps, dual-curve XCCY |
 | `IR.XCCY.<ccy>.<pillar>` 📋 | Cross-currency basis between two currencies' funding curves. | Same machinery as `IR.BASIS` but with a foreign discount leg.  `quote_jacobian` on a four-curve `CurveGraph` closed by a `CrossCurrencyBasisSwap` produces the xccy DV01 in one solve. | `CrossCurrencySwap` (pricer exists; risk-engine shock TBD) |
 | `IR.CONVEXITY.<ccy>` 📋 | Hull-White / quasi-Gaussian convexity adjustment for CMS, futures, in-arrears caps. | Reuse `valax/curves/convexity.py`; expose its parameters as risk factors.  The `MoneyMarketFuture.convexity_adj_fn` plug-in accepts `no_convexity_adj` / `constant_convexity_adj` today; `hull_white_convexity_adj(model)` queued for MC-Curves-3. | `CMSSwap`, `CMSCapFloor`, money-market futures |
 
@@ -238,7 +243,7 @@ This is the dependency-ordered build-out plan that turns 🚧 / 📋 entries int
 
 1. **Survival curve + credit shocks** *(this iteration: completed for the curve and shock primitives)*
     - Unlocks: CDS pricer, OAS for callable bonds, convertible-bond credit dimension.
-2. **Multi-curve `MarketData`** — *(partially shipped)* `MarketData.curve_graph` ✅ holds an optional `CurveGraph` (dict of `DiscountCurve` keyed by identifier, supports any number of currencies × tenors + basis + xccy), and the `CurveGraph`-aware `bump_*` primitives ✅ mirror the `MultiCurveSet` ones.  **Remaining:** route `apply_scenario` / `MarketScenario` through the graph, and integrate with `quote_jacobian` for quote-space delta bucketing.
+2. **Multi-curve `MarketData`** — *(partially shipped)* `MarketData.curve_graph` ✅ holds an optional `CurveGraph` (dict of `DiscountCurve` keyed by identifier, supports any number of currencies × tenors + basis + xccy), and the `CurveGraph`-aware `bump_*` primitives ✅ mirror the `MultiCurveSet` ones.  Scenario-level addressing shipped with `KeyedScenario` + `valax.risk.shock` on a `MarketState` ✅, and the VaR path no longer drops the graph ✅.  **Remaining:** keyed scenario generators and a per-curve covariance layout (the VaR engine itself is still flat), and integration with `quote_jacobian` for quote-space delta bucketing.
     - Unlocks: real OIS-vs-SOFR basis risk, dual-curve KRDs, dual-curve PLA decomposition (separate `delta_ois` and `delta_sofr` ladders), full cross-currency delta chains, closed-form basis DV01 and xccy DV01 via the implicit-adjoint quote-Jacobian.
 3. **Per-currency curve registry + FX risk factors** — distinguish `EQ.SPOT.<asset>` (currently overloaded) from `FX.SPOT.<pair>`, and add a foreign discount curve per currency.
     - Unlocks: full Garman-Kohlhagen risk, XCCY swap KRDs in both currencies, multi-currency PLA.

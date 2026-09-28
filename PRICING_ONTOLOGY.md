@@ -55,15 +55,91 @@ line in the same change (`AGENTS.md` definition of done).
 
 ### 0.1 Highest payoff
 
+- [x] **Keyed scenarios + a `MarketState` shock primitive** (part 1 of the
+  risk-layer migration). `KeyedScenario`
+  (`valax/market/keyed_scenario.py`) addresses curves, surfaces, spots and
+  dividends **by identifier**; `valax.risk.shock`
+  (`valax/risk/state_shocks.py`) applies one to a `MarketState`, routing
+  curve moves through `bump_graph_curve` and vol moves through
+  `shift_surface` / `ShiftedVolSurface` (`valax/surfaces/shifted.py` —
+  design fork resolved in favour of a uniform parallel-shift decorator over
+  grid-specific node shocks, which keeps `SensitivityLadder.delta_vol` /
+  `vanna` / `volga` one scalar per asset). `MarketScenario` /
+  `apply_scenario` stay as the legacy view for one deprecation cycle, with
+  `keyed_from_market_scenario` bridging them. Same change fixed the silent
+  `curve_graph` drop in `reprice_under_scenario` / `parametric_var` /
+  `pnl_attribution`.
 - [ ] **Port the risk engine to `price(...)` and retire the `wrap_*`
-  adapters.** `valax/risk/var.py::wrap_equity_pricing_fn` is still the
-  bridge from the loose-scalar convention into `reprice_under_scenario`,
-  and the risk engine never calls `price`. This is the single biggest
-  unrealised payoff of the whole migration — "every Greek is one
-  `jax.grad` through one function" — and it is the same work as the
-  multi-curve risk gap in
-  [roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-pipeline-is-single-curve-largest-gap).
-  (§14.2)
+  adapters** (part 2, now unblocked).
+  `valax/risk/var.py::wrap_equity_pricing_fn` is still the bridge from the
+  loose-scalar convention into `reprice_under_scenario`, and the risk
+  engine never calls `price`. This is the single biggest unrealised payoff
+  of the whole migration — "every Greek is one `jax.grad` through one
+  function" — and it is the same work as the multi-curve risk gap in
+  [roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-engine-is-still-single-curve-largest-gap).
+  The keyed scenario representation it needs now exists; what remains is
+  the loop itself (`reprice_under_scenario` / `portfolio_pnl` /
+  `value_at_risk` onto `price`, `MarketState`-keyed generators and
+  covariance layout), plus `valax/greeks/market_greeks.py::_price_scalar`
+  as the model for the `.price` unwrap. (§14.2)
+
+  **Brief for that session — decisions already taken, do not re-litigate:**
+
+  1. **Risk layer does homogeneous groups; the portfolio layer aggregates.**
+     `price` dispatches on *type*, so one `vmap` covers one homogeneous
+     group and a heterogeneous book is a sum over groups. Because every
+     group differentiates w.r.t. the *same* `MarketState` pytree, per-group
+     gradients share a structure and aggregate by
+     `jax.tree_util.tree_map(add, …)` — i.e. aggregation happens in the
+     market's own coordinate system, and `risk/bucketing.py` stays the
+     coordinate change applied *after* aggregation, not a prerequisite.
+  2. **The grouping key is stricter than "instrument class":**
+     `(instrument type, static field values, model type + its statics,
+     method, config)`. `EuropeanOption.is_call` is `static=True`, so calls
+     and puts cannot share a stacked pytree — cf. `sample_option_portfolio`,
+     which already returns them separately. Make the key explicit in the API
+     rather than letting callers discover it from a tracer error.
+  3. **Return surface of the group-level primitives** (design them for the
+     aggregator now, so the portfolio layer needs no re-cut): the scalar PV,
+     the gradient *pytree*, and the `(n_scenarios,)` P&L vector — with an
+     explicit `key` argument. **Not** a VaR number.
+  4. **Four traps the aggregation must own.** (a) *Risk measures are not
+     additive*: a quantile of a sum is not a sum of quantiles, so aggregate
+     the P&L **vector** and apply `value_at_risk` / `expected_shortfall` /
+     the PLA tests only at the top; an API that permits adding per-desk VaRs
+     will produce a plausible wrong number with no error — the same failure
+     class as the `curve_graph` drop just fixed. (b) *MC common random
+     numbers*: once groups price through `price(..., key=…)`, an MC group's
+     scenario P&L is noise unless the key is fixed per group and reused
+     identically for the base and every shocked revaluation (analytic-only
+     pricers have hidden this so far). (c) *Absent ≠ zero*: `theta` raises
+     `NotImplementedError` for date-based instruments and a market-surface
+     vega does not exist for a group whose market has no surface, so the
+     aggregate needs a keyed union with explicit absence, or a mixed
+     equity/rates book reports an equity-only theta as the book's theta.
+     (d) *Quantity and sign* belong to the portfolio layer — `price` returns
+     a unit price and instruments are data-only; nothing in the library
+     carries a position size today.
+  5. **`valax/portfolio/` is not reusable as-is and there is no PV
+     aggregation to copy.** It is two functions (`batch_price`,
+     `batch_greeks`) on the pre-curve loose-scalar convention
+     `(spots, vols, rates, dividends)`, homogeneous-only, with
+     `batch_greeks` calling the old `greeks/autodiff.py`; there is no
+     `Portfolio` / `Position` type and no `tests/test_portfolio/` package.
+     Today's heterogeneous aggregation is a single `jnp.sum(prices)` inside
+     `reprice_under_scenario`. Build the layer once for the three additive
+     quantities (PV, gradient pytree, P&L vector) rather than once per
+     quantity, and treat `batch_price` / `batch_greeks` like
+     `wrap_equity_pricing_fn` — public API in `docs/getting-started.md` and
+     `docs/scaling/batching.md`, so they need a deprecation decision, not a
+     quiet patch.
+  6. **Sequence.** Port the loop first (self-contained, testable against the
+     legacy path for exact equality on a single-curve equity book), *then*
+     build the portfolio layer on top of it. Keyed generators + a named
+     factor layout to replace `parametric_var`'s positional covariance
+     concat are the follow-up that finally makes a basis move show up in a
+     VaR number — and that is what lets the `UserWarning` added in part 1
+     (`_warn_frozen_graph_curves`) be deleted as no longer true.
 - [ ] **Close the quote-space (hedge-space) loop.** Compose
   `∇_MarketState price` (`valax/greeks/market_greeks.py`) with
   `valax/curves/bootstrap_graph.py::quote_jacobian` and
@@ -849,7 +925,9 @@ explicit-argument kernels survive untouched — all of that is what shipped.
   and the risk engine still does not call `price`. This is the note's
   single biggest unrealised payoff — "every Greek is one `jax.grad`
   through one function" — and it is the same work as the multi-curve risk
-  gap in [Roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-pipeline-is-single-curve-largest-gap).
+  gap in [Roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-engine-is-still-single-curve-largest-gap).
+  Part 1 of that migration (keyed scenarios + `shock` on a `MarketState`,
+  and the `curve_graph` drop in the VaR path) has landed; see §0.1.
 - [ ] **Per-leg index descriptors for genuinely multi-index products.**
   A singular `forward_id` covers the single-index case only. A
   single-currency tenor basis swap needs **three** curves (OIS discount +

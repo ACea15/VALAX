@@ -1,10 +1,14 @@
 """End-to-end tests for VaR, parametric VaR, and P&L attribution."""
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import pytest
 
+from valax.core.market_state import DEFAULT_ID
 from valax.curves.discount import DiscountCurve
+from valax.curves.graph import CurveGraph
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.instruments.options import EuropeanOption
 from valax.instruments.rates import InterestRateSwap
@@ -13,6 +17,7 @@ from valax.market.scenario import MarketScenario, ScenarioSet
 from valax.pricing.analytic.black_scholes import black_scholes_price
 from valax.pricing.analytic.swaptions import swap_price
 from valax.risk.scenarios import parametric_scenarios, stress_scenario, stack_scenarios
+from valax.risk.shocks import apply_scenario
 from valax.risk.var import (
     expected_shortfall,
     parametric_var,
@@ -352,3 +357,175 @@ class TestPnLAttribution:
             "actual", "unexplained",
         }
         assert set(attr.keys()) == expected_keys
+
+
+# ── Test: the curve graph survives the VaR path ───────────────────────
+#
+# Regression gate. Every entry point below used to rebuild a
+# per-instrument ``MarketData(...)`` without ``curve_graph``, so the field
+# silently defaulted to ``None``: a graph-bearing market was repriced
+# single-curve with no error anywhere.
+
+
+def _graph_df_fn(option, market: MarketData) -> jnp.ndarray:
+    """Price off a *named* graph curve — blows up if the graph was dropped."""
+    curve = market.curve_graph["USD.SOFR.3M"]
+    return market.spots * curve(curve.pillar_dates[-1])
+
+
+def _sentinel_graph_fn(option, market: MarketData) -> jnp.ndarray:
+    """Price off the graph's sentinel curve."""
+    curve = market.curve_graph[DEFAULT_ID]
+    return market.spots * curve(curve.pillar_dates[-1])
+
+
+def _discount_curve_fn(option, market: MarketData) -> jnp.ndarray:
+    """Same payoff through the legacy ``discount_curve`` view."""
+    curve = market.discount_curve
+    return market.spots * curve(curve.pillar_dates[-1])
+
+
+@pytest.fixture
+def graph_portfolio(simple_portfolio):
+    """``simple_portfolio`` with a two-curve graph (sentinel + 3M forward)."""
+    instruments, base = simple_portfolio
+    curve = base.discount_curve
+    times = (
+        (curve.pillar_dates - curve.reference_date).astype(jnp.float64) / 365.0
+    )
+    fwd = DiscountCurve(
+        pillar_dates=curve.pillar_dates,
+        discount_factors=jnp.exp(-0.055 * times),  # +50bp basis
+        reference_date=curve.reference_date,
+    )
+    graph = CurveGraph(curves={DEFAULT_ID: curve, "USD.SOFR.3M": fwd})
+    return instruments, MarketData(
+        spots=base.spots,
+        vols=base.vols,
+        dividends=base.dividends,
+        discount_curve=curve,
+        curve_graph=graph,
+    )
+
+
+def _zero_scenario_3p() -> MarketScenario:
+    return MarketScenario(
+        spot_shocks=jnp.zeros(2),
+        vol_shocks=jnp.zeros(2),
+        rate_shocks=jnp.zeros(3),
+        dividend_shocks=jnp.zeros(2),
+    )
+
+
+class TestCurveGraphSurvivesVaRPath:
+    def test_reprice_under_scenario_keeps_the_graph(self, graph_portfolio):
+        """A graph-aware pricer must see the graph, not ``None``."""
+        instruments, base = graph_portfolio
+        with pytest.warns(UserWarning, match="held fixed"):
+            val = reprice_under_scenario(
+                _graph_df_fn, instruments, base, _zero_scenario_3p(),
+            )
+        fwd = base.curve_graph["USD.SOFR.3M"]
+        expected = jnp.sum(base.spots * fwd(fwd.pillar_dates[-1]))
+        assert val == expected
+
+    def test_portfolio_pnl_keeps_the_graph(self, graph_portfolio):
+        instruments, base = graph_portfolio
+        scenarios = stack_scenarios([
+            stress_scenario(2, 3, spot_shock=5.0),
+            stress_scenario(2, 3, spot_shock=-5.0),
+        ])
+        with pytest.warns(UserWarning, match="held fixed"):
+            pnl = portfolio_pnl(_graph_df_fn, instruments, base, scenarios)
+        assert pnl.shape == (2,)
+        assert float(pnl[0]) > 0.0 > float(pnl[1])
+
+    def test_parametric_var_keeps_the_graph(self, graph_portfolio):
+        instruments, base = graph_portfolio
+        cov = jnp.eye(9) * 0.01
+        with pytest.warns(UserWarning, match="held fixed"):
+            pvar = parametric_var(_graph_df_fn, instruments, base, cov)
+        assert float(pvar) > 0.0
+
+    def test_pnl_attribution_keeps_the_graph(self, graph_portfolio):
+        instruments, base = graph_portfolio
+        with pytest.warns(UserWarning, match="held fixed"):
+            attr = pnl_attribution(
+                _graph_df_fn, instruments, base,
+                stress_scenario(2, 3, spot_shock=5.0),
+            )
+        assert float(attr["delta_spot"]) > 0.0
+
+    def test_sentinel_graph_curve_is_shocked_like_the_discount_view(
+        self, simple_portfolio,
+    ):
+        """Both views of the same curve must move together, exactly."""
+        instruments, base = simple_portfolio
+        with_graph = MarketData(
+            spots=base.spots,
+            vols=base.vols,
+            dividends=base.dividends,
+            discount_curve=base.discount_curve,
+            curve_graph=CurveGraph(
+                curves={DEFAULT_ID: base.discount_curve},
+            ),
+        )
+        scenario = stress_scenario(2, 3, parallel_rate_shift=0.01)
+        via_graph = reprice_under_scenario(
+            _sentinel_graph_fn, instruments, with_graph, scenario,
+        )
+        via_discount = reprice_under_scenario(
+            _discount_curve_fn, instruments, with_graph, scenario,
+        )
+        unshocked = reprice_under_scenario(
+            _sentinel_graph_fn, instruments, with_graph, _zero_scenario_3p(),
+        )
+        assert via_graph == via_discount
+        assert float(via_graph) < float(unshocked)  # rates up ⇒ DF down
+
+    def test_single_curve_numbers_are_bit_identical(self, simple_portfolio):
+        """No graph ⇒ arithmetic is untouched by the graph plumbing."""
+        instruments, base = simple_portfolio
+        scenario = stress_scenario(
+            2, 3, spot_shock=4.0, vol_shock=0.02, parallel_rate_shift=0.005,
+        )
+        val = reprice_under_scenario(_bs_market_fn, instruments, base, scenario)
+        shocked = apply_scenario(base, scenario)
+        expected = jnp.sum(
+            jax.vmap(
+                lambda inst, s, v, d: _bs_market_fn(
+                    inst,
+                    MarketData(
+                        spots=s, vols=v, dividends=d,
+                        discount_curve=shocked.discount_curve,
+                    ),
+                )
+            )(instruments, shocked.spots, shocked.vols, shocked.dividends)
+        )
+        assert val == expected
+
+    def test_no_graph_does_not_warn(self, simple_portfolio):
+        instruments, base = simple_portfolio
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            reprice_under_scenario(
+                _bs_market_fn, instruments, base, _zero_scenario_3p(),
+            )
+            parametric_var(_bs_market_fn, instruments, base, jnp.eye(9) * 0.01)
+
+    def test_sentinel_only_graph_does_not_warn(self, simple_portfolio):
+        """The sentinel curve *is* shocked, so there is nothing to flag."""
+        instruments, base = simple_portfolio
+        with_graph = MarketData(
+            spots=base.spots,
+            vols=base.vols,
+            dividends=base.dividends,
+            discount_curve=base.discount_curve,
+            curve_graph=CurveGraph(curves={DEFAULT_ID: base.discount_curve}),
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            reprice_under_scenario(
+                _sentinel_graph_fn, instruments, with_graph,
+                _zero_scenario_3p(),
+            )

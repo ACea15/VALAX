@@ -148,8 +148,10 @@ the short-rate overlay in
 
 **The boundary is sharp.** The `CurveGraph` flows cleanly through
 **build → `MarketState` → `resolve` → analytic / MC / PDE rates pricers**, and
-now through **short-rate calibration**. It stops at **risk, surfaces, and
-portfolio**:
+now through **short-rate calibration**. It stops at **surfaces and
+portfolio**; **risk** is partway across — scenarios are keyed and the graph
+is no longer dropped, but the VaR engine itself still consumes the flat
+`MarketData` view:
 
 ```
 quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ analytic          ✅
@@ -159,14 +161,16 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
                    ┊
                    ┊ (never composed)
                    ▼
-            greeks 🟡 ── risk ❌ ── calibration 🟡 ── surfaces ❌ ── portfolio ❌
-                                     (HW/G2++ ✅,
-                                      Cheyette refuses)
+            greeks 🟡 ── risk 🟡 ── calibration 🟡 ── surfaces ❌ ── portfolio ❌
+                        (keyed scenarios ✅,   (HW/G2++ ✅,
+                         VaR engine flat)       Cheyette refuses)
 ```
 
 So a book can be **priced** multi-curve today and its short-rate models
-**calibrated** multi-curve, but it cannot yet be **risk-managed** or
-**surface-built** multi-curve.
+**calibrated** multi-curve; it can be **shocked** per curve
+(`valax.risk.shock` on a `MarketState`), but the VaR / P&L-attribution loop
+is still driven by unkeyed `MarketScenario` vectors, and surfaces and
+portfolio are untouched.
 
 ### Shipped
 
@@ -194,6 +198,22 @@ So a book can be **priced** multi-curve today and its short-rate models
   [Tier 2.1](#21-short-rate-models)
 - [x] **Graph shock primitives** — `bump_graph_curve`,
   `parallel_graph_shift`, `key_rate_graph_bump` in `valax/risk/shocks.py`
+- [x] **Keyed scenarios + `MarketState` shock** — `KeyedScenario`
+  (`valax/market/keyed_scenario.py`) addresses curves, surfaces, spots and
+  dividends **by identifier**, and `valax.risk.shock`
+  (`valax/risk/state_shocks.py`) applies one to a `MarketState`, routing
+  curve moves through `bump_graph_curve` and vol moves through
+  `shift_surface` / `ShiftedVolSurface` (`valax/surfaces/shifted.py`). A
+  pure basis move is now one scenario; `keyed_from_market_scenario` lifts
+  the legacy flat vectors, which stay supported for one deprecation cycle.
+  See [Scenarios & Shocks § Keyed scenarios](risk-scenarios.md#keyed-scenarios-on-a-marketstate)
+- [x] **The VaR path stops dropping the graph** —
+  `reprice_under_scenario`, `portfolio_pnl`, `parametric_var` and
+  `pnl_attribution` (`valax/risk/var.py`) thread `curve_graph` into the
+  per-instrument `MarketData` instead of letting it default to `None`, and
+  warn when a legacy scenario cannot address a named graph curve;
+  `apply_scenario` keeps the `"_default_"` graph entry in step with
+  `discount_curve`
 - [x] **Dual-curve analytic short-rate swaptions and calibration** —
   `hw_swaption_price` / `g2pp_swaption_price` accept a projection curve, and
   `calibrate_hull_white` / `calibrate_g2pp` / `swaption_prices_from_vols`
@@ -201,33 +221,55 @@ So a book can be **priced** multi-curve today and its short-rate models
 
 ### Remaining work
 
-#### 1. Risk pipeline is single-curve *(largest gap)*
+#### 1. Risk engine is still single-curve *(largest gap)*
 
 The whole point of multi-curve is that OIS and projection curves are
 **distinct risk factors** and the basis is itself hedgeable
 ([Why Multi-Curve § What this means for risk](guide/why-multicurve.md#what-this-means-for-risk)).
-None of that is reachable today.
+The *representation* now supports that — a keyed scenario shocks any curve
+on the graph by identifier, and the graph survives the VaR path — but the
+*engine* (generators, covariance layout, ladders, and the repricing loop
+itself) is still built on flat `MarketData` vectors with one rate block.
 
-- [ ] **Per-curve scenario axis** — `MarketScenario.rate_shocks` /
-  `ScenarioSet` (`valax/market/scenario.py`) carry one
-  `Float[Array, " n_pillars"]` vector with no curve identity; every
-  generator in `valax/risk/scenarios.py` assumes the fixed factor order
-  `[spots, vols, rates, dividends]` with a single rate block
-- [ ] **Route graph shocks through `apply_scenario`** — it shocks only
-  `base.discount_curve` and passes `curve_graph` through **unshocked**
-  (source comment admits it); `bump_graph_curve` and friends are exported
-  but have **no caller** outside their own module and
-  `tests/test_risk/test_shocks.py`
-- [ ] **Stop dropping the graph in the VaR path** —
-  `reprice_under_scenario`, `parametric_var` and `pnl_attribution`
-  (`valax/risk/var.py`) rebuild `MarketData(...)` without `curve_graph`,
-  so it silently defaults to `None`
+- [x] **Per-curve scenario axis** — `KeyedScenario.curve_shocks`
+  (`valax/market/keyed_scenario.py`) is `dict[curve_id, per-pillar bumps]`,
+  applied by `valax.risk.shock`; OIS and projection curves are separately
+  shockable on one `CurveGraph`
+- [ ] **Keyed *generators* and a keyed scenario set** — the generators in
+  `valax/risk/scenarios.py` (`parametric_scenarios`, `historical_scenarios`,
+  `stress_scenario`, `steepener` / `flattener` / `butterfly`) and
+  `parametric_var`'s covariance ordering still assume the flat factor order
+  `[spots, vols, rates, dividends]` with a **single** rate block.
+  `stack_keyed_scenarios` gives the batched keyed pytree; what is missing is
+  keyed generators and a keyed covariance layout (per-curve blocks)
+- [x] **Route graph shocks through the container-level shock** —
+  `valax.risk.shock` moves any named graph curve via `bump_graph_curve`, and
+  `apply_scenario` now keeps the graph's `"_default_"` entry in step with
+  `discount_curve` instead of passing the whole graph through unshocked
+- [x] **Stop dropping the graph in the VaR path** —
+  `reprice_under_scenario`, `portfolio_pnl`, `parametric_var` and
+  `pnl_attribution` (`valax/risk/var.py`) thread `curve_graph` through to
+  the pricer; a graph curve a `MarketScenario` cannot address is reported
+  as a `UserWarning`, never silently. Gate:
+  `tests/test_risk/test_var.py::TestCurveGraphSurvivesVaRPath`
+- [ ] **Node-level (surface-keyed) vega ladders** — the keyed vol shock is
+  a per-surface **parallel shift** (`ShiftedVolSurface`), which is why
+  `SensitivityLadder.delta_vol` / `vanna` / `volga` stay one scalar per
+  asset. A node-level vega ladder needs those fields to become
+  identifier-keyed per-node arrays; see
+  [Scenarios & Shocks § Vol shocks](risk-scenarios.md#vol-shocks-parallel-shift-not-node-shock)
+- [ ] **Keyed shocks for credit / inflation / FX on `MarketState`** —
+  `shock` covers curves, surfaces, spots and dividends;
+  `credit_curves`, `inflation_curves` and `fx_spots` are not addressable
+  yet (the `SurvivalCurve` primitives in `valax/risk/shocks.py` exist and
+  are unwired, exactly as the graph bumps were)
 - [ ] **Route the risk engine through `price(...)` and retire
   `wrap_equity_pricing_fn`** — the risk layer still bridges into the
   loose-scalar convention with its own adapter instead of calling the
   unified front door. Doing so is what makes "every Greek is one
-  `jax.grad` through one function" true, and it subsumes the three items
-  above. Tracked as the top backlog item in `PRICING_ONTOLOGY.md` § 0.1
+  `jax.grad` through one function" true, and it subsumes the remaining
+  items above — the keyed scenario layer it needs is now in place.
+  Tracked as the top backlog item in `PRICING_ONTOLOGY.md` § 0.1
   (repo root)
 - [ ] **`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` risk factor** — already
   tracked as 🚧 in [Risk Factors § 3](risk-factors.md)
@@ -317,9 +359,13 @@ caller-supplied pre-computed `forwards` array.
 - [ ] **`valax/portfolio/batch.py`** — `batch_price` / `batch_greeks` take
   scalar `rates`, no curve object at all; pre-dates the curve layer
 - [ ] **`valax/risk/factors.py`** — `curve: DiscountCurve` at two sites
-- [ ] **`MarketData.curve_graph` is inert** — consumed only by the
-  `MarketState` round-trip and the `apply_scenario` pass-through; no
-  pricer or risk function reads it
+- [ ] **`MarketData.curve_graph` is only carried, not consumed** — the
+  scenario / VaR path now threads it end-to-end (§1 above) and
+  `apply_scenario` keeps its `"_default_"` entry in step with
+  `discount_curve`, so a graph-aware `pricing_fn` can read it; but no
+  *library* pricer takes a `MarketData`, so nothing in `valax/pricing/`
+  reads the field. Retire it with `MarketData` once the risk engine
+  targets `price(...)` on a `MarketState`
 
 #### 6. Curve build (absorbed from the retired MC-Curves-3 notes)
 
@@ -373,9 +419,15 @@ Curve construction, `resolve`, and the analytic / MC / PDE pricing paths
 are well covered (`tests/test_curves/`, `tests/test_pricing/test_graph_pricing.py`,
 `tests/test_{pde,mc,pricing}/test_multicurve.py`). Absent entirely:
 
-- [ ] **Multi-curve risk tests** — `tests/test_risk/test_shocks.py` is the
-  only risk file touching a graph, and `test_curve_graph_carried_through`
-  actively asserts the graph comes back *unchanged*
+- [x] **Multi-curve risk tests** — `tests/test_risk/test_state_shocks.py`
+  covers keyed per-curve / basis shocks on a `MarketState`, and
+  `tests/test_risk/test_var.py::TestCurveGraphSurvivesVaRPath` gates the
+  graph through the whole VaR path. `test_curve_graph_carried_through`
+  still asserts a *named* graph curve comes back unchanged from
+  `apply_scenario` — which is now the documented contract of the unkeyed
+  legacy vectors, not an accident. **Still missing:** VaR / ladder tests
+  where a projection curve carries its own P&L, which needs the keyed
+  generators of §1
 - [ ] **Multi-curve calibration tests** — none under `tests/test_calibration/`
 - [ ] **Multi-curve greeks tests** — `tests/test_greeks/test_market_greeks.py`
   runs entirely against single-curve markets; nothing asserts separate
@@ -386,10 +438,13 @@ are well covered (`tests/test_curves/`, `tests/test_pricing/test_graph_pricing.p
 ### Recommended sequence
 
 1. **Multi-curve risk** (§1) — highest leverage by a distance: it is the
-   stated purpose of the framework, the shock primitives already exist
-   unused, and it is the only item with an explicit "still needed" note in
-   the docs. Fold the graph-level greeks API in, since both want the same
-   per-curve plumbing.
+   stated purpose of the framework. Part 1 has landed (keyed scenarios +
+   `shock` on a `MarketState`; the graph no longer dropped in the VaR
+   path), so what is left is the *engine*: route
+   `reprice_under_scenario` / `portfolio_pnl` / `value_at_risk` through
+   `price(...)` on a `MarketState`, then keyed generators and a per-curve
+   covariance layout. Fold the graph-level greeks API in, since both want
+   the same per-curve plumbing.
 2. **Dual-curve calibration** (§2) — smaller, and it closes the
    consistency gap that P5.1 opened between how models are fitted and how
    they are now priced.
@@ -808,6 +863,7 @@ Portfolio-level risk management and valuation adjustments.
 ### 4.2 Stress Testing and Scenario Analysis
 
 - [x] **Scenario definition framework** — shifts to curves, vols, spots, correlations
+- [x] **Identifier-keyed scenarios** — `KeyedScenario` + `valax.risk.shock` shock a `MarketState` by curve / surface / asset id (per-curve and basis moves; parallel vol shifts via `ShiftedVolSurface`); `keyed_from_market_scenario` lifts the legacy flat vectors
 - [ ] **Historical stress scenarios** — replay historical crises (2008, COVID, SVB)
 - [ ] **Reverse stress testing** — find scenarios that cause a target loss (optimization problem)
 - [x] **P&L attribution** — second-order Taylor decomposition into delta (spot, vol, rate, div), gamma, and unexplained via autodiff
@@ -816,7 +872,7 @@ Portfolio-level risk management and valuation adjustments.
 
 **Approach:** Scenarios as pytree diffs applied to `MarketData`. Batch repricing via `vmap`. P&L attribution via Taylor expansion using autodiff Greeks. Reverse stress testing via `optimistix.minimize`.
 
-**Status:** Scenario framework implemented. `MarketScenario` and `ScenarioSet` pytrees, `apply_scenario` for full market state shocks, named stress builders (steepener, flattener, butterfly). P&L attribution via `pnl_attribution()` with second-order Taylor expansion. Historical crisis replay and reverse stress testing are next.
+**Status:** Scenario framework implemented in two representations — the positional `MarketScenario` / `ScenarioSet` pytrees with `apply_scenario` over a `MarketData`, and the identifier-keyed `KeyedScenario` with `shock` over a `MarketState` (`valax/risk/state_shocks.py`) for per-curve, per-surface moves — plus named stress builders (steepener, flattener, butterfly). P&L attribution via `pnl_attribution()` with second-order Taylor expansion. Keyed *generators*, historical crisis replay, and reverse stress testing are next.
 
 ### 4.3 XVA Suite
 
@@ -960,7 +1016,7 @@ Production deployment concerns.
 **Why:** These are necessary for production deployment but are more about systems engineering than quantitative finance. They become relevant once the pricing and risk engine is mature.
 
 ---
-
+	
 ## VALAX Advantages to Leverage
 
 Throughout this roadmap, VALAX's JAX-native architecture provides structural advantages:

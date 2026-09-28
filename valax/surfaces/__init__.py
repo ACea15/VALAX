@@ -9,6 +9,7 @@ from valax.surfaces.optionlet_surface import (
     build_sabr_caplet_surface,
 )
 from valax.surfaces.constant import ConstantVol
+from valax.surfaces.shifted import ShiftedVolSurface
 from valax.surfaces.svi import (
     SVISlice,
     SVIVolSurface,

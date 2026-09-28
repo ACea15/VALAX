@@ -121,3 +121,17 @@ and a useful Heston-limit reduction-test fixture. See the
 the Markovian-projection-based two-pass SLV calibration.
 
 ::: valax.surfaces.LeverageGrid
+
+## Shifted surface (scenario decorator)
+
+`ShiftedVolSurface` adds an additive **parallel** vol shift to any
+duck-typed surface — grid, SVI, SABR, cube, optionlet, or constant —
+without touching its shape. It is the vol leg of a keyed market
+scenario: see
+[Scenarios & Shocks § Keyed scenarios](../risk-scenarios.md#keyed-scenarios-on-a-marketstate)
+for why the parallel-shift representation was chosen over node-level
+shocks, and [`valax.risk.shift_surface`](risk.md#keyed-shocks-on-a-marketstate)
+for the constructor that applies one (it shifts a `ConstantVol` in place
+rather than wrapping it).
+
+::: valax.surfaces.ShiftedVolSurface

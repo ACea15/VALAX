@@ -3,6 +3,7 @@
 Modules
 -------
 - :mod:`valax.risk.shocks`        — apply risk-factor shocks to ``MarketData``.
+- :mod:`valax.risk.state_shocks`  — apply *keyed* shocks to ``MarketState``.
 - :mod:`valax.risk.scenarios`     — generate parametric / historical / stress scenarios.
 - :mod:`valax.risk.var`           — VaR, ES, parametric VaR, scalar P&L attribution.
 - :mod:`valax.risk.ladders`       — sensitivity ladders and waterfall P&L.
@@ -28,6 +29,10 @@ from valax.risk.shocks import (
     bump_hazard_rates,
     parallel_credit_spread_shift,
     key_rate_hazard_bump,
+)
+from valax.risk.state_shocks import (
+    shift_surface,
+    shock,
 )
 from valax.risk.scenarios import (
     parametric_scenarios,
