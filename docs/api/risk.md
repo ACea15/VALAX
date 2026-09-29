@@ -1,9 +1,10 @@
 # Risk
 
 Scenario generation, shock application, and risk measures. Everything
-is fully differentiable — `jax.grad` flows through `apply_scenario`
-into the underlying `MarketData` fields, which is what powers
-`parametric_var`'s delta-normal computation.
+is fully differentiable — `jax.grad` flows through `shock` into the
+underlying `MarketState` (and through `apply_scenario` into the legacy
+`MarketData` fields), which is what powers both `group_market_gradient`
+and `parametric_var`'s delta-normal computation.
 
 For `MarketData`, `MarketScenario`, `ScenarioSet`, `KeyedScenario`,
 `zero_scenario`, and `stack_scenarios`, see [Market Data](market.md).
@@ -112,15 +113,56 @@ implies for the sensitivity ladders, is in
 
 ::: valax.risk.scenarios.butterfly
 
-## Pricing function adapter
+## Group repricing on a `MarketState`
+
+Repricing, P&L and gradients for one **homogeneous group**, all routed
+through [`price`](core.md#the-unified-signature) — no pricing-function adapter. The
+group primitives return the three quantities that aggregate additively
+across groups (scalar PV, gradient pytree, P&L vector) and deliberately
+never a risk measure. Walkthrough and a runnable multi-curve example:
+[VaR & P&L § Repricing through `price()`](../risk-var.md#repricing-through-price).
+
+A shock the group's model *shadows* — a curve shock against a model
+carrying its own scalar `rate`, for instance — cannot reach the price and
+contributes exactly zero P&L. `group_reprice` and `group_scenario_pnl`
+emit a `UserWarning` rather than return that zero silently; see
+[the warning's rationale](../risk-var.md#repricing-through-price).
+
+::: valax.risk.state_var.group_pv
+
+::: valax.risk.state_var.group_prices
+
+::: valax.risk.state_var.group_reprice
+
+::: valax.risk.state_var.group_scenario_pnl
+
+::: valax.risk.state_var.group_market_gradient
+
+::: valax.risk.state_var.group_model_gradient
+
+::: valax.risk.state_var.group_size
+
+## Pricing function adapter (deprecated)
 
 Adapts equity-style `(instrument, spot, vol, rate, dividend) -> price`
 pricers to the market-data-aware signature
-`(instrument, MarketData) -> price` used by the risk engine.
+`(instrument, MarketData) -> price` used by the legacy risk engine.
+
+!!! warning "Deprecated — removed with `MarketData`"
+    Emits a `DeprecationWarning`. The wrapper collapses the discount
+    curve to a single pillar's zero rate (`_extract_short_rate`), so a
+    wrapped payoff carries no sensitivity to any other pillar. Use the
+    group primitives above, which need no adapter and see the whole
+    curve.
 
 ::: valax.risk.var.wrap_equity_pricing_fn
 
 ## Risk measures
+
+`value_at_risk` / `expected_shortfall` take any P&L vector, including one
+from `group_scenario_pnl`. The repricing entry points below are the
+legacy `MarketData` / `MarketScenario` path, frozen for one deprecation
+cycle.
 
 ::: valax.risk.var.reprice_under_scenario
 

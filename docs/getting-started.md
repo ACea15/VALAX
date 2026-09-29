@@ -131,6 +131,8 @@ model = BlackScholesModel(
     rate=jnp.array(0.05),
     dividend=jnp.array(0.02),
 )
+# Any of these may instead be left out and read from the MarketState —
+# see API → Core § Model binding.
 
 price = mc_price(
     option, spot=jnp.array(100.0), model=model,

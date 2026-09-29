@@ -24,6 +24,23 @@ swaptions — because the pricing function receives the full market state
 For equity-style pricing functions with signature
 ``(instrument, spot, vol, rate, dividend) -> price``, use
 ``wrap_equity_pricing_fn`` to adapt them.
+
+.. deprecated::
+    This module is the **legacy view**, frozen for one deprecation cycle
+    alongside :class:`~valax.market.data.MarketData` itself.  New code
+    should use :mod:`valax.risk.state_var`, which reprices a
+    :class:`~valax.core.market_state.MarketState` under a
+    :class:`~valax.market.keyed_scenario.KeyedScenario` through the
+    unified :func:`valax.core.pricing.price`, and so measures each named
+    curve of a :class:`~valax.curves.graph.CurveGraph` as a risk factor
+    in its own right.
+
+    The two paths are *not* one implementation behind two signatures, and
+    cannot be: a ``pricing_fn`` here is an opaque callable carrying no
+    model, while ``price`` dispatches on ``(instrument, model, method)``.
+    The bodies below are therefore held at their current behaviour, and
+    ``tests/test_risk/test_state_var.py`` pins the ported path against
+    them for exact equality on a flat single-curve equity book.
 """
 
 import warnings
@@ -57,7 +74,37 @@ def wrap_equity_pricing_fn(fn: Callable) -> Callable:
 
     The scalar risk-free rate is extracted as the shortest-maturity
     zero rate from the discount curve.
+
+    .. deprecated::
+        Bridging into the loose-scalar convention is exactly what the
+        unified front door removes.  Price the group through
+        :mod:`valax.risk.state_var` instead — ``group_pv`` /
+        ``group_reprice`` / ``group_scenario_pnl`` take a
+        :class:`~valax.core.market_state.MarketState` and need no
+        adapter.
+
+        Note the approximation that disappears with the move: the
+        wrapper collapses the whole term structure to
+        :func:`_extract_short_rate`, a single pillar's zero rate, so a
+        wrapped payoff has *structurally zero* sensitivity to every other
+        pillar.  Exact for a flat curve, wrong for a sloped one.
+
+    Args:
+        fn: ``(instrument, spot, vol, rate, dividend) -> price``.
+
+    Returns:
+        The same pricer under the ``(instrument, MarketData) -> price``
+        signature the legacy risk engine takes.
     """
+    warnings.warn(
+        "wrap_equity_pricing_fn is deprecated and will be removed together "
+        "with MarketData. Use valax.risk.state_var (group_pv / "
+        "group_reprice / group_scenario_pnl) on a MarketState, which "
+        "prices through valax.core.price and needs no adapter — and which "
+        "does not collapse the discount curve to a single pillar.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     def wrapped(instrument, market: MarketData) -> Float[Array, ""]:
         rate = _extract_short_rate(market.discount_curve)
@@ -183,6 +230,12 @@ def reprice_under_scenario(
 
         from valax.risk.var import wrap_equity_pricing_fn
         market_fn = wrap_equity_pricing_fn(black_scholes_price)
+
+    Both the wrapper and this entry point are the legacy view; the
+    ported equivalent needs neither::
+
+        from valax.risk import group_reprice
+        pv = group_reprice(instruments, model, market_state, scenario)
 
     Args:
         pricing_fn: ``(instrument, MarketData) -> price``.

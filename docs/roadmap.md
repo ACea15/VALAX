@@ -149,9 +149,10 @@ the short-rate overlay in
 **The boundary is sharp.** The `CurveGraph` flows cleanly through
 **build → `MarketState` → `resolve` → analytic / MC / PDE rates pricers**, and
 now through **short-rate calibration**. It stops at **surfaces and
-portfolio**; **risk** is partway across — scenarios are keyed and the graph
-is no longer dropped, but the VaR engine itself still consumes the flat
-`MarketData` view:
+portfolio**; **risk** is partway across — scenarios are keyed and the
+repricing loop now goes through `price(...)` on a `MarketState`, but the
+*measurement* layer (ladders, scenario generators, `parametric_var`'s
+covariance) still consumes the flat `MarketData` view:
 
 ```
 quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ analytic          ✅
@@ -163,14 +164,19 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
                    ▼
             greeks 🟡 ── risk 🟡 ── calibration 🟡 ── surfaces ❌ ── portfolio ❌
                         (keyed scenarios ✅,   (HW/G2++ ✅,
-                         VaR engine flat)       Cheyette refuses)
+                         repricing loop ✅,     Cheyette refuses)
+                         ladders + generators
+                         + covariance flat)
 ```
 
 So a book can be **priced** multi-curve today and its short-rate models
 **calibrated** multi-curve; it can be **shocked** per curve
-(`valax.risk.shock` on a `MarketState`), but the VaR / P&L-attribution loop
-is still driven by unkeyed `MarketScenario` vectors, and surfaces and
-portfolio are untouched.
+(`valax.risk.shock` on a `MarketState`) and **repriced** per curve
+(`valax.risk.state_var` through `price(...)`), so a basis widening now
+reaches a P&L number. What is still driven by unkeyed `MarketScenario`
+vectors is the measurement layer above that loop — sensitivity ladders,
+the scenario generators, and `parametric_var`'s positional covariance —
+and surfaces and portfolio are untouched.
 
 ### Shipped
 
@@ -263,14 +269,53 @@ itself) is still built on flat `MarketData` vectors with one rate block.
   `credit_curves`, `inflation_curves` and `fx_spots` are not addressable
   yet (the `SurvivalCurve` primitives in `valax/risk/shocks.py` exist and
   are unwired, exactly as the graph bumps were)
-- [ ] **Route the risk engine through `price(...)` and retire
-  `wrap_equity_pricing_fn`** — the risk layer still bridges into the
-  loose-scalar convention with its own adapter instead of calling the
-  unified front door. Doing so is what makes "every Greek is one
-  `jax.grad` through one function" true, and it subsumes the remaining
-  items above — the keyed scenario layer it needs is now in place.
-  Tracked as the top backlog item in `PRICING_ONTOLOGY.md` § 0.1
-  (repo root)
+- [x] **Route the repricing loop through `price(...)` and retire
+  `wrap_equity_pricing_fn`** — `valax/risk/state_var.py` reprices a
+  homogeneous group on a `MarketState` under a `KeyedScenario` through
+  the unified front door: `group_pv` / `group_prices` / `group_reprice` /
+  `group_scenario_pnl` / `group_market_gradient` / `group_model_gradient`.
+  Each named curve of the graph carries its own cotangent, so a basis
+  widening produces a P&L (measured +9,817 on a two-swap book for a 25 bp
+  projection-curve move, where the unkeyed legacy vector gives −150 for
+  the same input). `wrap_equity_pricing_fn` now emits a
+  `DeprecationWarning` and goes with `MarketData`. Gates:
+  `tests/test_risk/test_state_var.py` — bit-exact against the legacy path
+  on a single-curve book, plus the common-random-numbers gate for MC
+  groups. Recipe: [VaR & P&L § Repricing through `price()`](risk-var.md#repricing-through-price)
+- [ ] **Port the *measurement* layer** — the repricing loop has moved but
+  what sits above it has not: `compute_ladder` still builds DF-space
+  Hessians over flat `MarketData` vectors, `risk_theoretical_pnl_vector`
+  consumes those ladders, and `pnl_attribution` / `parametric_var` are
+  still positional. These move with the keyed ladder (below) rather than
+  independently
+- [x] **Market-sourced equity model parameters** — `BlackScholesModel`,
+  `HestonModel` and `LocalVolModel` now accept `rate` / `dividend` (and
+  BS `vol`) as `None`, sourced from the `MarketState` at price time by
+  `valax/core/binding.py::bind_model`. A sourced rate is the
+  continuously-compounded zero at **the trade's own maturity**, day-count
+  aware via the new `valax.dates.ordinal_from_year_fraction`; a sourced
+  vol is the surface at `(strike, expiry)`. Because binding sits inside the
+  differentiated path, an equity group's curve shock now reaches the price
+  (measured +0.92 on a 1Y two-option book for +100 bp) and
+  `group_market_gradient` reports the pillar delta on the trade's own
+  pillar instead of a structural zero — so the `TestShadowedShockGuard`
+  warning stops firing by itself. Constant-mode pricing is unchanged,
+  bit-for-bit. Gate: `tests/test_core/test_binding.py`. Recipe:
+  [API → Core § Model binding](api/core.md#model-binding-constants-or-market-sourced)
+- [ ] **Market-sourced parameters for the remaining two equity models** —
+  `SLVModel` (its `rate` / `dividend` are followed by the non-defaulted
+  `surface` / `leverage`, so optionality needs a field-order or
+  `__check_init__` decision, and its docstring declares field order a
+  frozen contract) and `MultiAssetGBMModel` (`vols` / `dividends` are
+  per-asset **vectors** and `n_assets` is derived from `vols.shape[0]`,
+  so sourcing them needs a per-asset market lookup). Everything else is
+  in place; these two are shape problems, not design problems
+- [ ] **Full curve de-embedding for the rates models** — cosmetic, and
+  measurably so: an HW price moves under a curve shock bit-identically
+  with or without `with_market_curve`, because the recipe takes
+  `discount_curve` from the market, so the embedded `initial_curve` is
+  already vestigial in the price path. Tracked in
+  `PRICING_ONTOLOGY.md` § 0.3
 - [ ] **`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` risk factor** — already
   tracked as 🚧 in [Risk Factors § 3](risk-factors.md)
 - [ ] **Graph-level greeks API** — `curve_pillar_deltas`
@@ -438,13 +483,14 @@ are well covered (`tests/test_curves/`, `tests/test_pricing/test_graph_pricing.p
 ### Recommended sequence
 
 1. **Multi-curve risk** (§1) — highest leverage by a distance: it is the
-   stated purpose of the framework. Part 1 has landed (keyed scenarios +
-   `shock` on a `MarketState`; the graph no longer dropped in the VaR
-   path), so what is left is the *engine*: route
-   `reprice_under_scenario` / `portfolio_pnl` / `value_at_risk` through
-   `price(...)` on a `MarketState`, then keyed generators and a per-curve
-   covariance layout. Fold the graph-level greeks API in, since both want
-   the same per-curve plumbing.
+   stated purpose of the framework. Parts 1 and 2 have landed (keyed
+   scenarios + `shock` on a `MarketState`; the repricing loop and the
+   gradient pytree through `price(...)` in `valax/risk/state_var.py`), so
+   a basis move now reaches a P&L. What is left is the layer above:
+   the portfolio aggregation of the three additive quantities, then keyed
+   generators and a per-curve covariance layout to get that move into a
+   *VaR* number, then the keyed ladders. Fold the graph-level greeks API
+   in, since all of them want the same per-curve plumbing.
 2. **Dual-curve calibration** (§2) — smaller, and it closes the
    consistency gap that P5.1 opened between how models are fitted and how
    they are now priced.

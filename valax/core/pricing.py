@@ -56,6 +56,7 @@ import equinox as eqx
 from jaxtyping import Float
 from jax import Array
 
+from valax.core.binding import bind_model
 from valax.core.market_state import MarketState
 from valax.core.resolve import ResolvedMarket, resolve
 
@@ -508,6 +509,14 @@ def price(
         _validate_method(method)
 
     resolved = resolve(instrument, model, market)
+
+    # Layer 3 of 4: fill any model parameter left as ``None`` from the
+    # resolved market, so every pricer below sees a fully-concrete model
+    # and none of them needs to know about market sourcing.  A
+    # fully-specified model is returned unchanged, which is what keeps
+    # constant-mode prices bit-identical.  ``bind_model`` preserves the
+    # model's class, so dispatch below is unaffected.
+    model = bind_model(model, instrument, resolved)
 
     adapter = None
     for cls in _instrument_bases(type(instrument)):

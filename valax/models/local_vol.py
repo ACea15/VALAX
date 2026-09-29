@@ -53,8 +53,10 @@ class LocalVolModel(eqx.Module):
     """
 
     surface: eqx.Module
-    rate: Float[Array, ""]
-    dividend: Float[Array, ""]
+    # ``None`` defers to the MarketState at price time — see
+    # ``valax.core.binding.bind_model``.
+    rate: Float[Array, ""] | None = None
+    dividend: Float[Array, ""] | None = None
 
     @classmethod
     def from_flat_rate(

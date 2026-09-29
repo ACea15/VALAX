@@ -5,6 +5,15 @@ model is an `equinox.Module` carrying the process parameters and, in
 most cases, companion `Drift` / `Diffusion` callables that plug into
 the [`diffrax`](https://docs.kidger.site/diffrax/) SDE solvers.
 
+!!! note "Constants or market-sourced"
+    `BlackScholesModel`, `HestonModel` and `LocalVolModel` accept
+    `rate` / `dividend` (and BS `vol`) either as explicit constants — the
+    textbook form every closed form below assumes — or as `None`, in which
+    case they are read from the `MarketState` at price time. The two modes,
+    the projection conventions, and what it means for risk are documented
+    once in
+    [API → Core § Model binding](core.md#model-binding-constants-or-market-sourced).
+
 ## Black–Scholes (GBM)
 
 Geometric Brownian motion — the workhorse spot dynamics for equity

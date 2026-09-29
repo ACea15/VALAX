@@ -4,6 +4,7 @@ from valax.dates.daycounts import (
     act_360,
     act_365,
     act_act,
+    ordinal_from_year_fraction,
     thirty_360,
     year_fraction,
     ymd_to_ordinal,

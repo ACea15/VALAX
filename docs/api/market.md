@@ -41,8 +41,15 @@ simultaneously.
     container: a keyed `CurveGraph` instead of one curve, full vol
     surfaces instead of a scalar per asset, plus credit / inflation / FX.
     `MarketData` stays for one minor release as a two-way view
-    (`MarketState.from_market_data` / `.to_market_data`), so the scenario
-    and VaR framework on this page is unaffected.
+    (`MarketState.from_market_data` / `.to_market_data`).
+
+    The repricing loop **has** moved: `valax.risk.state_var` reprices a
+    `MarketState` under a `KeyedScenario` through `price(...)`, and
+    `wrap_equity_pricing_fn` is deprecated alongside this container. What
+    still consumes the legacy view is the rest of `valax.risk.var`
+    (`reprice_under_scenario`, `portfolio_pnl`, `parametric_var`,
+    `pnl_attribution`), the sensitivity ladders, and the scenario
+    generators — all frozen at current behaviour until `MarketData` goes.
 
 ::: valax.market.MarketData
 

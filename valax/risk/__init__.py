@@ -6,6 +6,7 @@ Modules
 - :mod:`valax.risk.state_shocks`  — apply *keyed* shocks to ``MarketState``.
 - :mod:`valax.risk.scenarios`     — generate parametric / historical / stress scenarios.
 - :mod:`valax.risk.var`           — VaR, ES, parametric VaR, scalar P&L attribution.
+- :mod:`valax.risk.state_var`     — group repricing / P&L / gradients through ``price``.
 - :mod:`valax.risk.ladders`       — sensitivity ladders and waterfall P&L.
 - :mod:`valax.risk.pnl_vectors`   — HPL / RTPL P&L vectors over scenario sets.
 - :mod:`valax.risk.backtesting`   — Kupiec / Christoffersen / FRTB PLA tests.
@@ -50,6 +51,15 @@ from valax.risk.var import (
     pnl_attribution,
     value_at_risk,
     expected_shortfall,
+)
+from valax.risk.state_var import (
+    group_size,
+    group_prices,
+    group_pv,
+    group_reprice,
+    group_scenario_pnl,
+    group_market_gradient,
+    group_model_gradient,
 )
 from valax.risk.ladders import (
     SensitivityLadder,

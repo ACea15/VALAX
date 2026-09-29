@@ -280,44 +280,50 @@ would have had to become identifier-keyed per-node arrays. Node-level vega
 ladders therefore remain future work, tracked in the
 [roadmap](roadmap.md#1-risk-engine-is-still-single-curve-largest-gap).
 
-!!! note "The VaR engine still consumes the legacy view"
-    `reprice_under_scenario` / `portfolio_pnl` / `value_at_risk` take a
-    `MarketData` and a `MarketScenario` and have not moved onto
-    `price(...)` yet, so `KeyedScenario` is today the scenario
-    representation for `MarketState`-based repricing and greeks rather
-    than a drop-in for the VaR loop. `keyed_from_market_scenario` bridges
-    the two representations in the meantime.
+!!! note "Repricing a keyed scenario"
+    A `KeyedScenario` is consumed by the group primitives in
+    [VaR & P&L § Repricing through `price()`](risk-var.md#repricing-through-price),
+    which take a `MarketState` and need no pricing-function adapter. The
+    legacy `reprice_under_scenario` / `portfolio_pnl` / `parametric_var`
+    entry points continue to take a `MarketData` and a `MarketScenario`
+    for one deprecation cycle; `keyed_from_market_scenario` bridges the
+    two representations.
 
 ## Pricing Functions for Risk
 
-The risk engine accepts any pricing function with the signature:
+There are two conventions, and only one of them is current.
+
+**The front door.** Nothing has to be adapted: a group of instruments, a
+model and a `MarketState` go straight through
+[`price`](api/core.md#the-unified-signature), which dispatches on
+`(instrument type, model type, method)`. Recipes and a runnable example
+live on [VaR & P&L § Repricing through `price()`](risk-var.md#repricing-through-price).
+
+**The legacy convention**, still accepted by `valax.risk.var`, is a
+caller-supplied callable:
 
 ```python
 def my_pricing_fn(instrument, market: MarketData) -> Float[Array, ""]:
     ...
 ```
 
-Each instrument receives a per-instrument `MarketData` with scalar `spots`, `vols`, `dividends` and the **full shared discount curve**. This means both equity and rates products work through the same risk framework:
+Each instrument receives a per-instrument `MarketData` with scalar `spots`, `vols`, `dividends` and the **full shared discount curve**:
 
 ```python
-# Equity: extract spot/vol/rate from market
-def bs_pricer(option, market):
-    from valax.risk.var import _extract_short_rate
-    rate = _extract_short_rate(market.discount_curve)
-    return black_scholes_price(option, market.spots, market.vols, rate, market.dividends)
-
 # Rates: use the full curve directly
 def swap_pricer(swap, market):
     return swap_price(swap, market.discount_curve)
 ```
 
-For existing equity-style functions with signature `(instrument, spot, vol, rate, dividend) -> price`, use the adapter:
-
-```python
-from valax.risk import wrap_equity_pricing_fn
-
-market_fn = wrap_equity_pricing_fn(black_scholes_price)
-```
+!!! warning "`wrap_equity_pricing_fn` is deprecated"
+    The adapter for equity-style `(instrument, spot, vol, rate, dividend)`
+    pricers collapses the whole term structure to a single pillar's zero
+    rate, so a wrapped payoff has *structurally zero* sensitivity to
+    every other pillar — exact for a flat curve, and measured at a 150 bp
+    rate error worth **9.0 % of PV** for a 1Y option on a 3 %→6 % sloped
+    curve (`tests/test_risk/test_state_var.py::TestShortRateCollapse`).
+    It is removed together with `MarketData`; price the group through
+    `price` instead.
 
 ---
 

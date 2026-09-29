@@ -20,6 +20,7 @@ from valax.core.resolve import (
     ResolvedMarket,
     resolve,
     resolve_curves,
+    resolve_dividend,
     resolve_spot,
     resolve_surface,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "ResolvedMarket",
     "resolve",
     "resolve_curves",
+    "resolve_dividend",
     "resolve_spot",
     "resolve_surface",
     "METHODS",

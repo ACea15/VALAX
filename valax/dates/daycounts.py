@@ -91,6 +91,16 @@ DAY_COUNT_FNS = {
     "30_360": thirty_360,
 }
 
+#: Denominators of the conventions that are *linear* in elapsed days, and
+#: therefore exactly invertible.  ``30_360`` is deliberately absent: it
+#: depends on the calendar structure of both endpoints, so it has no
+#: closed-form inverse.
+DAY_COUNT_DENOMINATORS = {
+    "act_360": 360.0,
+    "act_365": 365.0,
+    "act_act": 365.25,
+}
+
 
 def year_fraction(
     start: Int[Array, "..."],
@@ -99,3 +109,62 @@ def year_fraction(
 ) -> Float[Array, "..."]:
     """Compute year fraction between two ordinal dates."""
     return DAY_COUNT_FNS[convention](start, end)
+
+
+def ordinal_from_year_fraction(
+    start: Int[Array, "..."],
+    year_frac: Float[Array, "..."],
+    convention: str = "act_365",
+) -> Float[Array, "..."]:
+    """Inverse of :func:`year_fraction`: a year fraction back to an ordinal.
+
+    The bridge between the two date conventions VALAX instruments use:
+    equity contracts carry ``expiry`` as a **year fraction**, while
+    :class:`~valax.curves.discount.DiscountCurve` is indexed by **date
+    ordinals**.  Converting one to the other is a day-count question, and
+    answering it with a hard-coded ``365`` is how a curve's own
+    convention gets silently ignored (the defect measured in
+    ``valax.risk.var._extract_short_rate``).  Always pass the curve's
+    ``day_count``.
+
+    Returns a **fractional** ordinal rather than rounding to a whole day,
+    for two reasons: the round trip through :func:`year_fraction` is then
+    exact, and the result stays differentiable, so a rate projected off a
+    curve at this horizon still carries a gradient.  Both
+    ``DiscountCurve.__call__`` and :func:`~valax.curves.discount.zero_rate`
+    accept a fractional ordinal and interpolate identically to the integer
+    case.  Round at the boundary if a calendar date is what you need.
+
+    Args:
+        start: Reference-date ordinal.
+        year_frac: Year fraction from ``start``, in ``convention``.
+        convention: Day-count name; must be one of the linear
+            conventions in :data:`DAY_COUNT_DENOMINATORS`.
+
+    Returns:
+        The fractional ordinal ``d`` such that
+        ``year_fraction(start, d, convention) == year_frac``.
+
+    Raises:
+        ValueError: For ``"30_360"``, which has no closed-form inverse
+            (it depends on both endpoints' calendar structure), or for an
+            unknown convention.
+    """
+    if convention not in DAY_COUNT_DENOMINATORS:
+        if convention in DAY_COUNT_FNS:
+            raise ValueError(
+                f"Day count {convention!r} is not linear in elapsed days, "
+                f"so it has no closed-form inverse: it depends on the "
+                f"calendar structure of both endpoints. Supply an explicit "
+                f"date ordinal instead of a year fraction, or use one of "
+                f"{sorted(DAY_COUNT_DENOMINATORS)}."
+            )
+        raise ValueError(
+            f"Unknown day count {convention!r}; expected one of "
+            f"{sorted(DAY_COUNT_FNS)}."
+        )
+    denominator = DAY_COUNT_DENOMINATORS[convention]
+    return (
+        jnp.asarray(start, dtype=jnp.float64)
+        + jnp.asarray(year_frac, dtype=jnp.float64) * denominator
+    )

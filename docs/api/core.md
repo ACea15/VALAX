@@ -94,7 +94,62 @@ resolution happens at trace time and stays out of the gradient path.
 
 ::: valax.core.resolve_spot
 
+::: valax.core.resolve_dividend
+
 ::: valax.core.resolve_surface
+
+## Model binding — constants or market-sourced
+
+Pricing is four layers, and a model parameter may be supplied at either of
+two of them:
+
+| Layer | Example | Owns |
+|---|---|---|
+| **Kernel** | `black_scholes_price(option, spot, vol, rate, dividend)` | the closed form; pure scalars, no market |
+| **Model** | `BlackScholesModel(vol=0.2, rate=0.05, dividend=0.0)` | calibrated parameters |
+| **Binding** | `bind_model(model, instrument, resolved)` | market → scalar, the **only** place that conversion lives |
+| **Front door** | `price(instrument, model, market)` | resolution, binding, dispatch |
+
+A model whose parameters are all given is self-contained — the textbook
+form, and what every closed-form derivation in
+[Theory](../theory/foundations.md) assumes. Leaving one `None` sources it
+from the `MarketState` instead:
+
+```python
+BlackScholesModel(vol=0.2, rate=0.05, dividend=0.0)  # all constant
+BlackScholesModel(vol=0.2)                # rate + dividend from market
+BlackScholesModel(rate=0.05)              # vol from the surface
+BlackScholesModel()                       # everything from the market
+```
+
+A market-sourced `rate` is the continuously-compounded zero rate at **the
+instrument's own maturity** (day-count aware, via the curve's own
+`day_count`); a market-sourced `vol` is the surface sampled at
+`(strike, expiry)`; a market-sourced `dividend` is the market's yield for
+the underlying.
+
+Three properties worth knowing:
+
+- **Constant mode is bit-identical** to pricing before this layer existed.
+  A fully-specified model is returned by `bind_model` unchanged — the same
+  object, not a copy.
+- **Market mode carries risk.** Binding happens *inside* the
+  differentiated path, so a sourced parameter traces back to the curve or
+  surface. That is what lets an equity book report curve pillar deltas
+  rather than a structural zero — see
+  [VaR & P&L](../risk-var.md#repricing-through-price).
+- **It is still a constant-parameter model.** Projecting at each trade's
+  own maturity makes its discount factor right for that maturity, so a
+  book of mixed expiries uses different rates — correct per trade, but not
+  a term-structure model.
+
+::: valax.core.binding.bind_model
+
+::: valax.core.binding.project_rate
+
+::: valax.core.binding.sample_vol
+
+::: valax.core.binding.instrument_horizon
 
 ## See also
 

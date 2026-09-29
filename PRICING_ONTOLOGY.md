@@ -69,77 +69,103 @@ line in the same change (`AGENTS.md` definition of done).
   `keyed_from_market_scenario` bridging them. Same change fixed the silent
   `curve_graph` drop in `reprice_under_scenario` / `parametric_var` /
   `pnl_attribution`.
-- [ ] **Port the risk engine to `price(...)` and retire the `wrap_*`
-  adapters** (part 2, now unblocked).
-  `valax/risk/var.py::wrap_equity_pricing_fn` is still the bridge from the
-  loose-scalar convention into `reprice_under_scenario`, and the risk
-  engine never calls `price`. This is the single biggest unrealised payoff
-  of the whole migration — "every Greek is one `jax.grad` through one
-  function" — and it is the same work as the multi-curve risk gap in
-  [roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-engine-is-still-single-curve-largest-gap).
-  The keyed scenario representation it needs now exists; what remains is
-  the loop itself (`reprice_under_scenario` / `portfolio_pnl` /
-  `value_at_risk` onto `price`, `MarketState`-keyed generators and
-  covariance layout), plus `valax/greeks/market_greeks.py::_price_scalar`
-  as the model for the `.price` unwrap. (§14.2)
+- [x] **Port the repricing loop to `price(...)` and deprecate
+  `wrap_equity_pricing_fn`** (part 2). `valax/risk/state_var.py` reprices
+  a **homogeneous group** on a `MarketState` under a `KeyedScenario`
+  through the unified front door, modelled on
+  `valax/greeks/market_greeks.py::_price_scalar` for the `.price` unwrap:
+  `group_pv` / `group_prices` / `group_reprice` / `group_scenario_pnl` /
+  `group_market_gradient` / `group_model_gradient`, plus `group_size` as
+  the pre-trace group validator. `method` / `config` / `key` are keyword
+  arguments mirroring `price`'s own signature rather than fields of a
+  group object — reifying the group is the aggregator's decision (below),
+  not the risk layer's. Gates in `tests/test_risk/test_state_var.py`:
+  **bit-exact** against `reprice_under_scenario` on a single-curve rates
+  and equity book, the common-random-numbers gate for MC groups, and a
+  dual-curve basis widening worth +9,817 that the unkeyed legacy vector
+  reports as −150.
 
-  **Brief for that session — decisions already taken, do not re-litigate:**
+  Two findings worth carrying forward. (a) The legacy path **cannot** be
+  re-expressed in terms of the new one — a `pricing_fn` is an opaque
+  callable carrying no model, and `price` dispatches on
+  `(instrument, model, method)` — so `valax/risk/var.py` is frozen at its
+  current behaviour rather than reimplemented, and the whole existing
+  test suite stays untouched. (b) `BlackScholesModel` carries its own
+  `rate` / `vol` / `dividend`, so a curve or surface shock does not move
+  an equity price through `price`; that risk lands on
+  `group_model_gradient`. Pinned by `TestEquityCurveShockIsInert`, closed
+  by full curve de-embedding (§0.3).
 
-  1. **Risk layer does homogeneous groups; the portfolio layer aggregates.**
-     `price` dispatches on *type*, so one `vmap` covers one homogeneous
-     group and a heterogeneous book is a sum over groups. Because every
-     group differentiates w.r.t. the *same* `MarketState` pytree, per-group
-     gradients share a structure and aggregate by
-     `jax.tree_util.tree_map(add, …)` — i.e. aggregation happens in the
-     market's own coordinate system, and `risk/bucketing.py` stays the
-     coordinate change applied *after* aggregation, not a prerequisite.
+- [ ] **Portfolio aggregation layer** (part 3 — the session this one was
+  explicitly scoped to enable). The group primitives above return the
+  three additive quantities; what is missing is the layer that sums them
+  over a heterogeneous book.
+
+  **Decisions already taken, do not re-litigate:**
+
+  1. **Risk layer does homogeneous groups; the portfolio layer
+     aggregates.** Because every group differentiates w.r.t. the *same*
+     `MarketState` pytree, per-group gradients share a structure and
+     aggregate by `jax.tree_util.tree_map(add, …)` — aggregation happens
+     in the market's own coordinate system, and `risk/bucketing.py` stays
+     the coordinate change applied *after* aggregation, not a
+     prerequisite. Verified by
+     `TestAggregationContract::test_gradients_tree_map_add_across_groups`.
   2. **The grouping key is stricter than "instrument class":**
      `(instrument type, static field values, model type + its statics,
      method, config)`. `EuropeanOption.is_call` is `static=True`, so calls
      and puts cannot share a stacked pytree — cf. `sample_option_portfolio`,
-     which already returns them separately. Make the key explicit in the API
-     rather than letting callers discover it from a tracer error.
-  3. **Return surface of the group-level primitives** (design them for the
-     aggregator now, so the portfolio layer needs no re-cut): the scalar PV,
-     the gradient *pytree*, and the `(n_scenarios,)` P&L vector — with an
-     explicit `key` argument. **Not** a VaR number.
-  4. **Four traps the aggregation must own.** (a) *Risk measures are not
-     additive*: a quantile of a sum is not a sum of quantiles, so aggregate
-     the P&L **vector** and apply `value_at_risk` / `expected_shortfall` /
-     the PLA tests only at the top; an API that permits adding per-desk VaRs
-     will produce a plausible wrong number with no error — the same failure
-     class as the `curve_graph` drop just fixed. (b) *MC common random
-     numbers*: once groups price through `price(..., key=…)`, an MC group's
-     scenario P&L is noise unless the key is fixed per group and reused
-     identically for the base and every shocked revaluation (analytic-only
-     pricers have hidden this so far). (c) *Absent ≠ zero*: `theta` raises
-     `NotImplementedError` for date-based instruments and a market-surface
-     vega does not exist for a group whose market has no surface, so the
-     aggregate needs a keyed union with explicit absence, or a mixed
-     equity/rates book reports an equity-only theta as the book's theta.
-     (d) *Quantity and sign* belong to the portfolio layer — `price` returns
-     a unit price and instruments are data-only; nothing in the library
-     carries a position size today.
+     which already returns them separately. Differing statics change the
+     treedef, so such instruments cannot be stacked at all; `group_size`
+     catches the remaining ragged/unstacked cases pre-trace.
+  3. **Return surface of the group-level primitives** — shipped: the
+     scalar PV, the gradient *pytree*, and the `(n_scenarios,)` P&L
+     vector, with an explicit `key` argument. **Not** a VaR number.
+  4. **Three traps the aggregation must own** (the fourth is discharged).
+     (a) *Risk measures are not additive*: a quantile of a sum is not a
+     sum of quantiles, so aggregate the P&L **vector** and apply
+     `value_at_risk` / `expected_shortfall` / the PLA tests only at the
+     top; an API that permits adding per-desk VaRs will produce a
+     plausible wrong number with no error — the same failure class as the
+     `curve_graph` drop. (b) ~~*MC common random numbers*~~ — discharged:
+     `group_scenario_pnl` closes over one key for the base and every
+     shocked revaluation, gated by
+     `TestCommonRandomNumbers::test_fresh_key_per_revaluation_is_noise`
+     (measured −0.207 of spurious P&L on a zero scenario against a +1.16
+     real move). Pass a different key per *group*, never per scenario.
+     (c) *Absent ≠ zero*: `theta` raises `NotImplementedError` for
+     date-based instruments and a market-surface vega does not exist for a
+     group whose market has no surface, so the aggregate needs a keyed
+     union with explicit absence, or a mixed equity/rates book reports an
+     equity-only theta as the book's theta. Note the equity finding above
+     makes this sharper: rate/vol risk for an equity group is on the
+     *model* gradient, so a book-level "rho" is a keyed union across two
+     different gradient pytrees, not a sum. (d) *Quantity and sign* belong
+     to the portfolio layer — `price` returns a unit price and instruments
+     are data-only; `group_prices` is the per-instrument vector to weight.
   5. **`valax/portfolio/` is not reusable as-is and there is no PV
      aggregation to copy.** It is two functions (`batch_price`,
      `batch_greeks`) on the pre-curve loose-scalar convention
      `(spots, vols, rates, dividends)`, homogeneous-only, with
      `batch_greeks` calling the old `greeks/autodiff.py`; there is no
      `Portfolio` / `Position` type and no `tests/test_portfolio/` package.
-     Today's heterogeneous aggregation is a single `jnp.sum(prices)` inside
-     `reprice_under_scenario`. Build the layer once for the three additive
-     quantities (PV, gradient pytree, P&L vector) rather than once per
-     quantity, and treat `batch_price` / `batch_greeks` like
-     `wrap_equity_pricing_fn` — public API in `docs/getting-started.md` and
-     `docs/scaling/batching.md`, so they need a deprecation decision, not a
-     quiet patch.
-  6. **Sequence.** Port the loop first (self-contained, testable against the
-     legacy path for exact equality on a single-curve equity book), *then*
-     build the portfolio layer on top of it. Keyed generators + a named
-     factor layout to replace `parametric_var`'s positional covariance
-     concat are the follow-up that finally makes a basis move show up in a
-     VaR number — and that is what lets the `UserWarning` added in part 1
-     (`_warn_frozen_graph_curves`) be deleted as no longer true.
+     Build the layer once for the three additive quantities rather than
+     once per quantity, and treat `batch_price` / `batch_greeks` like
+     `wrap_equity_pricing_fn` — public API in `docs/getting-started.md`
+     and `docs/scaling/batching.md`, so they need a deprecation decision,
+     not a quiet patch.
+
+- [ ] **Keyed generators and a per-curve covariance layout.** The
+  generators in `valax/risk/scenarios.py` (`parametric_scenarios`,
+  `historical_scenarios`, `stress_scenario`, `steepener` / `flattener` /
+  `butterfly`) and `parametric_var`'s covariance ordering still assume the
+  flat factor order `[spots, vols, rates, dividends]` with a **single**
+  rate block. `stack_keyed_scenarios` gives the batched keyed pytree and
+  `group_scenario_pnl` consumes it, so what is missing is keyed
+  *generation* and a named factor layout. This is what finally makes a
+  basis move show up in a **VaR** number — the repricing loop already
+  shows it in a P&L vector — and it is what lets the `UserWarning` added
+  in part 1 (`_warn_frozen_graph_curves`) be deleted as no longer true.
 - [ ] **Close the quote-space (hedge-space) loop.** Compose
   `∇_MarketState price` (`valax/greeks/market_greeks.py`) with
   `valax/curves/bootstrap_graph.py::quote_jacobian` and
@@ -184,6 +210,19 @@ line in the same change (`AGENTS.md` definition of done).
   gates are internal (PDE agreement, payer/receiver parity), so they prove
   self-consistency, not convention. Results should be *logged* per run.
   Tracked in `docs/roadmap.md` (QuantLib Validation Pyramid, stage 2).
+- [ ] **Port the risk *measurement* layer onto `MarketState`.** Part 2
+  moved the repricing loop (§0.1); everything layered above it is still
+  positional. `compute_ladder` (`valax/risk/ladders.py`) builds DF-space
+  Hessians over flat `MarketData` vectors and drops the `curve_graph`
+  entirely; `risk_theoretical_pnl_vector` consumes those ladders;
+  `pnl_attribution` and `parametric_var` differentiate the same flat
+  layout. The keyed successor is a `dict[curve_id, ladder]` — the same
+  design as the graph-level greeks API and the node-level vega ladders in
+  [roadmap §1](docs/roadmap.md#1-risk-engine-is-still-single-curve-largest-gap)
+  — so all three move together, not one at a time.
+  `hypothetical_pnl_vector` needs no port: it is a one-line alias of
+  `portfolio_pnl`, and `group_scenario_pnl` is already its keyed
+  equivalent.
 - [ ] **Rates theta as a valuation-date roll.** `greeks/market_greeks.py::theta`
   raises `NotImplementedError` for date-based instruments; implement the
   `reference_date` roll (carry-and-roll repricing, never a derivative of
@@ -213,10 +252,79 @@ line in the same change (`AGENTS.md` definition of done).
 - [ ] **Full curve de-embedding.** The endpoint of §3.1: the model carries
   only `curve_id` and the exact-fit shift is computed at price time.
   P5 + P5.1 already deliver the *behaviour* (see §14.3), so this is a
-  tidy-up, not a blocker. (§14.2)
+  tidy-up **for the rates models**, not a blocker. (§14.2)
+
+  Part 2 gave it a concrete cost and split it cleanly in two. Because
+  `BlackScholesModel` carries its own `rate` / `vol` / `dividend`, a curve
+  or surface shock does **not** move an equity price through `price`, so
+  an equity group's rate and vol risk sit on `group_model_gradient` while
+  its spot risk sits on `group_market_gradient`. A book-level rate ladder
+  therefore has to union two different gradient pytrees. Pinned by
+  `tests/test_risk/test_state_var.py::TestEquityCurveShockIsInert`, and no
+  longer *silent*: `valax/risk/state_var.py::_warn_shadowed_shocks` warns
+  at the user boundary when a scenario's shock family cannot reach the
+  price, detected structurally from the model pytree's own fields
+  (`TestShadowedShockGuard`).
+
+  The affected set is exactly the equity family — `BlackScholesModel`,
+  `HestonModel`, `LocalVolModel`, `SLVModel`, `MultiAssetGBMModel` all
+  carry an intrinsic scalar `rate`. **The rates models are already
+  correct, and measurably so:** a curve shock reaches a Hull-White price
+  *bit-identically with or without* `with_market_curve`, because the
+  recipe takes `discount_curve` from the market rather than from the
+  model's `initial_curve` (measured −1.902 on an HW bond vs −1.901
+  curve-discounted for the same +100 bp). That confirms §14.3 — P5/P5.1
+  delivered the behaviour and `initial_curve` is vestigial in the price
+  path. So de-embedding `HullWhiteModel` / `G2PPModel` is cosmetic.
+
+  **Shipped for three of the five equity models** (`BlackScholesModel`,
+  `HestonModel`, `LocalVolModel`): `rate` / `dividend` — and BS `vol` —
+  may be left `None` and are sourced from the `MarketState` by
+  `valax/core/binding.py::bind_model`, a **binding layer** between
+  `resolve` and pricer dispatch. Design notes worth keeping:
+
+  * The seam is *bind-then-price*, not optional reads at each pricer.
+    `model.rate` / `.vol` / `.dividend` are read at ~34 sites across the
+    MC path generators, the MC engine, the PDE coefficient builders and
+    the PDE boundary conditions — and `pde/recipes.py` uses `model.vol` to
+    **size the spot grid**. Binding once, above all of them, left every
+    one of those sites untouched. Generalises
+    `HullWhiteModel.with_market_curve`.
+  * Because bind runs *inside* the differentiated path, a sourced
+    parameter traces back to the curve/surface: an equity curve shock now
+    moves the price (+0.92 on a 1Y two-option book for +100 bp) and
+    `group_market_gradient` puts the delta on **the trade's own pillar**,
+    not a fixed one. The `_warn_shadowed_shocks` guard then stops firing
+    by itself, because `model.rate is None`.
+  * A fully-specified model is returned by `bind_model` **unchanged**
+    (identity, not a copy), which is what makes constant mode
+    bit-identical and left all ~90 existing model constructions alone.
+  * Required new primitive: `valax.dates.ordinal_from_year_fraction`,
+    the inverse of `year_fraction`. No year-fraction → ordinal bridge
+    existed anywhere, and the two *forward* conventions in the tree
+    already disagreed (day-count-aware in the rates pricers vs hard-coded
+    `/365.0` in `risk/var.py`). It returns a **fractional** ordinal so the
+    round trip is exact and the path stays differentiable; `30_360` raises,
+    having no closed-form inverse.
+  * Guarded rather than trusting: `resolve_surface` does no kind checking
+    and falls back to the market's default surface whatever it is, so
+    `sample_vol` refuses `LeverageGrid` (same arity, log-moneyness units)
+    and `SwaptionCube` (needs a tenor), and refuses `is_normal` surfaces
+    outright rather than feeding Bachelier vols to a lognormal form.
+  * Still a *constant-parameter* model: projecting at each trade's own
+    maturity is right per trade but is not a term structure.
+
+  Left for a follow-up (shape problems, not design problems): `SLVModel`
+  (its `rate` / `dividend` precede the non-defaulted `surface` /
+  `leverage`, and its docstring declares field order a frozen contract) and
+  `MultiAssetGBMModel` (`vols` / `dividends` are per-asset vectors and
+  `n_assets` derives from `vols.shape[0]`).
 - [ ] **Retire `MarketData`.** Q4 granted it one minor release as a two-way
-  view; once `risk/var.py` targets `price(...)` (§0.1) it can go, along
-  with `docs/api/market.md`'s deprecation note. (§4, §11-Q4)
+  view. Part 2 moved the repricing loop off it and deprecated
+  `wrap_equity_pricing_fn` (which goes at the same time); what still holds
+  it alive is the rest of `valax/risk/var.py`, the ladders, and the
+  scenario generators (§0.2). Once those target `price(...)` it can go,
+  along with `docs/api/market.md`'s deprecation note. (§4, §11-Q4)
 - [ ] **End-to-end unified example + local example guard** — see §13. New
   `examples/10_unified_pricing.py` exercising `MarketState` → `price`
   (auto/mc/pde) → `market_greeks` → multi-curve selectors → Hull-White
@@ -359,6 +467,17 @@ and market are not freely-combinable independent inputs.
   Phase 5 migrates them to id-references *behind backward-compatible
   constructors* (keep `HullWhiteModel(initial_curve=...)` working during the
   deprecation cycle).
+- **Realised as a binding layer.** The chosen fork is implemented by
+  `valax/core/binding.py::bind_model`, called by `price` between `resolve`
+  and dispatch: a parameter given explicitly stays intrinsic, a parameter
+  left `None` is read from the `MarketState`. Both modes on one model
+  class, so the textbook `BlackScholesModel(vol=…, rate=…, dividend=…)`
+  keeps working unchanged while `BlackScholesModel()` is fully
+  market-driven. The four layers (kernel → model → binding → front door)
+  are documented in `docs/api/core.md` § Model binding. Note this is
+  *parameter* binding; the curve-**object** de-embedding of §0.3 (dropping
+  `initial_curve` in favour of `curve_id` alone) is the remaining cosmetic
+  step for the rates models.
 
 ### 3.2 Consistency invariant (state it in code + docs)
 

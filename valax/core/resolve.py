@@ -51,6 +51,9 @@ class ResolvedMarket(eqx.Module):
             projects off its discount curve (single-curve semantics).
         spot: Underlying spot level, or ``None`` for trades with no
             spot input (linear rates products).
+        dividend: Continuous dividend yield of the underlying, or ``None``
+            for trades with no underlying asset.  ``0.0`` when the market
+            carries assets but no dividend entries.
         surface: Volatility surface the model reads, or ``None``.
         fixings: Realised-fixing registry from the market.
         reference_date: Valuation-date ordinal of the discount curve.
@@ -59,6 +62,7 @@ class ResolvedMarket(eqx.Module):
     discount_curve: DiscountCurve
     forward_curve: DiscountCurve | None
     spot: Float[Array, ""] | None
+    dividend: Float[Array, ""] | None
     surface: Any
     fixings: FixingHistory
     reference_date: Int[Array, ""]
@@ -186,6 +190,30 @@ def resolve_spot(
     return market.spot(underlying_id_of(instrument))
 
 
+def resolve_dividend(
+    instrument: Any,
+    market: MarketState,
+) -> Float[Array, ""] | None:
+    """Bind an instrument's underlying selector to a dividend yield.
+
+    Args:
+        instrument: Any instrument pytree.
+        market: The calibrated market.
+
+    Returns:
+        The continuous dividend yield, or ``None`` when the market carries
+        no assets at all (a pure rates market).  A market that holds
+        assets but no dividend entries yields ``0.0``, which is the
+        economically correct default for a non-payer.
+
+    Raises:
+        KeyError: If the market holds dividends but not this instrument's.
+    """
+    if not market.spots:
+        return None
+    return market.dividend(underlying_id_of(instrument))
+
+
 def resolve_surface(model: Any, market: MarketState) -> Any:
     """Bind a model's surface reference against ``market``.
 
@@ -236,6 +264,7 @@ def resolve(
         discount_curve=discount_curve,
         forward_curve=forward_curve,
         spot=resolve_spot(instrument, market),
+        dividend=resolve_dividend(instrument, market),
         surface=resolve_surface(model, market),
         fixings=market.fixings,
         reference_date=discount_curve.reference_date,

@@ -40,8 +40,10 @@ class HestonModel(eqx.Module):
     theta: Float[Array, ""]    # long-run variance
     xi: Float[Array, ""]       # vol of vol
     rho: Float[Array, ""]      # correlation between spot and vol Brownians
-    rate: Float[Array, ""]     # risk-free rate
-    dividend: Float[Array, ""] # continuous dividend yield
+    # ``None`` defers to the MarketState at price time — see
+    # ``valax.core.binding.bind_model``.
+    rate: Float[Array, ""] | None = None     # risk-free rate
+    dividend: Float[Array, ""] | None = None # continuous dividend yield
 
 
 class HestonDrift(eqx.Module):

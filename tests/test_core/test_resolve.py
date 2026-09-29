@@ -11,6 +11,7 @@ from valax.core.resolve import (
     forward_id_of,
     resolve,
     resolve_curves,
+    resolve_dividend,
     resolve_spot,
     resolve_surface,
     surface_id_of,
@@ -169,7 +170,26 @@ class TestResolve:
         market = MarketState.single_curve(_curve())
         resolved = resolve(_option(), None, market)
         assert resolved.spot is None
+        assert resolved.dividend is None
         assert resolved.surface is None
+
+
+class TestResolveDividend:
+    """A market with assets but no dividend entries means a non-payer."""
+
+    def test_reads_the_market_dividend(self):
+        market = MarketState.single_curve(
+            _curve(), spot=jnp.array(100.0), dividend=jnp.array(0.03),
+        )
+        assert float(resolve_dividend(_option(), market)) == 0.03
+
+    def test_absent_dividend_table_is_zero_not_none(self):
+        market = MarketState.single_curve(_curve(), spot=jnp.array(100.0))
+        assert float(resolve_dividend(_option(), market)) == 0.0
+
+    def test_no_assets_at_all_is_none(self):
+        market = MarketState.single_curve(_curve())
+        assert resolve_dividend(_option(), market) is None
 
     def test_is_a_pytree(self):
         market = MarketState.single_curve(_curve(), spot=jnp.array(100.0))
