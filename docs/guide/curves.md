@@ -103,7 +103,7 @@ fra_6x9 = FRA(
 # Long end: par swap rate.
 swap_5y = SwapRate(
     start_date=ref,
-    fixed_dates=generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2),
+    fixed_dates=generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2).payment_dates,
     rate=jnp.array(0.0385),      # 3.85% par
     day_count="act_360",
 )
@@ -208,7 +208,7 @@ def curve_dfs_from_quotes(depo_rate_1, depo_rate_2, fra_rate, swap_rate):
     d1 = DepositRate(ref, ymd_to_ordinal(2025, 4, 1), depo_rate_1, "act_360")
     d2 = DepositRate(ref, ymd_to_ordinal(2025, 7, 1), depo_rate_2, "act_360")
     f = FRA(ymd_to_ordinal(2025, 7, 1), ymd_to_ordinal(2025, 10, 1), fra_rate, "act_360")
-    s = SwapRate(ref, generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2),
+    s = SwapRate(ref, generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2).payment_dates,
                  swap_rate, "act_360")
     curve = bootstrap_simultaneous(ref, pillar_dates, [d1, d2, f, s], "act_365")
     return curve.discount_factors
@@ -721,11 +721,11 @@ from valax.pricing.analytic.bonds import fixed_rate_bond_price
 def bond_price_from_quotes(depo_rate, swap_rate):
     """Build a curve from two quotes, then price a bond."""
     d = DepositRate(ref, ymd_to_ordinal(2025, 4, 1), depo_rate, "act_360")
-    s = SwapRate(ref, generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2),
+    s = SwapRate(ref, generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2).payment_dates,
                  swap_rate, "act_360")
     curve = bootstrap_sequential(ref, [d, s], "act_365")
     bond = FixedRateBond(
-        payment_dates=generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2),
+        payment_dates=generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2).payment_dates,
         settlement_date=ref,
         coupon_rate=jnp.array(0.04),
         face_value=jnp.array(100.0),

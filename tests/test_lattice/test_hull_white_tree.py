@@ -49,7 +49,7 @@ def model(flat_curve):
 
 @pytest.fixture
 def bond_schedule():
-    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
 
 
 @pytest.fixture

@@ -58,7 +58,7 @@ def zcb(ref_date):
 @pytest.fixture
 def coupon_bond(ref_date):
     """5-year, 4% semi-annual coupon bond, face=100."""
-    sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+    sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
     return FixedRateBond(
         payment_dates=sched,
         settlement_date=ref_date,
@@ -100,7 +100,7 @@ class TestFixedRateBond:
     def test_par_bond_near_100(self):
         """A bond with coupon = yield should price near par."""
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
         bond = FixedRateBond(
             payment_dates=sched,
             settlement_date=ref,
@@ -125,7 +125,7 @@ class TestFixedRateBond:
     def test_higher_coupon_higher_price(self, flat_curve):
         """Bond with higher coupon should have higher price."""
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
         bond_low = FixedRateBond(
             payment_dates=sched, settlement_date=ref,
             coupon_rate=jnp.array(0.02), face_value=jnp.array(100.0), frequency=2,
@@ -147,20 +147,51 @@ class TestFixedRateBond:
 
 class TestYieldPricing:
     def test_par_bond(self):
-        """Bond priced at coupon rate yield should be at par."""
+        """Coupon == yield prices at par, exactly, under 30/360.
+
+        The par identity is a property of the convention, not of bonds in
+        general: it needs every coupon to be exactly ``c / f``, which is only
+        true when the day count makes all periods equal. 30/360 does; Act/365
+        does not, because the 181- and 184-day half-years pay different
+        amounts while ``(1 + y/f)`` discounts them as if they did not. Under
+        Act/365 the same bond prices at 100.010 and Act/360 at 100.366 — real
+        effects that this assertion previously hid by using ``c / f`` on both
+        sides regardless of the bond's stated convention.
+        """
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        starts, _, pays = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
         bond = FixedRateBond(
-            payment_dates=sched, settlement_date=ref,
-            coupon_rate=jnp.array(0.06), face_value=jnp.array(100.0), frequency=2,
+            payment_dates=pays, accrual_start_dates=starts,
+            settlement_date=ref,
+            coupon_rate=jnp.array(0.06), face_value=jnp.array(100.0),
+            frequency=2, day_count="30_360",
         )
         p = fixed_rate_bond_price_from_yield(bond, jnp.array(0.06))
         assert abs(float(p) - 100.0) < 1e-6
 
+    @pytest.mark.parametrize(
+        "day_count,expected", [("act_365", 100.0103), ("act_360", 100.3658)]
+    )
+    def test_par_identity_breaks_under_an_actual_day_count(
+        self, day_count, expected
+    ):
+        """The same bond is *not* at par under actual/N — and by how much."""
+        ref = ymd_to_ordinal(2025, 1, 1)
+        starts, _, pays = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        bond = FixedRateBond(
+            payment_dates=pays, accrual_start_dates=starts,
+            settlement_date=ref,
+            coupon_rate=jnp.array(0.06), face_value=jnp.array(100.0),
+            frequency=2, day_count=day_count,
+        )
+        p = float(fixed_rate_bond_price_from_yield(bond, jnp.array(0.06)))
+        assert p == pytest.approx(expected, abs=1e-3)
+        assert p > 100.0
+
     def test_discount_bond(self):
         """Yield > coupon => price < par."""
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
         bond = FixedRateBond(
             payment_dates=sched, settlement_date=ref,
             coupon_rate=jnp.array(0.04), face_value=jnp.array(100.0), frequency=2,
@@ -171,7 +202,7 @@ class TestYieldPricing:
     def test_premium_bond(self):
         """Yield < coupon => price > par."""
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
         bond = FixedRateBond(
             payment_dates=sched, settlement_date=ref,
             coupon_rate=jnp.array(0.06), face_value=jnp.array(100.0), frequency=2,
@@ -186,7 +217,7 @@ class TestYTM:
     def test_roundtrip(self):
         """Price at yield y, then solve for y — should recover."""
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
         bond = FixedRateBond(
             payment_dates=sched, settlement_date=ref,
             coupon_rate=jnp.array(0.05), face_value=jnp.array(100.0), frequency=2,
@@ -197,11 +228,18 @@ class TestYTM:
         assert abs(float(recovered) - float(target_yield)) < 1e-8
 
     def test_par_bond_ytm_equals_coupon(self):
+        """The inverse of the par identity, so it needs 30/360 too.
+
+        See ``TestYieldPricing.test_par_bond``: equal periods are what make
+        ``y == c`` at par exact.
+        """
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        starts, _, pays = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
         bond = FixedRateBond(
-            payment_dates=sched, settlement_date=ref,
-            coupon_rate=jnp.array(0.05), face_value=jnp.array(100.0), frequency=2,
+            payment_dates=pays, accrual_start_dates=starts,
+            settlement_date=ref,
+            coupon_rate=jnp.array(0.05), face_value=jnp.array(100.0),
+            frequency=2, day_count="30_360",
         )
         ytm = yield_to_maturity(bond, jnp.array(100.0))
         assert abs(float(ytm) - 0.05) < 1e-8
@@ -212,7 +250,7 @@ class TestYTM:
 class TestRiskMeasures:
     def test_modified_duration_positive(self):
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
         bond = FixedRateBond(
             payment_dates=sched, settlement_date=ref,
             coupon_rate=jnp.array(0.05), face_value=jnp.array(100.0), frequency=2,
@@ -223,8 +261,8 @@ class TestRiskMeasures:
     def test_duration_increases_with_maturity(self):
         """Longer bonds should have higher duration."""
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched_2y = generate_schedule(2025, 1, 1, 2027, 1, 1, frequency=2)
-        sched_10y = generate_schedule(2025, 1, 1, 2035, 1, 1, frequency=2)
+        sched_2y = generate_schedule(2025, 1, 1, 2027, 1, 1, frequency=2).payment_dates
+        sched_10y = generate_schedule(2025, 1, 1, 2035, 1, 1, frequency=2).payment_dates
         bond_2y = FixedRateBond(
             payment_dates=sched_2y, settlement_date=ref,
             coupon_rate=jnp.array(0.05), face_value=jnp.array(100.0), frequency=2,
@@ -239,7 +277,7 @@ class TestRiskMeasures:
 
     def test_convexity_positive(self):
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
         bond = FixedRateBond(
             payment_dates=sched, settlement_date=ref,
             coupon_rate=jnp.array(0.05), face_value=jnp.array(100.0), frequency=2,
@@ -254,7 +292,7 @@ class TestRiskMeasures:
         MD = (1/y) * [1 - 1/(1+y/f)^n]  (for par bond)
         """
         ref = ymd_to_ordinal(2025, 1, 1)
-        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+        sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
         bond = FixedRateBond(
             payment_dates=sched, settlement_date=ref,
             coupon_rate=jnp.array(0.06), face_value=jnp.array(100.0), frequency=2,

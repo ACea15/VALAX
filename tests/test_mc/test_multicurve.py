@@ -109,7 +109,7 @@ def frn(ref_date) -> FloatingRateBond:
     curve's day count, so the model's time axis and the curve agree (see the
     note in the PDE companion test).
     """
-    payments = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1)
+    payments = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1).payment_dates
     fixings = jnp.concatenate(
         [jnp.asarray(ref_date, dtype=payments.dtype)[None], payments[:-1]]
     )
@@ -119,7 +119,6 @@ def frn(ref_date) -> FloatingRateBond:
         settlement_date=jnp.asarray(ref_date, dtype=payments.dtype),
         spread=jnp.array(0.002),
         face_value=jnp.array(100.0),
-        frequency=1,
         day_count="act_365",
         discount_id=_OIS_ID,
         forward_id=_PROJ_ID,
@@ -221,7 +220,6 @@ def test_price_single_curve_market_is_unchanged(frn, hw, ois):
         settlement_date=frn.settlement_date,
         spread=frn.spread,
         face_value=frn.face_value,
-        frequency=frn.frequency,
         day_count=frn.day_count,
     )
     market = MarketState.single_curve(ois)
@@ -238,7 +236,7 @@ def test_cms_spread_rejects_a_distinct_projection_curve(
 ):
     swap = CMSSpreadSwap(
         start_date=jnp.asarray(ref_date, dtype=jnp.int32),
-        payment_dates=generate_schedule(2026, 1, 1, 2028, 1, 1, frequency=1),
+        payment_dates=generate_schedule(2026, 1, 1, 2028, 1, 1, frequency=1).payment_dates,
         fixed_rate=jnp.array(0.0),
         notional=jnp.array(1_000_000.0),
         cms_tenor_long=10,

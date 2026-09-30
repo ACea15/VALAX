@@ -29,6 +29,36 @@ broadcasting. Valid convention names for
 
 ::: valax.dates.daycounts.thirty_360
 
+::: valax.dates.daycounts.ordinal_from_year_fraction
+
+## Schedule conventions
+
+::: valax.dates.conventions.ScheduleConventions
+
 ## Schedule generation
 
+::: valax.dates.schedule.Schedule
+
 ::: valax.dates.schedule.generate_schedule
+
+## Accrual and clean/dirty prices
+
+::: valax.dates.accrual.accrual_periods
+
+::: valax.dates.accrual.floating_accrual_periods
+
+::: valax.dates.accrual.fixed_coupon_amounts
+
+::: valax.dates.accrual.accrued_interest
+
+::: valax.dates.accrual.accrued_interest_at_dates
+
+::: valax.dates.accrual.accrued_interest_by_time
+
+::: valax.dates.accrual.bond_accrued_interest
+
+::: valax.dates.accrual.bond_accrued_interest_at_dates
+
+::: valax.dates.accrual.clean_from_dirty
+
+::: valax.dates.accrual.dirty_from_clean

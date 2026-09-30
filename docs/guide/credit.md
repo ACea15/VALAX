@@ -79,7 +79,7 @@ import jax.numpy as jnp
 cds = CDS(
     effective_date=ymd_to_ordinal(2025, 3, 20),
     maturity_date=ymd_to_ordinal(2030, 3, 20),
-    premium_dates=generate_schedule(2025, 6, 20, 2030, 3, 20, frequency=4),
+    premium_dates=generate_schedule(2025, 6, 20, 2030, 3, 20, frequency=4).payment_dates,
     spread=jnp.array(0.01),       # 100 bps annual spread
     notional=jnp.array(10_000_000.0),
     recovery_rate=jnp.array(0.4), # 40% — market standard for senior unsecured
@@ -157,7 +157,7 @@ import jax.numpy as jnp
 tranche = CDOTranche(
     effective_date=ymd_to_ordinal(2025, 3, 20),
     maturity_date=ymd_to_ordinal(2030, 3, 20),
-    premium_dates=generate_schedule(2025, 6, 20, 2030, 3, 20, frequency=4),
+    premium_dates=generate_schedule(2025, 6, 20, 2030, 3, 20, frequency=4).payment_dates,
     attachment=jnp.array(0.03),     # 3%
     detachment=jnp.array(0.07),     # 7%
     spread=jnp.array(0.05),         # 500 bps running

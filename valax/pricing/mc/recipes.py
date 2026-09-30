@@ -56,6 +56,7 @@ import jax.numpy as jnp
 from jaxtyping import Float, Int
 from jax import Array
 
+from valax.dates.accrual import fixed_coupon_amounts, floating_accrual_periods
 from valax.dates.daycounts import year_fraction
 from valax.instruments.bonds import CallableBond, FixedRateBond, FloatingRateBond, PuttableBond
 from valax.instruments.options import (
@@ -866,7 +867,7 @@ def _hw_coupon_schedule(
 
     Args:
         instrument: Bond carrying ``payment_dates``, ``coupon_rate``,
-            ``face_value`` and a static ``frequency``.
+            ``face_value`` and optional ``accrual_start_dates``.
         ref: Curve reference date (ordinal).
 
     Returns:
@@ -875,9 +876,7 @@ def _hw_coupon_schedule(
         final coupon).
     """
     times = year_fraction(ref, instrument.payment_dates, instrument.day_count)
-    coupon = instrument.face_value * instrument.coupon_rate / instrument.frequency
-    n_pay = instrument.payment_dates.shape[0]
-    amounts = jnp.full((n_pay,), coupon).at[-1].add(instrument.face_value)
+    amounts = fixed_coupon_amounts(instrument).at[-1].add(instrument.face_value)
     return times, amounts
 
 
@@ -980,10 +979,14 @@ def _floating_bond_hw(
     face = instrument.face_value
 
     cf_times = year_fraction(ref, instrument.payment_dates, day_count)
-    prev_dates = jnp.concatenate(
-        [instrument.settlement_date[None], instrument.payment_dates[:-1]]
-    )
-    taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
+    # One accrual convention for every FRN engine: the coupon accrues over
+    # [accrual_start, payment_date) and the projected rate is the forward
+    # over that same period. Previously this recipe accrued from the
+    # previous payment date (and the first period from settlement) while
+    # the analytic pricer accrued from the fixing date, so the two
+    # disagreed whenever those dates differed.
+    prev_dates, accrual_end = floating_accrual_periods(instrument)
+    taus = year_fraction(prev_dates, accrual_end, day_count)
     spread_amounts = instrument.spread * face * taus          # (n_pay,)
     basis = tenor_basis(
         model.initial_curve, forward_curve, prev_dates, instrument.payment_dates
@@ -1327,10 +1330,14 @@ def _floating_bond_g2pp(
     face = instrument.face_value
 
     cf_times = year_fraction(ref, instrument.payment_dates, day_count)
-    prev_dates = jnp.concatenate(
-        [instrument.settlement_date[None], instrument.payment_dates[:-1]]
-    )
-    taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
+    # One accrual convention for every FRN engine: the coupon accrues over
+    # [accrual_start, payment_date) and the projected rate is the forward
+    # over that same period. Previously this recipe accrued from the
+    # previous payment date (and the first period from settlement) while
+    # the analytic pricer accrued from the fixing date, so the two
+    # disagreed whenever those dates differed.
+    prev_dates, accrual_end = floating_accrual_periods(instrument)
+    taus = year_fraction(prev_dates, accrual_end, day_count)
     spread_amounts = instrument.spread * face * taus
     basis = tenor_basis(
         model.initial_curve, forward_curve, prev_dates, instrument.payment_dates
@@ -1658,10 +1665,14 @@ def _floating_bond_cheyette(
     face = instrument.face_value
 
     cf_times = year_fraction(ref, instrument.payment_dates, day_count)
-    prev_dates = jnp.concatenate(
-        [instrument.settlement_date[None], instrument.payment_dates[:-1]]
-    )
-    taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
+    # One accrual convention for every FRN engine: the coupon accrues over
+    # [accrual_start, payment_date) and the projected rate is the forward
+    # over that same period. Previously this recipe accrued from the
+    # previous payment date (and the first period from settlement) while
+    # the analytic pricer accrued from the fixing date, so the two
+    # disagreed whenever those dates differed.
+    prev_dates, accrual_end = floating_accrual_periods(instrument)
+    taus = year_fraction(prev_dates, accrual_end, day_count)
     spread_amounts = instrument.spread * face * taus
 
     t_settle = year_fraction(ref, instrument.settlement_date, day_count)
@@ -1969,10 +1980,14 @@ def _floating_bond_cheyette2f(
     face = instrument.face_value
 
     cf_times = year_fraction(ref, instrument.payment_dates, day_count)
-    prev_dates = jnp.concatenate(
-        [instrument.settlement_date[None], instrument.payment_dates[:-1]]
-    )
-    taus = year_fraction(prev_dates, instrument.payment_dates, day_count)
+    # One accrual convention for every FRN engine: the coupon accrues over
+    # [accrual_start, payment_date) and the projected rate is the forward
+    # over that same period. Previously this recipe accrued from the
+    # previous payment date (and the first period from settlement) while
+    # the analytic pricer accrued from the fixing date, so the two
+    # disagreed whenever those dates differed.
+    prev_dates, accrual_end = floating_accrual_periods(instrument)
+    taus = year_fraction(prev_dates, accrual_end, day_count)
     spread_amounts = instrument.spread * face * taus
 
     t_settle = year_fraction(ref, instrument.settlement_date, day_count)

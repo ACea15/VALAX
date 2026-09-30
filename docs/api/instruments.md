@@ -128,9 +128,10 @@ Margrabe (\(K = 0\)) and Kirk (\(K \neq 0\)); see
 
 ### Fixed-rate bond
 
-Use `generate_schedule()` from
-[`valax.dates`](dates.md#schedule-generation) to build
-`payment_dates`. Only future cash flows
+Use [`generate_schedule`](dates.md#schedule-generation) from `valax.dates` to
+build `payment_dates`, and pass its `accrual_start` leg as
+`accrual_start_dates` — that is what sizes each coupon, and it is required
+whenever the schedule has a stub. Only future cash flows
 (`payment_date > settlement_date`) are included in pricing.
 
 ::: valax.instruments.FixedRateBond

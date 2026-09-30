@@ -15,42 +15,31 @@ settlement = ymd_to_ordinal(2025, 1, 15)  # -> jnp.int32 scalar
 maturity = ymd_to_ordinal(2030, 1, 15)
 ```
 
-### Day Count Conventions
+### Day Counts and Schedules
 
-Four conventions are available, all operating on ordinal dates:
-
-| Convention | Function | Description |
-|---|---|---|
-| ACT/365 | `act_365(start, end)` | Actual days / 365 |
-| ACT/360 | `act_360(start, end)` | Actual days / 360 |
-| ACT/ACT | `act_act(start, end)` | Actual days / 365.25 |
-| 30/360 | `thirty_360(start, end)` | 30/360 Bond Basis |
-
-```python
-from valax.dates import year_fraction, ymd_to_ordinal
-
-start = ymd_to_ordinal(2025, 1, 15)
-end = ymd_to_ordinal(2025, 7, 15)
-
-yf = year_fraction(start, end, "act_365")   # 0.4959...
-yf = year_fraction(start, end, "30_360")    # 0.5 (exactly 6 months)
-```
-
-### Schedule Generation
-
-Generate coupon payment dates backward from maturity (standard bond convention):
+Day-count conventions, stub placement, end-of-month rolls, accrued interest and
+the clean/dirty distinction are all documented on
+**[Dates and Conventions](dates-and-conventions.md)**. In brief, a schedule is
+three aligned arrays, because sizing a coupon needs the period it accrued over
+and not just the date the cash arrives:
 
 ```python
 from valax.dates import generate_schedule
 
 # 5-year semi-annual bond
-schedule = generate_schedule(
+accrual_start, accrual_end, payment_dates = generate_schedule(
     start_year=2025, start_month=1, start_day=15,
     end_year=2030, end_month=1, end_day=15,
     frequency=2,  # semi-annual
 )
-# Returns: array of 10 ordinal dates (every 6 months, excluding issue date)
+# 10 periods. accrual_start[0] is the dated date (2025-01-15); every date
+# keeps its day-of-month, so payments fall on the 15th, and accrual_end[-1]
+# is exactly the stated maturity.
 ```
+
+Pass `accrual_start` to the instrument as `accrual_start_dates` whenever the
+schedule has a stub, since a stub period cannot be recovered from the payment
+dates alone.
 
 ## Discount Curves
 
@@ -108,12 +97,17 @@ zcb = ZeroCouponBond(
 from valax.instruments import FixedRateBond
 from valax.dates import generate_schedule, ymd_to_ordinal
 
+accrual_start, _, payment_dates = generate_schedule(
+    2025, 1, 15, 2030, 1, 15, frequency=2
+)
+
 bond = FixedRateBond(
-    payment_dates=generate_schedule(2025, 1, 15, 2030, 1, 15, frequency=2),
+    payment_dates=payment_dates,
+    accrual_start_dates=accrual_start,   # sizes each coupon; required for stubs
     settlement_date=ymd_to_ordinal(2025, 1, 15),
     coupon_rate=jnp.array(0.04),   # 4% annual coupon
     face_value=jnp.array(100.0),
-    frequency=2,                    # semi-annual
+    frequency=2,                    # yield compounding only
     day_count="act_365",
 )
 ```
@@ -194,7 +188,9 @@ This is computed via `jax.grad` through the discount curve pytree — the exact 
 
 ### Z-Spread and Spread DV01
 
-The **Z-spread** is the constant continuously-compounded spread added to every point of the discount curve that reprices the bond to its market price — the standard measure of a bond's credit/liquidity premium over the risk-free curve. Its risk sensitivities (spread duration, spread DV01, spread convexity) fall out of the same autodiff machinery:
+The **Z-spread** is the constant continuously-compounded spread added to every point of the discount curve that reprices the bond to its market price — the standard measure of a bond's credit/liquidity premium over the risk-free curve. Its risk sensitivities (spread duration, spread DV01, spread convexity) fall out of the same autodiff machinery.
+
+Pass `price_type="clean"` for a conventional bond quote: the solver inverts a dirty repricing map, and treating a clean quote as dirty biases the recovered spread by the accrued interest — tens of basis points mid-period. See [Dates and Conventions](dates-and-conventions.md#accrued-interest-clean-and-dirty).
 
 ```python
 from valax.risk import (
@@ -204,8 +200,10 @@ from valax.risk import (
     z_spread_convexity,
 )
 
-# Solve the Z-spread that matches a market dirty price of 96.0
-z = bond_z_spread(bond, curve, jnp.array(96.0))
+# Solve the Z-spread that matches a market *clean* quote of 96.0.
+# Bonds are quoted clean while the pricer produces a dirty price, so the
+# price type is stated explicitly — see Dates and Conventions.
+z = bond_z_spread(bond, curve, jnp.array(96.0), price_type="clean")
 
 # Spread risk evaluated at the bond's own Z-spread
 dv01 = z_spread_dv01(bond, curve, z)        # cash P&L per +1 bp of spread
@@ -233,7 +231,7 @@ from valax.pricing.analytic import (
 # 5-year, 4% semi-annual bond
 ref = ymd_to_ordinal(2025, 1, 1)
 bond = FixedRateBond(
-    payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2),
+    payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates,
     settlement_date=ref,
     coupon_rate=jnp.array(0.04),
     face_value=jnp.array(100.0),
@@ -297,7 +295,7 @@ import jax.numpy as jnp
 import numpy as np
 
 ref = ymd_to_ordinal(2025, 1, 1)
-sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=4)  # quarterly
+sched = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=4).payment_dates  # quarterly
 # Fixing dates = start of each accrual period (previous payment date, or ref)
 fixings = jnp.array([int(ref)] + list(np.asarray(sched[:-1]).tolist()), dtype=jnp.int32)
 

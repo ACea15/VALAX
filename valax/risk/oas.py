@@ -23,6 +23,14 @@ a pure constant shift of the discount coefficient with the :math:`x`-dynamics
 unchanged — so the two conventional definitions of OAS ("shift discounting only"
 versus "re-fit the whole model") coincide exactly.
 
+**Clean or dirty?**  A model price is the present value of every remaining
+cashflow, which is a *dirty* price; bonds are quoted *clean*.  Feeding a clean
+quote to a dirty repricing map biases the recovered spread by the accrued
+interest — up to a full coupon, and in one direction rather than randomly.  The
+solvers here therefore take an explicit ``price_type``: pass ``"clean"`` for a
+market quote and the accrued interest is added for you, or ``"dirty"`` if you
+have already grossed it up.  There is deliberately no default-by-guessing.
+
 Everything here is a pure function of pytrees.  The OAS root-find is implicitly
 differentiable through :func:`optimistix.root_find`, and the effective-risk
 helpers take exact autodiff derivatives of the model repricing map — never
@@ -44,6 +52,7 @@ from jaxtyping import Float
 from jax import Array
 
 from valax.curves.discount import DiscountCurve
+from valax.dates.accrual import bond_accrued_interest, dirty_from_clean
 from valax.instruments.bonds import FixedRateBond
 from valax.models.hull_white import HullWhiteModel
 from valax.pricing.analytic.bonds import fixed_rate_bond_price
@@ -156,6 +165,37 @@ def price_under_spread(
     return pde_price_dispatch(bond, shifted, config).price
 
 
+def _target_dirty_price(
+    bond: Any,
+    market_price: Float[Array, ""],
+    price_type: str,
+) -> Float[Array, ""]:
+    """Convert a quoted price to the dirty price the pricers produce.
+
+    Args:
+        bond: Bond instrument, used to compute accrued interest.
+        market_price: Observed price.
+        price_type: ``"clean"`` (accrued interest is added) or ``"dirty"``
+            (taken as-is).
+
+    Returns:
+        The dirty price to match.
+
+    Raises:
+        ValueError: If ``price_type`` is neither ``"clean"`` nor ``"dirty"``.
+    """
+    price = jnp.asarray(market_price)
+    if price_type == "dirty":
+        return price
+    if price_type == "clean":
+        return dirty_from_clean(price, bond_accrued_interest(bond))
+    raise ValueError(
+        f"price_type must be 'clean' or 'dirty', got {price_type!r}. Bond "
+        f"quotes are conventionally clean while model prices are dirty, so "
+        f"this is stated explicitly rather than assumed."
+    )
+
+
 # ── OAS root-find ────────────────────────────────────────────────────
 
 
@@ -165,6 +205,7 @@ def callable_bond_oas(
     market_price: Float[Array, ""],
     config: Any,
     *,
+    price_type: str = "dirty",
     x0: Float[Array, ""] | float = 0.0,
     rtol: float = 1e-12,
     atol: float = 1e-12,
@@ -194,8 +235,12 @@ def callable_bond_oas(
     Args:
         bond: Bond instrument with a registered Hull-White PDE recipe.
         model: Base Hull-White model (its initial curve is the un-shifted curve).
-        market_price: Observed market dirty price to match.
+        market_price: Observed market price to match, interpreted according
+            to ``price_type``.
         config: A :class:`~valax.pricing.pde.config.PDEConfig`.
+        price_type: ``"clean"`` if ``market_price`` is a conventional bond
+            quote (accrued interest is added), ``"dirty"`` if it is already
+            a full price.
         x0: Initial spread guess (default ``0.0``).
         rtol: Relative tolerance for the Newton solver.
         atol: Absolute tolerance for the Newton solver.
@@ -203,8 +248,11 @@ def callable_bond_oas(
 
     Returns:
         The option-adjusted spread :math:`s` (continuous, scalar array).
+
+    Raises:
+        ValueError: If ``price_type`` is not ``"clean"`` or ``"dirty"``.
     """
-    target = jnp.asarray(market_price)
+    target = _target_dirty_price(bond, market_price, price_type)
 
     def residual(spread: Float[Array, ""], args: Any) -> Float[Array, ""]:
         return price_under_spread(bond, model, config, spread) - target
@@ -225,6 +273,7 @@ def bond_z_spread(
     curve: DiscountCurve,
     market_price: Float[Array, ""],
     *,
+    price_type: str = "dirty",
     x0: Float[Array, ""] | float = 0.0,
     rtol: float = 1e-12,
     atol: float = 1e-12,
@@ -242,7 +291,11 @@ def bond_z_spread(
     Args:
         bond: An option-free fixed-rate bond.
         curve: Base discount curve.
-        market_price: Observed market dirty price to match.
+        market_price: Observed market price to match, interpreted according
+            to ``price_type``.
+        price_type: ``"clean"`` if ``market_price`` is a conventional bond
+            quote (accrued interest is added), ``"dirty"`` if it is already
+            a full price.
         x0: Initial spread guess (default ``0.0``).
         rtol: Relative tolerance for the Newton solver.
         atol: Absolute tolerance for the Newton solver.
@@ -250,8 +303,11 @@ def bond_z_spread(
 
     Returns:
         The Z-spread :math:`s` (continuous, scalar array).
+
+    Raises:
+        ValueError: If ``price_type`` is not ``"clean"`` or ``"dirty"``.
     """
-    target = jnp.asarray(market_price)
+    target = _target_dirty_price(bond, market_price, price_type)
 
     def residual(spread: Float[Array, ""], args: Any) -> Float[Array, ""]:
         shifted = parallel_shift(curve, spread)

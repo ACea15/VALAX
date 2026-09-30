@@ -231,7 +231,11 @@ Three things differ from the equity recipes, each for a concrete reason:
 - **Coupons and exercise use a discrete-event hook** on the backward sweep,
   with exercise decided ex-coupon and cashflows scaled by the analytic
   Hull-White bond price from their snapped level to their true date (so
-  cashflow timing contributes no discretisation error).
+  cashflow timing contributes no discretisation error). Ex-coupon is not the
+  same as clean: the obstacle also carries the accrued interest owed on the
+  exercise date, measured on the true date rather than the snapped level, so
+  the exercise boundary does not depend on `n_time`. See
+  [Dates and Conventions](dates-and-conventions.md#accrued-interest-clean-and-dirty).
 
 Because schedules are scattered with traced indices, nothing has to be
 concrete — unlike the trinomial tree, whose half-width is an array shape. The

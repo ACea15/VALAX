@@ -61,6 +61,10 @@ import jax.numpy as jnp
 from jax import Array
 from jaxtyping import Float, Int
 
+from valax.dates.accrual import (
+    bond_accrued_interest_at_dates,
+    fixed_coupon_amounts,
+)
 from valax.dates.daycounts import year_fraction
 from valax.instruments.bonds import CallableBond, FixedRateBond, PuttableBond
 from valax.instruments.rates import (
@@ -366,7 +370,7 @@ def _cheyette_coupon_values_by_level(
     """
     reference_date = model.initial_curve.reference_date
     dt = horizon / config.n_time
-    coupon = bond.face_value * bond.coupon_rate / bond.frequency
+    coupon = fixed_coupon_amounts(bond)
 
     def factor(level_time, payment_time):
         return _cheyette_coupon_bond_values(
@@ -454,6 +458,7 @@ def _callable_style_price_1f(
         dt,
         config.n_time,
         is_call,
+        accrued_at_exercise=bond_accrued_interest_at_dates(bond, exercise_dates),
     )
 
     def build(grid: Grid1D):
@@ -866,7 +871,7 @@ def _cheyette_coupon_values_by_level_2f(
     """Coupon value to inject at each time level, per node (2F, frozen-``y``)."""
     reference_date = model.initial_curve.reference_date
     dt = horizon / config.n_time
-    coupon = bond.face_value * bond.coupon_rate / bond.frequency
+    coupon = fixed_coupon_amounts(bond)
 
     def factor(level_time, payment_time):
         return _cheyette_discount_grid_2f(model, grid, level_time, payment_time)
@@ -1114,6 +1119,7 @@ def _callable_style_price_2f(
         dt,
         config.n_time,
         is_call,
+        accrued_at_exercise=bond_accrued_interest_at_dates(bond, exercise_dates),
     )
 
     def build(grid: Grid2D):
@@ -1537,7 +1543,7 @@ def cheyette_exact_price(
         horizon = _bond_horizon(instrument, model)
         reference_date = model.initial_curve.reference_date
         dt = horizon / config.n_time
-        coupon = instrument.face_value * instrument.coupon_rate / instrument.frequency
+        coupon = fixed_coupon_amounts(instrument)
 
         def build(grid: Grid2D):
             def factor(level_time, payment_time):

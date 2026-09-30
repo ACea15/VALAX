@@ -93,11 +93,22 @@ Vanilla contracts are documented on the pricing-method pages:
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
 | [Zero-coupon bond](#zero-coupon-bond) | Analytic | n-a (curve) | curve bootstrap | single cash flow | ✅ |
-| [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | n-a · Hull-White · G2++ · Cheyette | curve / HW | deterministic coupons | ✅ |
+| [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | n-a · Hull-White · G2++ · Cheyette | curve / HW | day-count accrual per period | ✅ |
 | [Floating-rate bond](#floating-rate-note) | Analytic · MC | n-a (curves) · Hull-White · G2++ · Cheyette | curve / HW | par-reset replication | ✅ |
-| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | issuer-optimal call | ✅ |
-| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | holder-optimal put | ✅ |
+| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | issuer-optimal call, clean call price | ✅ |
+| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | holder-optimal put, clean put price | ✅ |
 | [Convertible bond](#convertible-bond) | — | equity-credit | — | equity conversion option | 🟡 |
+
+!!! note "Conventions that apply to every row above"
+    Coupons are sized from each period's **day-count year fraction**, never
+    from `coupon_rate / frequency`, so unequal periods (stubs, and the
+    181/184-day alternation of any semiannual actual/N bond) pay unequal
+    amounts. Every pricer returns a **dirty** price; call and put prices are
+    quoted **clean**. Schedules support day-of-month preservation,
+    end-of-month rolls and short/long front/back stubs, but are still
+    **holiday-agnostic** — business-day adjustment is
+    [Tier 1.3](../roadmap.md#13-business-calendars-and-holiday-schedules).
+    See [Dates and Conventions](../guide/dates-and-conventions.md).
 
 ### FX derivatives
 
@@ -244,10 +255,10 @@ Periodic fixed coupons plus face at maturity. Ships with yield-to-maturity, modi
 Coupons reset periodically off a reference rate plus a `spread`; values by par-reset replication (a floater prices near par at reset, plus the spread annuity). See [Theory §3.2](../theory/curves.md#32-single-curve-vs-multi-curve-framework).
 
 ### Callable bond
-A fixed-rate bond the *issuer* may redeem early at `call_prices` on `call_dates` — long a bond, short a call on the bond. Requires an exact-curve-fit short-rate model: priced on the [Hull-White trinomial tree](../theory/hull-white-pde.md), the HW PDE, or HW MC, with an issuer-optimal $\min(\text{continuation},\text{call})$ at each call date. See [Callable bonds guide](../guide/callable-bonds.md).
+A fixed-rate bond the *issuer* may redeem early at `call_prices` on `call_dates` — long a bond, short a call on the bond. Requires an exact-curve-fit short-rate model: priced on the [Hull-White trinomial tree](../theory/hull-white-pde.md), the HW PDE, or HW MC, with an issuer-optimal $\min(\text{continuation},\text{call} + \text{accrued})$ at each call date — the call price is quoted clean, so accrued interest is added to put both sides of the comparison on the same footing. See [Callable bonds guide](../guide/callable-bonds.md).
 
 ### Puttable bond
-As above but the *holder* may sell back at `put_prices` — long a bond, long a put — with a holder-optimal $\max(\text{continuation},\text{put})$ node rule. See [Callable bonds guide](../guide/callable-bonds.md).
+As above but the *holder* may sell back at `put_prices` — long a bond, long a put — with a holder-optimal $\max(\text{continuation},\text{put} + \text{accrued})$ node rule. See [Callable bonds guide](../guide/callable-bonds.md).
 
 ### Convertible bond
 A fixed-rate bond carrying an embedded option to convert into `conversion_ratio` shares — an equity-credit hybrid needing a joint equity/rates (and ideally default) model. *Equity-credit PDE on the roadmap.* 🟡

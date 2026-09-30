@@ -89,8 +89,8 @@ from valax.dates import ymd_to_ordinal, generate_schedule
 import jax.numpy as jnp
 
 # 5-year SOFR OIS swap, quarterly fixed payments, quarterly float
-fixed_dates = generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4)
-float_dates = generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4)
+fixed_dates = generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4).payment_dates
+float_dates = generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4).payment_dates
 
 ois = OISSwap(
     start_date=ymd_to_ordinal(2025, 3, 15),
@@ -141,7 +141,7 @@ from valax.dates import ymd_to_ordinal, generate_schedule
 import jax.numpy as jnp
 
 # 5-year EUR/USD cross-currency basis swap
-payment_dates = generate_schedule(2025, 9, 15, 2030, 3, 15, frequency=4)
+payment_dates = generate_schedule(2025, 9, 15, 2030, 3, 15, frequency=4).payment_dates
 
 xccy = CrossCurrencySwap(
     start_date=ymd_to_ordinal(2025, 3, 15),
@@ -203,7 +203,7 @@ import jax.numpy as jnp
 # 1-year TRS on investment-grade bond index, quarterly resets
 trs = TotalReturnSwap(
     start_date=ymd_to_ordinal(2025, 3, 15),
-    payment_dates=generate_schedule(2025, 6, 15, 2026, 3, 15, frequency=4),
+    payment_dates=generate_schedule(2025, 6, 15, 2026, 3, 15, frequency=4).payment_dates,
     notional=jnp.array(100_000_000.0),
     funding_spread=jnp.array(0.004),    # SOFR + 40 bps funding
     is_total_return_receiver=True,
@@ -261,7 +261,7 @@ import jax.numpy as jnp
 # Pay fixed, receive 10Y CMS rate quarterly for 5 years
 cms_swap = CMSSwap(
     start_date=ymd_to_ordinal(2025, 3, 15),
-    payment_dates=generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4),
+    payment_dates=generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4).payment_dates,
     fixed_rate=jnp.array(0.042),     # 4.2% fixed leg
     notional=jnp.array(25_000_000.0),
     cms_tenor=10,                    # reference: 10-year swap rate
@@ -298,7 +298,7 @@ import jax.numpy as jnp
 
 # CMS floor struck at 3% on the 10Y rate, 5-year tenor
 cms_floor = CMSCapFloor(
-    payment_dates=generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4),
+    payment_dates=generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4).payment_dates,
     strike=jnp.array(0.03),         # 3% floor strike
     notional=jnp.array(50_000_000.0),
     cms_tenor=10,
@@ -356,7 +356,7 @@ import jax.numpy as jnp
 
 # 2-year range accrual on SOFR, pays 5% if SOFR stays between 3% and 5%
 range_note = RangeAccrual(
-    payment_dates=generate_schedule(2025, 6, 15, 2027, 3, 15, frequency=4),
+    payment_dates=generate_schedule(2025, 6, 15, 2027, 3, 15, frequency=4).payment_dates,
     coupon_rate=jnp.array(0.05),         # 5% max coupon
     lower_barrier=jnp.array(0.03),       # 3% lower bound
     upper_barrier=jnp.array(0.05),       # 5% upper bound

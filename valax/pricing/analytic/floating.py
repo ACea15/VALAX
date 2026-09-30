@@ -24,6 +24,7 @@ from jax import Array
 from valax.instruments.bonds import FloatingRateBond
 from valax.instruments.rates import OISSwap
 from valax.curves.discount import DiscountCurve
+from valax.dates.accrual import floating_accrual_periods
 from valax.dates.daycounts import year_fraction
 
 # Reuse the fixed-leg annuity and dual-curve float-leg helpers from the
@@ -95,11 +96,12 @@ def floating_rate_bond_price(
     Returns:
         Present value at ``curve.reference_date``.
     """
-    tau = year_fraction(bond.fixing_dates, bond.payment_dates, bond.day_count)
+    accrual_start, accrual_end = floating_accrual_periods(bond)
+    tau = year_fraction(accrual_start, accrual_end, bond.day_count)
     fwd = curve if forward_curve is None else forward_curve
 
-    df_f_start = fwd(bond.fixing_dates)
-    df_f_end = fwd(bond.payment_dates)
+    df_f_start = fwd(accrual_start)
+    df_f_end = fwd(accrual_end)
     df_end = curve(bond.payment_dates)
     projected_rate = (df_f_start / df_f_end - 1.0) / tau
 

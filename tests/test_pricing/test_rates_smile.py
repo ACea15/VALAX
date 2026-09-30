@@ -57,7 +57,7 @@ def flat_curve(ref_date):
 def payer_swaption(ref_date):
     """1y x 5y payer swaption."""
     expiry = ymd_to_ordinal(2026, 1, 1)
-    fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1)
+    fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1).payment_dates
     return Swaption(
         expiry_date=expiry,
         fixed_dates=fixed_dates,

@@ -11,6 +11,7 @@ from jax import Array
 
 from valax.instruments.bonds import ZeroCouponBond, FixedRateBond
 from valax.curves.discount import DiscountCurve
+from valax.dates.accrual import fixed_coupon_amounts
 from valax.dates.daycounts import year_fraction
 
 
@@ -40,8 +41,19 @@ def fixed_rate_bond_price(
     curve's interpolated discount factors.
 
     Only future cash flows (payment_date > settlement_date) are included.
+
+    Coupons are sized from each period's day-count year fraction, so
+    unequal periods — long/short stubs, and the 181/184-day alternation
+    of any semiannual actual/N bond — pay correspondingly unequal
+    amounts.
+
+    Returns the **dirty** price: the present value of every remaining
+    cashflow, including interest accrued since the last coupon date. Use
+    :func:`~valax.dates.accrual.clean_from_dirty` with
+    :func:`~valax.dates.accrual.bond_accrued_interest` for the quoted
+    clean price.
     """
-    coupon = bond.face_value * bond.coupon_rate / bond.frequency
+    coupon = fixed_coupon_amounts(bond)
 
     dfs = curve(bond.payment_dates)
     # Mask out past payments
@@ -69,8 +81,15 @@ def fixed_rate_bond_price_from_yield(
         P = sum_i [C / (1 + y/f)^i] + F / (1 + y/f)^n
 
     where i counts future periods from settlement.
+
+    Note the two distinct roles of ``frequency`` here. Coupon *amounts*
+    come from the accrual period and day count, like everywhere else in
+    the library. The ``/ bond.frequency`` below is *yield compounding* —
+    the convention by which a quoted annual yield is converted to a
+    per-period discount rate — which is genuinely a frequency and not a
+    day count. They must not be conflated.
     """
-    coupon = bond.face_value * bond.coupon_rate / bond.frequency
+    coupon = fixed_coupon_amounts(bond)
     future_mask = (bond.payment_dates > bond.settlement_date).astype(jnp.float64)
     n_future = jnp.sum(future_mask)
 

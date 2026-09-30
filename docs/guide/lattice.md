@@ -112,7 +112,7 @@ The Hull-White one-factor model is the standard short-rate model for pricing bon
 1. **`HullWhiteModel`** — an `equinox.Module` pytree carrying the mean-reversion speed $a$, short-rate volatility $\sigma$, and the initial discount curve $P^M(0,t)$.
 2. **Analytic zero-coupon bond prices** — $P(t,T \mid r) = A(t,T)\,e^{-B(t,T)\,r}$ with exact-fit to the initial curve via the Brigo-Mercurio $A(t,T)$ formula.
 3. **Trinomial tree** — a recombining tree for backward induction, with Arrow-Debreu forward propagation to calibrate $\alpha(t_i)$ at each step and match market discount factors exactly.
-4. **Callable and puttable bond pricing** — backward induction with exercise decisions: `callable_bond_price` (issuer calls when continuation > call price, reducing holder value) and `puttable_bond_price` (holder puts when continuation < put price, increasing holder value).
+4. **Callable and puttable bond pricing** — backward induction with exercise decisions: `callable_bond_price` (issuer calls when continuation > call price, reducing holder value) and `puttable_bond_price` (holder puts when continuation < put price, increasing holder value). Call and put prices are quoted clean while the continuation value is dirty, so the obstacle carries accrued interest; see [Dates and Conventions](dates-and-conventions.md#accrued-interest-clean-and-dirty).
 
 ### Model
 

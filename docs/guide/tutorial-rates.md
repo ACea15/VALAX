@@ -147,12 +147,15 @@ deposit_dates = [
 ]
 
 # Build the semi-annual fixed-leg schedule for each swap.
+# A swap's fixed leg needs only the payment dates, so we take that leg of
+# the returned schedule; see the Dates and Conventions guide for the
+# accrual arrays.
 swap_schedules = [
     generate_schedule(
         ref_y, ref_m, ref_d,
         ref_y + n, ref_m, ref_d,
         frequency=2,
-    )
+    ).payment_dates
     for n in swap_tenors_years
 ]
 ```
@@ -395,7 +398,7 @@ print(f"  sign check         : payer of an above-par coupon is "
 expiry = jnp.asarray(ymd_to_ordinal(ref_y + 1, ref_m, ref_d), dtype=jnp.int32)
 und_schedule = generate_schedule(
     ref_y + 1, ref_m, ref_d, ref_y + 6, ref_m, ref_d, frequency=2,
-).astype(jnp.int32)
+).payment_dates.astype(jnp.int32)
 
 # Forward 1Y×5Y par swap rate, via the same primitive the pricer uses.
 fwd_template = InterestRateSwap(

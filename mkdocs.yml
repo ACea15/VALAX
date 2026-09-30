@@ -89,6 +89,8 @@ nav:
           - PDE Solvers: guide/pde.md
           - Binomial Trees: guide/lattice.md
       - Synthetic Market Data: guide/synthetic_market.md
+  - Conventions:
+      - Dates, Schedules & Accrual: guide/dates-and-conventions.md
   - Calibration:
       - Overview: guide/calibration.md
       - Yield Curves & Bootstrapping: guide/curves.md

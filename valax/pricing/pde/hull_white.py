@@ -108,6 +108,10 @@ import jax.numpy as jnp
 from jax import Array
 from jaxtyping import Float, Int
 
+from valax.dates.accrual import (
+    bond_accrued_interest_at_dates,
+    fixed_coupon_amounts,
+)
 from valax.dates.daycounts import year_fraction
 from valax.instruments.bonds import CallableBond, FixedRateBond, PuttableBond
 from valax.instruments.rates import BermudanSwaption, Cap, Caplet, Swaption
@@ -269,7 +273,7 @@ def _coupon_values_by_level(
     """
     reference_date = model.initial_curve.reference_date
     dt = horizon / config.n_time
-    coupon = bond.face_value * bond.coupon_rate / bond.frequency
+    coupon = fixed_coupon_amounts(bond)
 
     def factor(level_time, payment_time):
         rates = grid.nodes + hw_alpha(model, level_time)
@@ -335,6 +339,7 @@ def _callable_style_price(
         dt,
         config.n_time,
         is_call,
+        accrued_at_exercise=bond_accrued_interest_at_dates(bond, exercise_dates),
     )
 
     def build(grid: Grid1D):

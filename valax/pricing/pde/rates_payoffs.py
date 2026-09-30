@@ -59,6 +59,7 @@ import jax.numpy as jnp
 from jax import Array
 from jaxtyping import Float, Int
 
+from valax.dates.accrual import bond_accrued_interest_at_dates
 from valax.dates.daycounts import year_fraction
 from valax.pricing.multicurve import apply_swap_basis
 
@@ -230,7 +231,10 @@ def coupon_values_by_level(
         reference_date: Curve reference date as an integer ordinal.
         payment_dates: Coupon payment dates as integer ordinals.
         day_count: Day-count convention.
-        coupon: Coupon amount (per payment date).
+        coupon: Coupon amount. Either a scalar applied to every payment
+            date, or one amount per payment date — the latter being the
+            normal case, since day-count accrual makes coupon periods
+            unequal.
         dt: Time-step size in year fractions.
         n_time: Number of backward time steps.
         node_shape: Shape of the spatial grid (``(n,)`` or ``(n_x, n_y)``).
@@ -244,6 +248,11 @@ def coupon_values_by_level(
         jnp.round(payment_times / dt).astype(jnp.int32), 0, n_time
     )
     factors = jax.vmap(discount_factor)(levels * dt, payment_times)
+    coupon = jnp.asarray(coupon)
+    if coupon.ndim == 1:
+        # Align the per-payment axis with `factors` before broadcasting
+        # across the spatial grid.
+        coupon = coupon.reshape(coupon.shape[0], *([1] * len(node_shape)))
     return (
         jnp.zeros((n_time + 1, *node_shape)).at[levels].add(coupon * factors)
     )
@@ -492,6 +501,7 @@ def exercise_obstacle_by_level(
     dt: Float[Array, ""],
     n_time: int,
     is_call: bool,
+    accrued_at_exercise: Float[Array, " m"] | None = None,
 ) -> Float[Array, " n_levels"]:
     """Per-level exercise obstacle for a callable/puttable bond.
 
@@ -500,6 +510,15 @@ def exercise_obstacle_by_level(
     get a **neutral** obstacle that never wins the projection: ``+inf`` for an
     issuer call (a ``min`` caps nothing), ``-inf`` for a holder put (a ``max``
     floors nothing).
+
+    **Clean vs dirty.** Call and put prices are quoted *clean*, while the
+    continuation value the obstacle is compared against is a present value
+    of all remaining cashflows and is therefore *dirty*. A holder redeemed
+    mid-period receives the redemption amount **plus** the interest accrued
+    since the last coupon, so the obstacle is raised by that accrual and the
+    comparison becomes like-for-like. Accrual is zero on a coupon date, so
+    this changes nothing when exercise and coupon dates coincide — which is
+    exactly why the discrepancy went unnoticed.
 
     Args:
         exercise_dates: Call or put dates as integer ordinals.
@@ -512,6 +531,13 @@ def exercise_obstacle_by_level(
         n_time: Number of backward time steps.
         is_call: ``True`` for issuer-optimal (callable), ``False`` for
             holder-optimal (puttable).
+        accrued_at_exercise: Accrued interest owed on each *exercise date*
+            (from
+            :func:`~valax.dates.accrual.bond_accrued_interest_at_dates`).
+            Measured on the true date rather than at the snapped level, so
+            the obstacle does not depend on ``n_time``. ``None`` treats the
+            quoted price as already dirty, which is only correct when every
+            exercise date is a coupon date.
 
     Returns:
         The obstacle value at each time level, indexed ``0 .. n_time``.
@@ -520,11 +546,10 @@ def exercise_obstacle_by_level(
         exercise_dates, reference_date, day_count, dt, n_time
     )
     neutral = jnp.inf if is_call else -jnp.inf
-    return (
-        jnp.full(n_time + 1, neutral)
-        .at[levels]
-        .set(exercise_prices * face_value)
-    )
+    redemption = exercise_prices * face_value
+    if accrued_at_exercise is not None:
+        redemption = redemption + accrued_at_exercise
+    return jnp.full(n_time + 1, neutral).at[levels].set(redemption)
 
 
 def exercisable_terminal_and_event(
@@ -537,9 +562,17 @@ def exercisable_terminal_and_event(
 
     The ordering within a step follows the trinomial tree: exercise is decided
     on the *ex-coupon* continuation value and the coupon is added afterwards,
-    because call/put prices are quoted ex-coupon and a holder redeemed on a
-    coupon date still receives that coupon. The issuer caps the value at the
-    call price (``is_call``); the holder floors it at the put price.
+    because a holder redeemed on a coupon date still receives that coupon. The
+    issuer caps the value at the call price (``is_call``); the holder floors it
+    at the put price.
+
+    Being ex-coupon is not the same as being clean, and the obstacle must
+    account for the difference: between coupon dates the continuation value
+    carries accrued interest that the quoted redemption price does not. That
+    adjustment lives in :func:`exercise_obstacle_by_level`, which raises the
+    obstacle by the accrual owed on each exercise date, so
+    ``strike_at_level`` arrives here already on the same (dirty) footing as
+    ``values``.
 
     Args:
         coupons: Coupon value to inject per ``(time level, *node)`` (from

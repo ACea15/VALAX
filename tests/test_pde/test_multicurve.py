@@ -108,7 +108,7 @@ def payer(ref_date) -> Swaption:
     """
     return Swaption(
         expiry_date=jnp.int32(int(ymd_to_ordinal(2027, 1, 1))),
-        fixed_dates=generate_schedule(2027, 1, 1, 2032, 1, 1, frequency=1),
+        fixed_dates=generate_schedule(2027, 1, 1, 2032, 1, 1, frequency=1).payment_dates,
         strike=jnp.array(0.03),
         notional=jnp.array(1_000_000.0),
         is_payer=True,
@@ -163,7 +163,7 @@ def test_hw_swaption_no_curves_equals_model_curve(hw, payer):
 def test_hw_cap_single_curve_non_regression(hw, ref_date):
     from valax.instruments.rates import Cap
 
-    fixings = generate_schedule(2025, 7, 1, 2027, 7, 1, frequency=2)
+    fixings = generate_schedule(2025, 7, 1, 2027, 7, 1, frequency=2).payment_dates
     cap = Cap(
         fixing_dates=fixings[:-1],
         start_dates=fixings[:-1],
@@ -198,7 +198,7 @@ def test_hw_bond_honours_a_distinct_discount_curve(hw, projection, ref_date):
     ``projection``, not the one on the model's embedded OIS curve.
     """
     bond = FixedRateBond(
-        payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2),
+        payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates,
         settlement_date=ref_date,
         coupon_rate=jnp.array(0.04),
         face_value=jnp.array(100.0),
@@ -304,7 +304,7 @@ def test_cms_spread_rejects_a_distinct_projection_curve(
 ):
     swap = CMSSpreadSwap(
         start_date=jnp.int32(int(ymd_to_ordinal(2025, 1, 1))),
-        payment_dates=generate_schedule(2026, 1, 1, 2028, 1, 1, frequency=1),
+        payment_dates=generate_schedule(2026, 1, 1, 2028, 1, 1, frequency=1).payment_dates,
         fixed_rate=jnp.array(0.0),
         notional=jnp.array(1_000_000.0),
         cms_tenor_long=10,

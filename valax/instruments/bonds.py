@@ -33,7 +33,15 @@ class FixedRateBond(eqx.Module):
         settlement_date: Valuation/settlement date as ordinal.
         coupon_rate: Annual coupon rate (e.g., 0.05 for 5%).
         face_value: Par/face value.
-        frequency: Coupons per year (1, 2, or 4).
+        accrual_start_dates: Start of each coupon's accrual period. Supply
+            this — from :func:`~valax.dates.schedule.generate_schedule` —
+            whenever the schedule has a stub, since a stub period is by
+            definition not inferable from the payment dates alone. When
+            ``None`` the periods are reconstructed as described in
+            :func:`~valax.dates.accrual.accrual_periods`.
+        frequency: Coupons per year. Used for **yield compounding only**
+            (``(1 + y/f)``); coupon *sizing* comes from the accrual period
+            and ``day_count``, never from ``1/frequency``.
         day_count: Day count convention for accrual.
     """
 
@@ -41,6 +49,7 @@ class FixedRateBond(eqx.Module):
     settlement_date: Int[Array, ""]
     coupon_rate: Float[Array, ""]
     face_value: Float[Array, ""]
+    accrual_start_dates: Optional[Int[Array, " n_payments"]] = None
     frequency: int = eqx.field(static=True, default=2)
     day_count: str = eqx.field(static=True, default="act_365")
     discount_id: str = eqx.field(static=True, default="_default_")
@@ -72,7 +81,14 @@ class FloatingRateBond(eqx.Module):
         face_value: Par/face value.
         fixing_rates: Known past fixing rates (shape n), NaN for future fixings.
             If None, all fixings are projected from the forward curve.
-        frequency: Coupon resets per year (1, 2, or 4). Default is quarterly.
+        accrual_start_dates: Start of each coupon's accrual period. Note
+            these are **not** the fixing dates: ``fixing_dates`` say when
+            the rate is *observed*, ``accrual_start_dates`` say what the
+            rate is *applied to*. The two coincide for a plain
+            fixing-in-advance FRN and diverge for stubs, fixing lags and
+            in-arrears conventions. When ``None`` the periods are
+            reconstructed by
+            :func:`~valax.dates.accrual.accrual_periods`.
         day_count: Day count convention for accrual fractions.
     """
 
@@ -82,7 +98,7 @@ class FloatingRateBond(eqx.Module):
     spread: Float[Array, ""]
     face_value: Float[Array, ""]
     fixing_rates: Optional[Float[Array, " n"]] = None
-    frequency: int = eqx.field(static=True, default=4)
+    accrual_start_dates: Optional[Int[Array, " n"]] = None
     day_count: str = eqx.field(static=True, default="act_360")
     discount_id: str = eqx.field(static=True, default="_default_")
     forward_id: Optional[str] = eqx.field(static=True, default=None)
@@ -107,9 +123,13 @@ class CallableBond(eqx.Module):
         coupon_rate: Annual fixed coupon rate.
         face_value: Par/face value.
         call_dates: Dates on which the issuer may call (ordinals, shape m).
-        call_prices: Redemption price at each call date (shape m).
-            Typically par (1.0) or a small premium above par.
-        frequency: Coupons per year (1, 2, or 4).
+        call_prices: Redemption price at each call date (shape m), as a
+            fraction of face. **Quoted clean**, i.e. excluding accrued
+            interest, per market convention; the pricer strips accrual
+            from the continuation value before comparing.
+        accrual_start_dates: Start of each coupon's accrual period; see
+            :class:`FixedRateBond`.
+        frequency: Coupons per year; yield compounding only.
         day_count: Day count convention for accrual fractions.
     """
 
@@ -119,6 +139,7 @@ class CallableBond(eqx.Module):
     face_value: Float[Array, ""]
     call_dates: Int[Array, " m"]
     call_prices: Float[Array, " m"]
+    accrual_start_dates: Optional[Int[Array, " n"]] = None
     frequency: int = eqx.field(static=True, default=2)
     day_count: str = eqx.field(static=True, default="act_365")
     discount_id: str = eqx.field(static=True, default="_default_")
@@ -146,8 +167,12 @@ class PuttableBond(eqx.Module):
         coupon_rate: Annual fixed coupon rate.
         face_value: Par/face value.
         put_dates: Dates on which the holder may put (ordinals, shape m).
-        put_prices: Redemption price at each put date (shape m).
-        frequency: Coupons per year (1, 2, or 4).
+        put_prices: Redemption price at each put date (shape m), as a
+            fraction of face and **quoted clean**; see
+            :class:`CallableBond`.
+        accrual_start_dates: Start of each coupon's accrual period; see
+            :class:`FixedRateBond`.
+        frequency: Coupons per year; yield compounding only.
         day_count: Day count convention for accrual fractions.
     """
 
@@ -157,6 +182,7 @@ class PuttableBond(eqx.Module):
     face_value: Float[Array, ""]
     put_dates: Int[Array, " m"]
     put_prices: Float[Array, " m"]
+    accrual_start_dates: Optional[Int[Array, " n"]] = None
     frequency: int = eqx.field(static=True, default=2)
     day_count: str = eqx.field(static=True, default="act_365")
     discount_id: str = eqx.field(static=True, default="_default_")
@@ -183,8 +209,10 @@ class ConvertibleBond(eqx.Module):
         face_value: Par/face value.
         conversion_ratio: Number of shares received per unit of face value.
         call_dates: Issuer call dates (ordinals, shape m). Empty if non-callable.
-        call_prices: Issuer call prices (shape m).
-        frequency: Coupons per year (1, 2, or 4).
+        call_prices: Issuer call prices (shape m), quoted clean.
+        accrual_start_dates: Start of each coupon's accrual period; see
+            :class:`FixedRateBond`.
+        frequency: Coupons per year; yield compounding only.
         day_count: Day count convention for accrual fractions.
     """
 
@@ -195,6 +223,7 @@ class ConvertibleBond(eqx.Module):
     conversion_ratio: Float[Array, ""]
     call_dates: Optional[Int[Array, " m"]] = None
     call_prices: Optional[Float[Array, " m"]] = None
+    accrual_start_dates: Optional[Int[Array, " n"]] = None
     frequency: int = eqx.field(static=True, default=2)
     day_count: str = eqx.field(static=True, default="act_365")
     discount_id: str = eqx.field(static=True, default="_default_")

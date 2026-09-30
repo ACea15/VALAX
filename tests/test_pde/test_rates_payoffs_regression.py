@@ -11,6 +11,20 @@ dropped ``alpha`` term, a different bond-price call — trips immediately.
 This is deliberately a stored-number test (unlike the rest of ``test_pde``,
 which checks against independent oracles): its whole job is to guard the
 refactor, not to re-validate the models.
+
+**Baseline moved once, deliberately.** The bond goldens were re-captured when
+coupon sizing changed from ``coupon_rate / frequency`` to a day-count year
+fraction over each accrual period, and when callable/puttable exercise began
+comparing a clean call price against a clean continuation value. Both were
+corrections, not refactors, so price preservation could not hold: the bullet
+prices moved by 0.87 cents per 100 of face and the callable/puttable by
+between 0.13 and 0.68 cents. Every bond here now carries an explicit
+``accrual_start_dates``, so the goldens are anchored on a fully specified
+schedule rather than on one inferred from the payment dates.
+
+The swaption and Bermudan goldens are **unchanged to the last bit**, which is
+the useful signal: the correction touches bond coupon accrual and the exercise
+obstacle, and nothing else.
 """
 
 import jax.numpy as jnp
@@ -27,25 +41,27 @@ from valax.models.hull_white import HullWhiteModel
 from valax.pricing.pde import PDEConfig, PDEConfig2D, Scheme, pde_price_dispatch
 from valax.pricing.pde.cheyette import cheyette_exact_price
 
-# Golden prices captured on the pre-refactor recipes.
+# Golden prices captured on the pre-refactor recipes, re-captured once when
+# day-count coupon accrual and the clean/dirty exercise comparison landed
+# (see the module docstring).
 GOLDEN = {
-    "hw_bullet": 104.49830026963392,
-    "hw_callable": 101.43257564686353,
-    "hw_puttable": 104.99358577947564,
+    "hw_bullet": 104.50702170207438,
+    "hw_callable": 101.4338759620375,
+    "hw_puttable": 105.00039307221081,
     "hw_swaption": 588.8695461364847,
     "hw_bermudan": 2887.7488420481063,
-    "g2_bullet": 104.49770036006319,
+    "g2_bullet": 104.50642169585382,
     "g2_swaption": 9.942659392497438,
     "g2_bermudan": 341.4774890058857,
-    "ch1_bullet": 104.49836140345472,
+    "ch1_bullet": 104.50708284611957,
     "ch1_swaption": 1349.0715337959873,
     "ch1_bermudan": 4636.66777250074,
-    "ch1_callable": 101.31569663148674,
-    "ch1_puttable": 105.11925829900835,
-    "ch2_bullet": 104.49770089001973,
+    "ch1_callable": 101.31731866746532,
+    "ch1_puttable": 105.12588429287793,
+    "ch2_bullet": 104.50642222588172,
     "ch2_swaption": 10.074270539247307,
     "ch2_bermudan": 342.99139729908006,
-    "chex_bullet": 104.49750972177986,
+    "chex_bullet": 104.506231027728,
     "chex_swaption": 1366.3178400013967,
 }
 
@@ -66,8 +82,10 @@ def _flat_curve(rate=0.03, n=26):
 
 
 CURVE = _flat_curve()
-BOND_SCHED = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
-SWAP_SCHED = generate_schedule(2027, 1, 1, 2032, 1, 1, frequency=1)
+BOND_ACCRUAL_START, _, BOND_SCHED = generate_schedule(
+    2025, 1, 1, 2030, 1, 1, frequency=2
+)
+SWAP_SCHED = generate_schedule(2027, 1, 1, 2032, 1, 1, frequency=1).payment_dates
 CALL_DATES = jnp.array(
     [int(ymd_to_ordinal(y, 1, 1)) for y in (2027, 2028, 2029)], dtype=jnp.int32
 )
@@ -77,17 +95,20 @@ EX_DATES = jnp.array(
 )
 
 BULLET = FixedRateBond(
-    payment_dates=BOND_SCHED, settlement_date=jnp.int32(REF),
+    payment_dates=BOND_SCHED, accrual_start_dates=BOND_ACCRUAL_START,
+    settlement_date=jnp.int32(REF),
     coupon_rate=jnp.array(0.04), face_value=jnp.array(100.0), frequency=2,
 )
 CALLABLE = CallableBond(
-    payment_dates=BOND_SCHED, settlement_date=jnp.int32(REF),
+    payment_dates=BOND_SCHED, accrual_start_dates=BOND_ACCRUAL_START,
+    settlement_date=jnp.int32(REF),
     coupon_rate=jnp.array(0.04), face_value=jnp.array(100.0),
     call_dates=CALL_DATES, call_prices=jnp.full(CALL_DATES.shape[0], 1.0),
     frequency=2,
 )
 PUTTABLE = PuttableBond(
-    payment_dates=BOND_SCHED, settlement_date=jnp.int32(REF),
+    payment_dates=BOND_SCHED, accrual_start_dates=BOND_ACCRUAL_START,
+    settlement_date=jnp.int32(REF),
     coupon_rate=jnp.array(0.04), face_value=jnp.array(100.0),
     put_dates=CALL_DATES, put_prices=jnp.full(CALL_DATES.shape[0], 1.0),
     frequency=2,

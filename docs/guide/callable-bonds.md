@@ -59,8 +59,8 @@ from valax.dates import ymd_to_ordinal, generate_schedule
 import jax.numpy as jnp
 
 # 3-year SOFR + 50 bps FRN, quarterly resets
-payment_dates = generate_schedule(2025, 6, 15, 2028, 3, 15, frequency=4)
-fixing_dates = generate_schedule(2025, 3, 15, 2027, 12, 15, frequency=4)
+payment_dates = generate_schedule(2025, 6, 15, 2028, 3, 15, frequency=4).payment_dates
+fixing_dates = generate_schedule(2025, 3, 15, 2027, 12, 15, frequency=4).payment_dates
 
 # First two fixings are known (seasoned bond)
 n = len(payment_dates)
@@ -128,7 +128,7 @@ from valax.dates import ymd_to_ordinal, generate_schedule
 import jax.numpy as jnp
 
 # 10-year callable corporate bond, callable after year 3
-payment_dates = generate_schedule(2025, 9, 15, 2035, 3, 15, frequency=2)
+payment_dates = generate_schedule(2025, 9, 15, 2035, 3, 15, frequency=2).payment_dates
 call_dates = jnp.array([
     ymd_to_ordinal(2028, 3, 15),
     ymd_to_ordinal(2029, 3, 15),
@@ -186,7 +186,9 @@ model = HullWhiteModel(
 )
 config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
 
-oas  = callable_bond_oas(callable, model, jnp.array(99.0), config)  # market dirty price
+oas  = callable_bond_oas(
+    callable, model, jnp.array(99.0), config, price_type="clean"
+)  # 99.0 is a conventional clean quote; accrued interest is added for you
 dur  = effective_duration(callable, model, config)
 cvx  = effective_convexity(callable, model, config)
 ```
@@ -262,7 +264,7 @@ from valax.instruments import PuttableBond
 from valax.dates import ymd_to_ordinal, generate_schedule
 import jax.numpy as jnp
 
-payment_dates = generate_schedule(2025, 9, 15, 2032, 3, 15, frequency=2)
+payment_dates = generate_schedule(2025, 9, 15, 2032, 3, 15, frequency=2).payment_dates
 
 puttable = PuttableBond(
     payment_dates=payment_dates,
@@ -333,7 +335,7 @@ from valax.instruments import ConvertibleBond
 from valax.dates import ymd_to_ordinal, generate_schedule
 import jax.numpy as jnp
 
-payment_dates = generate_schedule(2025, 9, 15, 2030, 3, 15, frequency=2)
+payment_dates = generate_schedule(2025, 9, 15, 2030, 3, 15, frequency=2).payment_dates
 
 convertible = ConvertibleBond(
     payment_dates=payment_dates,

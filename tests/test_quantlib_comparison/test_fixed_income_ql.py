@@ -19,7 +19,9 @@ import QuantLib as ql
 
 import valax
 from valax.curves.discount import zero_rate
+from valax.dates.conventions import ScheduleConventions
 from valax.dates.daycounts import ymd_to_ordinal, year_fraction
+from valax.dates.schedule import generate_schedule
 from valax.instruments.bonds import FixedRateBond
 from valax.market import (
     SeedRegistry,
@@ -124,13 +126,26 @@ class TestBondPricing:
 
     @pytest.fixture
     def valax_bond(self, curve_setup):
+        """A real calendar schedule, matching the QL one date for date.
+
+        This fixture used to hand-build ``today + round(0.5 * i * 365)``,
+        which drifts from a true semiannual roll by up to half a day per
+        cashflow — the drift that ``test_bond_price_close`` then absorbed
+        with a ``5e-4`` tolerance. Generating the schedule properly, with
+        explicit accrual starts, removes the discrepancy at source and lets
+        the tolerance measure what it is supposed to: curve interpolation.
+        """
         today = curve_setup["valax_curve"].reference_date
-        payment_dates = jnp.array([
-            today + jnp.int32(int(round(0.5 * i * 365)))
-            for i in range(1, 11)   # 5 years semi-annual
-        ])
+        accrual_start, _, payment_dates = generate_schedule(
+            2026, 1, 1, 2031, 1, 1, frequency=2,
+            conventions=ScheduleConventions(
+                day_count="act_365", stub="short_back"
+            ),
+        )
         return FixedRateBond(
-            payment_dates=payment_dates, settlement_date=today,
+            payment_dates=payment_dates,
+            accrual_start_dates=accrual_start,
+            settlement_date=today,
             coupon_rate=jnp.array(0.04), face_value=jnp.array(100.0),
             frequency=2, day_count="act_365",
         )

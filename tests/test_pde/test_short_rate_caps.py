@@ -299,7 +299,7 @@ class TestCapStrip:
 
 def _bond(cls, dates_key, dates, price):
     kw = dict(
-        payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2),
+        payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates,
         settlement_date=jnp.int32(_REF), coupon_rate=jnp.array(0.04),
         face_value=jnp.array(100.0), frequency=2,
     )
@@ -312,7 +312,7 @@ class TestTwoFactorCallablePuttable:
     @pytest.fixture
     def bullet(self):
         return FixedRateBond(
-            payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2),
+            payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates,
             settlement_date=jnp.int32(_REF), coupon_rate=jnp.array(0.04),
             face_value=jnp.array(100.0), frequency=2,
         )

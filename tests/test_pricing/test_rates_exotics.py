@@ -63,7 +63,7 @@ def for_curve(ref_date):
 
 @pytest.fixture
 def quarterly_schedule():
-    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=4)
+    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=4).payment_dates
 
 
 # ── Cross-currency swap ─────────────────────────────────────────────

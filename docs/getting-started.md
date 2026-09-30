@@ -98,7 +98,7 @@ from valax.pricing.analytic import fixed_rate_bond_price, modified_duration, yie
 # 5-year, 4% semi-annual bond
 ref = ymd_to_ordinal(2025, 1, 1)
 bond = FixedRateBond(
-    payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2),
+    payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates,
     settlement_date=ref,
     coupon_rate=jnp.array(0.04),
     face_value=jnp.array(100.0),

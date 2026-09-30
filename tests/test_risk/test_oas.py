@@ -83,7 +83,7 @@ def model(flat_curve):
 
 @pytest.fixture
 def schedule():
-    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
 
 
 @pytest.fixture
@@ -134,7 +134,7 @@ def conv_model(flat_curve):
 
 @pytest.fixture
 def long_schedule():
-    return generate_schedule(2025, 1, 1, 2035, 1, 1, frequency=2)
+    return generate_schedule(2025, 1, 1, 2035, 1, 1, frequency=2).payment_dates
 
 
 # ── 1. hw_alpha shift identity ───────────────────────────────────────

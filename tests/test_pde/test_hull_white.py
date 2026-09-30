@@ -105,7 +105,7 @@ def model(flat_curve):
 
 @pytest.fixture
 def bond_schedule():
-    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
 
 
 @pytest.fixture
@@ -162,7 +162,7 @@ def puttable_bond(ref_date, bond_schedule, call_dates):
 
 @pytest.fixture
 def swap_schedule():
-    return generate_schedule(2027, 1, 1, 2032, 1, 1, frequency=1)
+    return generate_schedule(2027, 1, 1, 2032, 1, 1, frequency=1).payment_dates
 
 
 def _swaption(expiry_ordinal, fixed_dates, is_payer=True, strike=0.05):

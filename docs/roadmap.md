@@ -17,7 +17,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | **Pricing** | Black-Scholes, Black-76, Bachelier, SABR analytic; **Heston Fang-Oosterlee COS**; **Dupire local vol (Gatheral IV-space)**; Monte Carlo (GBM, Heston, SABR, Local Vol, **SLV**, **multi-asset GBM**, LMM, **Hull-White**, **G2++**, **Cheyette**); Crank-Nicolson 1-D PDE; **2-D ADI PDE (Heston)**; **short-rate PDE (Hull-White, G2++, Cheyette)**; CRR binomial tree; Hull-White trinomial tree |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
 | **Curves** | `DiscountCurve` with log-linear interpolation, flat extrapolation |
-| **Dates** | Act/360, Act/365, Act/Act, 30/360; ordinal-based date arithmetic; coupon schedule generation |
+| **Dates** | Act/360, Act/365, **Act/Act (ISDA, exact)**, 30/360; ordinal-based date arithmetic; schedule generation with day-of-month preservation, end-of-month rolls and short/long front/back **stubs**, returning `(accrual_start, accrual_end, payment_dates)`; **accrued interest and clean/dirty prices**. Still **holiday-agnostic** — no calendars or business-day adjustment ([Tier 1.3](#13-business-calendars-and-holiday-schedules)) |
 | **Calibration** | SABR, Heston, **Hull-White, G2++, Cheyette (1F/2F)**, and **SLV leverage** calibration with LM / BFGS / Optax solvers; parameter constraint transforms. Curve bootstrap (sequential, simultaneous, joint `CurveGraph`); **survival-curve bootstrap from CDS spreads**; SABR / SVI vol surfaces, **swaption cube, optionlet surface** |
 | **Portfolio** | `batch_price()` and `batch_greeks()` via vmap |
 | **Market Data** | `MarketData` container, `MarketScenario` / `ScenarioSet` for risk factor shocks; full synthetic-data subpackage (`valax.market.synthetic`) covering Stages 1–6 of the workflow — `SyntheticMarketConfig`, `SeedRegistry`, NSS / flat curve samplers, random PSD correlation matrices, ground-truth model parameters, noisy observation layer, option / swap portfolio samplers, correlated-GBM market tapes, scenario sets, and deliberate arbitrage injectors |
@@ -433,7 +433,9 @@ caller-supplied pre-computed `forwards` array.
   consumed by nothing
 - [ ] **Business-day calendars and roll conventions** — see
   [Tier 1.3](#13-business-calendars-and-holiday-schedules); `valax/dates/`
-  is holiday-agnostic, so every bootstrap pillar is an unadjusted date
+  is holiday-agnostic, so every bootstrap pillar is an unadjusted date.
+  `ScheduleConventions` already carries the `calendar` and
+  `business_day_convention` slots for this work to drop into
 - [ ] **Over-determined bootstrap** — an `optimistix.least_squares` variant
   of `bootstrap_curve_graph` with per-quote weights
 - [ ] **Fixings seasoning** — `OISSwapRate` and the futures residual do
@@ -515,7 +517,7 @@ These items are hard prerequisites. Every downstream feature, product, and integ
 | # | Task | Why It's Critical | Tier Ref |
 |---|------|-------------------|----------|
 | **P1.1** | **Business Calendars & Date Adjustment** | Every trade in a bank settles on business days. Wrong dates = wrong cashflows = wrong P&L. Precomputed holiday arrays (TARGET, NYSE, SOFR/Fed, London, Tokyo) with modified-following/preceding and end-of-month conventions. | 1.3 |
-| **P1.2** | **Cashflow Engine (Legs, Stubs, Compounding)** | Real swaps have short/long stubs, compounding-in-arrears, amortizing notionals, fixing histories. The current schedule generator can't represent production trades. `FixedLeg` / `FloatingLeg` pytrees with full convention support. | 1.4 |
+| **P1.2** | **Cashflow Engine (Legs, Compounding)** — *stubs and accrued interest done* | Real swaps have compounding-in-arrears, amortizing notionals and fixing histories. Stub schedules and accrued interest have landed (`generate_schedule`, `valax.dates.accrual`); what remains is `FixedLeg` / `FloatingLeg` pytrees with compounding, amortisation and realized fixings. | 1.4 |
 | **P1.3** | **CI/CD Pipeline** | No bank adopts a library without automated testing. GitHub Actions with: lint, type-check, full test suite, QuantLib comparison, coverage reporting. A gate before anything else ships. | — |
 | **P1.4** | ~~**Short-Rate Models (Hull-White, G2++, Cheyette)**~~ ✅ **Done** | One-factor Hull-White, two-factor G2++, and quasi-Gaussian Cheyette (1F/2F) — analytic/tree/MC/PDE pricing, exact curve fit, and swaption-surface calibration (`calibrate_hull_white` / `calibrate_g2pp` / `calibrate_cheyette`). | 2.1 |
 
@@ -596,7 +598,7 @@ Ongoing (Differentiators):
 
 VALAX has excellent bones. The pure-functional JAX architecture is genuinely superior to what most banks run internally (mutable C++ object graphs built 20+ years ago). Autodiff Greeks, `vmap` batching, and GPU portability are structural advantages that compound with every new feature added.
 
-The most urgent gap is **foundational infrastructure** (P1: calendars, cashflows, CI/CD) — not because it's glamorous, but because every downstream feature depends on it. A bank quant evaluating VALAX will immediately ask: *"Can it handle modified-following date adjustment on a 10Y EUR swap with short front stub and compounding-in-arrears on the floating leg?"* — and today the answer is no.
+The most urgent gap is **foundational infrastructure** (P1: calendars, cashflows, CI/CD) — not because it's glamorous, but because every downstream feature depends on it. A bank quant evaluating VALAX will immediately ask: *"Can it handle modified-following date adjustment on a 10Y EUR swap with short front stub and compounding-in-arrears on the floating leg?"* — and today the answer is *partly*: the **short front stub** is supported and accrual is measured on a real day-count basis, but **modified-following adjustment** (Tier 1.3) and **compounding-in-arrears** (Tier 1.4) are not.
 
 The **highest-ROI parallel investment** is **short-rate models + Heston COS** alongside calendars/cashflows, because they unlock the most actively traded products (callable bonds, fast equity vol calibration) while the plumbing is being built.
 
@@ -662,14 +664,14 @@ These are foundational pieces that block almost everything else. They should be 
 ### 1.4 Trade Representation and Cashflow Engine
 
 - [ ] **Leg abstraction** — fixed leg, floating leg with compounding conventions (in arrears, in advance, compounded, averaged)
-- [ ] **Cashflow schedule generation** with proper date adjustment, stub periods (short/long front/back stubs)
+- [x] **Cashflow schedule generation** with **stub periods (short/long front/back stubs)**, day-of-month preservation and end-of-month rolls — `valax.dates.schedule.generate_schedule` returns a `Schedule` of `(accrual_start, accrual_end, payment_dates)`; conventions in `valax.dates.conventions.ScheduleConventions`. *Date adjustment remains open and is owned by [Tier 1.3](#13-business-calendars-and-holiday-schedules)*: the `calendar` and `business_day_convention` slots exist and are validated, but raise `NotImplementedError` rather than silently returning unadjusted dates
 - [ ] **Fixing histories** — realized fixings for partially-settled floating legs
 - [ ] **Amortization schedules** — notional step-down for amortizing swaps
-- [ ] **Accrued interest** calculation
+- [x] **Accrued interest** calculation and the **clean/dirty distinction** — `valax.dates.accrual` (`accrued_interest`, `bond_accrued_interest`, `clean_from_dirty`, `dirty_from_clean`); coupon sizing via `fixed_coupon_amounts` (day-count year fraction per accrual period, replacing `coupon_rate / frequency` across the analytic, lattice, PDE and MC pricers); `price_type="clean"|"dirty"` on `valax.risk.oas.callable_bond_oas` / `bond_z_spread`; callable/puttable exercise now compares a clean call price against a clean continuation value in both `valax.pricing.lattice.hull_white_tree` and `valax.pricing.pde.rates_payoffs`
 
-**Why:** Real swaps and bonds have complex cashflow structures. The current simplified schedule generation can't handle production trades.
+**Why:** Real swaps and bonds have complex cashflow structures. Accrual and stub handling are done; leg abstractions, fixing histories and amortisation are not, so a partially-settled or amortising trade still cannot be represented.
 
-**Approach:** `FixedLeg` and `FloatingLeg` as `eqx.Module` pytrees. Schedule generation takes a calendar + conventions and produces arrays of (accrual_start, accrual_end, payment_date, notional). Cashflow projection is a pure function over these arrays.
+**Approach:** `FixedLeg` and `FloatingLeg` as `eqx.Module` pytrees. Schedule generation takes a calendar + conventions and produces arrays of (accrual_start, accrual_end, payment_date, notional) — the first three of those four now exist; `notional` arrives with amortisation. Cashflow projection is a pure function over these arrays.
 
 ---
 

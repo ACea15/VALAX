@@ -120,7 +120,6 @@ def floating_bond(ref_date, payment_dates) -> FloatingRateBond:
         settlement_date=jnp.int32(ref_date),
         spread=jnp.asarray(0.0),
         face_value=jnp.asarray(_FACE),
-        frequency=1,
         day_count=_DAY_COUNT,
     )
 
