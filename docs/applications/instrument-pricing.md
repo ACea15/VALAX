@@ -75,8 +75,8 @@ Vanilla contracts are documented on the pricing-method pages:
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | SABR caplet strip | single forward per period | ✅ |
-| [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | SABR caplet strip | strip of independent caplets | ✅ |
+| [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR) | single forward per period | ✅ |
+| [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR) | strip of independent caplets | ✅ |
 | [Interest-rate swap](#interest-rate-swap) | Analytic | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
 | [Swaption](#swaption) | Analytic · MC · PDE | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette · LMM | SABR cube · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)) | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
 | [CMS swap](#cms-swap) | Analytic | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
@@ -205,7 +205,7 @@ Usage: [Rates exotics guide](../guide/rates-exotics.md). Fields: [API](../api/in
 A single-period call/put on a simply-compounded forward rate $F_i$: pays $\tau_i\,(F_i(T_{i-1})-K)^+$ at $T_i$ (caplet). Priced by Black-76 or Bachelier under the $T_i$-forward measure; a per-expiry smile is supplied by an `OptionletVolSurface`. See [Theory §9.2](../theory/rate-derivatives.md#92-caps-floors-and-the-caplet-formula) and [§2.2](../theory/stochastic-models.md#22-black-76-futures-forwards)/[§2.3](../theory/stochastic-models.md#23-bachelier-normal-model).
 
 ### Cap / floor
-A strip of caplets/floorlets on a common strike over a payment schedule; the price is the sum of the constituent optionlet prices, each reading its own vol from the surface. See [Theory §9.2](../theory/rate-derivatives.md#92-caps-floors-and-the-caplet-formula).
+A strip of caplets/floorlets on a common strike over a payment schedule; the price is the sum of the constituent optionlet prices, each reading its own vol from the surface. Market quotes are *flat* per maturity and are converted into that per-expiry surface by the cap→caplet strip — see [Volatility Surfaces § Cap → caplet stripping](../guide/vol-surfaces.md#cap-caplet-optionlet-stripping-rates) and [Theory §9.2](../theory/rate-derivatives.md#92-caps-floors-and-the-caplet-formula).
 
 ### Interest-rate swap
 Exchange of a fixed leg for a floating leg. The floating leg values by the replication identity $\text{PV}=N\,(P(t_0)-P(t_N))$ (single-curve) or by projected forwards (multi-curve). See [Theory §3.2](../theory/curves.md#32-single-curve-vs-multi-curve-framework).

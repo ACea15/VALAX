@@ -8,6 +8,14 @@ from valax.surfaces.optionlet_surface import (
     OptionletVolSurface,
     build_sabr_caplet_surface,
 )
+from valax.surfaces.caplet_stripping import (
+    CapletVolCurve,
+    cap_price_from_strip,
+    optionlet_expiries,
+    optionlet_forwards,
+    strip_caplet_vols,
+    strip_optionlet_surface,
+)
 from valax.surfaces.constant import ConstantVol
 from valax.surfaces.shifted import ShiftedVolSurface
 from valax.surfaces.svi import (

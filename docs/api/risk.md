@@ -113,6 +113,58 @@ implies for the sensitivity ladders, is in
 
 ::: valax.risk.scenarios.butterfly
 
+::: valax.risk.scenarios.curve_shape_bumps
+
+## Keyed, per-curve factor layout
+
+The replacement for the flat positional `[spots, vols, rates, dividends]`
+layout: an ordered tuple of blocks, **one per named market object**, so
+every curve on the graph owns its own coordinates in a scenario, in a
+covariance matrix and in a ladder alike. Rationale and recipes:
+[Scenarios & Shocks § Keyed generators](../risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout).
+
+::: valax.risk.scenarios.FactorBlock
+
+::: valax.risk.scenarios.KeyedFactorLayout
+
+### The basis as a coordinate
+
+`as_basis_layout` turns a projection curve's block into a **spread** over a
+discount curve, which is what gives
+`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>`
+([Risk Factors § 3.2](../risk-factors.md#32-interest-rates-multi-curve)) a variance, a
+P&L rung and a VaR contribution of its own rather than only a scenario.
+
+::: valax.risk.scenarios.as_basis_layout
+
+::: valax.risk.scenarios.basis_factor_prefix
+
+### Per-curve covariance assembly
+
+::: valax.risk.scenarios.block_covariance
+
+::: valax.risk.scenarios.historical_block_covariance
+
+::: valax.risk.scenarios.psd_factor
+
+### Keyed generators
+
+::: valax.risk.scenarios.keyed_parametric_scenarios
+
+::: valax.risk.scenarios.keyed_historical_scenarios
+
+::: valax.risk.scenarios.keyed_stress_scenario
+
+::: valax.risk.scenarios.keyed_curve_stress
+
+::: valax.risk.scenarios.keyed_steepener
+
+::: valax.risk.scenarios.keyed_flattener
+
+::: valax.risk.scenarios.keyed_butterfly
+
+::: valax.risk.scenarios.keyed_basis_shift
+
 ## Group repricing on a `MarketState`
 
 Repricing, P&L and gradients for one **homogeneous group**, all routed
@@ -295,6 +347,43 @@ workflows.
 ::: valax.risk.ladders.waterfall_pnl
 
 ::: valax.risk.ladders.waterfall_pnl_report
+
+## Keyed ladders on a `MarketState`
+
+The counterpart of the above for the container the unified pricer takes,
+indexed by a
+[`KeyedFactorLayout`](#keyed-per-curve-factor-layout) rather than
+positionally — so a dual-curve book reports an OIS ladder and a projection
+(or basis) ladder instead of one summed `delta_rate` vector.
+
+Sensitivities are taken with respect to the **shock magnitudes** of a
+keyed scenario rather than the market leaves, which removes the
+DF → zero-rate chain rule entirely and gives one well-defined vega per
+surface whatever its type. Rationale and recipes:
+[Sensitivity Ladders § Keyed ladders](../risk-ladders.md#keyed-ladders-on-a-marketstate).
+
+::: valax.risk.state_ladders.KeyedLadder
+
+::: valax.risk.state_ladders.keyed_ladder
+
+### Per-block waterfall
+
+::: valax.risk.state_ladders.KeyedWaterfall
+
+::: valax.risk.state_ladders.keyed_waterfall_pnl
+
+::: valax.risk.state_ladders.keyed_waterfall_report
+
+### Per-curve delta-normal VaR
+
+`keyed_component_var` is the number the flat layout cannot produce: an
+additive decomposition of the book's VaR in which a projection curve — or,
+on an `as_basis_layout` layout, the `IR.BASIS...` factor — carries its own
+contribution.
+
+::: valax.risk.state_ladders.keyed_parametric_var
+
+::: valax.risk.state_ladders.keyed_component_var
 
 ## Backtesting
 

@@ -77,6 +77,14 @@ scenarios = parametric_scenarios(
 
 Column ordering in the covariance matrix: `[spots, vols, rates, dividends]`.
 
+!!! warning "This layout has one undivided `rates` block"
+    It therefore cannot say *which* curve moved. On a multi-curve book a
+    basis move is inexpressible and a projection curve carries no VaR. The
+    keyed, per-curve replacement is
+    [§ Keyed generators and the per-curve covariance layout](#keyed-generators-and-the-per-curve-covariance-layout)
+    below; these flat generators remain for single-curve work and for one
+    deprecation cycle.
+
 **Historical simulation** — replay observed risk factor changes:
 
 ```python
@@ -247,6 +255,118 @@ rebuilds only the affected branches via `eqx.tree_at` and never mutates.
 sensitivities) as well as to the base market, and the whole path is
 `eqx.filter_jit`-safe.
 
+### Keyed generators and the per-curve covariance layout
+
+A hand-written `KeyedScenario` expresses one move. To get a *distribution*
+of moves — a VaR number, a ladder, a stress library — the three
+representations a risk engine carries have to agree on what the factors
+are:
+
+- the **scenario** (which shocks are applied),
+- the **covariance matrix** (rows and columns of $\Sigma$), and
+- the **ladder** (which sensitivity belongs to which factor).
+
+`KeyedFactorLayout` is that agreement: an ordered tuple of `FactorBlock`s,
+**one block per named market object**, derived from the market itself.
+
+```python
+from valax.risk import KeyedFactorLayout
+
+layout = KeyedFactorLayout.from_market_state(dual)
+layout.n_factors          # 8 = 4 OIS pillars + 4 projection pillars
+layout.factor_ids()
+# ('IR.CURVE.USD.SOFR.3M.0Y',  ..., 'IR.CURVE.USD.SOFR.OIS.2Y')
+layout.index("curve", "USD.SOFR.3M")     # slice(0, 4)
+```
+
+Every coordinate carries the hierarchical identifier of
+[Risk Factors § 1.2](risk-factors.md#12-factor-identifier-convention), and
+`layout.flatten(scenario)` / `layout.unflatten(vector)` move between the
+keyed pytree and that vector — exact inverses, batched or not.
+
+**Per-curve covariance.** Each named object supplies its own block, and
+cross-correlations are stated rather than implied by position:
+
+```python
+from valax.risk import block_covariance, keyed_parametric_scenarios
+
+cov = block_covariance(
+    layout,
+    {
+        ("curve", "USD.SOFR.OIS"): jnp.full(4, (7e-4) ** 2),   # 7bp/day
+        ("curve", "USD.SOFR.3M"):  jnp.full(4, (2e-4) ** 2),   # 2bp/day
+    },
+    {(("curve", "USD.SOFR.OIS"), ("curve", "USD.SOFR.3M")): 0.3},
+)
+
+scenarios = keyed_parametric_scenarios(key, cov, layout, n_scenarios=10_000)
+scenarios.curve_shocks["USD.SOFR.3M"].shape      # (10_000, 4)
+```
+
+A block may be a full matrix, a vector of per-pillar variances, or a
+scalar; omitted blocks are deterministic. The sampler factors $\Sigma$
+spectrally (`psd_factor`), so a *singular* covariance — a stress on one
+curve alone, or more factors than observations — samples correctly instead
+of returning NaNs from a failed Cholesky. `historical_block_covariance`
+builds the same object from data.
+
+Feed the result straight into the group primitives:
+`group_scenario_pnl(instruments, model, market, scenarios)` →
+`value_at_risk(...)` ([VaR & P&L](risk-var.md)).
+
+**Keyed stresses** size themselves from the layout, so a caller never
+counts pillars, and they *name the curve they move*:
+
+```python
+from valax.risk import (
+    keyed_stress_scenario, keyed_steepener, keyed_basis_shift,
+)
+
+parallel_up = keyed_stress_scenario(layout, parallel_shift=0.01)
+mixed = keyed_stress_scenario(
+    layout, parallel_shift=0.0010, curve_shifts={"USD.SOFR.3M": 0.0025},
+)
+steep = keyed_steepener(layout, "USD.SOFR.3M", -0.005, 0.015)
+widen = keyed_basis_shift(layout, "USD.SOFR.3M", 0.0010, "USD.SOFR.OIS")
+```
+
+`keyed_steepener` / `keyed_flattener` / `keyed_butterfly` share their shape
+algebra with the flat presets above (`curve_shape_bumps`) so the two
+layouts cannot drift apart — the difference is only that these take a
+curve id.
+
+#### The basis as a coordinate, not just a scenario
+
+`keyed_basis_shift` expresses a basis *move*. To give the basis a
+**variance** — and therefore its own VaR and its own P&L rung — it has to
+be a coordinate. `as_basis_layout` reparameterises a projection curve's
+block into a spread over a discount curve, $r^{\text{proj}} = r^{\text{disc}} + b$:
+
+```python
+from valax.risk import as_basis_layout
+
+basis_layout = as_basis_layout(layout, "USD.SOFR.3M", "USD.SOFR.OIS")
+basis_layout.factor_ids()[:4]
+# ('IR.BASIS.USD.SOFR3M.SOFROIS.0Y', ...)
+```
+
+The two layouts span the same space, but they say different things about
+*independence*, which is what a covariance matrix encodes:
+
+| Coordinates | A pure discount move means | A pure projection move means |
+|---|---|---|
+| absolute | discounting moves, basis widens by the same amount | basis widens |
+| basis | both curves move together, basis unchanged | — (the basis block does that) |
+
+The second row is the empirically right default: OIS and 3M rates move
+together and the *spread* between them is the separate, much less volatile
+factor. In absolute coordinates you would have to encode that with a
+near-unit cross-correlation; in basis coordinates it is the structure.
+This is the `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` factor of
+[Risk Factors § 3.2](risk-factors.md#32-interest-rates-multi-curve); its ladder and
+VaR contribution are in
+[Sensitivity Ladders § Keyed ladders](risk-ladders.md#keyed-ladders-on-a-marketstate).
+
 ### Vol shocks: parallel shift, not node shock
 
 Under `MarketState` a vol is a duck-typed **surface object**
@@ -278,7 +398,7 @@ fields already assume — so they are unchanged by this work, but their
 (a bucket vega), not a node vega. Had (a) been chosen, those three fields
 would have had to become identifier-keyed per-node arrays. Node-level vega
 ladders therefore remain future work, tracked in the
-[roadmap](roadmap.md#1-risk-engine-is-still-single-curve-largest-gap).
+[roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 !!! note "Repricing a keyed scenario"
     A `KeyedScenario` is consumed by the group primitives in

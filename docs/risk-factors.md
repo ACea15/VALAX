@@ -43,7 +43,23 @@ For example:
 The identifier is what links a factor across **scenarios** (rows of a `ScenarioSet`), **covariance matrices** (rows / columns of $\Sigma$), **ladders** (entries of `SensitivityLadder.*`), and **PLA reports** (per-factor RTPL contributions).
 
 !!! note "Current code"
-    VALAX currently uses a flat *positional* layout for risk factors (`[spots, vols, rates, dividends]`) inside `MarketData` / `MarketScenario`. Hierarchical identifiers are the target architecture — see [§4 Roadmap](#4-roadmap) — but the registry below is already organised by them so future migration is mechanical.
+    Two layouts coexist. The **legacy** one is flat and *positional*
+    (`[spots, vols, rates, dividends]`) inside `MarketData` /
+    `MarketScenario`; it has one undivided `rates` block and therefore
+    cannot name a curve.
+
+    The **current** one is identifier-keyed:
+    [`KeyedFactorLayout`](api/risk.md#keyed-per-curve-factor-layout) holds
+    one `FactorBlock` per named market object (every curve on the
+    `CurveGraph`, every surface, every asset) and emits exactly the
+    identifiers below from `layout.factor_ids()`. The same layout indexes
+    scenarios ([`keyed_parametric_scenarios`](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout)),
+    covariance matrices (`block_covariance`) and ladders
+    ([`KeyedLadder`](risk-ladders.md#keyed-ladders-on-a-marketstate)), so
+    the three line up by **name** rather than by position. Identifier
+    coverage is still partial — the IR and equity families below are keyed;
+    FX, credit, inflation and the model-parameter families are not yet
+    (see [§4 Roadmap](#4-roadmap)).
 
 ### 1.3 Shock conventions
 
@@ -179,14 +195,18 @@ curve on a graph — including one carried on the optional
 *named* curve is addressable from a scenario too:
 `KeyedScenario(curve_shocks={curve_id: bumps})` applied with
 `valax.risk.shock` to a `MarketState`
-([guide](risk-scenarios.md#keyed-scenarios-on-a-marketstate)).
+([guide](risk-scenarios.md#keyed-scenarios-on-a-marketstate)), and a whole
+*distribution* of such moves is addressable through
+`KeyedFactorLayout` — one block per named curve in the scenario
+generators, the covariance matrix and the ladders alike
+([guide](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout)).
 
 | Factor ID | Description | What is needed | Pricing engines that will consume it |
 |---|---|---|---|
-| `IR.OIS.<ccy>.<pillar>` ✅ *(via `bump_discount_curve` on `MultiCurveSet`, or `bump_graph_curve` on `CurveGraph`)* | OIS / collateral discount-curve zero rate. | `bump_discount_curve` ✅ and `bump_graph_curve` ✅ in `valax/risk/shocks.py`; `MarketData.curve_graph` ✅ carries an optional `CurveGraph`; `KeyedScenario.curve_shocks` + `valax.risk.shock` ✅ address any graph curve from a scenario. **Still needed:** keyed scenario *generators* and a per-curve covariance layout, so a projection curve carries its own VaR / P&L rung. | All analytic rates pricers (dual-curve via the optional `forward_curve` argument; see [`guide/curves.md` §8](guide/curves.md#8-what-is-not-yet-implemented)). |
+| `IR.OIS.<ccy>.<pillar>` ✅ *(via `bump_discount_curve` on `MultiCurveSet`, or `bump_graph_curve` on `CurveGraph`)* | OIS / collateral discount-curve zero rate. | `bump_discount_curve` ✅ and `bump_graph_curve` ✅ in `valax/risk/shocks.py`; `MarketData.curve_graph` ✅ carries an optional `CurveGraph`; `KeyedScenario.curve_shocks` + `valax.risk.shock` ✅ address any graph curve from a scenario; `KeyedFactorLayout` ✅ gives each curve its own block in a scenario *set*, a covariance matrix (`block_covariance`) and a ladder (`KeyedLadder`), so a projection curve carries its own VaR (`keyed_component_var`) and P&L rung (`keyed_waterfall_pnl`). | All analytic rates pricers (dual-curve via the optional `forward_curve` argument; see [`guide/curves.md` §8](guide/curves.md#8-what-is-not-yet-implemented)). |
 | `IR.FWD.<ccy>.<tenor>.<pillar>` ✅ *(via `bump_forward_curve` or `bump_graph_curve`)* | Tenor-specific forward curve (e.g. 3M SOFR forwards). | `bump_forward_curve(mcs, tenor, rate_bumps)` and `parallel_basis_shift` ✅ on `MultiCurveSet`; `bump_graph_curve(graph, curve_id, rate_bumps)` / `parallel_graph_shift` / `key_rate_graph_bump` ✅ on `CurveGraph`. | `pricing/analytic/floating.py` (FRN, OIS swap), `pricing/analytic/swaptions.py`, `pricing/analytic/caplets.py` — all with optional `forward_curve` |
-| `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` 🚧 | Forward-curve basis (e.g. 3M vs 6M, SOFR vs OIS). Derived: shock the forward curve while holding discount fixed. | Already achievable via `bump_forward_curve`, and expressible as a single scenario on a `MarketState` — `KeyedScenario(curve_shocks={...})` per curve id, see [Scenarios & Shocks § Per-curve moves](risk-scenarios.md#per-curve-moves-are-the-point); still needs a named factor identifier and a helper that takes a basis as input rather than a raw zero-rate bump.  With `quote_jacobian` the delta w.r.t. a `TenorBasisSwap.spread` is available directly through the calibrated `CurveGraph`. | Basis swaps, dual-curve XCCY |
-| `IR.XCCY.<ccy>.<pillar>` 📋 | Cross-currency basis between two currencies' funding curves. | Same machinery as `IR.BASIS` but with a foreign discount leg.  `quote_jacobian` on a four-curve `CurveGraph` closed by a `CrossCurrencyBasisSwap` produces the xccy DV01 in one solve. | `CrossCurrencySwap` (pricer exists; risk-engine shock TBD) |
+| `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` ✅ | Forward-curve basis (e.g. 3M vs 6M, SOFR vs OIS): the spread $b$ in $r^{\text{proj}} = r^{\text{disc}} + b$. | `keyed_basis_shift(layout, projection_id, bump, over=discount_id)` ✅ takes a **basis** as input rather than a raw zero-rate bump. `as_basis_layout` ✅ makes it a *coordinate*, not just a scenario: it reparameterises the projection curve's block into a spread and names it with this identifier (`basis_factor_prefix`), so the basis gets its own variance in `block_covariance`, its own rung in `keyed_waterfall_pnl`, its own `KeyedLadder.basis_dv01`, and its own `keyed_component_var` contribution — independently of discounting, which is how the market trades it. Gate: `tests/test_risk/test_state_ladders.py::TestBasisDV01`, `tests/test_risk/test_keyed_scenarios.py::TestBasisLayout`. With `quote_jacobian` the delta w.r.t. a `TenorBasisSwap.spread` is additionally available through the calibrated `CurveGraph`. | Basis swaps, dual-curve XCCY |
+| `IR.XCCY.<ccy>.<pillar>` 🚧 | Cross-currency basis between two currencies' funding curves. | The same machinery as `IR.BASIS` now applies — `as_basis_layout` is currency-agnostic and `basis_factor_prefix` falls back to both full curve ids when the currencies differ — but the *pricers* are the gap: `cross_currency_swap_price` is single-curve-per-currency and `ResolvedMarket` binds no second-currency discount curve, so the coordinate exists before anything reads it. `quote_jacobian` on a four-curve `CurveGraph` closed by a `CrossCurrencyBasisSwap` produces the xccy DV01 in one solve. | `CrossCurrencySwap` (pricer exists; per-leg curve selection TBD) |
 | `IR.CONVEXITY.<ccy>` 📋 | Hull-White / quasi-Gaussian convexity adjustment for CMS, futures, in-arrears caps. | Reuse `valax/curves/convexity.py`; expose its parameters as risk factors.  The `MoneyMarketFuture.convexity_adj_fn` plug-in accepts `no_convexity_adj` / `constant_convexity_adj` today; `hull_white_convexity_adj(model)` queued for MC-Curves-3. | `CMSSwap`, `CMSCapFloor`, money-market futures |
 
 ### 3.3 FX
@@ -243,7 +263,7 @@ This is the dependency-ordered build-out plan that turns 🚧 / 📋 entries int
 
 1. **Survival curve + credit shocks** *(this iteration: completed for the curve and shock primitives)*
     - Unlocks: CDS pricer, OAS for callable bonds, convertible-bond credit dimension.
-2. **Multi-curve `MarketData`** — *(partially shipped)* `MarketData.curve_graph` ✅ holds an optional `CurveGraph` (dict of `DiscountCurve` keyed by identifier, supports any number of currencies × tenors + basis + xccy), and the `CurveGraph`-aware `bump_*` primitives ✅ mirror the `MultiCurveSet` ones.  Scenario-level addressing shipped with `KeyedScenario` + `valax.risk.shock` on a `MarketState` ✅, and the VaR path no longer drops the graph ✅.  **Remaining:** keyed scenario generators and a per-curve covariance layout (the VaR engine itself is still flat), and integration with `quote_jacobian` for quote-space delta bucketing.
+2. **Multi-curve `MarketData`** — *(shipped, bar the quote-space leg)* `MarketData.curve_graph` ✅ holds an optional `CurveGraph` (dict of `DiscountCurve` keyed by identifier, supports any number of currencies × tenors + basis + xccy), and the `CurveGraph`-aware `bump_*` primitives ✅ mirror the `MultiCurveSet` ones.  Scenario-level addressing shipped with `KeyedScenario` + `valax.risk.shock` on a `MarketState` ✅, and the VaR path no longer drops the graph ✅.  Keyed scenario *generators* and the per-curve covariance layout shipped with `KeyedFactorLayout` + `block_covariance` + `keyed_parametric_scenarios` ✅, and the keyed ladders / per-curve VaR decomposition with `KeyedLadder` + `keyed_component_var` ✅, so a projection curve and a basis each carry their own P&L and VaR.  **Remaining:** integration with `quote_jacobian` for quote-space delta bucketing, and the legacy flat `valax/risk/var.py` engine (kept for one deprecation cycle).
     - Unlocks: real OIS-vs-SOFR basis risk, dual-curve KRDs, dual-curve PLA decomposition (separate `delta_ois` and `delta_sofr` ladders), full cross-currency delta chains, closed-form basis DV01 and xccy DV01 via the implicit-adjoint quote-Jacobian.
 3. **Per-currency curve registry + FX risk factors** — distinguish `EQ.SPOT.<asset>` (currently overloaded) from `FX.SPOT.<pair>`, and add a foreign discount curve per currency.
     - Unlocks: full Garman-Kohlhagen risk, XCCY swap KRDs in both currencies, multi-currency PLA.
@@ -253,7 +273,7 @@ This is the dependency-ordered build-out plan that turns 🚧 / 📋 entries int
     - Unlocks: inflation desk PLA, inflation-linked bond IE01.
 6. **Model-parameter ladder** — generic infrastructure that lets any pytree model (Heston, HW, LMM, SVI) auto-register its parameters as named risk factors.
     - Unlocks: model-drift attribution, "Greeks-of-Greeks" diagnostics.
-7. **Hierarchical factor IDs and PSD-preserving correlation shocks** — full migration from positional to identifier-based factor layout.
+7. **Hierarchical factor IDs and PSD-preserving correlation shocks** — *(partially shipped)* the identifier-based layout exists and is the current one for curves, surfaces, spots and dividends (`KeyedFactorLayout.factor_ids`, `FACTOR_CATEGORIES`), and `psd_factor` already projects a non-PSD covariance onto its nearest PSD counterpart when sampling.  **Remaining:** identifiers for the FX / credit / inflation / model-parameter families, PSD-preserving *correlation* shocks (as opposed to covariance sampling), and retiring the legacy positional path.
     - Unlocks: bank-scale (~10⁴ factor) deployments, FRTB factor-eligibility audit trails.
 
 Each tier deliberately keeps the autodiff invariant intact: every new factor is just another leaf of a pytree that pricing functions consume, so adding the factor automatically gives both the delta ladder (one reverse-mode pass) and the second-order block (one Hessian pass) for free.

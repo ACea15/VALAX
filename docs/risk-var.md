@@ -86,7 +86,7 @@ Three things follow, and they are the reason the port matters:
     [Sensitivity ladders](risk-ladders.md), the scenario generators in
     `valax.risk.scenarios`, and `parametric_var`'s covariance layout are
     still positional and still take a `MarketData`. Tracked in the
-    [roadmap](roadmap.md#1-risk-engine-is-still-single-curve-largest-gap).
+    [roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 !!! warning "A shock that cannot reach the price says so"
     An equity model given an explicit scalar `rate` / `vol` / `dividend`

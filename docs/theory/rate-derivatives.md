@@ -54,6 +54,8 @@ $$
 
 **VALAX implementation:** `valax/pricing/analytic/caplets.py` (`caplet_price_black76`, `caplet_price_bachelier`, `cap_price_*`) is dual-curve aware and takes a per-caplet volatility term structure.
 
+The market, however, quotes **one flat volatility per cap maturity** rather than the $\sigma_i$ above. Recovering the optionlet term structure from those quotes is a nested bootstrap — one scalar root-find per quoted maturity, projecting off the tenor curve and discounting off OIS — implemented by `valax/surfaces/caplet_stripping.py` (`strip_caplet_vols`, `strip_optionlet_surface`). Recipe and the bootstrap identity: [Volatility Surfaces § Cap → caplet stripping](../guide/vol-surfaces.md#cap-caplet-optionlet-stripping-rates).
+
 ### 9.3 Swaptions and the Annuity Measure
 
 A payer swap over $[T_0, T_N]$ has value $P(t,T_0) - P(t,T_N) - K\,A(t)$, where the **annuity** (present value of a basis point) is

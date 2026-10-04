@@ -227,27 +227,42 @@ and surfaces and portfolio are untouched.
 
 ### Remaining work
 
-#### 1. Risk engine is still single-curve *(largest gap)*
+#### 1. Risk engine: keyed end to end, bar portfolio aggregation
 
 The whole point of multi-curve is that OIS and projection curves are
 **distinct risk factors** and the basis is itself hedgeable
 ([Why Multi-Curve § What this means for risk](guide/why-multicurve.md#what-this-means-for-risk)).
-The *representation* now supports that — a keyed scenario shocks any curve
-on the graph by identifier, and the graph survives the VaR path — but the
-*engine* (generators, covariance layout, ladders, and the repricing loop
-itself) is still built on flat `MarketData` vectors with one rate block.
+That now holds along the whole chain for a *group*: a keyed scenario shocks
+any curve on the graph by identifier, keyed generators draw a whole
+distribution of such moves from a **per-curve covariance layout**, the
+repricing loop goes through `price(...)`, and a keyed ladder reports each
+curve's — and the basis's — own DV01, P&L rung and VaR contribution. What
+is still flat is the **legacy** `valax/risk/var.py` / `valax/risk/ladders.py`
+pair (kept for one deprecation cycle) and the **portfolio aggregation**
+layer above the group primitives.
 
 - [x] **Per-curve scenario axis** — `KeyedScenario.curve_shocks`
   (`valax/market/keyed_scenario.py`) is `dict[curve_id, per-pillar bumps]`,
   applied by `valax.risk.shock`; OIS and projection curves are separately
   shockable on one `CurveGraph`
-- [ ] **Keyed *generators* and a keyed scenario set** — the generators in
-  `valax/risk/scenarios.py` (`parametric_scenarios`, `historical_scenarios`,
-  `stress_scenario`, `steepener` / `flattener` / `butterfly`) and
-  `parametric_var`'s covariance ordering still assume the flat factor order
-  `[spots, vols, rates, dividends]` with a **single** rate block.
-  `stack_keyed_scenarios` gives the batched keyed pytree; what is missing is
-  keyed generators and a keyed covariance layout (per-curve blocks)
+- [x] **Keyed *generators* and a per-curve covariance layout** —
+  `KeyedFactorLayout` (`valax/risk/scenarios.py`) replaces the flat
+  positional factor order with an ordered tuple of `FactorBlock`s, **one
+  block per named market object**, derived from the market itself
+  (`from_market_state`) and naming every coordinate with the hierarchical
+  identifier of [Risk Factors § 1.2](risk-factors.md#12-factor-identifier-convention).
+  `flatten` / `unflatten` are exact inverses (batched or not), so the same
+  layout indexes a scenario, a covariance matrix and a ladder. On top of it:
+  `block_covariance` (per-curve blocks + explicit cross-correlations,
+  factored by `psd_factor` so a singular covariance samples instead of
+  returning NaNs), `historical_block_covariance`, and the generators
+  `keyed_parametric_scenarios` / `keyed_historical_scenarios` /
+  `keyed_stress_scenario` / `keyed_curve_stress` (+ `keyed_steepener` /
+  `keyed_flattener` / `keyed_butterfly`, sharing `curve_shape_bumps` with
+  the flat presets) / `keyed_basis_shift`. The legacy flat generators stay
+  for one deprecation cycle. Gate:
+  `tests/test_risk/test_keyed_scenarios.py`. Recipe:
+  [Scenarios & Shocks § Keyed generators](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout)
 - [x] **Route graph shocks through the container-level shock** —
   `valax.risk.shock` moves any named graph curve via `bump_graph_curve`, and
   `apply_scenario` now keeps the graph's `"_default_"` entry in step with
@@ -282,12 +297,33 @@ itself) is still built on flat `MarketData` vectors with one rate block.
   `tests/test_risk/test_state_var.py` — bit-exact against the legacy path
   on a single-curve book, plus the common-random-numbers gate for MC
   groups. Recipe: [VaR & P&L § Repricing through `price()`](risk-var.md#repricing-through-price)
-- [ ] **Port the *measurement* layer** — the repricing loop has moved but
-  what sits above it has not: `compute_ladder` still builds DF-space
-  Hessians over flat `MarketData` vectors, `risk_theoretical_pnl_vector`
-  consumes those ladders, and `pnl_attribution` / `parametric_var` are
-  still positional. These move with the keyed ladder (below) rather than
-  independently
+- [x] **Port the *measurement* layer: keyed ladders, waterfall and VaR** —
+  `valax/risk/state_ladders.py` is the `MarketState` counterpart of
+  `ladders.py`: `keyed_ladder` returns a `KeyedLadder` indexed by a
+  `KeyedFactorLayout` (one `jax.grad` for the whole first-order ladder, one
+  `jax.hessian` for the second-order block matrix, all through
+  `price(...)`), with `dv01(curve_id)` / `curve_ladder` / `vega` /
+  `basis_dv01` / `block_totals` / `to_dict` accessors. The sensitivities are
+  taken w.r.t. the **shock magnitudes** rather than the market leaves, which
+  deletes the hand-written DF→zero-rate chain rule (and its gamma
+  correction) and gives one well-defined vega for *every* surface type.
+  `keyed_waterfall_pnl` / `keyed_waterfall_report` attribute P&L with one
+  rung per named market object — a pure basis widening puts exactly zero on
+  the discount rung — and `keyed_parametric_var` / `keyed_component_var`
+  give a delta-normal VaR whose Euler decomposition is additive across
+  curves, so a projection curve and a basis each carry their own VaR
+  (measured 5,922 OIS + 494 basis on a two-swap book). Gate:
+  `tests/test_risk/test_state_ladders.py` (ladder vs finite differences of
+  the same shock map; second-order explain to <1e-5 of actual; component VaR
+  summing to total; delta-normal within 5% of a 20k-scenario simulated VaR).
+  Recipe: [Sensitivity Ladders § Keyed ladders](risk-ladders.md#keyed-ladders-on-a-marketstate)
+- [ ] **Port the rest of the measurement layer** — `compute_ladder` still
+  builds DF-space Hessians over flat `MarketData` vectors and
+  `risk_theoretical_pnl_vector` consumes *those* ladders, so the FRTB PLA
+  path (`valax/risk/pnl_vectors.py`) and `pnl_attribution` are still
+  positional. The keyed ladder above is what they re-target onto; the
+  remaining work is the RTPL/HPL vector pair and retiring the flat
+  `parametric_var`
 - [x] **Market-sourced equity model parameters** — `BlackScholesModel`,
   `HestonModel` and `LocalVolModel` now accept `rate` / `dividend` (and
   BS `vol`) as `None`, sourced from the `MarketState` at price time by
@@ -316,13 +352,32 @@ itself) is still built on flat `MarketData` vectors with one rate block.
   `discount_curve` from the market, so the embedded `initial_curve` is
   already vestigial in the price path. Tracked in
   `PRICING_ONTOLOGY.md` § 0.3
-- [ ] **`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` risk factor** — already
-  tracked as 🚧 in [Risk Factors § 3](risk-factors.md)
-- [ ] **Graph-level greeks API** — `curve_pillar_deltas`
-  (`valax/greeks/market_greeks.py`) resolves exactly one `curve_id` per
-  call and `bucketed_curve_deltas` takes a flat pillar vector with no
-  curve identity. Per-curve ladders are obtainable one at a time; there is
-  no `dict[curve_id, ladder]` API and no graph-aware bucketing
+- [x] **`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` risk factor** — the
+  basis is now a *coordinate*, not only a scenario: `as_basis_layout`
+  reparameterises a projection curve's block into the spread
+  `r_proj = r_disc + b` and names it via `basis_factor_prefix`
+  (`USD.SOFR.3M` over `USD.OIS` → `IR.BASIS.USD.SOFR3M.OIS`), and
+  `keyed_basis_shift` takes a **basis** as input rather than a raw
+  zero-rate bump — the two things
+  [Risk Factors § 3.2](risk-factors.md#32-interest-rates-multi-curve)
+  asked for. Consequences: the basis carries its own variance in
+  `block_covariance`, its own rung in `keyed_waterfall_pnl`, its own
+  `KeyedLadder.basis_dv01`, and its own `keyed_component_var` share — and
+  a *pure discount* move in basis coordinates correctly drags the
+  projection curve with it, which the absolute layout can only fake with a
+  near-unit correlation
+- [ ] **Graph-level greeks API** — *(delivered for groups; `market_greeks`
+  itself unchanged)* `KeyedLadder` is the graph-aware, all-curves-at-once
+  ladder API at the **group** level: one `jax.grad` fills every curve's
+  block and `curve_ladder` / `dv01` / `block_totals` / `to_dict` read them
+  back by identifier. What is still true of
+  `valax/greeks/market_greeks.py` is unchanged: `curve_pillar_deltas`
+  resolves exactly one `curve_id` per call and `bucketed_curve_deltas`
+  takes a flat pillar vector with no curve identity, so the
+  **single-instrument** greeks API still has no `dict[curve_id, ladder]`
+  form and no graph-aware bucketing. Retargeting it onto the keyed layout
+  (and composing `BucketMap` with `KeyedFactorLayout` for graph-aware
+  bucketing) is the remaining work
 - [ ] **Compose `quote_jacobian` with `∇_MarketState price`** — the
   `J_build` leg of the Jacobian stack (`PRICING_ONTOLOGY.md` § 6.3) is not
   packaged; `market_greeks` explicitly defers it ("left for the caller, since
@@ -357,18 +412,36 @@ itself) is still built on flat `MarketData` vectors with one rate block.
   `calibrate_sabr`, `calibrate_slv` take loose scalars
   (`rate`, `dividend`, `forward`), never a curve object
 
-#### 3. Vol-surface construction is curve-free
+#### 3. Vol-surface construction is curve-free *(closed for caps/floors)*
 
-`valax/surfaces/` has **zero** references to `DiscountCurve`.
-`build_sabr_caplet_surface` and `calibrate_swaption_cube` take a
-caller-supplied pre-computed `forwards` array.
+`valax/surfaces/caplet_stripping.py` is the first curve-aware module in
+`valax/surfaces/`: it takes `DiscountCurve` arguments directly.
+`build_sabr_caplet_surface` and `calibrate_swaption_cube` still take a
+caller-supplied pre-computed `forwards` array — the cap route no longer
+has to.
 
-- [ ] **Cap → caplet (optionlet) stripping** — does not exist in any form.
-  This is *the* canonical dual-curve operation: project off the tenor
-  curve, discount off OIS. Its absence puts the quotes→surface leg of the
-  chain outside the framework entirely
+- [x] **Cap → caplet (optionlet) stripping** — `strip_caplet_vols`
+  bootstraps a quoted cap strip into per-optionlet vols (one
+  `optimistix.Newton` root-find per quoted maturity over nested
+  schedules, so the whole strip is differentiable by implicit
+  differentiation), and `strip_optionlet_surface` carries a whole
+  strike × maturity quote matrix through to a per-expiry SABR
+  `OptionletVolSurface`. *The* canonical dual-curve operation: forwards
+  are projected off the tenor curve (`optionlet_forwards`) and payoffs
+  discounted off OIS, so the same quotes strip to different vols under a
+  different basis. `cap_price_from_strip` closes the round trip. Gates:
+  `tests/test_surfaces/test_caplet_stripping.py` (repricing to 1e-10 rel.,
+  single- and dual-curve; the first multi-curve tests under
+  `tests/test_surfaces/`) and
+  `tests/test_quantlib_comparison/test_cap_strip_on_caplet_vols_ql.py::TestVALAXStripRepricesQuotesInQL`,
+  where QuantLib's own `BlackCapFloorEngine` reprices the quotes off the
+  VALAX strip to 1e-10 — the counterpart of `ql.OptionletStripper1`.
+  Recipe:
+  [Volatility Surfaces § Cap → caplet stripping](guide/vol-surfaces.md#cap-caplet-optionlet-stripping-rates)
 - [ ] **Dual-curve swaption-cube calibration** — same gap for
-  `calibrate_swaption_cube`
+  `calibrate_swaption_cube`, which still takes a pre-computed forward
+  swap-rate array rather than deriving it from a discount/projection
+  pair. The caplet route above is the template
 
 #### 4. FX / credit / inflation carry no selectors
 
@@ -472,32 +545,52 @@ are well covered (`tests/test_curves/`, `tests/test_pricing/test_graph_pricing.p
   graph through the whole VaR path. `test_curve_graph_carried_through`
   still asserts a *named* graph curve comes back unchanged from
   `apply_scenario` — which is now the documented contract of the unkeyed
-  legacy vectors, not an accident. **Still missing:** VaR / ladder tests
-  where a projection curve carries its own P&L, which needs the keyed
-  generators of §1
+  legacy vectors, not an accident. The VaR / ladder hole is now closed too:
+  `tests/test_risk/test_keyed_scenarios.py::TestBasisRiskReachesPnL` draws a
+  scenario set on the **basis block alone** and gets a loss distribution out
+  of `group_scenario_pnl`, and
+  `tests/test_risk/test_state_ladders.py::TestKeyedVaR` gates per-curve
+  component VaR (additive, and zero for a curve with no variance) plus
+  agreement between delta-normal and 20k-scenario simulated VaR
 - [ ] **Multi-curve calibration tests** — none under `tests/test_calibration/`
 - [ ] **Multi-curve greeks tests** — `tests/test_greeks/test_market_greeks.py`
   runs entirely against single-curve markets; nothing asserts separate
-  OIS vs projection ladders
-- [ ] **Multi-curve surface tests** — none under `tests/test_surfaces/`
+  OIS vs projection ladders. Note this is now a gap in the
+  **single-instrument** greeks API only: separate OIS / projection /  basis
+  ladders *are* gated at group level in
+  `tests/test_risk/test_state_ladders.py::TestPerCurveLadders` (including
+  the control that an unused projection curve carries exactly zero risk)
+- [x] **Multi-curve surface tests** — `tests/test_surfaces/test_caplet_stripping.py`
+  strips a cap strip against an OIS discount curve and a distinct 3M
+  projection curve, asserts the basis moves the stripped vols, and
+  differentiates a stripped vol w.r.t. the projection curve's pillars
 - [ ] **Portfolio tests** — there is no `tests/test_portfolio/` package at all
 
 ### Recommended sequence
 
 1. **Multi-curve risk** (§1) — highest leverage by a distance: it is the
-   stated purpose of the framework. Parts 1 and 2 have landed (keyed
+   stated purpose of the framework. Four parts have landed: keyed
    scenarios + `shock` on a `MarketState`; the repricing loop and the
-   gradient pytree through `price(...)` in `valax/risk/state_var.py`), so
-   a basis move now reaches a P&L. What is left is the layer above:
-   the portfolio aggregation of the three additive quantities, then keyed
-   generators and a per-curve covariance layout to get that move into a
-   *VaR* number, then the keyed ladders. Fold the graph-level greeks API
-   in, since all of them want the same per-curve plumbing.
+   gradient pytree through `price(...)` (`valax/risk/state_var.py`); keyed
+   generators + the per-curve covariance layout (`KeyedFactorLayout`,
+   `block_covariance`); and the keyed ladders, per-block waterfall and
+   per-curve VaR decomposition (`valax/risk/state_ladders.py`), which also
+   closed the `IR.BASIS` factor. So a basis move now reaches a P&L *and* a
+   VaR number, attributed to the basis by name. What is left above it is
+   the **portfolio aggregation** of the three additive quantities across
+   groups (a quantile of a sum is not a sum of quantiles, so the risk
+   measure belongs at the top only), re-targeting the FRTB PLA vectors
+   (`valax/risk/pnl_vectors.py`) onto the keyed ladder, and the
+   single-instrument graph-level greeks API — which wants the same
+   per-curve plumbing and should reuse `KeyedFactorLayout` rather than
+   grow its own.
 2. **Dual-curve calibration** (§2) — smaller, and it closes the
    consistency gap that P5.1 opened between how models are fitted and how
    they are now priced.
-3. **Caplet stripping** (§3) — unlocks the quotes→surface→exotic chain and
-   is the honest prerequisite for a dual-curve vol story.
+3. ~~**Caplet stripping** (§3)~~ — **done**: `strip_caplet_vols` /
+   `strip_optionlet_surface` unlock the quotes→surface→exotic chain and
+   give the dual-curve vol story its first honest leg. What remains in §3
+   is the swaption cube, which wants the same treatment.
 
 Items in §6 are independently shippable and mostly self-contained; §7 is
 research-scale.
@@ -640,6 +733,11 @@ These are foundational pieces that block almost everything else. They should be 
 - [x] **SVI parametric fitting** — `SVIVolSurface` with Gatheral's SVI parameterization and LM calibration
 - [x] **Swaption cube** — `SwaptionCube` with `calibrate_swaption_cube` (strike × expiry × tenor)
 - [x] **Optionlet (caplet) surface** — `OptionletVolSurface` via `build_sabr_caplet_surface`
+- [x] **Cap → caplet (optionlet) stripping** — `strip_caplet_vols` /
+      `strip_optionlet_surface` in `valax/surfaces/caplet_stripping.py`:
+      flat quoted cap vols → per-optionlet term structure → per-expiry
+      SABR surface, projecting off the tenor curve and discounting off
+      OIS. See [Multi-Curve Framework §3](#3-vol-surface-construction-is-curve-free-closed-for-capsfloors)
 - [ ] **SSVI** — global arbitrage-free parameterization (Gatheral-Jacquier)
 - [ ] **Sticky-strike vs sticky-delta** conventions
 - [x] **Local vol extraction** from implied vol surface (Dupire formula) — shipped
@@ -742,13 +840,15 @@ New stochastic models that unlock entire product categories.
       (see [Tier 3.1](#31-bermudan-swaptions))
 - [ ] **Calibration — the headline gap.** There is no `calibrate_lmm`. LMM is
       the only model in the library with no calibrator, so its parameters must
-      be supplied by hand and it cannot be fitted to market. Needs **caplet /
-      swaption volatility stripping**: fit the `RebonatoVol` abcd surface and
-      the correlation parameters to a cap/floor optionlet surface and a
-      swaption cube. Converges with
-      [Multi-Curve Framework §3](#3-vol-surface-construction-is-curve-free) —
-      the stripping routine that section calls for is the same one this needs.
-      Expect the Levenberg-Marquardt arity trap documented in the
+      be supplied by hand and it cannot be fitted to market. **Its input now
+      exists**: the caplet-stripping prerequisite shipped
+      ([Multi-Curve Framework §3](#3-vol-surface-construction-is-curve-free-closed-for-capsfloors)),
+      so `strip_optionlet_surface` produces the per-expiry optionlet surface
+      the calibrator has to match. What is left is the fit itself — the
+      `RebonatoVol` abcd surface and the correlation parameters against that
+      surface (and, for the swap-rate leg, a swaption cube, whose own
+      dual-curve calibration is still open). Expect the Levenberg-Marquardt
+      arity trap documented in the
       [calibration guide](guide/calibration.md#solvers)
 - [ ] **Dual-curve recipes** — the LMM recipes do not declare
       `discount_curve` / `forward_curve`, so they remain single-curve; see

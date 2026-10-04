@@ -116,6 +116,82 @@ SVI interpolates **total variance** (not implied vol) across expiries. This pres
 
 **When to use:** Equity options desks. SVI fits market smiles well with only 5 parameters, extrapolates cleanly, and can be constrained for arbitrage-freeness. The linear wings match the Roger Lee moment formula for extreme strikes.
 
+## Cap → caplet (optionlet) stripping (rates)
+
+Rates vol arrives in a form no pricer can use. A cap is quoted with **one flat volatility per maturity** — the single number that, applied to every optionlet in the strip, reproduces the market premium. A 6M optionlet and a 9Y optionlet do not share a volatility, so the first step of any rates-vol pipeline is to *strip* the quotes into a per-expiry term structure.
+
+This is also **the canonical dual-curve operation**. A cap has two curve dependencies that move independently:
+
+- each period's forward rate $F_i$ is **projected** off the tenor (IBOR / term) curve, and
+- the payoff at $T_i$ is **discounted** off the OIS / collateral curve.
+
+So the stripped vols are a function of *both* curves: the same quotes strip to different optionlet vols under a different tenor basis. Every entry point takes `curve` (discounting) plus an optional `forward_curve` (projection), matching the convention of the cap/caplet pricers.
+
+### The bootstrap
+
+Caps on a common schedule are **nested** — the 2Y cap's optionlets are the 1Y cap's plus the incremental ones — so the strip is solved forward in maturity, one scalar unknown at a time:
+
+$$
+\text{Cap}^{\text{mkt}}_i
+  = \underbrace{\sum_{j \in \mathcal{C}_{i-1}} \text{Optionlet}_j(\sigma_j)}_{\text{already stripped}}
+  + \sum_{j \in \mathcal{C}_i \setminus \mathcal{C}_{i-1}} \text{Optionlet}_j(\sigma_i),
+$$
+
+where $\mathcal{C}_i$ is the $i$-th quoted cap's optionlet index set and $\sigma_i$ — the vol shared by the incremental bucket — is the only unknown. Each step is an `optimistix.Newton` root-find, so the whole strip is differentiable by **implicit differentiation**: `jax.grad` of a stripped vol with respect to a quoted cap vol, a discount pillar, or a projection pillar works without unrolling the solver.
+
+```python
+import jax.numpy as jnp
+import equinox as eqx
+from valax.surfaces import strip_caplet_vols, cap_price_from_strip
+
+# caps: nested quarterly cap strip (1Y / 2Y / 3Y / 4Y), same strike;
+# ois: discount curve;  sofr3m: projection curve.
+quotes = jnp.array([0.30, 0.34, 0.36, 0.37])   # flat quoted cap vols
+
+strip = strip_caplet_vols(
+    caps, ois,
+    cap_vols=quotes,          # or cap_premiums=... if the desk quotes price
+    forward_curve=sofr3m,     # omit for the single-curve strip
+)
+
+strip.vols        # one vol per optionlet, constant within each quoted bucket
+strip.expiries    # optionlet expiries (year fractions)
+strip.forwards    # projected forwards, read off sofr3m
+strip(jnp.array(2.5))          # vol lookup at any expiry
+
+# The defining property: every quoted cap is repriced exactly.
+cap_price_from_strip(caps[2], strip, ois, sofr3m)
+```
+
+`strip_caplet_vols` is JIT-safe (`eqx.filter_jit` over the quotes) and reprices each quoted cap to ~1e-10 relative — including when the repricing is done by QuantLib's `BlackCapFloorEngine` off the adopted strip, which is how the routine is validated against `ql.OptionletStripper1` ([validation pyramid § 5.2](../architecture/quantlib-validation-pyramid.md#52-files)). Pass `is_normal=True` to strip Bachelier-quoted vols, which is the branch to use at or below zero rates. An optionlet that has already fixed has zero vega and nothing to strip — drop it from the quoted strip, as the market does, or the call raises.
+
+### From a strip to a surface
+
+`strip_caplet_vols` gives one *column*: the term structure at a single strike. `strip_optionlet_surface` does the whole quotes → surface leg — strip each strike column, transpose into one smile per optionlet expiry, read the ATM anchor (the projected forwards) off the curves, and fit one SABR model per expiry:
+
+```python
+from valax.surfaces import strip_optionlet_surface
+
+strikes = jnp.array([0.020, 0.028, 0.035, 0.045, 0.060])
+cap_vol_matrix = ...   # shape (n_strikes, n_caps): flat quoted vols
+
+surface = strip_optionlet_surface(
+    caps, strikes, cap_vol_matrix, ois,
+    forward_curve=sofr3m,
+)
+
+surface(jnp.array(0.035), jnp.array(2.5))   # smile-consistent optionlet vol
+```
+
+The result is an [`OptionletVolSurface`](../api/surfaces.md#optionlet-surface-rates) ready for the caplet / cap / rates-exotics pricers — see [Interest Rate Exotics](rates-exotics.md) for the instruments that consume it.
+
+Two points worth knowing:
+
+- **The forwards are curve-derived.** `build_sabr_caplet_surface` takes a caller-supplied `forwards` array; `strip_optionlet_surface` reads them off the projection curve with `optionlet_forwards`, so the smile is anchored on the same forwards the pricer will use. That is what puts the quotes → surface leg inside the framework rather than in the caller's spreadsheet.
+- **Beta is fixed by default** (`fixed_beta=0.5`). Alpha and beta share the ATM backbone $\sigma_{ATM} \approx \alpha F^{\beta - 1}$ and are not jointly identifiable from a single cap smile — a free-beta Levenberg-Marquardt fit stalls rather than converging (see [Calibration § Solvers](calibration.md#solvers)). Rates desks fix beta by convention; pass `fixed_beta=None` to free it anyway.
+
+**When to use:** any rates workflow that starts from broker cap/floor quotes — pricing caps and floors off a smile rather than a flat vol, feeding an optionlet surface to the rates exotics, or building the vol input for LMM calibration.
+
 ## Common Patterns
 
 ### Pricing with a surface

@@ -155,17 +155,28 @@ line in the same change (`AGENTS.md` definition of done).
      and `docs/scaling/batching.md`, so they need a deprecation decision,
      not a quiet patch.
 
-- [ ] **Keyed generators and a per-curve covariance layout.** The
-  generators in `valax/risk/scenarios.py` (`parametric_scenarios`,
-  `historical_scenarios`, `stress_scenario`, `steepener` / `flattener` /
-  `butterfly`) and `parametric_var`'s covariance ordering still assume the
-  flat factor order `[spots, vols, rates, dividends]` with a **single**
-  rate block. `stack_keyed_scenarios` gives the batched keyed pytree and
-  `group_scenario_pnl` consumes it, so what is missing is keyed
-  *generation* and a named factor layout. This is what finally makes a
-  basis move show up in a **VaR** number — the repricing loop already
-  shows it in a P&L vector — and it is what lets the `UserWarning` added
-  in part 1 (`_warn_frozen_graph_curves`) be deleted as no longer true.
+- [x] **Keyed generators and a per-curve covariance layout.** Shipped as
+  `KeyedFactorLayout` / `FactorBlock` in `valax/risk/scenarios.py`: an
+  ordered tuple of blocks, **one per named market object**, derived from
+  the market (`from_market_state`), naming each coordinate with the
+  hierarchical factor id of `docs/risk-factors.md` § 1.2, with
+  `flatten` / `unflatten` as exact inverses. On top of it
+  `block_covariance` (per-curve blocks + explicit cross-correlations,
+  factored by `psd_factor` so a singular covariance samples rather than
+  NaN-ing) and the generators `keyed_parametric_scenarios` /
+  `keyed_historical_scenarios` / `keyed_stress_scenario` /
+  `keyed_curve_stress` / `keyed_basis_shift`. A basis move now shows up in
+  a **VaR** number, and `as_basis_layout` makes the basis a named
+  coordinate so `keyed_component_var` attributes that VaR to it. The
+  measurement layer followed in `valax/risk/state_ladders.py`
+  (`KeyedLadder`, `keyed_waterfall_pnl`, `keyed_parametric_var`,
+  `keyed_component_var`), which differentiates the *shock* rather than the
+  market leaves and so needs no DF→zero-rate chain rule.
+  `_warn_frozen_graph_curves` **stays**: it guards the legacy
+  `MarketData` / `MarketScenario` path, which is still flat and still
+  shipped for one deprecation cycle. What is left above this is portfolio
+  aggregation (part 5 above) and re-targeting the FRTB PLA vectors in
+  `valax/risk/pnl_vectors.py` onto the keyed ladder.
 - [ ] **Close the quote-space (hedge-space) loop.** Compose
   `∇_MarketState price` (`valax/greeks/market_greeks.py`) with
   `valax/curves/bootstrap_graph.py::quote_jacobian` and
@@ -210,19 +221,29 @@ line in the same change (`AGENTS.md` definition of done).
   gates are internal (PDE agreement, payer/receiver parity), so they prove
   self-consistency, not convention. Results should be *logged* per run.
   Tracked in `docs/roadmap.md` (QuantLib Validation Pyramid, stage 2).
-- [ ] **Port the risk *measurement* layer onto `MarketState`.** Part 2
-  moved the repricing loop (§0.1); everything layered above it is still
-  positional. `compute_ladder` (`valax/risk/ladders.py`) builds DF-space
-  Hessians over flat `MarketData` vectors and drops the `curve_graph`
-  entirely; `risk_theoretical_pnl_vector` consumes those ladders;
-  `pnl_attribution` and `parametric_var` differentiate the same flat
-  layout. The keyed successor is a `dict[curve_id, ladder]` — the same
-  design as the graph-level greeks API and the node-level vega ladders in
-  [roadmap §1](docs/roadmap.md#1-risk-engine-is-still-single-curve-largest-gap)
-  — so all three move together, not one at a time.
-  `hypothetical_pnl_vector` needs no port: it is a one-line alias of
+- [x] **Port the risk *measurement* layer onto `MarketState`.** Shipped as
+  `valax/risk/state_ladders.py`: `keyed_ladder` → `KeyedLadder` indexed by
+  a `KeyedFactorLayout`, `keyed_waterfall_pnl` /
+  `keyed_waterfall_report` for a per-block explain, and
+  `keyed_parametric_var` / `keyed_component_var` for a delta-normal VaR
+  whose Euler decomposition is additive across curves. The successor is
+  *better* than the `dict[curve_id, ladder]` originally sketched: a single
+  factor vector indexed by one layout, which the scenarios and the
+  covariance matrix share, so the three line up by name. It also
+  differentiates the **shock magnitudes** rather than the market leaves,
+  which deletes the DF→zero-rate chain rule (and its gamma correction) and
+  makes vega well-defined for every surface type.
+  `hypothetical_pnl_vector` needed no port: it is a one-line alias of
   `portfolio_pnl`, and `group_scenario_pnl` is already its keyed
   equivalent.
+- [ ] **Re-target the FRTB PLA vectors.** `risk_theoretical_pnl_vector`
+  (`valax/risk/pnl_vectors.py`) still consumes the *positional*
+  `compute_ladder` output, and `pnl_attribution` / `parametric_var`
+  differentiate the same flat layout. `KeyedLadder` is what they point at
+  now; `compute_ladder` and `ladders.py` stay for one deprecation cycle.
+  The node-level vega ladders and the single-instrument graph-level greeks
+  API are the other two consumers of the keyed layout
+  ([roadmap §1](docs/roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)).
 - [ ] **Rates theta as a valuation-date roll.** `greeks/market_greeks.py::theta`
   raises `NotImplementedError` for date-based instruments; implement the
   `reference_date` roll (carry-and-roll repricing, never a derivative of
@@ -1038,15 +1059,19 @@ explicit-argument kernels survive untouched — all of that is what shipped.
 
 ### 14.2 Still open
 
-- [ ] **Port the risk engine to `price(...)` and retire the `wrap_*`
-  adapters.** `valax/risk/var.py::wrap_equity_pricing_fn` is still the
-  bridge from the loose-scalar convention into `reprice_under_scenario`,
-  and the risk engine still does not call `price`. This is the note's
-  single biggest unrealised payoff — "every Greek is one `jax.grad`
-  through one function" — and it is the same work as the multi-curve risk
-  gap in [Roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-engine-is-still-single-curve-largest-gap).
-  Part 1 of that migration (keyed scenarios + `shock` on a `MarketState`,
-  and the `curve_graph` drop in the VaR path) has landed; see §0.1.
+- [ ] **Retire the legacy flat risk path.** The *new* path is done: a
+  keyed scenario on a `MarketState`, generated from a per-curve covariance
+  layout, repriced through `price(...)` (`valax/risk/state_var.py`) and
+  measured by a keyed ladder (`valax/risk/state_ladders.py`) — so "every
+  Greek is one `jax.grad` through one function" now holds along the whole
+  chain for a group, with a projection curve and a basis each carrying
+  their own P&L and VaR. What remains is **removal**:
+  `wrap_equity_pricing_fn` (already `DeprecationWarning`),
+  `reprice_under_scenario` / `portfolio_pnl` / `parametric_var` /
+  `pnl_attribution`, `compute_ladder`, and `MarketData` itself, plus
+  portfolio aggregation above the group primitives. See
+  [Roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)
+  and §0.1.
 - [ ] **Per-leg index descriptors for genuinely multi-index products.**
   A singular `forward_id` covers the single-index case only. A
   single-currency tenor basis swap needs **three** curves (OIS discount +

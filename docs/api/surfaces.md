@@ -122,6 +122,41 @@ the Markovian-projection-based two-pass SLV calibration.
 
 ::: valax.surfaces.LeverageGrid
 
+## Optionlet surface (rates)
+
+The interest-rate counterpart of the SABR surface: one SABR model per
+**optionlet expiry**, with no tenor axis (contrast the swaption cube,
+whose underlying is a swap rate). `is_normal` selects the quoting
+convention — lognormal Black-76 or normal Bachelier, the latter honouring
+a displacement `shift` so zero and negative rates price finitely.
+
+::: valax.surfaces.OptionletVolSurface
+
+::: valax.surfaces.build_sabr_caplet_surface
+
+## Cap → caplet (optionlet) stripping
+
+Caps are quoted with **one flat vol per maturity**; nothing prices with a
+flat vol. Stripping converts the quotes into a per-optionlet term
+structure that reprices every quoted cap exactly, and it is the canonical
+dual-curve operation — forwards are projected off the tenor curve,
+payoffs discounted off OIS. Each quoted maturity contributes one scalar
+`optimistix.Newton` root-find, so the whole strip is differentiable by
+implicit differentiation. Recipe and worked example:
+[Volatility Surfaces § Cap → caplet stripping](../guide/vol-surfaces.md#cap-caplet-optionlet-stripping-rates).
+
+::: valax.surfaces.CapletVolCurve
+
+::: valax.surfaces.strip_caplet_vols
+
+::: valax.surfaces.strip_optionlet_surface
+
+::: valax.surfaces.cap_price_from_strip
+
+::: valax.surfaces.optionlet_forwards
+
+::: valax.surfaces.optionlet_expiries
+
 ## Shifted surface (scenario decorator)
 
 `ShiftedVolSurface` adds an additive **parallel** vol shift to any

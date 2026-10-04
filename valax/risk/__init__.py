@@ -4,10 +4,14 @@ Modules
 -------
 - :mod:`valax.risk.shocks`        — apply risk-factor shocks to ``MarketData``.
 - :mod:`valax.risk.state_shocks`  — apply *keyed* shocks to ``MarketState``.
-- :mod:`valax.risk.scenarios`     — generate parametric / historical / stress scenarios.
+- :mod:`valax.risk.scenarios`     — generate parametric / historical / stress scenarios,
+  over the legacy flat layout or the identifier-keyed, per-curve
+  :class:`~valax.risk.scenarios.KeyedFactorLayout`.
 - :mod:`valax.risk.var`           — VaR, ES, parametric VaR, scalar P&L attribution.
 - :mod:`valax.risk.state_var`     — group repricing / P&L / gradients through ``price``.
 - :mod:`valax.risk.ladders`       — sensitivity ladders and waterfall P&L.
+- :mod:`valax.risk.state_ladders` — *keyed* ladders / waterfall / VaR on a
+  ``MarketState``, one block per named curve, surface and asset.
 - :mod:`valax.risk.pnl_vectors`   — HPL / RTPL P&L vectors over scenario sets.
 - :mod:`valax.risk.backtesting`   — Kupiec / Christoffersen / FRTB PLA tests.
 """
@@ -42,6 +46,28 @@ from valax.risk.scenarios import (
     steepener,
     flattener,
     butterfly,
+    # Curve-shape algebra shared by both layouts
+    CURVE_SHAPES,
+    curve_shape_bumps,
+    # Keyed, per-curve factor layout
+    FACTOR_KINDS,
+    FACTOR_CATEGORIES,
+    FactorBlock,
+    KeyedFactorLayout,
+    as_basis_layout,
+    basis_factor_prefix,
+    block_covariance,
+    historical_block_covariance,
+    psd_factor,
+    # Keyed generators
+    keyed_parametric_scenarios,
+    keyed_historical_scenarios,
+    keyed_stress_scenario,
+    keyed_curve_stress,
+    keyed_steepener,
+    keyed_flattener,
+    keyed_butterfly,
+    keyed_basis_shift,
 )
 from valax.risk.var import (
     wrap_equity_pricing_fn,
@@ -67,6 +93,16 @@ from valax.risk.ladders import (
     compute_ladder,
     waterfall_pnl,
     waterfall_pnl_report,
+)
+from valax.risk.state_ladders import (
+    BASIS_POINT,
+    KeyedLadder,
+    KeyedWaterfall,
+    keyed_ladder,
+    keyed_waterfall_pnl,
+    keyed_waterfall_report,
+    keyed_parametric_var,
+    keyed_component_var,
 )
 from valax.risk.pnl_vectors import (
     risk_theoretical_pnl_vector,

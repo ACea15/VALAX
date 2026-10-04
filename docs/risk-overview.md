@@ -90,12 +90,22 @@ Every number in §2 is produced by the same chain of transformations. From left 
    Capital:    bucketed Δ at FRTB vertices → SBA formula (planned)
 ```
 
-The container in that picture is `MarketData` because the VaR engine still
-consumes it. The calibrated container the unified pricer takes —
-`MarketState`, with a keyed `CurveGraph` and vol surfaces — has its own
-scenario layer (`KeyedScenario` + `shock`, shocks addressed by curve /
-surface / asset id); see
-[Scenarios & Shocks § Keyed scenarios](risk-scenarios.md#keyed-scenarios-on-a-marketstate).
+The container in that picture is `MarketData` because the **legacy** VaR
+engine consumes it. The calibrated container the unified pricer takes —
+`MarketState`, with a keyed `CurveGraph` and vol surfaces — has the same
+picture drawn in identifier-keyed coordinates, and that is the current
+path: `KeyedScenario` + `shock` for a single move
+([guide](risk-scenarios.md#keyed-scenarios-on-a-marketstate)),
+`KeyedFactorLayout` + `block_covariance` + the `keyed_*` generators for a
+whole distribution of them
+([guide](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout)),
+`group_pv` / `group_scenario_pnl` for the repricing loop
+([guide](risk-var.md#repricing-through-price)), and `KeyedLadder` +
+`keyed_component_var` for the sensitivities and their VaR
+([guide](risk-ladders.md#keyed-ladders-on-a-marketstate)). The practical
+difference: every curve on the graph — and the *basis* between two of them
+— is a named factor with its own P&L rung and its own VaR contribution,
+rather than being summed into one `rates` block.
 
 Three things are worth stressing about this picture:
 
@@ -205,20 +215,20 @@ What is in the library **today** (✅) and what is signposted for the next itera
 |---|---|---|
 | Market data containers | ✅ | `MarketData`, `MarketScenario`, `ScenarioSet`, `CurveGraph` (modern joint-solver output — dict of `DiscountCurve` keyed by identifier), `MultiCurveSet` (legacy single-currency two-tier view; deprecated), `SurvivalCurve`, `InflationCurve`, vol surfaces. |
 | Pricing engines | ✅ (broad) / 📋 (XVA, CDS) | Equity, FX, rates, inflation, callable / puttable bonds, credit CDS pricer planned. |
-| Sensitivity ladders | ✅ | First- and second-order ladder, ten-rung waterfall, autodiff throughout. |
-| Scenario generation | ✅ | Historical, parametric Gaussian / t, named stress (parallel, steepener, butterfly, …). |
-| Shock primitives | ✅ | Single-curve, multi-curve (basis), credit hazard. 📋 Vol surface, inflation, FX vol. |
-| P&L vectors | ✅ | HPL (`hypothetical_pnl_vector`), RTPL (`risk_theoretical_pnl_vector`), unexplained. |
-| VaR / ES | ✅ | Full-revaluation and parametric delta-normal. |
+| Sensitivity ladders | ✅ | First- and second-order ladder, ten-rung waterfall, autodiff throughout; plus identifier-keyed per-curve ladders (`KeyedLadder`) with a per-block waterfall. |
+| Scenario generation | ✅ | Historical, parametric Gaussian / t, named stress (parallel, steepener, butterfly, …) — in the flat layout and in the keyed per-curve layout (`KeyedFactorLayout`, incl. basis stresses). |
+| Shock primitives | ✅ | Single-curve, multi-curve (basis), credit hazard. 📋 Vol surface (node-level), inflation, FX vol. |
+| P&L vectors | ✅ | HPL (`hypothetical_pnl_vector`), RTPL (`risk_theoretical_pnl_vector`), unexplained. 🚧 RTPL still reads the positional ladder. |
+| VaR / ES | ✅ | Full-revaluation and parametric delta-normal, the latter with an additive per-curve / per-basis decomposition (`keyed_component_var`). |
 | Backtesting | ✅ | Breach detection, Kupiec POF, Christoffersen independence, Basel traffic light. |
 | FRTB PLA | ✅ | Spearman + KS, BCBS d558 zoning. |
 | Bucketing | ✅ | Linear `BucketMap` ops, Jacobian reparameterization, FRTB tenor / sector / PCA / L-S-C / autodiff Jacobian builders. |
 | **SBA capital aggregation** | 📋 | Bucket-level Δ + γ are computed today; the prescribed inter-bucket correlation matrices and curvature add-ons are next. |
 | **XVA (CVA / FVA / KVA)** | 📋 | Needs the planned CDS pricer + a credit-IR joint Monte Carlo path generator. |
 | **IMA stress-period selection** | 📋 | The 250-day historical window is currently chosen by the caller; automated stress-period identification will land alongside the SBA work. |
-| **Named factor registry** | 📋 | Factor IDs (`IR.OIS.USD.5Y`, …) are documented but the engine still uses positional layouts; the migration is roadmap item 7. |
+| **Named factor registry** | 🚧 | Factor IDs (`IR.OIS.USD.5Y`, `IR.BASIS.USD.SOFR3M.OIS.5Y`, …) are live for curves, surfaces, spots and dividends: `KeyedFactorLayout.factor_ids()` is the shared index of the keyed scenarios, the per-curve covariance and the `KeyedLadder`. Still positional: the legacy `MarketData` path, the FRTB PLA vectors, and the FX / credit / inflation / model-parameter families (roadmap item 7). |
 
-The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](risk-factors.md#4-roadmap) and the project-wide [Roadmap](roadmap.md). The shortest critical path to a desk-usable bank-style risk system is: **(a) multi-curve `MarketData` → (b) vol-surface risk factors → (c) FRTB SBA capital aggregation**, which between them close roughly 90 % of the gap to a single-desk production deployment.
+The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](risk-factors.md#4-roadmap) and the project-wide [Roadmap](roadmap.md). The shortest critical path to a desk-usable bank-style risk system was: **(a) multi-curve risk → (b) vol-surface risk factors → (c) FRTB SBA capital aggregation**. Step (a) has now landed on the `MarketState` path — keyed per-curve scenarios, covariance, repricing and ladders, with the basis as a named factor — so the live front is (b) node-level vega, plus portfolio aggregation above the group primitives and re-targeting the PLA vectors onto the keyed ladder.
 
 ---
 
