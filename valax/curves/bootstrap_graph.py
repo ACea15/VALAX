@@ -194,6 +194,30 @@ def _build_graph_from_log_dfs(
     return CurveGraph(curves=curves)
 
 
+def _graph_residual(
+    log_dfs: Float[Array, " n_total"],
+    curve_specs: Sequence[CurveSpec],
+    offsets: tuple[int, ...],
+    instruments: Sequence[BootstrapInstrument],
+    fixings: FixingHistory,
+    ref_date: Int[Array, ""],
+) -> Float[Array, " n_instruments"]:
+    """The residual vector ``R(theta_c)`` of the joint curve system.
+
+    The single implementation of the Layer-1a residual.  Both
+    :func:`bootstrap_curve_graph` (which drives it to zero) and
+    :func:`curve_residual_fn` (which exposes it for adjoint
+    differentiation) route through here, so the solved system and the
+    differentiated system are the *same code path* by construction.
+    """
+    graph = _build_graph_from_log_dfs(
+        log_dfs, curve_specs, offsets, ref_date
+    )
+    return jnp.stack(
+        [inst.residual(graph, fixings, ref_date) for inst in instruments]
+    )
+
+
 def _default_initial_guess(
     reference_date: Int[Array, ""],
     curve_specs: Sequence[CurveSpec],
@@ -452,14 +476,14 @@ def bootstrap_curve_graph(
         args,
     ) -> Float[Array, " n_instruments"]:
         ref_inner, fixings_inner = args
-        graph = _build_graph_from_log_dfs(
-            log_dfs, curve_specs, offsets, ref_inner
+        return _graph_residual(
+            log_dfs,
+            curve_specs,
+            offsets,
+            instruments,
+            fixings_inner,
+            ref_inner,
         )
-        residuals = [
-            inst.residual(graph, fixings_inner, ref_inner)
-            for inst in instruments
-        ]
-        return jnp.stack(residuals)
 
     args = (ref_i32, fixings)
 
@@ -517,6 +541,114 @@ def bootstrap_curve_graph(
     )
 
     return graph, diagnostics
+
+
+# ── Residual / state accessors for adjoint differentiation ───────────
+
+
+def curve_quote_vector(
+    instruments: Sequence[BootstrapInstrument],
+) -> Float[Array, " n_quotes"]:
+    """Stack the primary quote scalar of every instrument into ``q_c``.
+
+    The column ordering of every quote-space sensitivity in VALAX --
+    :func:`quote_jacobian` and
+    :func:`valax.greeks.adjoint.curve_quote_deltas` alike -- is the
+    order of ``instruments``.
+
+    Args:
+        instruments: Bootstrap quotes, each with a primary-quote field
+            registered in :data:`_QUOTE_FIELD`.
+
+    Returns:
+        The quote vector, one entry per instrument.
+
+    Raises:
+        TypeError: If any instrument type has no registered
+            primary-quote field.
+    """
+    return jnp.stack([_extract_quote_rate(i) for i in instruments])
+
+
+def log_dfs_from_graph(
+    graph: CurveGraph,
+    curve_specs: Sequence[CurveSpec],
+) -> Float[Array, " n_total"]:
+    """Recover the solver state ``theta_c`` from a calibrated graph.
+
+    Inverts the layout of :func:`_build_graph_from_log_dfs`: drops each
+    curve's reference-date pillar (where ``DF == 1`` by construction, so
+    it is not a free unknown) and concatenates ``log(DF)`` across curves
+    in ``curve_specs`` order.
+
+    Args:
+        graph: A calibrated :class:`CurveGraph`.
+        curve_specs: The specs the graph was built from; their order
+            defines the layout of the returned vector.
+
+    Returns:
+        The flat log-DF state vector, length
+        ``sum(spec.pillar_dates.shape[0])``.
+    """
+    return jnp.concatenate(
+        [
+            jnp.log(graph[spec.curve_id].discount_factors[1:])
+            for spec in curve_specs
+        ]
+    )
+
+
+def curve_residual_fn(
+    reference_date: Int[Array, ""],
+    curve_specs: Sequence[CurveSpec],
+    instruments: Sequence[BootstrapInstrument],
+    *,
+    fixings: FixingHistory | None = None,
+):
+    """Expose the Layer-1a residual as ``R(theta_c, q_c)`` for the adjoint.
+
+    Returns the *same* residual :func:`bootstrap_curve_graph` drives to
+    zero (both call :func:`_graph_residual`), re-parameterised so the
+    quote vector is an explicit differentiable argument.  This is what
+    lets :mod:`valax.greeks.adjoint` form the two vector-Jacobian
+    products of the implicit function theorem --
+    ``(dR/dtheta)^T lambda`` and ``(dR/dq)^T lambda`` -- without ever
+    re-implementing the residual.
+
+    Note that VALAX residuals are **not** uniformly in quote units: a
+    futures residual is a rate difference (``dR/dq = +I``) while a swap
+    residual is ``rate * annuity - float_pv`` (PV units, so
+    ``dR/dq = annuity``).  Consumers must therefore differentiate
+    ``dR/dq`` rather than assume ``-I``.
+
+    Args:
+        reference_date: Valuation date as an integer ordinal scalar.
+        curve_specs: The curve specs defining the state layout.
+        instruments: Bootstrap quotes; column order of ``q_c``.
+        fixings: Optional realised-fixings registry; defaults to empty.
+
+    Returns:
+        A callable ``residual(log_dfs, quotes)`` returning the residual
+        vector of shape ``(n_instruments,)``.
+    """
+    offsets = _spec_offsets(curve_specs)
+    insts = tuple(instruments)
+    fix = empty_fixing_history() if fixings is None else fixings
+    ref_i32 = jnp.asarray(reference_date, dtype=jnp.int32)
+
+    def residual(
+        log_dfs: Float[Array, " n_total"],
+        quotes: Float[Array, " n_quotes"],
+    ) -> Float[Array, " n_instruments"]:
+        rebuilt = tuple(
+            _replace_quote_rate(inst, quotes[k])
+            for k, inst in enumerate(insts)
+        )
+        return _graph_residual(
+            log_dfs, curve_specs, offsets, rebuilt, fix, ref_i32
+        )
+
+    return residual
 
 
 # ── Quote-sensitivity Jacobian ───────────────────────────────────────

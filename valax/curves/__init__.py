@@ -18,6 +18,9 @@ from valax.curves.bootstrap import bootstrap_sequential, bootstrap_simultaneous
 from valax.curves.bootstrap_graph import (
     CurveBuildDiagnostics,
     bootstrap_curve_graph,
+    curve_quote_vector,
+    curve_residual_fn,
+    log_dfs_from_graph,
     quote_jacobian,
 )
 from valax.curves.multi_curve import MultiCurveSet, bootstrap_multi_curve

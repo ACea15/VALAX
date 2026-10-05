@@ -764,6 +764,16 @@ Inflation uses a parallel type, `InflationCurve` (`valax/curves/inflation.py`),
 storing **forward CPI levels** interpolated in log-CPI space. The API mirrors
 `DiscountCurve`:
 
+!!! warning "`from_zc_rates` is algebraic, not a bootstrap"
+
+    Unlike the rates curves above, `from_zc_rates` applies the closed-form
+    identity $\mathrm{CPI}(T) = \mathrm{CPI}_0 (1 + z_T)^{\tau_T}$ directly to
+    the quoted zero-coupon rates. There is no residual, no root-find and no
+    `BootstrapInstrument`, so inflation quotes do not participate in
+    `bootstrap_curve_graph` and carry no `quote_jacobian` row. Routing ZCIS /
+    YYIS quotes through the joint solver is on the
+    [roadmap](../roadmap.md).
+
 ```python
 from valax.curves.inflation import from_zc_rates, forward_cpi, yoy_forward_rate
 

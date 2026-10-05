@@ -150,7 +150,7 @@ See [Analytical Pricing § FX Options](analytical.md#fx-options-garman-kohlhagen
 | Year-on-year inflation swap (YYIS) | YoY forward rate (with small convexity adj.) | `InflationCurve` short end + convexity |
 | Inflation caps / floors (YoY) | YoY inflation vol | YoY Black-76 vol surface |
 
-See [Inflation §7 in Curves](curves.md#7-inflation-curves) for the bootstrap and [Inflation Derivatives](inflation.md) for pricing.
+See [Inflation §7 in Curves](curves.md#7-inflation-curves) for curve construction — which is algebraic (`from_zc_rates`), not a bootstrap — and [Inflation Derivatives](inflation.md) for pricing.
 
 ## 3. SABR Smile Calibration
 

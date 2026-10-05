@@ -50,3 +50,48 @@ key-rate deltas onto FRTB tenor vertices.
 ::: valax.greeks.theta
 
 ::: valax.greeks.market_greeks
+
+## Quote-space (hedge-space) risk
+
+`curve_pillar_deltas` above answers "how does the price move if a *pillar
+discount factor* moves". A desk hedges in instruments, not pillars, so the
+sensitivity it needs is to the **market quotes the curves were bootstrapped
+from**. That is a different number, not a rescaling: holding the other quotes
+fixed forces the whole curve graph to re-solve, so an OIS quote picks up its
+indirect effect on every projection curve that was calibrated against it.
+
+[`curve_quote_deltas`](#valax.greeks.curve_quote_deltas) delivers it via the
+implicit function theorem: one reverse sweep through the pricer, one transposed
+linear solve against the bootstrap residual Jacobian, one reverse sweep through
+the residual. The optimiser's Newton iterations are never differentiated, and
+the quote Jacobian is never formed — so unlike
+[`quote_jacobian`](curves.md#valax.curves.quote_jacobian) (which re-bootstraps
+once per quote) the cost does not grow with the number of quotes.
+
+Build a [`CurveAdjoint`](#valax.greeks.CurveAdjoint) once per market snapshot
+and reuse it: it carries the factorised Jacobian, so each additional trade
+costs one back-substitution.
+
+::: valax.greeks.curve_adjoint
+
+::: valax.greeks.CurveAdjoint
+
+::: valax.greeks.curve_quote_deltas
+
+::: valax.greeks.curve_log_df_cotangent
+
+::: valax.greeks.quote_deltas_from_cotangent
+
+### Generic calibration levels
+
+The same theorem applies to every calibrated object, not just curves. A
+[`CalibrationLevel`](#valax.greeks.CalibrationLevel) states a calibration as
+`R(theta; inputs) = 0`; [`level_adjoint`](#valax.greeks.level_adjoint) then
+differentiates it. This is the building block the volatility and model layers
+plug into.
+
+::: valax.greeks.CalibrationLevel
+
+::: valax.greeks.level_adjoint
+
+::: valax.greeks.LevelAdjoint

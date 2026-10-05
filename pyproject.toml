@@ -40,4 +40,5 @@ markers = [
     "arbitrage: tests that inject deliberate static-arbitrage data and assert detect-or-regularise behaviour.",
     "golden: tests that compare against a versioned golden dataset under tests/golden/.",
     "detects: tests that the library currently *passes* (as opposed to xfail roadmap items).",
+    "audit: conformance gates for the multi-curve calibration / AAD risk audit specification (the T-suite). Run with `pytest -m audit`; each test names the requirement it verifies and states its tolerance.",
 ]

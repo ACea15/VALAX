@@ -579,26 +579,50 @@ float(price(bond_ois, None, market).price)     # 103.439757
 
 ### From quotes to hedge ratios
 
-Now that the curve came *from* quotes, there is a Jacobian between them, and
-stage 8's pillar deltas can be pushed into the space a desk actually trades:
-`∂price/∂quote = J_buildᵀ · ∇price`.
+Now that the curve came *from* quotes, stage 8's pillar deltas can be pushed
+into the space a desk actually trades. Build an adjoint handle once per
+snapshot, then ask for quote deltas per trade:
 
 ```python
-from valax.curves.bootstrap_graph import quote_jacobian
+from valax.greeks.adjoint import curve_adjoint, curve_quote_deltas
 
-J = quote_jacobian(REF, [spec], quotes, by="df")     # (n_pillars, n_quotes)
-pillar_deltas = curve_pillar_deltas(bond_ois, None, market,
-                                    curve_id="USD.SOFR.OIS")
-quote_deltas = J.T @ pillar_deltas[1:]
+adj = curve_adjoint(graph, REF, [spec], quotes)   # factorise once per snapshot
+quote_deltas = curve_quote_deltas(bond_ois, None, market, adjoint=adj)
 # [0.0, -0.6356, -2.6041, -468.272]
 ```
 
-(`[1:]` drops the reference-date pillar, whose discount factor is 1 by
-construction and which `quote_jacobian` therefore omits.) Read the result as
-hedge ratios: the 5-year bond has **zero** sensitivity to the 6-month deposit
-quote, and −468 per unit of the 5-year swap rate — about −4.7 cents per basis
-point. Because the bootstrap is differentiated by implicit adjoint, this costs
-one linear solve, not a re-bootstrap per quote.
+Read the result as hedge ratios: the 5-year bond has **zero** sensitivity to
+the 6-month deposit quote, and −468 per unit of the 5-year swap rate — about
+−4.7 cents per basis point.
+
+This is the implicit function theorem, not a re-bootstrap: one reverse sweep
+through the pricer, one transposed solve against the bootstrap residual
+Jacobian, one reverse sweep through the residual. The Newton iterations are
+never differentiated and the quote Jacobian is never formed, so the cost is
+flat in the number of quotes and each extra trade is a back-substitution
+against `adj`'s stored factorisation.
+
+!!! note "The dense route, and when it is still useful"
+
+    The same number can be assembled explicitly as
+    `∂price/∂quote = J_buildᵀ · ∇price`:
+
+    ```python
+    from valax.curves.bootstrap_graph import quote_jacobian
+
+    J = quote_jacobian(REF, [spec], quotes, by="df")   # (n_pillars, n_quotes)
+    pillar_deltas = curve_pillar_deltas(bond_ois, None, market,
+                                        curve_id="USD.SOFR.OIS")
+    dense = J.T @ pillar_deltas[1:]        # agrees to ~1e-15
+    ```
+
+    `[1:]` drops the reference-date pillar, whose discount factor is 1 by
+    construction and which `quote_jacobian` therefore omits —
+    `curve_quote_deltas` handles that alignment internally. Reach for the
+    dense form when you want the whole Jacobian as an object (reporting the
+    full pillar×quote matrix, or a cross-check like this one); it costs one
+    reverse sweep **per quote**, so it does not scale to a real quote set the
+    way the adjoint does.
 
 The full pipeline, then, is four verbs:
 

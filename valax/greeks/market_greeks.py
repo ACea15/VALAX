@@ -31,10 +31,16 @@ The Jacobian stack (§6.3)
 :func:`curve_pillar_deltas` returns the raw ``∂price/∂DF(pillar)`` vector; feed
 it to :func:`bucketed_curve_deltas` with a :class:`~valax.risk.bucketing.BucketMap`
 (e.g. from ``tenor_bucket_map``) to land the same sensitivity on the FRTB tenor
-vertices — the ``J_bucket`` leg of the stack.  Quote-space (hedge) risk is the
-sibling ``J_build`` leg: compose these pillar deltas with
-``valax.curves.bootstrap_graph.quote_jacobian`` (left for the caller, since the
-build lives outside ``price``).
+vertices — the ``J_bucket`` leg of the stack.
+
+Quote-space (hedge) risk is the sibling ``J_build`` leg, and it lives in
+:mod:`valax.greeks.adjoint`: :func:`~valax.greeks.adjoint.curve_quote_deltas`
+pushes the pillar cotangent back through the bootstrap residual by the implicit
+function theorem, giving ``∂price/∂quote`` for every instrument the curves were
+built from.  Prefer it over multiplying these pillar deltas by a dense
+``quote_jacobian``: the adjoint never forms the quote Jacobian, so its cost
+does not grow with the number of quotes, and it reuses one factorisation across
+a whole portfolio.
 """
 
 from __future__ import annotations

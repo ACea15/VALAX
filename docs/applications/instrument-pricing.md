@@ -125,15 +125,15 @@ Vanilla contracts are documented on the pricing-method pages:
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [CDS](#credit-default-swap-cds) | — (curve bootstrap ✅) | n-a (hazard curve) | `SurvivalCurve` from spreads | credit triangle; constant recovery | 🟡 |
+| [CDS](#credit-default-swap-cds) | — (hazard curve ✅) | n-a (hazard curve) | `SurvivalCurve` from spreads (closed-form credit triangle, not a repricing bootstrap) | credit triangle; constant recovery | 🟡 |
 | [CDO tranche](#cdo-tranche) | — | Gaussian copula | base correlation | one-factor copula | 🟡 |
 
 ### Inflation derivatives
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [Zero-coupon inflation swap](#zero-coupon-inflation-swap-zcis) | Analytic | n-a (inflation curve) | inflation bootstrap | index lag; single exchange | ✅ |
-| [Year-on-year inflation swap](#year-on-year-inflation-swap-yyis) | Analytic | n-a (inflation curve) | inflation bootstrap | YoY convexity ignored | ✅ |
+| [Zero-coupon inflation swap](#zero-coupon-inflation-swap-zcis) | Analytic | n-a (inflation curve) | algebraic (`from_zc_rates`) | index lag; single exchange | ✅ |
+| [Year-on-year inflation swap](#year-on-year-inflation-swap-yyis) | Analytic | n-a (inflation curve) | algebraic (`from_zc_rates`) | YoY convexity ignored | ✅ |
 | [Inflation cap / floor](#inflation-cap-floor) | Analytic | flat Black-76 | — | Black-76 on forward YoY | ✅ |
 
 ---
@@ -297,7 +297,7 @@ Underlying: a survival/hazard-rate curve bootstrapped from CDS spreads via the
 credit triangle. Usage: [Credit guide](../guide/credit.md).
 
 ### Credit default swap (CDS)
-Protection against default of a reference entity: the **protection leg** pays $(1-R)$ of notional on default, funded by a **premium leg** of periodic spread payments until default or maturity. VALAX bootstraps the `SurvivalCurve` from market spreads today; the standalone CDS *pricer is on the roadmap*. 🟡
+Protection against default of a reference entity: the **protection leg** pays $(1-R)$ of notional on default, funded by a **premium leg** of periodic spread payments until default or maturity. VALAX builds the `SurvivalCurve` from market spreads today via the closed-form credit triangle (no root-find, no leg repricing); both the standalone CDS *pricer* and a true repricing hazard bootstrap *are on the roadmap*. 🟡
 
 ### CDO tranche
 Exposure to portfolio losses in an $[\text{attachment},\text{detachment}]$ band, paying a spread on the surviving tranche notional. Priced by a one-factor Gaussian copula over `n_names`. *Pricer on the roadmap.* 🟡

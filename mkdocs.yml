@@ -111,6 +111,7 @@ nav:
       - Numerical Pitfalls: architecture/numerical-pitfalls.md
       - Validation:
           - Pricing Examples: examples.md
+          - Multi-Curve / AAD Audit Conformance: architecture/aad-audit-conformance.md
           - QuantLib Validation Pyramid: architecture/quantlib-validation-pyramid.md
           - Benchmarks: benchmarks.md
           - Reproducibility & Arbitrage Tests: guide/reproducibility_and_arbitrage_tests.md

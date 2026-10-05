@@ -10,6 +10,16 @@ Two layers coexist:
 """
 
 from valax.greeks.autodiff import greeks, greek
+from valax.greeks.adjoint import (
+    CalibrationLevel,
+    CurveAdjoint,
+    LevelAdjoint,
+    curve_adjoint,
+    curve_log_df_cotangent,
+    curve_quote_deltas,
+    level_adjoint,
+    quote_deltas_from_cotangent,
+)
 from valax.greeks.market_greeks import (
     bucketed_curve_deltas,
     curve_pillar_deltas,
@@ -32,4 +42,13 @@ __all__ = [
     "dual_delta",
     "theta",
     "market_greeks",
+    # Quote-space (hedge-space) risk via the implicit function theorem
+    "CalibrationLevel",
+    "LevelAdjoint",
+    "level_adjoint",
+    "CurveAdjoint",
+    "curve_adjoint",
+    "curve_log_df_cotangent",
+    "quote_deltas_from_cotangent",
+    "curve_quote_deltas",
 ]

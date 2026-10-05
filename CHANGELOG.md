@@ -12,6 +12,56 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Quote-space (hedge-space) adjoint risk
+
+Closes the `J_build` leg of the Jacobian stack. `curve_pillar_deltas` already
+answered "how does the price move if a pillar discount factor moves", but a desk
+hedges in instruments, not pillars — and the two are not a rescaling of each
+other. Holding the other *quotes* fixed forces the whole curve graph to
+re-solve, so an OIS quote picks up its indirect effect on every projection curve
+calibrated against it; a bump that held projection *nodes* fixed misses that
+term entirely. On a dual-curve book the two conventions differ in magnitude
+*and* sign.
+
+- **`valax.greeks.adjoint`** (new module).
+  - `curve_adjoint(graph, ref, specs, instruments)` builds a per-snapshot
+    handle: the residual Jacobian `∂R_c/∂θ_c` at the solution, its condition
+    number, and a `lineax.LU` factorisation computed **once**.
+  - `curve_quote_deltas(instrument, model, market, adjoint=...)` returns
+    `∂price/∂quote` for every bootstrap instrument via the implicit function
+    theorem: one reverse sweep through the pricer, one transposed solve, one
+    reverse sweep through the residual. The quote Jacobian is never formed and
+    the Newton iterations are never taped, so cost is flat in the number of
+    quotes and each additional trade is a back-substitution.
+  - `CalibrationLevel` / `level_adjoint` / `LevelAdjoint` generalise the same
+    step to any calibration written as `R(θ; inputs) = 0` — the hook the
+    volatility and model layers will plug into. The generic path reproduces the
+    curve-specialised one bit-for-bit.
+  - `curve_log_df_cotangent` handles the change of variables from
+    `∂V/∂DF` (all pillars) to the solver's `log(DF)` space (reference pillar
+    excluded), so callers no longer hand-slice `[1:]`.
+- **Residual single-sourcing.** `valax.curves.curve_residual_fn` exposes the
+  residual as `R(θ_c, q_c)`, and both it and `bootstrap_curve_graph` now call
+  one extracted `_graph_residual`. The solved system and the differentiated
+  system are the same code path by construction, not by convention. Also added:
+  `curve_quote_vector`, `log_dfs_from_graph`.
+- **Mixed residual units handled by construction.** VALAX residuals are
+  deliberately not uniform — a futures residual is a rate difference, a swap
+  residual is `rate × annuity − float_pv`. The adjoint differentiates `∂R/∂q`
+  rather than assuming `−I`, so both scale correctly with no per-instrument
+  special-casing.
+- **Conformance gates.** New `audit` pytest marker (`pytest -m audit`) and
+  `tests/test_greeks/test_quote_adjoint.py`: AAD vs full-rebuild central finite
+  differences for every quote at 0.1 bp and 1 bp (single- and dual-curve), the
+  parallel-shift identity, and the quotes-fixed vs nodes-fixed distinction.
+  Observed agreement 1e-9 to 1e-11 relative.
+- **Docs.** New
+  [Audit Conformance Map](docs/architecture/aad-audit-conformance.md) scoring
+  VALAX requirement-by-requirement against the multi-curve / AAD risk audit
+  specification, including the identifier map, the instrument→residual
+  inventory, committed tolerances and the explicitly documented (and explicitly
+  *undecided*) convention choices.
+
 ### Added — Dual-curve rates calibration (OIS discounting + tenor projection)
 
 Closes the consistency hole between pricing and calibration: since P5.1 the

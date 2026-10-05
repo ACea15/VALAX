@@ -192,6 +192,85 @@ Two points worth knowing:
 
 **When to use:** any rates workflow that starts from broker cap/floor quotes — pricing caps and floors off a smile rather than a flat vol, feeding an optionlet surface to the rates exotics, or building the vol input for LMM calibration.
 
+## Smile dynamics: what moves when the curve moves
+
+A fitted smile is anchored on a forward. When the curve moves, the forward
+moves — and the convention you choose for what happens to the *vol* is a
+modelling decision, not an implementation detail. It determines the delta of
+every option priced off the surface, so it has to match the desk's risk policy
+and it has to be stated.
+
+Write $F_0$ for the forward the node was calibrated at, $F$ for the forward the
+curve implies now, $K$ for the absolute strike and $\delta = K - F_0$ for the
+quoted offset. The three standard conventions differ in exactly one place —
+which forward enters the Hagan evaluation:
+
+| Convention | Vol read | Forward used | Needs $F_0$? |
+|---|---|---|---|
+| **Sticky absolute strike** | $\sigma_{SABR}(K;\, F_0, \alpha, \rho, \nu, \beta)$ | $F_0$ — the stored, calibration-time forward | yes |
+| **Sticky moneyness** | $\sigma_{SABR}(K - (F - F_0);\, F_0, \ldots)$ | both $F_0$ and $F$ | yes |
+| **SABR backbone** | $\sigma_{SABR}(K;\, F, \alpha, \rho, \nu, \beta)$ | $F$ only — **computed, never interpolated** | no |
+
+Under the backbone convention the parameters are held fixed and the smile is
+re-evaluated at the new forward, with $\beta$ setting the backbone slope
+($\beta \to 0$ a normal/flat backbone, $\beta \to 1$ lognormal). It is the one
+convention that consults no stored forward at query time; the forward should be
+the exact par rate for the traded schedule, since interpolating a forward is
+strictly worse than computing one.
+
+!!! warning "What VALAX does today: sticky absolute strike, structurally"
+
+    `SwaptionCube.__call__(strike, expiry, tenor)` is never handed a forward —
+    it reads `self.forward_at(expiry, tenor)`, the grid of forwards frozen at
+    calibration time. Meanwhile the pricer computes $S_x$ and the annuity from
+    the **live** curve. So under a curve move the price's forward moves and the
+    vol's does not: vol-at-absolute-strike is invariant, which *is* sticky
+    strike.
+
+    That is a legitimate convention, but today it is the **only** one
+    expressible, and it was arrived at structurally rather than chosen. The
+    consequence is that the SABR backbone contribution to delta is absent, and
+    the moneyness-dependence the cube vol should have on the curve
+    ($K - S_x$) cannot be expressed at all. The same query-time pattern applies
+    to `OptionletVolSurface`.
+
+### Agreed target design — not yet implemented
+
+The decision on record, so the convention stops being accidental:
+
+- **`dynamics`** — a static field on `SwaptionCube` / `OptionletVolSurface`
+  taking `"sticky_strike"` | `"sticky_moneyness"` | `"sabr_backbone"`,
+  **defaulting to `"sticky_strike"`** so existing numbers are preserved
+  bit-for-bit.
+- **`quote_form`** — `"absolute_strike"` | `"atm_offset"`, recording how the
+  quote was given, validated against `dynamics` for consistency. The two are
+  not independent: the dynamics is a *consequence* of what the quote holds
+  fixed (offsets-to-ATM imply sticky moneyness, absolute strikes imply sticky
+  strike, un-refitted parameters imply the backbone), so a contradictory pair
+  is a configuration error.
+- The forward is **passed in** at query time rather than read from storage;
+  `forwards` is retained but demoted to "the forward this node was fitted at".
+
+Two caveats that come with the target design:
+
+- **Off-node queries are mixed-order.** At an intermediate (expiry, tenor) the
+  cube bilinearly interpolates $\alpha, \rho, \nu, \beta$ but would receive an
+  *exact* forward. Since $\alpha$ is the volatility of $F^\beta$, interpolating
+  it across nodes with differing forwards and then evaluating at an exact
+  forward is not the same as interpolating the ATM vols. A second-order effect,
+  but a real one: an off-node ATM query under the backbone convention will not
+  equal the bilinear interpolation of neighbouring ATM vols.
+- **`sabr_backbone` has a prerequisite.** It reproduces the calibrated market
+  vol at a node only if $F = F_0$ there, which holds only when the cube was
+  calibrated with forwards derived from the *same* curve and schedule
+  conventions the pricer uses. Since `calibrate_swaption_cube` currently
+  accepts caller-supplied forwards, that is not guaranteed — so the
+  curve-aware calibration route and a repricing gate must land **before**
+  `sabr_backbone` can be offered as a default. See the
+  [roadmap](../roadmap.md) item for the sequencing and the
+  [audit conformance map](../architecture/aad-audit-conformance.md) for how
+  this scores against requirement V-5.
+
 ## Common Patterns
 
 ### Pricing with a surface

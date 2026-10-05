@@ -66,8 +66,13 @@ where:
    risk, CVA, and portfolio credit models where default correlation matters.
 
 Neither standalone pricer ships yet; both are on the roadmap. What *is* available
-today is the survival-curve bootstrap (`valax.curves.survival.from_cds_spreads`),
-which turns quoted CDS spreads into the `SurvivalCurve` these pricers will consume.
+today is `valax.curves.survival.from_cds_spreads`, which turns quoted CDS spreads
+into the `SurvivalCurve` these pricers will consume — but via the closed-form
+credit-triangle approximation `h = s / (1 - R)`, **not** a bootstrap. It performs
+no root-find and never reprices the premium and protection legs, so the resulting
+curve does not exactly reprice its input quotes. A true repricing bootstrap (CDS
+quotes routed through `BootstrapInstrument` / `bootstrap_curve_graph`, as the
+rates quotes are) is on the roadmap and requires the CDS pricer first.
 
 ### Code Example
 
