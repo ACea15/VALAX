@@ -50,7 +50,7 @@ import equinox as eqx
 from jaxtyping import Int
 from jax import Array
 
-from valax.curves.discount import DiscountCurve
+from valax.curves.discount import DISCOUNT_CURVE_INTERP, DiscountCurve
 
 
 # ── Curve-id alphabet (frozen MC-Curves-2) ───────────────────────────
@@ -84,10 +84,19 @@ def _validate_curve_id(curve_id: str) -> None:
         )
 
 
-#: Supported interpolation modes on a :class:`CurveSpec`.  MC-Curves-2
+#: Interpolation modes a :class:`CurveSpec` may declare.  MC-Curves-2
 #: ships ``log_linear_df`` only; ``monotone_convex`` / ``linear_zero`` /
 #: ``tension_spline`` are queued for MC-Curves-3.
-_SUPPORTED_INTERP = ("log_linear_df",)
+#:
+#: Derived from :data:`~valax.curves.discount.DISCOUNT_CURVE_INTERP` rather
+#: than spelled out, so the set of *declarable* modes cannot drift from the
+#: single mode :class:`~valax.curves.discount.DiscountCurve` can actually
+#: deliver.  Widening this tuple without teaching ``DiscountCurve`` to
+#: dispatch would make ``CurveSpec.interp`` a silently-ignored field; the
+#: derivation, plus the guard in
+#: :func:`valax.curves.bootstrap_graph._build_graph_from_log_dfs`, is what
+#: prevents that.
+_SUPPORTED_INTERP = (DISCOUNT_CURVE_INTERP,)
 
 
 class CurveSpec(eqx.Module):
@@ -107,8 +116,19 @@ class CurveSpec(eqx.Module):
         pillar_dates: Sorted ordinal dates for the curve's unknown
             pillars (i.e. **excluding** the reference date, at which
             ``DF == 1`` is imposed by construction).  Shape ``(n,)``.
-        interp: Interpolation mode.  Currently only ``"log_linear_df"``
-            is supported.  Static field.
+        interp: Interpolation mode the emitted curve should use.  Static
+            field, validated against :data:`_SUPPORTED_INTERP`, which is
+            derived from
+            :data:`~valax.curves.discount.DISCOUNT_CURVE_INTERP` and today
+            holds exactly one entry.  It is **declared and checked but not
+            forwarded**, because there is nowhere to forward it to:
+            :class:`~valax.curves.discount.DiscountCurve` has no ``interp``
+            field and hard-codes log-linear-in-DF.  Since the only
+            admissible value is precisely what the curve does, nothing is
+            currently ignored — the hazard is latent, and it is guarded on
+            both sides so that adding a real mode fails loudly rather than
+            being quietly dropped.  See the interpolation workstream on the
+            roadmap (spec C-4/C-8).
         day_count: Day count convention for the emitted
             :class:`DiscountCurve`.  Static field.
 
@@ -134,7 +154,8 @@ class CurveSpec(eqx.Module):
         if self.interp not in _SUPPORTED_INTERP:
             raise ValueError(
                 f"CurveSpec.interp={self.interp!r} not supported. "
-                f"MC-Curves-2 supports {_SUPPORTED_INTERP!r}. "
+                f"DiscountCurve implements {_SUPPORTED_INTERP!r} and "
+                f"nothing else, so no other mode can be honoured. "
                 f"Additional variants are queued for MC-Curves-3."
             )
 

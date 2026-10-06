@@ -18,8 +18,26 @@ from jax import Array
 from valax.dates.daycounts import year_fraction
 
 
+#: The interpolation mode :meth:`DiscountCurve.__call__` implements.
+#:
+#: :class:`DiscountCurve` has no ``interp`` field — log-linear-in-DF is
+#: hard-coded.  This constant names that fact so that code declaring an
+#: interpolation mode (notably :class:`valax.curves.CurveSpec`) can be
+#: checked against what the curve actually does, instead of the two
+#: agreeing by coincidence.  Adding a genuine second mode means giving
+#: :class:`DiscountCurve` a static ``interp`` field and dispatching on it
+#: here; see the interpolation workstream on the roadmap (spec C-4/C-8).
+DISCOUNT_CURVE_INTERP = "log_linear_df"
+
+
 class DiscountCurve(eqx.Module):
     """Term structure of discount factors.
+
+    Interpolation is always :data:`DISCOUNT_CURVE_INTERP` — log-linear in
+    discount factors, equivalently piecewise-constant continuously
+    compounded forward rates — with flat extrapolation.  It is not
+    configurable; see that constant for why and for what adding a mode
+    would entail.
 
     Attributes:
         pillar_dates: Sorted ordinal dates for curve nodes.

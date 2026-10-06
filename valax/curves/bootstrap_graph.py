@@ -54,7 +54,11 @@ from jaxtyping import Float, Int
 from jax import Array
 
 from valax.curves.bootstrap_proto import BootstrapInstrument
-from valax.curves.discount import DiscountCurve, zero_rate
+from valax.curves.discount import (
+    DISCOUNT_CURVE_INTERP,
+    DiscountCurve,
+    zero_rate,
+)
 from valax.curves.fixings import FixingHistory, empty_fixing_history
 from valax.curves.graph import CurveGraph, CurveSpec
 from valax.dates.daycounts import year_fraction
@@ -180,6 +184,23 @@ def _build_graph_from_log_dfs(
     ref_int = reference_date.astype(jnp.int32)
     curves: dict[str, DiscountCurve] = {}
     for i, spec in enumerate(curve_specs):
+        # This is the one place a declared interpolation mode would have
+        # to be forwarded, and ``DiscountCurve`` has no field to forward
+        # it to — it hard-codes log-linear-in-DF.  Today that is not a
+        # defect, because ``CurveSpec.__check_init__`` admits only the
+        # mode the curve implements.  The guard exists so that widening
+        # ``_SUPPORTED_INTERP`` without first teaching ``DiscountCurve``
+        # to dispatch fails loudly here, instead of silently honouring a
+        # mode the caller did not ask for.
+        if spec.interp != DISCOUNT_CURVE_INTERP:
+            raise NotImplementedError(
+                f"CurveSpec(curve_id={spec.curve_id!r}) declares "
+                f"interp={spec.interp!r}, but DiscountCurve only "
+                f"implements {DISCOUNT_CURVE_INTERP!r}. Give "
+                f"DiscountCurve a static `interp` field and dispatch on "
+                f"it in its __call__ before admitting this mode in "
+                f"valax.curves.graph._SUPPORTED_INTERP."
+            )
         chunk = log_dfs[offsets[i] : offsets[i + 1]]
         dfs = jnp.concatenate([jnp.ones(1), jnp.exp(chunk)])
         dates = jnp.concatenate(

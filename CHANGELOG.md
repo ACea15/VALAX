@@ -12,6 +12,33 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — `CurveSpec.interp` is no longer a field that could be silently ignored
+
+`CurveSpec.interp` was validated against `graph._SUPPORTED_INTERP` and then
+never forwarded anywhere, because `DiscountCurve` has no `interp` field — it
+hard-codes log-linear-in-DF. That was not a live bug: the supported tuple held
+exactly one entry, and that entry is precisely what the curve implements, so
+no caller could ask for something they did not get. It was a *latent* one.
+The day a second mode joined the tuple, every curve declaring it would have
+quietly carried on interpolating log-linearly.
+
+Rather than implement the dispatch (a curve-representation project, still
+deferred) or delete a field the interpolation workstream needs, the invariant
+is now enforced from both ends:
+
+- New `valax.curves.DISCOUNT_CURVE_INTERP` names the mode
+  `DiscountCurve.__call__` actually implements.
+- `graph._SUPPORTED_INTERP` is **derived from** it rather than spelled out, so
+  the declarable set cannot drift from the deliverable one by accident.
+- `bootstrap_graph._build_graph_from_log_dfs` re-checks the mode at the single
+  place it would have to be forwarded, raising `NotImplementedError` naming
+  exactly what a future implementer must do first.
+- `tests/test_curves/test_graph.py::TestCurveSpecInterp` asserts the one-mode
+  invariant directly, so widening the tuple fails the suite until the dispatch
+  lands.
+
+Behaviour is unchanged for every existing caller. Narrows spec C-4.
+
 ### Added — Partly-accrued overnight coupons blend realised and projected
 
 `_floating_leg_pv` treated every coupon as all-or-nothing: either a recorded
