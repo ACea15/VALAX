@@ -95,3 +95,23 @@ plug into.
 ::: valax.greeks.level_adjoint
 
 ::: valax.greeks.LevelAdjoint
+
+### Vega to volatility quotes
+
+The same step one layer up. A smile fit is not a square root-find — there are
+more quoted strikes than SABR parameters — so the system the theorem is applied
+to is the fit's **first-order condition**, the stationarity of the weighted sum
+of squares. That is square by construction, and differentiating it with
+`jax.grad` of a gradient yields the **full** Hessian rather than the
+Gauss-Newton approximation, so the adjoint stays correct when the fit is not
+tight (which is when a sensitivity is most likely to be trusted wrongly).
+
+Two input blocks come back, answering two different questions: the quoted vols
+give **vega in quote space**, and the forward gives
+$\partial V / \partial F_0$ — the term that chains the volatility layer back
+into the curve layer (spec A-3). The second is non-zero only because the forward
+is a genuine input to the fit, which is what
+[`calibrate_swaption_cube_from_curves`](surfaces.md#swaption-cube-rates)
+arranged; on the caller-supplied-forward route it is structurally zero.
+
+::: valax.greeks.vol_adjoint

@@ -52,10 +52,13 @@ from jax import Array
 
 _EPS = 1e-10
 
-# A *vol source* is a callable ``(strike, expiry, tenor) -> implied vol`` that
-# also carries an ``is_normal`` bool attribute (e.g. ``SwaptionCube`` /
-# ``ConstantVol``).  Public entry points also accept a bare scalar (flat
-# lognormal vol), captured by the ``| Float[Array, ""] | float`` union below.
+# A *vol source* is a callable ``(strike, expiry, tenor, *, forward) ->
+# implied vol`` that also carries an ``is_normal`` bool attribute (e.g.
+# ``SwaptionCube`` / ``ConstantVol``).  ``forward`` is the live forward par
+# swap rate; see the protocol description in
+# :mod:`valax.pricing.analytic.rates_smile`.  Public entry points also accept a
+# bare scalar (flat lognormal vol), captured by the
+# ``| Float[Array, ""] | float`` union below.
 VolSource = Callable[..., Float[Array, ""]]
 
 
@@ -76,23 +79,62 @@ def _resolve_vol_source(
         vol: A vol source or a bare scalar volatility.
 
     Returns:
-        Tuple ``(source, is_normal)`` where ``source(strike, expiry, tenor)``
-        returns an implied vol and ``is_normal`` is the quoting convention.
+        Tuple ``(source, is_normal)`` where
+        ``source(strike, expiry, tenor, *, forward)`` returns an implied vol and
+        ``is_normal`` is the quoting convention.
     """
     if callable(vol) and hasattr(vol, "is_normal"):
         return vol, vol.is_normal
     v = jnp.asarray(vol)
-    return (lambda *coords: v), False
+    return (lambda *coords, forward=None: v), False
 
 
 # ── Standard-model annuity / numeraire-ratio functions ────────────────
+
+def cash_settled_annuity(
+    swap_rate: Float[Array, ""],
+    n_periods: Float[Array, ""] | int,
+    freq: int,
+) -> Float[Array, ""]:
+    r"""Flat-yield ("street-standard") annuity per unit notional.
+
+    .. math::
+
+        A(S) = \sum_{i=1}^{m} \frac{1}{q}\left(1 + \frac{S}{q}\right)^{-i}
+             = \frac{1 - (1 + S/q)^{-m}}{S}
+
+    with ``q`` the fixed-leg frequency and ``m`` the number of fixed payments.
+    It appears in two places: as Hagan's standard model for the numeraire ratio
+    in the CMS convexity adjustment, and as the **cash-settled** swaption
+    annuity -- a cash-settled swaption pays off against this flat-yield
+    annuity evaluated at the settlement rate, rather than against the physical
+    annuity :math:`A_d = \sum_i \tau_i P_d(0, T_i)`. One implementation serves
+    both (see
+    :func:`valax.surfaces.swaption_premium.swaption_forward_and_numeraire`).
+
+    Args:
+        swap_rate: Par swap rate ``S``, floored at a small epsilon so the
+            ``1/S`` form stays finite at zero.
+        n_periods: Number of fixed payments ``m``.
+        freq: Fixed-leg payments per year ``q``.
+
+    Returns:
+        The flat-yield annuity.
+    """
+    s = jnp.maximum(swap_rate, _EPS)
+    return (1.0 - (1.0 + s / freq) ** (-n_periods)) / s
+
 
 def _standard_annuity(
     swap_rate: Float[Array, ""],
     tenor: int,
     freq: int,
 ) -> Float[Array, ""]:
-    """Flat-yield ("street-standard") annuity per unit notional.
+    """Flat-yield annuity expressed via a tenor in years.
+
+    A thin ``(tenor, freq)`` parametrisation of :func:`cash_settled_annuity`
+    with ``m = tenor * freq``, kept because the Hagan routines below are
+    written in terms of the underlying-swap tenor.
 
     Args:
         swap_rate: Par swap rate ``S`` (positive).
@@ -102,9 +144,7 @@ def _standard_annuity(
     Returns:
         Annuity :math:`A(S) = (1 - (1 + S/q)^{-nq}) / S`.
     """
-    s = jnp.maximum(swap_rate, _EPS)
-    m = tenor * freq
-    return (1.0 - (1.0 + s / freq) ** (-m)) / s
+    return cash_settled_annuity(swap_rate, tenor * freq, freq)
 
 
 def _standard_g(
@@ -282,7 +322,8 @@ def cms_convexity_adjustment(
     (``"replication"``) route.  The vol argument is a *vol source* — a callable
     exposing an ``is_normal`` flag (e.g. a
     :class:`~valax.surfaces.swaption_cube.SwaptionCube`) queried at
-    ``(strike, expiry, tenor)`` — or a bare scalar (flat lognormal vol).
+    ``(strike, expiry, tenor, forward=S_0)`` — or a bare scalar (flat lognormal
+    vol).
 
     Args:
         forward: Forward par swap rate ``S_0``.
@@ -308,7 +349,9 @@ def cms_convexity_adjustment(
     tenor_f = jnp.asarray(float(tenor))
 
     def vol_at(strike):
-        return src(strike, expiry, tenor_f)
+        # The whole replication is anchored to this one forward, so the smile
+        # is read against it at every strike (curve-aware vol-source protocol).
+        return src(strike, expiry, tenor_f, forward=forward)
 
     if method == "analytic":
         return _hagan_analytic(
@@ -358,7 +401,7 @@ def cms_convexity_adjusted_rates(
 
     def one(forward, expiry):
         def vol_at(strike):
-            return src(strike, expiry, tenor_f)
+            return src(strike, expiry, tenor_f, forward=forward)
 
         if method == "analytic":
             a0 = _standard_annuity(forward, tenor, freq)

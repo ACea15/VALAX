@@ -13,14 +13,20 @@ from valax.pricing.analytic.bonds import (
     key_rate_durations,
 )
 from valax.pricing.analytic.caplets import (
+    caplet_forward,
+    cap_forwards,
     caplet_price_black76,
     caplet_price_bachelier,
     cap_price_black76,
     cap_price_bachelier,
 )
 from valax.pricing.analytic.swaptions import (
+    annuity,
     swap_rate,
     swap_price,
+    swaption_forward_and_annuity,
+    swaption_black76_from_forward,
+    swaption_bachelier_from_forward,
     swaption_price_black76,
     swaption_price_bachelier,
 )
@@ -70,6 +76,7 @@ from valax.pricing.analytic.rates_exotics import (
     range_accrual_price_black76,
 )
 from valax.pricing.analytic.cms_convexity import (
+    cash_settled_annuity,
     cms_convexity_adjustment,
     cms_convexity_adjusted_rates,
 )

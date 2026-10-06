@@ -89,6 +89,7 @@ from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import year_fraction
 from valax.instruments.rates import Cap
 from valax.pricing.analytic.caplets import (
+    cap_forwards,
     cap_price_bachelier,
     cap_price_black76,
 )
@@ -207,10 +208,10 @@ def optionlet_forwards(
               - 1\right),
 
     read off ``forward_curve`` when one is supplied and off ``curve``
-    otherwise (single-curve setup).  Matching the convention of
-    :func:`valax.pricing.analytic.caplets.cap_price_black76` exactly, so
-    a surface built on these forwards is consistent with the pricer that
-    will consume it.
+    otherwise (single-curve setup).  Delegates to
+    :func:`valax.pricing.analytic.caplets.cap_forwards` rather than
+    re-deriving the projection, so a surface built on these forwards is
+    consistent by construction with the pricer that will consume it.
 
     Args:
         cap: Cap/floor whose accrual schedule defines the periods.
@@ -221,9 +222,7 @@ def optionlet_forwards(
     Returns:
         Simply-compounded forward rate of each accrual period.
     """
-    fwd = curve if forward_curve is None else forward_curve
-    tau = year_fraction(cap.start_dates, cap.end_dates, cap.day_count)
-    return (fwd(cap.start_dates) / fwd(cap.end_dates) - 1.0) / tau
+    return cap_forwards(cap, curve, forward_curve)
 
 
 def optionlet_expiries(

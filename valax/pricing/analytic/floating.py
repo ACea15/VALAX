@@ -30,7 +30,8 @@ from valax.dates.daycounts import year_fraction
 # Reuse the fixed-leg annuity and dual-curve float-leg helpers from the
 # swaptions module rather than duplicating them. They are private helpers
 # but the intent is the same here.
-from valax.pricing.analytic.swaptions import _annuity, _dual_curve_float_pv
+from valax.pricing.analytic.swaptions import annuity as _annuity
+from valax.pricing.analytic.swaptions import _dual_curve_float_pv
 
 
 # ── Floating rate note ────────────────────────────────────────────────

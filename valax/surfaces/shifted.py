@@ -64,17 +64,27 @@ class ShiftedVolSurface(eqx.Module):
     base: Any
     shift: Float[Array, ""]
 
-    def __call__(self, *coords: Float[Array, ""]) -> Float[Array, ""]:
+    def __call__(
+        self,
+        *coords: Float[Array, ""],
+        forward: Float[Array, ""] | None = None,
+    ) -> Float[Array, ""]:
         """Return the base surface's quote at ``coords`` plus the shift.
 
         Args:
             *coords: Whatever coordinate tuple the base surface takes
-                (e.g. ``(strike, expiry)``, ``(expiry, tenor, strike)``).
+                (e.g. ``(strike, expiry)``, ``(strike, expiry, tenor)``).
+            forward: Optional live forward from the curves, per the vol-source
+                protocol of :mod:`valax.pricing.analytic.rates_smile`. Passed
+                through to the base surface only when supplied, so wrapping an
+                equity surface (which takes no forward) still works.
 
         Returns:
             The shifted implied volatility.
         """
-        return jnp.asarray(self.base(*coords)) + self.shift
+        if forward is None:
+            return jnp.asarray(self.base(*coords)) + self.shift
+        return jnp.asarray(self.base(*coords, forward=forward)) + self.shift
 
     def total_variance(
         self,

@@ -12,6 +12,135 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed (**breaking**) — Vol sources are now handed the live forward
+
+A smile is a function of moneyness, so *which* forward it is anchored to decides
+whether a curve move reprices the smile or merely slides along it. Until now a
+vol source was never told the forward the pricer was about to use: it was queried
+at `src(strike, expiry[, tenor])` and (for the SABR objects) read a forward frozen
+at calibration time, while the pricer computed the swap rate and annuity from the
+live curve. Vol and price could therefore see different forwards, and
+`∂σ/∂θ_curve` was structurally zero.
+
+- **Protocol.** A vol source is now called as
+  `src(strike, expiry[, tenor], forward=F)`, with `forward` keyword-only and `F`
+  the live curve-derived forward for that very instrument (forward par swap rate
+  for a swaption, projected period forward for an optionlet). Every source must
+  accept the keyword; flat sources ignore it. Affects
+  `valax.pricing.analytic.rates_smile` (`swaption_price`, `caplet_price`,
+  `cap_price`), `cms_convexity`, and the `cms_cap_floor` / `range_accrual`
+  pricers in `rates_exotics`.
+- **Numbers are unchanged.** `SwaptionCube.__call__` and
+  `OptionletVolSurface.__call__` accept `forward` and currently *ignore* it —
+  the sticky-absolute-strike convention — so every existing price is preserved
+  bit-for-bit. What the convention is, and what the alternatives would do, is
+  documented once in
+  [Smile dynamics](docs/guide/vol-surfaces.md#smile-dynamics-what-moves-when-the-curve-moves).
+- **Forward and annuity computed once.** New public observables
+  `valax.pricing.analytic.swaptions.annuity` (the promotion of the former private
+  `_annuity`; the old name remains as an alias),
+  `swaption_forward_and_annuity`, `caplets.caplet_forward` and
+  `caplets.cap_forwards`. `rates_smile.swaption_price` computes `(S, A_d)` once
+  and prices through the new `swaption_black76_from_forward` /
+  `swaption_bachelier_from_forward` cores; the caplet/cap pricers gained a
+  `forward=` / `forwards=` keyword so a caller can hand back the forward it read
+  its vol at. Vol and payoff now see the same forward *structurally*, not by
+  coincidence. `surfaces.caplet_stripping.optionlet_forwards` delegates to
+  `cap_forwards` instead of re-deriving the projection.
+- **Migration.** Custom vol sources must add `forward=None` to their
+  `__call__` signature (variadic sources: `def __call__(self, *coords,
+  forward=None)`). Callers of the surfaces' `__call__` are unaffected —
+  `forward` is optional.
+
+### Added — Smile dynamics are now a declared choice, not an accident
+
+Sticky-absolute-strike was previously the *only* expressible convention, and it
+was arrived at structurally (the surface was never handed a forward) rather than
+chosen. It is now named, validated and selectable.
+
+- **`valax.surfaces.dynamics`** (new module) owns the convention mechanics:
+  `SMILE_DYNAMICS`, `QUOTE_FORMS`, `CONSISTENT_DYNAMICS`,
+  `validate_smile_dynamics`, `default_dynamics_for`, `resolve_smile_query`.
+  One implementation, shared by both rates vol objects.
+- **`SwaptionCube` and `OptionletVolSurface`** gained two static fields:
+  - `dynamics` ∈ `{"sticky_strike", "sticky_moneyness", "sabr_backbone"}`,
+    default `"sticky_strike"` — so every existing price is unchanged.
+    `"sticky_strike"` evaluates Hagan at the fitted $F_0$;
+    `"sticky_moneyness"` at $(K - (F - F_0);\, F_0)$; `"sabr_backbone"` at the
+    live $F$ with the parameters held fixed.
+  - `quote_form` ∈ `{"absolute_strike", "atm_offset"}` (spec Q-3).
+  The pair is **validated at construction**: the dynamics is a consequence of
+  what the quote holds fixed, so absolute-strike + sticky-moneyness (and
+  atm-offset + sticky-strike) are configuration errors, not options. A
+  forward-dependent dynamics queried with no forward raises rather than
+  silently falling back.
+- **`forwards` is now documented as $F_0$** — "the forward this node was fitted
+  at" — on both objects and on `forward_at`, with the live forward supplied at
+  query time.
+- Under `"sticky_strike"`, `∂σ/∂θ_curve` is **exactly** zero and a new test
+  asserts it; under `"sabr_backbone"` it is non-zero. Both are now facts of
+  record rather than side effects.
+
+### Added — Curve-aware swaption cubes, premium quotes, and vega in quote space
+
+Closes the load-bearing gap in the adjoint chain. `calibrate_swaption_cube`
+takes a caller-supplied `forwards` array, and a forward handed in from outside
+is a constant as far as the fit is concerned — so `∂θ_v/∂θ_c` was *identically
+zero* and no curve risk could reach the volatility layer. That blocked three of
+the six paths by which curves enter model calibration, and a missing
+`dR_v/dθ_c` is the single most common cause of wrong deltas.
+
+- **`calibrate_swaption_cube_from_curves`** / **`_from_graph`** take the node
+  *schedules* — one representative `Swaption` per `(expiry, tenor)` — plus a
+  discount/projection pair, and derive everything else:
+  - `swaption_node_coordinates` builds the grid axes from the same expressions
+    `swaption_price` evaluates, so a node reprices at *its own* grid point
+    rather than a hair off it;
+  - `swaption_node_forwards_and_annuities` computes each node's `(S_x, A_d)`
+    through the pricer's own `swaption_forward_and_annuity`.
+  `quote_form="atm_offset"` converts offsets to absolute strikes per node using
+  that node's derived `F_0` (spec Q-3), and `dynamics` then defaults to the
+  convention that quote form implies. `calibrate_swaption_cube` survives as the
+  explicit opt-out. T-1 gate: every fitted quote reprices to `< 1e-8` in vol
+  units, both quote forms.
+- **`valax.surfaces.swaption_premium`** (new module) converts premium quotes:
+  `swaption_implied_normal_vol` solves
+  `N·𝒩(θ_c)·Bachelier(S_x(θ_c), K, σ_N, T) − q = 0` by scalar
+  `optimistix.Newton` with implicit differentiation, so the *implied vol*
+  carries curve risk. `settlement="physical"` uses the annuity `A_d`;
+  `"cash"` uses `P_d(0,T^p)·A_cash(S_x)` via the newly public
+  `valax.pricing.analytic.cash_settled_annuity` (the promotion of
+  `cms_convexity._standard_annuity`, now shared by Hagan and the cash branch).
+  The two settlements imply different vols from the same premium. Cash-settled
+  *convexity* is an explicitly documented deviation. The initial guess inverts
+  the **straddle** asymptote rather than the at-the-money one, which is a
+  guaranteed upper bound on `σ√T` and stays conditioned far from the money
+  where the naive seed collapses into underflowed vega.
+- **`valax.greeks.vol_adjoint`** (new module) adds λ_v. A smile fit is
+  over-determined, so the square system the implicit function theorem is applied
+  to is the fit's **first-order condition** — the stationarity of the weighted
+  SSE. `sabr_slice_level` states it; `vol_quote_vegas` returns both input
+  blocks: vega to the **quoted vols**, and `forward_bar = ∂V/∂F_0`, the
+  `dR_v/dθ_c` term (spec A-3). `cube_node_level` / `optionlet_slice_level` /
+  `cube_node_cotangent` wire it to the surface objects. Differentiating the SSE
+  *gradient* gives the **full** Hessian, not Gauss-Newton — the documented
+  resolution of spec R-5, chosen because the two coincide on a tight fit and so
+  the approximation only matters when the fit is loose.
+- **Bug fix — `bilinear_2d` returned NaN on a length-1 axis.** It divided by
+  `grid[0] - grid[0]`, so every query against a single-expiry or single-tenor
+  cube (and any `GridVolSurface` with one strike or one expiry) came back NaN. A
+  degenerate axis is now flat along that direction. Surfaced by calibrating a
+  one-node cube, which is the smallest curve-aware fit and a legitimate thing to
+  do.
+- **Verification note.** `forward_bar` is gated against a full-rebuild finite
+  difference under `atm_offset` quoting, and against `optimistix`'s own
+  `ImplicitAdjoint` through `calibrate_sabr` under `absolute_strike`. The latter
+  is deliberate: with the strikes pinned, a forward shift is very nearly
+  absorbable by `(α, ρ, ν)`, the least-squares Hessian's condition number is
+  ~1e6, and a Levenberg-Marquardt run terminates along a flat valley — so a
+  difference quotient is *stable in `h` and still wrong*. Two independent
+  formulations of the theorem agreeing to 1e-9 is the stronger statement.
+
 ### Added — Quote-space (hedge-space) adjoint risk
 
 Closes the `J_build` leg of the Jacobian stack. `curve_pillar_deltas` already

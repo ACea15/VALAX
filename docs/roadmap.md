@@ -152,7 +152,10 @@ now through **short-rate calibration**. It stops at **surfaces and
 portfolio**; **risk** is partway across — scenarios are keyed and the
 repricing loop now goes through `price(...)` on a `MarketState`, but the
 *measurement* layer (ladders, scenario generators, `parametric_var`'s
-covariance) still consumes the flat `MarketData` view:
+covariance) still consumes the flat `MarketData` view. **Surfaces** are
+partway across too: the rates vol objects (swaption cube, optionlet surface)
+are curve-aware and carry quote-space vega, while the equity surfaces remain
+curve-free:
 
 ```
 quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ analytic          ✅
@@ -162,13 +165,14 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
             curve_adjoint  ✅
                    │
                    │ λ_c composed: curve_quote_deltas ✅ (IFT, FD-gated)
-                   │ λ_v / λ_m     ❌ (blocked on the cube — see below)
+                   │ λ_v composed: vol_quote_vegas    ✅ (IFT on the fit's FOC)
+                   │ λ_m           ❌ (model level not yet a CalibrationLevel)
                    ▼
-            greeks 🟡 ── risk 🟡 ── calibration 🟡 ── surfaces ❌ ── portfolio ❌
-                        (keyed scenarios ✅,   (HW/G2++ ✅,
-                         repricing loop ✅,     Cheyette refuses)
-                         ladders + generators
-                         + covariance flat)
+            greeks 🟡 ── risk 🟡 ── calibration 🟡 ── surfaces 🟡 ── portfolio ❌
+                        (keyed scenarios ✅,   (HW/G2++ ✅,   (rates cubes +
+                         repricing loop ✅,     Cheyette       optionlets ✅,
+                         ladders + generators   refuses)       equity surfaces
+                         + covariance flat)                    still curve-free)
 ```
 
 So a book can be **priced** multi-curve today and its short-rate models
@@ -177,8 +181,11 @@ So a book can be **priced** multi-curve today and its short-rate models
 (`valax.risk.state_var` through `price(...)`), so a basis widening now
 reaches a P&L number. What is still driven by unkeyed `MarketScenario`
 vectors is the measurement layer above that loop — sensitivity ladders,
-the scenario generators, and `parametric_var`'s positional covariance —
-and surfaces and portfolio are untouched.
+the scenario generators, and `parametric_var`'s positional covariance.
+On the **surfaces** side the rates objects are across: a swaption cube or
+optionlet surface is calibrated off the curves and reports vega in *quote*
+space, so a curve move reaches the volatility layer. The equity surfaces and
+**portfolio** are untouched.
 
 ### Shipped
 
@@ -436,13 +443,14 @@ layer above the group primitives.
   `calibrate_sabr`, `calibrate_slv` take loose scalars
   (`rate`, `dividend`, `forward`), never a curve object
 
-#### 3. Vol-surface construction is curve-free *(closed for caps/floors)*
+#### 3. Vol-surface construction is curve-free *(closed for caps/floors and swaptions)*
 
-`valax/surfaces/caplet_stripping.py` is the first curve-aware module in
-`valax/surfaces/`: it takes `DiscountCurve` arguments directly.
-`build_sabr_caplet_surface` and `calibrate_swaption_cube` still take a
-caller-supplied pre-computed `forwards` array — the cap route no longer
-has to.
+`valax/surfaces/caplet_stripping.py` was the first curve-aware module in
+`valax/surfaces/`, taking `DiscountCurve` arguments directly;
+`calibrate_swaption_cube_from_curves` now closes the swaption side the same
+way. `build_sabr_caplet_surface` and `calibrate_swaption_cube` retain their
+caller-supplied pre-computed `forwards` arrays as explicit opt-outs, for when
+the forwards genuinely are exogenous.
 
 - [x] **Cap → caplet (optionlet) stripping** — `strip_caplet_vols`
   bootstraps a quoted cap strip into per-optionlet vols (one
@@ -462,35 +470,70 @@ has to.
   VALAX strip to 1e-10 — the counterpart of `ql.OptionletStripper1`.
   Recipe:
   [Volatility Surfaces § Cap → caplet stripping](guide/vol-surfaces.md#cap-caplet-optionlet-stripping-rates)
-- [ ] **Dual-curve swaption-cube calibration** — same gap for
-  `calibrate_swaption_cube`, which still takes a pre-computed forward
-  swap-rate array rather than deriving it from a discount/projection
-  pair. The caplet route above is the template.
+- [x] **Dual-curve swaption-cube calibration** —
+  `calibrate_swaption_cube_from_curves` / `calibrate_swaption_cube_from_graph`
+  take per-node `Swaption` pytrees plus a discount/projection pair and derive
+  the grid axes (`swaption_node_coordinates`) and each node's $(S_x, A_d)$
+  (`swaption_node_forwards_and_annuities`) themselves, through the pricer's own
+  `swaption_forward_and_annuity`. So the fitted SABR parameters are
+  differentiable functions of the curve pillars, where the legacy
+  precomputed-forward route gives identically `0.0`.
 
-    This is the load-bearing gap in the adjoint chain, not just a
+    This was the load-bearing gap in the adjoint chain, not just a
     convenience one: with the curve absent from the cube's graph,
-    `dθ_v/dθ_c = 0` identically, which blocks three of the six paths by
+    `dθ_v/dθ_c = 0` identically, which blocked three of the six paths by
     which curves enter model calibration (target annuities and forwards,
     the cube vol at a moneyness-dependent strike, and basket strikes) and
-    therefore blocks the `λ_v` adjoint level. A missing `dR_v/dθ_c` is the
+    therefore blocked the `λ_v` adjoint level. A missing `dR_v/dθ_c` is the
     single most common cause of wrong deltas.
 
-    **Sequencing** (decided; see
-    [Volatility Surfaces § Smile dynamics](guide/vol-surfaces.md#smile-dynamics-what-moves-when-the-curve-moves)):
+    Delivered in the sequence decided in
+    [Volatility Surfaces § Smile dynamics](guide/vol-surfaces.md#smile-dynamics-what-moves-when-the-curve-moves):
 
-    1. Widen the vol-source protocol so the forward is **passed in** at
-       query time rather than read from `SwaptionCube.forwards`. Breaking
-       change; `ConstantVol` / `_FlatVol` ignore the new argument, so
-       drop-in scalars and the acyclic `surfaces → pricing` dependency
-       both survive.
-    2. Add `dynamics` and `quote_form` static fields, defaulting to
-       `"sticky_strike"` so current numbers are preserved bit-for-bit.
-    3. Add the curve-aware calibration entry point (per-node `Swaption`
-       pytrees plus a curve, deriving $F_0$ and $A_d$ itself), keeping the
-       precomputed-forward signature as an explicit opt-out.
-    4. Only then may `sabr_backbone` be offered as a default — it
-       reproduces the calibrated vol at a node only if $F = F_0$ there,
-       which requires step 3 plus a repricing gate.
+    1. The vol-source protocol is widened to
+       `src(strike, expiry[, tenor], forward=F)`, with the live forward
+       computed once by the pricer and reused in the payoff
+       (`swaption_forward_and_annuity` +
+       `swaption_black76_from_forward` / `swaption_bachelier_from_forward`,
+       `caplet_forward` / `cap_forwards`). Breaking change; `ConstantVol` /
+       `_FlatVol` ignore the new argument, so drop-in scalars and the acyclic
+       `surfaces → pricing` dependency both survive.
+    2. `dynamics` and `quote_form` static fields on `SwaptionCube` /
+       `OptionletVolSurface`, implemented in `valax.surfaces.dynamics`,
+       defaulting to `"sticky_strike"` so current numbers are preserved
+       bit-for-bit, and validated against each other.
+    3. The curve-aware calibration entry points above, accepting ATM-offset
+       strikes so the quoted form is representable.
+    4. `sabr_backbone` is selectable but is **never a default**, even when the
+       quote form admits it: it reproduces the calibrated vol at a node only if
+       $F = F_0$ there, which holds on route 3 and is asserted by the cube's
+       T-1 repricing gate.
+
+    Gates: `tests/test_surfaces/test_swaption_cube.py::TestCurveAwareCalibration`
+    (T-1 repricing to 1e-8 in vol units, both quote forms; non-zero
+    `d(fitted vol)/d(DF)`; dual-curve basis moves the anchors) and
+    `tests/test_surfaces/test_smile_dynamics.py`.
+- [x] **Swaption premium → vol conversion** —
+  `valax.surfaces.swaption_implied_normal_vol` /
+  `swaption_premium_residual` / `swaption_forward_and_numeraire` solve
+  `N·𝒩(θ_c)·Bachelier(S_x(θ_c), K, σ_N, T) − q = 0` by scalar
+  `optimistix.Newton` with implicit differentiation, honouring physical
+  (numeraire $A_d$) versus cash settlement (numeraire
+  $P_d(0,T^p)\,A_{\text{cash}}(S_x)$, via the promoted
+  `cash_settled_annuity`). The implied vol therefore carries curve risk, which
+  it cannot when the numeraire is frozen. Gate:
+  `tests/test_surfaces/test_swaption_premium.py` (round trip to 1e-10, FD-matched
+  curve gradients, the two settlements imply different vols).
+- [x] **Vega in quote space (λ_v)** — `valax.greeks.vol_adjoint`
+  (`sabr_slice_level`, `vol_quote_vegas`, `cube_node_level`,
+  `optionlet_slice_level`, `cube_node_cotangent`) expresses a smile fit as a
+  `CalibrationLevel` whose residual is the **first-order condition** of the
+  weighted least squares — square by construction, so the implicit function
+  theorem applies to an over-determined fit. Returns vega to the quoted vols
+  *and* `forward_bar`, the `dR_v/dθ_c` term. Gate:
+  `tests/test_greeks/test_vol_adjoint.py` (quote vegas vs full-rebuild central
+  FD at two bump sizes; the forward coupling cross-validated against
+  `optimistix`'s own `ImplicitAdjoint` to 1e-9).
 
 #### 4. FX / credit / inflation carry no selectors
 
@@ -786,7 +829,9 @@ These are foundational pieces that block almost everything else. They should be 
 - [x] **Vol surface object** — `GridVolSurface` with bilinear interpolation on (strike, expiry) grid
 - [x] **SABR smile per expiry** — `SABRVolSurface` with per-expiry SABR calibration and parameter interpolation
 - [x] **SVI parametric fitting** — `SVIVolSurface` with Gatheral's SVI parameterization and LM calibration
-- [x] **Swaption cube** — `SwaptionCube` with `calibrate_swaption_cube` (strike × expiry × tenor)
+- [x] **Swaption cube** — `SwaptionCube` with `calibrate_swaption_cube` (strike × expiry × tenor), and the curve-aware `calibrate_swaption_cube_from_curves` / `_from_graph` which derive the grid axes and each node's $(S_x, A_d)$ off the curves themselves
+- [x] **Declared smile dynamics** — `valax.surfaces.dynamics` plus the `dynamics` / `quote_form` static fields on `SwaptionCube` and `OptionletVolSurface`: sticky strike (default), sticky moneyness, or SABR backbone, with the pair validated for consistency
+- [x] **Swaption premium → vol** — `swaption_implied_normal_vol` / `swaption_premium_residual` in `valax/surfaces/swaption_premium.py`, honouring physical vs cash settlement
 - [x] **Optionlet (caplet) surface** — `OptionletVolSurface` via `build_sabr_caplet_surface`
 - [x] **Cap → caplet (optionlet) stripping** — `strip_caplet_vols` /
       `strip_optionlet_surface` in `valax/surfaces/caplet_stripping.py`:

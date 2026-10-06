@@ -16,6 +16,65 @@ from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import year_fraction
 
 
+# ── Forward observables ───────────────────────────────────────────────
+
+def caplet_forward(
+    caplet: Caplet,
+    curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
+) -> Float[Array, ""]:
+    r"""Simply-compounded forward rate of a caplet's accrual period.
+
+    .. math::
+
+        F = \frac{1}{\tau}
+            \left(\frac{P^{\text{fwd}}(0, T_{s})}{P^{\text{fwd}}(0, T_{e})} - 1\right)
+
+    Exposed on its own because a smile-aware caller has to read its vol *at*
+    the forward before it can price, and must use the identical forward in the
+    option formula. The pricers below accept it back via their ``forward``
+    keyword so the two can never drift apart.
+
+    Args:
+        caplet: Caplet/floorlet contract.
+        curve: Discount curve; also the projection curve when
+            ``forward_curve`` is not given.
+        forward_curve: Optional tenor/projection curve.
+
+    Returns:
+        The period's forward rate.
+    """
+    tau = year_fraction(caplet.start_date, caplet.end_date, caplet.day_count)
+    fwd = curve if forward_curve is None else forward_curve
+    return (fwd(caplet.start_date) / fwd(caplet.end_date) - 1.0) / tau
+
+
+def cap_forwards(
+    cap: Cap,
+    curve: DiscountCurve,
+    forward_curve: DiscountCurve | None = None,
+) -> Float[Array, " n"]:
+    r"""Simply-compounded forward rate of every period in a cap strip.
+
+    The vectorised counterpart of :func:`caplet_forward`, and the at-the-money
+    anchor a per-expiry smile fit calibrates around (see
+    :func:`valax.surfaces.caplet_stripping.optionlet_forwards`, which
+    delegates here).
+
+    Args:
+        cap: Cap/floor whose accrual schedule defines the periods.
+        curve: Discount curve; also the projection curve when
+            ``forward_curve`` is not given.
+        forward_curve: Optional tenor/projection curve.
+
+    Returns:
+        Forward rate of each accrual period.
+    """
+    tau = year_fraction(cap.start_dates, cap.end_dates, cap.day_count)
+    fwd = curve if forward_curve is None else forward_curve
+    return (fwd(cap.start_dates) / fwd(cap.end_dates) - 1.0) / tau
+
+
 # ── Caplet / Floorlet ─────────────────────────────────────────────────
 
 def caplet_price_black76(
@@ -23,6 +82,8 @@ def caplet_price_black76(
     curve: DiscountCurve,
     vol: Float[Array, ""],
     forward_curve: DiscountCurve | None = None,
+    *,
+    forward: Float[Array, ""] | None = None,
 ) -> Float[Array, ""]:
     """Black-76 price for a caplet or floorlet.
 
@@ -39,17 +100,21 @@ def caplet_price_black76(
         vol: Black (lognormal) implied volatility of the forward rate.
         forward_curve: Optional projection curve for the forward rate F.
             Defaults to ``curve`` (single-curve setup).
+        forward: Optional precomputed forward rate (see
+            :func:`caplet_forward`). Supply it when the volatility was read at
+            a specific forward so vol and payoff cannot see different ones;
+            omitted, it is projected off the curves.
 
     Returns:
         Caplet or floorlet price.
     """
     T = year_fraction(curve.reference_date, caplet.fixing_date, caplet.day_count)
     tau = year_fraction(caplet.start_date, caplet.end_date, caplet.day_count)
-    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = fwd(caplet.start_date)
-    df_end = fwd(caplet.end_date)
-    F = (df_start / df_end - 1.0) / tau
+    if forward is None:
+        F = caplet_forward(caplet, curve, forward_curve)
+    else:
+        F = forward
     P = curve(caplet.end_date)
 
     K = caplet.strike
@@ -71,6 +136,8 @@ def caplet_price_bachelier(
     curve: DiscountCurve,
     vol: Float[Array, ""],
     forward_curve: DiscountCurve | None = None,
+    *,
+    forward: Float[Array, ""] | None = None,
 ) -> Float[Array, ""]:
     """Bachelier (normal model) price for a caplet or floorlet.
 
@@ -87,17 +154,19 @@ def caplet_price_bachelier(
         vol: Normal (Bachelier) volatility of the forward rate.
         forward_curve: Optional projection curve for the forward rate F.
             Defaults to ``curve`` (single-curve setup).
+        forward: Optional precomputed forward rate (see
+            :func:`caplet_forward`); omitted, it is projected off the curves.
 
     Returns:
         Caplet or floorlet price.
     """
     T = year_fraction(curve.reference_date, caplet.fixing_date, caplet.day_count)
     tau = year_fraction(caplet.start_date, caplet.end_date, caplet.day_count)
-    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = fwd(caplet.start_date)
-    df_end = fwd(caplet.end_date)
-    F = (df_start / df_end - 1.0) / tau
+    if forward is None:
+        F = caplet_forward(caplet, curve, forward_curve)
+    else:
+        F = forward
     P = curve(caplet.end_date)
 
     K = caplet.strike
@@ -123,6 +192,8 @@ def cap_price_black76(
     curve: DiscountCurve,
     vol: Float[Array, ""],
     forward_curve: DiscountCurve | None = None,
+    *,
+    forwards: Float[Array, " n"] | None = None,
 ) -> Float[Array, ""]:
     """Black-76 price for a cap or floor (strip of caplets/floorlets).
 
@@ -136,17 +207,20 @@ def cap_price_black76(
         vol: Flat Black volatility (scalar) or per-caplet vols (shape n).
         forward_curve: Optional projection curve for the forward rates.
             Defaults to ``curve`` (single-curve setup).
+        forwards: Optional precomputed per-period forward rates (see
+            :func:`cap_forwards`). Supply them when the per-caplet vols were
+            read at those forwards; omitted, they are projected off the curves.
 
     Returns:
         Cap or floor price.
     """
     T = year_fraction(curve.reference_date, cap.fixing_dates, cap.day_count)
     tau = year_fraction(cap.start_dates, cap.end_dates, cap.day_count)
-    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = fwd(cap.start_dates)
-    df_end = fwd(cap.end_dates)
-    F = (df_start / df_end - 1.0) / tau
+    if forwards is None:
+        F = cap_forwards(cap, curve, forward_curve)
+    else:
+        F = forwards
     P = curve(cap.end_dates)
 
     K = cap.strike
@@ -168,6 +242,8 @@ def cap_price_bachelier(
     curve: DiscountCurve,
     vol: Float[Array, ""],
     forward_curve: DiscountCurve | None = None,
+    *,
+    forwards: Float[Array, " n"] | None = None,
 ) -> Float[Array, ""]:
     """Bachelier (normal model) price for a cap or floor.
 
@@ -180,17 +256,19 @@ def cap_price_bachelier(
         vol: Flat normal volatility (scalar) or per-caplet vols (shape n).
         forward_curve: Optional projection curve for the forward rates.
             Defaults to ``curve`` (single-curve setup).
+        forwards: Optional precomputed per-period forward rates (see
+            :func:`cap_forwards`); omitted, they are projected off the curves.
 
     Returns:
         Cap or floor price.
     """
     T = year_fraction(curve.reference_date, cap.fixing_dates, cap.day_count)
     tau = year_fraction(cap.start_dates, cap.end_dates, cap.day_count)
-    fwd = curve if forward_curve is None else forward_curve
 
-    df_start = fwd(cap.start_dates)
-    df_end = fwd(cap.end_dates)
-    F = (df_start / df_end - 1.0) / tau
+    if forwards is None:
+        F = cap_forwards(cap, curve, forward_curve)
+    else:
+        F = forwards
     P = curve(cap.end_dates)
 
     K = cap.strike

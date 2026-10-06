@@ -218,43 +218,55 @@ convention that consults no stored forward at query time; the forward should be
 the exact par rate for the traded schedule, since interpolating a forward is
 strictly worse than computing one.
 
-!!! warning "What VALAX does today: sticky absolute strike, structurally"
+### Declaring the convention
 
-    `SwaptionCube.__call__(strike, expiry, tenor)` is never handed a forward —
-    it reads `self.forward_at(expiry, tenor)`, the grid of forwards frozen at
-    calibration time. Meanwhile the pricer computes $S_x$ and the annuity from
-    the **live** curve. So under a curve move the price's forward moves and the
-    vol's does not: vol-at-absolute-strike is invariant, which *is* sticky
-    strike.
+The convention is a **static field**, so it is a declared choice rather than a
+property of how the code happens to be wired:
 
-    That is a legitimate convention, but today it is the **only** one
-    expressible, and it was arrived at structurally rather than chosen. The
-    consequence is that the SABR backbone contribution to delta is absent, and
-    the moneyness-dependence the cube vol should have on the curve
-    ($K - S_x$) cannot be expressed at all. The same query-time pattern applies
-    to `OptionletVolSurface`.
+```python
+from valax.surfaces import SwaptionCube, SMILE_DYNAMICS, QUOTE_FORMS
 
-### Agreed target design — not yet implemented
+SMILE_DYNAMICS   # ('sticky_strike', 'sticky_moneyness', 'sabr_backbone')
+QUOTE_FORMS      # ('absolute_strike', 'atm_offset')
 
-The decision on record, so the convention stops being accidental:
+cube = SwaptionCube(..., dynamics="sabr_backbone", quote_form="absolute_strike")
+```
 
-- **`dynamics`** — a static field on `SwaptionCube` / `OptionletVolSurface`
-  taking `"sticky_strike"` | `"sticky_moneyness"` | `"sabr_backbone"`,
-  **defaulting to `"sticky_strike"`** so existing numbers are preserved
-  bit-for-bit.
-- **`quote_form`** — `"absolute_strike"` | `"atm_offset"`, recording how the
-  quote was given, validated against `dynamics` for consistency. The two are
-  not independent: the dynamics is a *consequence* of what the quote holds
-  fixed (offsets-to-ATM imply sticky moneyness, absolute strikes imply sticky
-  strike, un-refitted parameters imply the backbone), so a contradictory pair
-  is a configuration error.
-- The forward is **passed in** at query time rather than read from storage;
-  `forwards` is retained but demoted to "the forward this node was fitted at".
+- **`dynamics`** selects the row of the table above, on both `SwaptionCube` and
+  `OptionletVolSurface`. It **defaults to `"sticky_strike"`**, which is what
+  VALAX has always done, so no existing number changes.
+- **`quote_form`** records how the calibrating quote's strike was expressed.
+  `__call__` always takes an *absolute* strike; `quote_form` carries no
+  query-time behaviour of its own.
 
-Two caveats that come with the target design:
+The pair is **validated at construction**, because the dynamics is a
+*consequence* of what the quote holds fixed: an offset-to-ATM quote moves with
+the forward (sticky moneyness), an absolute-strike quote does not (sticky
+strike), and `"sabr_backbone"` holds the *parameters* fixed so it contradicts
+neither.
+
+| `quote_form` | admissible `dynamics` |
+|---|---|
+| `"absolute_strike"` | `"sticky_strike"`, `"sabr_backbone"` |
+| `"atm_offset"` | `"sticky_moneyness"`, `"sabr_backbone"` |
+
+Anything else raises. The live forward is supplied by the pricers at query
+time — `src(strike, expiry[, tenor], forward=F)` — and the two
+forward-dependent conventions **raise rather than silently fall back** if they
+are queried without one. `forwards` is retained on the objects but means
+exactly "the forward this node was fitted at", $F_0$; `forward_at` returns that,
+not the live rate.
+
+The practical consequence, which is worth stating because it is what a risk
+report shows: under the default `"sticky_strike"`, $\partial\sigma/\partial
+\theta_c$ is **exactly zero** and the SABR backbone contributes nothing to
+delta. Under `"sabr_backbone"` it does. Both are asserted in
+`tests/test_surfaces/test_smile_dynamics.py`.
+
+Two caveats come with the non-default conventions:
 
 - **Off-node queries are mixed-order.** At an intermediate (expiry, tenor) the
-  cube bilinearly interpolates $\alpha, \rho, \nu, \beta$ but would receive an
+  cube bilinearly interpolates $\alpha, \rho, \nu, \beta$ but receives an
   *exact* forward. Since $\alpha$ is the volatility of $F^\beta$, interpolating
   it across nodes with differing forwards and then evaluating at an exact
   forward is not the same as interpolating the ATM vols. A second-order effect,
@@ -263,13 +275,132 @@ Two caveats that come with the target design:
 - **`sabr_backbone` has a prerequisite.** It reproduces the calibrated market
   vol at a node only if $F = F_0$ there, which holds only when the cube was
   calibrated with forwards derived from the *same* curve and schedule
-  conventions the pricer uses. Since `calibrate_swaption_cube` currently
-  accepts caller-supplied forwards, that is not guaranteed — so the
-  curve-aware calibration route and a repricing gate must land **before**
-  `sabr_backbone` can be offered as a default. See the
-  [roadmap](../roadmap.md) item for the sequencing and the
-  [audit conformance map](../architecture/aad-audit-conformance.md) for how
-  this scores against requirement V-5.
+  conventions the pricer uses. That is what the curve-aware calibration route
+  below guarantees — and why `sabr_backbone` is never selected implicitly, even
+  when the quote form would admit it. See the
+  [audit conformance map](../architecture/aad-audit-conformance.md) for how this
+  scores against requirement V-5.
+
+## Swaption cube: curve-aware calibration
+
+A swaption cube's at-the-money anchor is the forward **par swap rate**, and the
+premium it is quoted against is the **annuity** — both functions of the curves.
+`calibrate_swaption_cube` takes a caller-supplied `forwards` array, and that is
+precisely where the dual-curve chain breaks: a forward handed in from outside is
+a constant as far as the fit is concerned, so $\partial\theta_v/\partial\theta_c
+= 0$ and no curve risk can ever reach the volatility layer.
+
+`calibrate_swaption_cube_from_curves` closes it. Give it the **schedules** —
+one representative `Swaption` per node — and the curves, and it derives the grid
+axes and the per-node $(S_x, A_d)$ itself, through the same
+`swaption_forward_and_annuity` the pricer uses:
+
+```python
+import jax.numpy as jnp
+from valax.dates.schedule import generate_schedule
+from valax.dates.daycounts import ymd_to_ordinal
+from valax.instruments.rates import Swaption
+from valax.surfaces import calibrate_swaption_cube_from_curves
+
+# One representative swaption per (expiry, tenor) node. Only the schedule and
+# day count are read — the `strike` field is ignored, since a node spans a
+# whole smile.
+def node(expiry_year, tenor):
+    return Swaption(
+        expiry_date=ymd_to_ordinal(expiry_year, 1, 1),
+        fixed_dates=generate_schedule(
+            expiry_year, 1, 1, expiry_year + tenor, 1, 1, frequency=1,
+        ).payment_dates,
+        strike=jnp.array(0.03), notional=jnp.array(1e6), is_payer=True,
+    )
+
+nodes = [[node(2026, 5), node(2026, 10)],      # 1y x {5y, 10y}
+         [node(2027, 5), node(2027, 10)]]      # 2y x {5y, 10y}
+
+offsets = jnp.array([-0.010, -0.005, 0.0, 0.005, 0.010])   # ATM offsets
+vols = ...   # [i][j] array of quoted vols at those offsets
+
+cube = calibrate_swaption_cube_from_curves(
+    nodes,
+    [[offsets] * 2] * 2,
+    vols,
+    ois,                      # discounting
+    sofr3m,                   # projection (omit for single-curve)
+    quote_form="atm_offset",  # strikes are offsets to each node's own forward
+    fixed_beta=jnp.array(0.5),
+)
+
+cube.forwards     # curve-derived F_0 per node, not caller-supplied
+cube.expiries     # year fractions, exactly what the pricer will query at
+cube.dynamics     # 'sticky_moneyness' — implied by the atm_offset quote form
+```
+
+Three things this buys:
+
+- **Quote form is representable.** Pass `quote_form="atm_offset"` and the
+  offsets are converted to absolute strikes per node using that node's derived
+  $F_0$ (spec Q-3). `dynamics` then defaults to the convention that quote form
+  implies, so the pair is consistent by construction.
+- **The grid coordinate is the pricer's coordinate.** Expiries and tenors come
+  from `swaption_node_coordinates`, which computes
+  `year_fraction(reference_date, expiry_date)` and
+  `year_fraction(expiry_date, fixed_dates[-1])` — the very expressions
+  `swaption_price` evaluates. A node therefore reprices *exactly*, rather than
+  a hair off its own grid point.
+- **Curve risk reaches the vols.** `jax.grad` of a fitted parameter with respect
+  to a discount or projection pillar is non-zero, because the forward really is
+  an input to the least squares. It is identically zero on the
+  caller-supplied-forward route — both are asserted in
+  `tests/test_greeks/test_vol_adjoint.py`.
+
+Use `calibrate_swaption_cube_from_graph(..., graph, discount_id, forward_id)` to
+resolve the curves off a bootstrapped
+[`CurveGraph`](curves.md) instead. The original
+`calibrate_swaption_cube` remains as the explicit opt-out for when the forwards
+genuinely are exogenous.
+
+### Premium quotes
+
+When the matrix is quoted in **premium** rather than vol, the conversion is also
+curve-dependent: the premium is quoted against a numeraire, and that numeraire
+is $A_d(\theta_c)$ (physical settlement) or $P_d(0,T^p)\,A_{\text{cash}}(S_x)$
+(cash settlement). `swaption_implied_normal_vol` solves
+
+$$
+R(\sigma_N;\, \theta_c, q)
+  = N \cdot \mathcal{N}(\theta_c)\,
+    \mathrm{Bachelier}\!\left(S_x(\theta_c), K, \sigma_N, T\right) - q = 0
+$$
+
+with a scalar `optimistix.Newton`, implicitly differentiated — so the *implied
+vol* carries curve risk, which it cannot if the numeraire is frozen:
+
+```python
+from valax.surfaces import swaption_implied_normal_vol
+
+sigma_n = swaption_implied_normal_vol(
+    swaption, premium, ois, sofr3m,
+    settlement="physical",     # or "cash"
+)
+```
+
+The two settlement conventions are not interchangeable and imply different
+vols from the same premium. The cash branch is the street-standard
+*approximation* — the flat-yield annuity is evaluated at the forward rather than
+inside the expectation, so the cash-settled convexity correction is not applied;
+that deviation is recorded in the
+[audit conformance map](../architecture/aad-audit-conformance.md). Under
+`eqx.filter_jit` the cash branch needs an explicit `freq=`, since the fixed-leg
+frequency is a convention inferred from the schedule and is never guessed from a
+tracer.
+
+### Vega in quote space
+
+Once a cube is fitted, the vega a desk hedges with is the sensitivity to the
+**quoted vols**, not to $(\alpha, \rho, \nu)$. That is one more application of
+the same implicit-function-theorem step the curve layer uses; the mechanism and
+the API live in
+[Greeks § Quote-space (hedge-space) risk](../api/greeks.md#quote-space-hedge-space-risk).
 
 ## Common Patterns
 

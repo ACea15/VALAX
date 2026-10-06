@@ -41,7 +41,9 @@ from jaxtyping import Float, Int
 from jax import Array
 
 # A *vol source* is a scalar/array vol or a callable exposing ``is_normal``
-# (e.g. a SwaptionCube / OptionletVolSurface / ConstantVol).
+# (e.g. a SwaptionCube / OptionletVolSurface / ConstantVol), queried as
+# ``src(strike, expiry[, tenor], forward=F)``; see the protocol description in
+# :mod:`valax.pricing.analytic.rates_smile`.
 VolSource = Float[Array, ""] | Callable[..., Float[Array, ""]]
 
 from valax.instruments.rates import (
@@ -57,7 +59,8 @@ from valax.dates.daycounts import year_fraction
 # Reuse the fixed-leg annuity and dual-curve float-leg helpers from the
 # swaptions module rather than duplicating them (same reasoning as
 # `floating.py`).
-from valax.pricing.analytic.swaptions import _annuity, _dual_curve_float_pv
+from valax.pricing.analytic.swaptions import annuity as _annuity
+from valax.pricing.analytic.swaptions import _dual_curve_float_pv
 from valax.pricing.analytic.cms_convexity import cms_convexity_adjusted_rates
 
 
@@ -529,10 +532,15 @@ def cms_cap_floor_price_black76(
         F = cms_rates
 
     # Resolve the per-period vol: a smile source is queried at the option
-    # strike; a bare scalar/array is used directly.
+    # strike, anchored to that period's *unadjusted* forward swap rate --
+    # the martingale forward the swaption smile is calibrated against, not
+    # the convexity-adjusted payment-measure expectation used in the payoff.
+    # A bare scalar/array is used directly.
     if callable(vol) and hasattr(vol, "is_normal"):
         tenor_f = jnp.asarray(float(cap.cms_tenor))
-        sigma = jax.vmap(lambda t: vol(K, t, tenor_f))(T_safe)
+        sigma = jax.vmap(
+            lambda t, f: vol(K, t, tenor_f, forward=f)
+        )(T_safe, cms_rates)
         is_normal = vol.is_normal
     else:
         sigma = jnp.asarray(vol)
@@ -653,8 +661,8 @@ def range_accrual_price_black76(
     # different vols); a bare scalar/array is used for both barriers,
     # reproducing the flat-vol digital replication bit-for-bit.
     if callable(vol) and hasattr(vol, "is_normal"):
-        vol_L = jax.vmap(lambda t: vol(L, t))(T_safe)
-        vol_U = jax.vmap(lambda t: vol(U, t))(T_safe)
+        vol_L = jax.vmap(lambda t, f: vol(L, t, forward=f))(T_safe, F)
+        vol_U = jax.vmap(lambda t, f: vol(U, t, forward=f))(T_safe, F)
     else:
         vol_L = jnp.asarray(vol)
         vol_U = jnp.asarray(vol)

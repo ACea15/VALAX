@@ -13,6 +13,13 @@ normal Bachelier); the normal branch honours a displacement ``shift`` so zero an
 negative rates price finitely. ``SABRVolSurface`` is left untouched (it carries a
 ``total_variance`` method for equity Dupire/SLV consumers and must not be
 repurposed).
+
+Static ``dynamics`` / ``quote_form`` fields record *what happens to the smile
+when the curve moves* -- whether the stored (fitted) forward or the live one
+enters the Hagan evaluation. See :mod:`valax.surfaces.dynamics` for the
+mechanics and the
+[vol-surfaces guide](../guide/vol-surfaces.md#smile-dynamics-what-moves-when-the-curve-moves)
+for the derivation and the chosen default.
 """
 
 import functools
@@ -25,6 +32,7 @@ from jax import Array
 from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_normal_implied_vol
 from valax.calibration.sabr import calibrate_sabr
+from valax.surfaces.dynamics import resolve_smile_query, validate_smile_dynamics
 
 
 class OptionletVolSurface(eqx.Module):
@@ -32,7 +40,9 @@ class OptionletVolSurface(eqx.Module):
 
     Attributes:
         expiries: Sorted optionlet-expiry grid (year fractions).
-        forwards: Forward rate for the optionlet at each expiry.
+        forwards: The forward rate each optionlet was **fitted** at
+            (:math:`F_0`) -- not the live forward, which pricers supply at
+            query time.
         alphas: SABR alpha at each expiry.
         betas: SABR beta at each expiry.
         rhos: SABR rho at each expiry.
@@ -42,6 +52,18 @@ class OptionletVolSurface(eqx.Module):
         is_normal: If True, ``__call__`` returns normal (Bachelier) vol via
             :func:`sabr_normal_implied_vol`; otherwise lognormal (Black-76) vol
             via :func:`sabr_implied_vol`.
+        dynamics: Smile-dynamics convention -- which forward the Hagan
+            evaluation uses when the curve has moved away from the fitted
+            forward. One of
+            :data:`~valax.surfaces.dynamics.SMILE_DYNAMICS`, defaulting to
+            ``"sticky_strike"`` (the convention VALAX has always applied, so
+            existing prices are preserved exactly). Static.
+        quote_form: How the calibrating quote's strike was expressed, one of
+            :data:`~valax.surfaces.dynamics.QUOTE_FORMS`. It carries no
+            query-time behaviour of its own -- ``__call__`` always takes an
+            absolute strike -- but it is validated against ``dynamics``,
+            because the dynamics is a consequence of what the quote holds
+            fixed. Static.
     """
 
     expiries: Float[Array, " n_expiries"]
@@ -52,6 +74,19 @@ class OptionletVolSurface(eqx.Module):
     nus: Float[Array, " n_expiries"]
     shift: Float[Array, ""] = eqx.field(default_factory=lambda: jnp.array(0.0))
     is_normal: bool = eqx.field(static=True, default=False)
+    dynamics: str = eqx.field(static=True, default="sticky_strike")
+    quote_form: str = eqx.field(static=True, default="absolute_strike")
+
+    def __check_init__(self) -> None:
+        """Validate the smile-dynamics configuration.
+
+        Raises:
+            ValueError: If ``dynamics`` or ``quote_form`` is unrecognised, or
+                the pair is contradictory.
+        """
+        validate_smile_dynamics(
+            "OptionletVolSurface", self.dynamics, self.quote_form
+        )
 
     def model_at(self, expiry: Float[Array, ""]) -> SABRModel:
         """Interpolated SABR model at ``expiry`` (linear in each parameter)."""
@@ -63,32 +98,71 @@ class OptionletVolSurface(eqx.Module):
         )
 
     def forward_at(self, expiry: Float[Array, ""]) -> Float[Array, ""]:
-        """Interpolated forward rate at ``expiry``."""
+        """Interpolated *fitted* forward rate at ``expiry``.
+
+        This is :math:`F_0` -- the forward each optionlet was calibrated at --
+        not the live forward the curve implies now, which curve-aware pricers
+        supply via ``__call__(..., forward=...)``.
+
+        Args:
+            expiry: Optionlet expiry (year fraction).
+
+        Returns:
+            Linearly interpolated fitted forward.
+        """
         return jnp.interp(expiry, self.expiries, self.forwards)
 
     def __call__(
         self,
         strike: Float[Array, ""],
         expiry: Float[Array, ""],
+        *,
+        forward: Float[Array, ""] | None = None,
     ) -> Float[Array, ""]:
         """Implied volatility at ``(strike, expiry)``.
 
-        Linearly interpolates the SABR parameters and forward to ``expiry``,
-        then evaluates the Hagan expansion at ``strike`` in the surface's
-        quoting convention.
+        Linearly interpolates the SABR parameters -- and the fitted forward
+        :math:`F_0` -- to ``expiry``, applies the surface's ``dynamics``
+        convention to pick the strike and forward the expansion is evaluated
+        at, then evaluates Hagan in the surface's quoting convention.
+
+        Under the default ``dynamics="sticky_strike"`` the live ``forward`` is
+        deliberately not consulted. The other two conventions require it; see
+        the [smile-dynamics section](../guide/vol-surfaces.md#smile-dynamics-what-moves-when-the-curve-moves)
+        of the vol-surfaces guide, which owns the derivation and the default.
+        The off-node mixed-order caveat documented there applies here too, with
+        linear rather than bilinear parameter interpolation.
 
         Args:
-            strike: Optionlet strike (rate).
+            strike: Optionlet strike (absolute rate), whatever the
+                ``quote_form`` the surface was fitted from.
             expiry: Optionlet expiry (year fraction).
+            forward: Optional live period forward computed off the curves,
+                supplied by the vol-source protocol of
+                :mod:`valax.pricing.analytic.rates_smile`. Required by
+                ``dynamics`` in ``{"sticky_moneyness", "sabr_backbone"}``;
+                ignored by ``"sticky_strike"``.
 
         Returns:
             Implied volatility (normal or lognormal per ``is_normal``).
+
+        Raises:
+            ValueError: If ``dynamics`` needs the live forward and none was
+                supplied.
         """
         model = self.model_at(expiry)
-        forward = self.forward_at(expiry)
+        strike_eff, anchor = resolve_smile_query(
+            self.dynamics,
+            strike,
+            self.forward_at(expiry),
+            forward,
+            owner="OptionletVolSurface",
+        )
         if self.is_normal:
-            return sabr_normal_implied_vol(model, forward, strike, expiry, self.shift)
-        return sabr_implied_vol(model, forward, strike, expiry)
+            return sabr_normal_implied_vol(
+                model, anchor, strike_eff, expiry, self.shift
+            )
+        return sabr_implied_vol(model, anchor, strike_eff, expiry)
 
 
 def build_sabr_caplet_surface(
@@ -101,6 +175,8 @@ def build_sabr_caplet_surface(
     fixed_beta: Float[Array, ""] | None = None,
     solver: str = "levenberg_marquardt",
     max_steps: int = 256,
+    dynamics: str = "sticky_strike",
+    quote_form: str = "absolute_strike",
 ) -> OptionletVolSurface:
     """Strip a caplet vol surface by SABR-calibrating each expiry slice.
 
@@ -113,7 +189,8 @@ def build_sabr_caplet_surface(
         strikes_per_expiry: List of strike arrays, one per expiry.
         market_vols_per_expiry: List of observed vol arrays, one per expiry, in
             the ``is_normal`` convention.
-        forwards: Forward rate at each expiry.
+        forwards: Forward rate at each expiry; recorded on the surface as the
+            forward each slice was fitted at.
         expiries: Expiry grid (year fractions).
         is_normal: Calibrate against normal (Bachelier) quotes if True, else
             lognormal (Black-76). Must match the convention of the input quotes.
@@ -122,9 +199,17 @@ def build_sabr_caplet_surface(
         fixed_beta: If provided, beta is fixed across all slices.
         solver: Per-slice optimizer (see :func:`calibrate_sabr`).
         max_steps: Max iterations per slice.
+        dynamics: Smile-dynamics convention recorded on the returned surface;
+            see :class:`OptionletVolSurface`. Defaults to ``"sticky_strike"``.
+        quote_form: Quote form recorded on the returned surface. Defaults to
+            ``"absolute_strike"``, matching the absolute
+            ``strikes_per_expiry`` this routine fits.
 
     Returns:
         A fitted :class:`OptionletVolSurface`.
+
+    Raises:
+        ValueError: If ``dynamics`` and ``quote_form`` are inconsistent.
     """
     if is_normal:
         vol_fn = functools.partial(sabr_normal_implied_vol, shift=jnp.asarray(shift))
@@ -158,4 +243,6 @@ def build_sabr_caplet_surface(
         nus=jnp.stack(nus),
         shift=jnp.asarray(shift),
         is_normal=is_normal,
+        dynamics=dynamics,
+        quote_form=quote_form,
     )

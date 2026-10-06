@@ -7,12 +7,34 @@ satisfied by :class:`~valax.surfaces.swaption_cube.SwaptionCube`,
 :class:`~valax.surfaces.optionlet_surface.OptionletVolSurface`, and
 :class:`~valax.surfaces.constant.ConstantVol` (a bare scalar is auto-wrapped).
 
-Each pricer computes the instrument's coordinate (time-to-expiry ``T`` and, for
-swaptions, the swap ``tenor``), reads the vol from the source there, and routes
-to the Black-76 or Bachelier core per the source's convention -- reusing the
-``DiscountCurve``-based pricers for the forward / annuity / discounting mechanics.
-So passing a flat scalar reproduces the existing pricers bit-for-bit, while
-passing a smile object makes the price strike/expiry(/tenor)-aware.
+The vol-source protocol
+-----------------------
+A vol source is called as::
+
+    src(strike, expiry[, tenor], forward=F)
+
+where ``F`` is the **live forward computed off the curves** for this very
+instrument -- the forward par swap rate for a swaption, the projected period
+forward for an optionlet. ``forward`` is keyword-only and every source must
+accept it; flat sources ignore it.
+
+Passing the forward in is what makes a smile *curve-aware*: a vol surface's
+smile is a function of moneyness, so which forward it is anchored to decides
+whether a curve move reprices the smile or merely slides along it. The surface
+objects own that policy via their ``dynamics`` field -- see the
+[smile-dynamics section](../guide/vol-surfaces.md#smile-dynamics-what-moves-when-the-curve-moves)
+of the vol-surfaces guide, which is the single source of truth for the three
+conventions and the chosen default. This module's job is only to *supply* the
+forward, not to choose what the surface does with it.
+
+Each pricer therefore computes the instrument's coordinate (time-to-expiry
+``T``, the swap ``tenor`` where applicable) **and its forward** exactly once,
+reads the vol from the source there, and routes to the Black-76 or Bachelier
+core per the source's convention -- handing the same forward back to the payoff
+so vol and price can never see different ones. Annuity / discounting mechanics
+are reused from the ``DiscountCurve``-based pricers. So passing a flat scalar
+reproduces the existing pricers bit-for-bit, while passing a smile object makes
+the price strike/expiry(/tenor)-aware.
 
 This module sits in the *pricing* layer and deliberately does **not** import
 the surfaces package: a bare scalar is wrapped in the self-contained
@@ -34,10 +56,13 @@ from valax.curves.discount import DiscountCurve
 from valax.curves.graph import CurveGraph
 from valax.dates.daycounts import year_fraction
 from valax.pricing.analytic.swaptions import (
-    swaption_price_black76,
-    swaption_price_bachelier,
+    swaption_forward_and_annuity,
+    swaption_black76_from_forward,
+    swaption_bachelier_from_forward,
 )
 from valax.pricing.analytic.caplets import (
+    caplet_forward,
+    cap_forwards,
     caplet_price_black76,
     caplet_price_bachelier,
     cap_price_black76,
@@ -62,8 +87,21 @@ class _FlatVol(eqx.Module):
     vol: Float[Array, ""]
     is_normal: bool = eqx.field(static=True, default=False)
 
-    def __call__(self, *coords: Float[Array, ""]) -> Float[Array, ""]:
-        """Return the constant vol, ignoring any (strike, expiry, tenor) coords."""
+    def __call__(
+        self,
+        *coords: Float[Array, ""],
+        forward: Float[Array, ""] | None = None,
+    ) -> Float[Array, ""]:
+        """Return the constant vol.
+
+        Args:
+            *coords: Ignored ``(strike, expiry[, tenor])`` coordinates.
+            forward: Ignored live forward; accepted so a flat vol stays a
+                drop-in for a curve-aware smile.
+
+        Returns:
+            The constant volatility.
+        """
         return jnp.asarray(self.vol)
 
 
@@ -91,9 +129,10 @@ def swaption_price(
 ) -> Float[Array, ""]:
     """Curve-aware European swaption price from a vol source.
 
-    Reads the implied vol at ``(strike, expiry, tenor)`` -- where ``tenor`` is
-    the underlying swap length -- and prices via Black-76 or Bachelier per the
-    source's ``is_normal`` flag.
+    Computes the forward par swap rate and annuity off the curves once, reads
+    the implied vol at ``(strike, expiry, tenor, forward=S)`` -- where ``tenor``
+    is the underlying swap length -- and prices via Black-76 or Bachelier per
+    the source's ``is_normal`` flag, reusing that same ``S`` and annuity.
 
     Args:
         swaption: Swaption contract.
@@ -111,10 +150,11 @@ def swaption_price(
     tenor = year_fraction(
         swaption.expiry_date, swaption.fixed_dates[-1], swaption.day_count
     )
-    v = src(swaption.strike, T, tenor)
+    S, ann = swaption_forward_and_annuity(swaption, curve, forward_curve)
+    v = src(swaption.strike, T, tenor, forward=S)
     if src.is_normal:
-        return swaption_price_bachelier(swaption, curve, v, forward_curve)
-    return swaption_price_black76(swaption, curve, v, forward_curve)
+        return swaption_bachelier_from_forward(swaption, S, ann, v, T)
+    return swaption_black76_from_forward(swaption, S, ann, v, T)
 
 
 # ── Caplets / floorlets (optionlet surface) ───────────────────────────
@@ -127,8 +167,9 @@ def caplet_price(
 ) -> Float[Array, ""]:
     """Curve-aware caplet/floorlet price from a vol source.
 
-    Reads the implied vol at ``(strike, expiry)`` and prices via Black-76 or
-    Bachelier per the source's ``is_normal`` flag.
+    Projects the period forward off the curves once, reads the implied vol at
+    ``(strike, expiry, forward=F)``, and prices via Black-76 or Bachelier per
+    the source's ``is_normal`` flag with that same ``F``.
 
     Args:
         caplet: Caplet/floorlet contract.
@@ -143,10 +184,13 @@ def caplet_price(
     """
     src = _as_vol_source(vol)
     T = year_fraction(curve.reference_date, caplet.fixing_date, caplet.day_count)
-    v = src(caplet.strike, T)
+    F = caplet_forward(caplet, curve, forward_curve)
+    v = src(caplet.strike, T, forward=F)
     if src.is_normal:
-        return caplet_price_bachelier(caplet, curve, v, forward_curve)
-    return caplet_price_black76(caplet, curve, v, forward_curve)
+        return caplet_price_bachelier(
+            caplet, curve, v, forward_curve, forward=F
+        )
+    return caplet_price_black76(caplet, curve, v, forward_curve, forward=F)
 
 
 def cap_price(
@@ -158,9 +202,10 @@ def cap_price(
     """Curve-aware cap/floor price as a smile-aware strip of optionlets.
 
     Each constituent optionlet is priced at the vol read from the source at its
-    own ``(strike, expiry_i)`` -- i.e. the caplet-stripping the per-expiry smile
-    supplies -- then summed via the ``DiscountCurve`` cap pricer (which accepts a
-    per-caplet vol vector).
+    own ``(strike, expiry_i, forward=F_i)`` -- i.e. the caplet-stripping the
+    per-expiry smile supplies, anchored to that period's own projected forward
+    -- then summed via the ``DiscountCurve`` cap pricer (which accepts a
+    per-caplet vol vector and the same forward vector).
 
     Args:
         cap: Cap/floor contract.
@@ -174,10 +219,11 @@ def cap_price(
     """
     src = _as_vol_source(vol)
     T = year_fraction(curve.reference_date, cap.fixing_dates, cap.day_count)
-    vols = jax.vmap(lambda t: src(cap.strike, t))(T)
+    F = cap_forwards(cap, curve, forward_curve)
+    vols = jax.vmap(lambda t, f: src(cap.strike, t, forward=f))(T, F)
     if src.is_normal:
-        return cap_price_bachelier(cap, curve, vols, forward_curve)
-    return cap_price_black76(cap, curve, vols, forward_curve)
+        return cap_price_bachelier(cap, curve, vols, forward_curve, forwards=F)
+    return cap_price_black76(cap, curve, vols, forward_curve, forwards=F)
 
 
 # ── CurveGraph wrappers ───────────────────────────────────────────────
