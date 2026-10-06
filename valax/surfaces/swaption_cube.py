@@ -265,7 +265,7 @@ def calibrate_swaption_cube(
     data. The ``is_normal`` flag must match the convention of the input quotes:
     fitting normal-quoted vols with the lognormal formula (or vice versa) is a
     model/convention mismatch that will not converge -- see
-    ``examples/pitfalls/01_normal_sabr_calibration_divergence.py``.
+    ``examples/pitfalls/01_sabr_vol_convention_mismatch.py``.
 
     Args:
         strikes_per_node: Nested list ``[i][j]`` of strike arrays for expiry

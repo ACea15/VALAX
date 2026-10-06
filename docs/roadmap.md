@@ -531,9 +531,17 @@ the forwards genuinely are exogenous.
   weighted least squares — square by construction, so the implicit function
   theorem applies to an over-determined fit. Returns vega to the quoted vols
   *and* `forward_bar`, the `dR_v/dθ_c` term. Gate:
-  `tests/test_greeks/test_vol_adjoint.py` (quote vegas vs full-rebuild central
-  FD at two bump sizes; the forward coupling cross-validated against
-  `optimistix`'s own `ImplicitAdjoint` to 1e-9).
+  `tests/test_greeks/test_vol_adjoint.py` — both blocks against full-rebuild
+  central finite differences at two bump sizes, under both quote forms.
+
+    Building this gate is what uncovered a long-standing derivative bug in
+    `sabr_implied_vol`: Hagan's `z/x(z)` was pinned to the constant `1.0` at the
+    money, which has the right value and zero slope, so
+    `∂σ/∂F` was wrong by 18% (lognormal) and identically zero (normal) at ATM.
+    Prices were never affected. Written up as
+    [Numerical Pitfalls entry 5](architecture/numerical-pitfalls.md#5-a-value-correct-guard-with-no-derivative-jnpwhere-on-a-removable-singularity),
+    reproduced in `examples/pitfalls/02_where_guard_kills_the_derivative.py`,
+    regression-guarded by `tests/test_models/test_sabr.py::TestATMDerivatives`.
 
 #### 4. FX / credit / inflation carry no selectors
 

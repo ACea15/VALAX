@@ -59,8 +59,8 @@ OFFSETS = jnp.array([-0.010, -0.005, 0.0, 0.005, 0.010])
 #: Bump sizes for the full-rebuild finite differences, in vol units.
 VOL_BUMPS = (1e-4, 1e-3)
 
-#: Bump sizes for the forward finite difference, in rate units (1 bp, 10 bp).
-FWD_BUMPS = (1e-4, 1e-3)
+#: Bump sizes for the forward finite difference, in rate units (0.1 bp, 1 bp).
+FWD_BUMPS = (1e-5, 1e-4)
 
 #: Agreement tolerance against the full-rebuild reference, relative to the
 #: largest component of the finite-difference vector.
@@ -332,45 +332,51 @@ class TestVolQuoteVegasAgainstFiniteDifferences:
 class TestCurveContributionThroughTheFit:
     r"""``forward_bar`` is the ``dR_v/dtheta_c`` coupling (spec A-3).
 
-    The reference differs by quote form, for a reason worth stating.
+    Gated against a **full rebuild** of the smile fit under both quote forms:
+    recalibrate with the forward bumped, reprice, difference. Under
+    ``atm_offset`` the strike grid moves with the forward
+    (:math:`K_k = F_0 + \delta_k`); under ``absolute_strike`` it does not, and
+    the residual rebuilds the grid accordingly, so both paths are exercised.
 
-    * **``atm_offset``** — moving :math:`F_0` moves the strike grid with it
-      (:math:`K_k = F_0 + \delta_k`), so the quotes stay exactly on a SABR
-      smile, the optimum stays a sharp zero-residual point, and
-      :math:`d\theta_v/dF_0` is well determined. A full-rebuild finite
-      difference is a valid reference and is used.
-    * **``absolute_strike``** — moving :math:`F_0` with the strikes pinned
-      takes the quotes *off* the SABR manifold by :math:`O(h)`, and a forward
-      shift is very nearly absorbable by :math:`(\alpha, \rho, \nu)`. The
-      least-squares problem therefore has a near-flat valley: the Hessian's
-      condition number is of order :math:`10^6` on the fixture below. A
-      Levenberg-Marquardt run terminates somewhere along that valley, smoothly
-      but path-dependently in its ``forward``-dependent initial guess, so a
-      finite difference measures ``d(solver stopping point)/dF`` rather than
-      ``d(optimum)/dF``. It is stable in ``h`` and still wrong, which is the
-      worst kind of reference.
+    .. note::
 
-      The gate there is an **independent implicit-adjoint implementation**:
-      ``jax.grad`` straight through :func:`calibrate_sabr`, i.e. optimistix's
-      own ``ImplicitAdjoint`` on the Levenberg-Marquardt problem in its
-      unconstrained parametrisation. Two different formulations of the theorem
-      agreeing to machine precision is a stronger statement than agreeing with
-      a degenerate difference quotient.
+        An earlier version of this suite gated the ``absolute_strike`` case
+        against ``jax.grad`` through :func:`calibrate_sabr` -- optimistix's own
+        ``ImplicitAdjoint`` -- on the grounds that the finite difference was
+        unreliable because the least-squares Hessian is ~1e6-conditioned here.
+        That was wrong twice over. The finite difference was *correct*, and the
+        two "independent" adjoints agreed only because they **share the same
+        primitive**: ``sabr_implied_vol`` pinned Hagan's ``z / x(z)`` to a
+        constant at the money, which has the right value and zero derivative,
+        so both routes inherited a corrupted
+        :math:`\partial\sigma/\partial F`. Two implementations agreeing is
+        worth nothing when they share the thing that is broken -- the lesson
+        already on record as entry 4 of ``docs/architecture/numerical-pitfalls.md``.
+
+        The primitive is fixed (regression:
+        ``tests/test_models/test_sabr.py::TestATMDerivatives``), the finite
+        difference now agrees with the adjoint to ~1e-6, and the conditioning
+        was a red herring: it is still ~1e6 and the FD is still fine. The
+        optimistix comparison is retained below, honestly labelled as a
+        consistency check rather than an independent one.
     """
 
     @pytest.mark.parametrize("h", FWD_BUMPS)
-    def test_atm_offset_forward_sensitivity_matches_a_full_rebuild(self, h):
+    @pytest.mark.parametrize("quote_form", ["absolute_strike", "atm_offset"])
+    def test_forward_sensitivity_matches_a_full_rebuild(self, h, quote_form):
         forward, expiry = jnp.array(0.03), jnp.array(1.0)
         strikes, vols = _slice_quotes(forward, expiry)
         query = strikes[1]
 
         def vol_at_query(f):
-            m = _fit(f + OFFSETS, vols, f, expiry)
+            k = f + OFFSETS if quote_form == "atm_offset" else strikes
+            m = _fit(k, vols, f, expiry)
             return sabr_implied_vol(m, forward, query, expiry)
 
         model = _fit(strikes, vols, forward, expiry)
+        grid = OFFSETS if quote_form == "atm_offset" else strikes
         level = sabr_slice_level(
-            model, OFFSETS, vols, forward, expiry, quote_form="atm_offset"
+            model, grid, vols, forward, expiry, quote_form=quote_form
         )
         theta_bar = jax.grad(
             lambda th: sabr_implied_vol(
@@ -384,10 +390,10 @@ class TestCurveContributionThroughTheFit:
         _assert_matches_fd(aad, jnp.asarray([fd]))
 
     @pytest.mark.parametrize("quote_form", ["absolute_strike", "atm_offset"])
-    def test_forward_jacobian_matches_optimistix_implicit_adjoint(
+    def test_forward_jacobian_agrees_with_optimistix_implicit_adjoint(
         self, quote_form
     ):
-        """Two independent implicit-adjoint formulations, same answer."""
+        """Consistency check -- *not* independent; see the class note."""
         forward, expiry = jnp.array(0.03), jnp.array(1.0)
         strikes, vols = _slice_quotes(forward, expiry)
         model = _fit(strikes, vols, forward, expiry)
@@ -408,8 +414,8 @@ class TestCurveContributionThroughTheFit:
         ])
         _assert_matches_fd(ours, reference, rtol=1e-9)
 
-    def test_vol_quote_jacobian_matches_optimistix_implicit_adjoint(self):
-        """The same cross-check on the quote block of the inputs."""
+    def test_vol_quote_jacobian_agrees_with_optimistix_implicit_adjoint(self):
+        """The same consistency check on the quote block of the inputs."""
         forward, expiry = jnp.array(0.03), jnp.array(1.0)
         strikes, vols = _slice_quotes(forward, expiry)
         model = _fit(strikes, vols, forward, expiry)
@@ -428,8 +434,14 @@ class TestCurveContributionThroughTheFit:
         ])
         _assert_matches_fd(ours, reference, rtol=1e-9)
 
-    def test_the_fixed_strike_problem_really_is_near_degenerate(self):
-        """Records the reason the finite difference is not used above."""
+    def test_ill_conditioning_does_not_invalidate_the_finite_difference(self):
+        """The conditioning is real; it was never the reason for a mismatch.
+
+        Recorded so the earlier misdiagnosis is not re-derived: the smile
+        Hessian is ~1e6-conditioned *and* the full-rebuild FD above agrees to
+        ~1e-6. High condition number is a reason to be careful, not a licence
+        to dismiss a disagreeing reference.
+        """
         forward, expiry = jnp.array(0.03), jnp.array(1.0)
         strikes, vols = _slice_quotes(forward, expiry)
         model = _fit(strikes, vols, forward, expiry)

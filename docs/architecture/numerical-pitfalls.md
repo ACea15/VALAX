@@ -21,6 +21,22 @@ signals → root cause → fix → the generalisable lesson.
 | [2](#2-a-passing-test-at-the-default-setting-is-not-evidence-time-reversed-boundary-sampling) | Backward steppers sampled boundaries at the mirrored time level | Sweep the numerical knobs; a default can hide an error by two orders of magnitude |
 | [3](#3-degenerate-fixtures-hide-first-order-errors-midpoint-sampling-of-a-kinked-curve) | Midpoint-sampled `alpha(t)` stalled Hull-White's convergence | A flat-curve fixture is degenerate — it can make a first-order term vanish identically |
 | [4](#4-measure-the-convergence-order-not-the-error-cashflow-date-snapping) | Coupon-date snapping swamped a second-order scheme | Small absolute error ≠ correct; and agreeing with an engine that shares your approximation is not validation |
+| [5](#5-a-value-correct-guard-with-no-derivative-jnpwhere-on-a-removable-singularity) | `jnp.where` pinned Hagan's `z/x(z)` to a constant at the money | A guard can be exact in value and empty in derivative; and two adjoints agreeing proves nothing if they share the broken primitive |
+
+## Runnable reproductions
+
+This page is the prose register. Several of these failures also live as
+**self-contained, runnable scripts** you can open and perturb — flip a solver,
+tighten a tolerance, re-break the fix — in
+[`examples/pitfalls/`](https://github.com/ACea15/VALAX/tree/main/examples/pitfalls).
+Each script carries a SYMPTOM / ROOT CAUSE / KNOBS header and a **WAY OUT**
+section, and is wrapped so it runs end-to-end even where the underlying call
+diverges: the point is to *observe* the failure, not to avoid it.
+
+| Script | Register entry |
+|---|---|
+| [`01_sabr_vol_convention_mismatch.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/01_sabr_vol_convention_mismatch.py) | — (calibration-convention mismatch; no PDE counterpart here) |
+| [`02_where_guard_kills_the_derivative.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/02_where_guard_kills_the_derivative.py) | [entry 5](#5-a-value-correct-guard-with-no-derivative-jnpwhere-on-a-removable-singularity) |
 
 ---
 
@@ -409,3 +425,144 @@ Corollaries:
   Wherever a model has closed-form structure available, use it for the
   *contractual* details and reserve the mesh for the genuinely unknown part —
   here, the continuation value.
+
+---
+
+## 5. A value-correct guard with no derivative: `jnp.where` on a removable singularity
+
+**Context.** Hagan's SABR implied-vol expansions
+(`valax/pricing/analytic/sabr.py`). Both the lognormal and normal forms contain
+the ratio
+
+$$
+\frac{z}{x(z)}, \qquad
+x(z) = \log\frac{\sqrt{1 - 2\rho z + z^2} + z - \rho}{1 - \rho},
+\qquad z \propto \log(F/K),
+$$
+
+which is $0/0$ at the money. It was guarded with the pattern every JAX codebase
+reaches for:
+
+```python
+is_small = jnp.abs(z) < 1e-7
+safe_z = jnp.where(is_small, 1.0, z)
+safe_x = jnp.where(is_small, 1.0, x_z)
+z_over_x = jnp.where(is_small, 1.0, safe_z / safe_x)   # limit is 1
+```
+
+Found while building the volatility layer's adjoint — not by a failing test.
+
+### Symptom
+
+$\partial\sigma/\partial F$ at the at-the-money strike was wrong by **18%** in
+the lognormal branch (AD $-10.910$ against a true $-9.222$) and **identically
+zero** in the normal branch (AD $0.000$ against a true $0.051$). Every *price*
+was correct to machine precision, at every strike, in both conventions.
+
+### The misleading signals (what it was *not*)
+
+This one produced three false exonerations in a row, and the order matters.
+
+1. **A full-rebuild finite difference disagreed, and was dismissed.** The FD was
+   stable across four decades of $h$ — the textbook evidence that it has
+   converged — and *that stability was read as the FD being suspicious* rather
+   than authoritative, because two adjoints disagreed with it.
+2. **A second, "independent" adjoint agreed with the first, bit-for-bit.**
+   `jax.grad` straight through `calibrate_sabr`, i.e. optimistix's own
+   `ImplicitAdjoint` on the Levenberg-Marquardt problem in its *unconstrained*
+   parametrisation — different code, different variables, different formulation
+   of the implicit function theorem. It shared `sabr_implied_vol` underneath, so
+   it shared the defect. Two votes that were really one.
+3. **The least-squares Hessian was genuinely ill-conditioned** ($\kappa \approx
+   2\times 10^6$), which supplied a *plausible mechanism* for the FD to be
+   untrustworthy: a flat valley, a solver stopping short of the optimum, a
+   difference quotient measuring the stopping point rather than the minimum.
+   The mechanism was real in general and false here — Newton on the first-order
+   condition to $10^{-14}$ reproduced the FD exactly. A believable story for why
+   the inconvenient evidence is wrong is the most expensive kind of misleading
+   signal.
+
+### Root cause
+
+A constant has zero derivative. `jnp.where(is_small, 1.0, ...)` returns the
+right *value* at $z = 0$ and propagates **nothing**, so AD discarded the entire
+$z/x$ contribution. The true limiting slope is
+$\mathrm{d}(z/x)/\mathrm{d}z \to -\rho/2 \neq 0$.
+
+Why only $\partial\sigma/\partial F$, and only at the money: $z$ carries a
+factor $\log(F/K)$, which vanishes at $F = K$. So every *parameter* derivative
+of $z$ (in $\alpha$, $\rho$, $\nu$) is multiplied by zero and genuinely
+vanishes — those derivatives were always correct. $\partial z/\partial F$ is the
+one that survives, because $\partial \log(F/K)/\partial F = 1/F$. One entry of
+one row of the Jacobian, at one strike.
+
+### The fix
+
+Hand over to the **series**, not to a constant, so both branches are smooth
+functions that agree to $O(z^3)$ *and* carry the right slope:
+
+$$
+\frac{z}{x(z)} = 1 - \frac{\rho}{2} z
+  + \left(\frac{1}{6} - \frac{\rho^2}{4}\right) z^2 + O(z^3).
+$$
+
+Extracted as `_z_over_x`, shared by both expansions. The outer double-`where`
+is retained — that part was doing real work, keeping NaN gradients from leaking
+out of the inactive branch.
+
+The crossover moved from `1e-7` to `_ATM_Z_TOL = 1e-4`, chosen by balancing the
+two error sources rather than by picking a small-looking number: series
+truncation grows like $z^3$, the closed form's cancellation like $\epsilon/z$,
+and $z^3 \sim \epsilon/z$ gives $z \sim \epsilon^{1/4} \sim 10^{-4}$, where both
+branches are accurate to ~$10^{-12}$. The original `1e-7` was *too small* — it
+kept the ill-conditioned closed form in play across a decade where the series
+was already the better approximation.
+
+At-the-money *values* are bit-identical before and after, because the series is
+exactly $1$ at $z = 0$.
+
+### The generalisable lesson
+
+> **A guard can be exact in value and empty in derivative. And corroboration
+> between two implementations is worth nothing when they share the primitive
+> that is broken — independence has to hold at the level of assumptions, not
+> code.**
+
+Corollaries:
+
+- **Never `jnp.where` a removable singularity onto a constant.** Use the limit's
+  series. The constant is right at exactly one point and wrong in every
+  derivative; the series is right in a neighbourhood and differentiable.
+- **Rank disagreeing evidence by independence, not by vote count.** A finite
+  difference shares *no* code with an adjoint, which is precisely why it is
+  worth keeping around despite being the noisier instrument. This is entry 4's
+  lesson — "corroboration from an engine that shares your approximation is
+  worthless" — in a second costume, and it was walked into anyway.
+- **Be suspicious of a satisfying explanation for inconvenient data.** The
+  ill-conditioning story was coherent, quantitative and wrong. The cheap test
+  that would have killed it immediately — solve the first-order condition with
+  Newton to $10^{-14}$ and re-difference — took one run.
+- **Value tests cannot see derivative bugs.** A differentiable library needs
+  derivative tests *at* its singular points, not merely near them. Guarded by
+  `tests/test_models/test_sabr.py::TestATMDerivatives`, which checks AD against
+  FD at the money and asserts the ATM forward derivative is non-zero.
+
+### The debugging playbook
+
+1. **Reduce to the smallest quantity that shows the discrepancy.** From "the
+   calibration adjoint is 80% off" down to "$\partial\sigma/\partial F$ of a
+   single `sabr_implied_vol` call", by removing the optimiser entirely.
+2. **Sweep the strike.** The error appeared only within $|K - F| < 10^{-7}$ —
+   i.e. exactly where `is_small` fires. That localised it to the guard without
+   reading the expansion.
+3. **Check *which* derivatives are affected.** $\alpha$, $\rho$, $\nu$ were
+   fine; only $F$ was wrong. That asymmetry is only explicable if the lost term
+   carries a $\log(F/K)$ factor, which named the culprit outright.
+4. **Verify the suspected mechanism in isolation.** `jax.grad` of the guard
+   alone at $z = 0$: `0.0` against the analytic $-\rho/2$. Two lines, no SABR.
+5. **Confirm the new branch against the old one where they overlap**, so the fix
+   cannot introduce a jump or a kink at the crossover.
+
+A runnable reproduction, with the broken and fixed guards side by side and the
+knobs to re-break it, is
+[`examples/pitfalls/02_where_guard_kills_the_derivative.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/02_where_guard_kills_the_derivative.py).

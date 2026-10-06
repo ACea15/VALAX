@@ -7,6 +7,7 @@ import pytest
 from valax.instruments.options import EuropeanOption
 from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import (
+    _ATM_Z_TOL,
     sabr_implied_vol,
     sabr_price,
     sabr_normal_implied_vol,
@@ -387,3 +388,170 @@ class TestSABRNormalMonteCarlo:
         assert abs(mc_price - analytic) < 2.0 * mc_se, (
             f"MC={mc_price:.6f} vs analytic={analytic:.6f}, SE={mc_se:.6f}"
         )
+
+
+# ── ATM derivatives (regression: the z/x(z) guard) ───────────────────
+
+class TestATMDerivatives:
+    r"""Hagan's ``z / x(z)`` must be differentiable *through* the money.
+
+    Both expansions hit :math:`z = 0` exactly at the at-the-money strike, where
+    the closed form is ``0/0``. Guarding that with
+    ``jnp.where(|z| < tol, 1.0, z / x(z))`` returns the right **value** and the
+    wrong **derivative**: a constant has zero slope, so differentiating through
+    it discards the entire ``z/x`` contribution. Since :math:`z \propto
+    \log(F/K)`, that silently corrupted :math:`\partial\sigma/\partial F` at the
+    money -- by 18% in the lognormal branch, and to *identically zero* in the
+    normal branch.
+
+    Prices were unaffected, which is why it survived: the bug is invisible to
+    every value-based test and fatal to a SABR backbone delta. ``_z_over_x``
+    now switches to the Taylor series instead of a constant, so both branches
+    are smooth and agree to :math:`O(z^3)`.
+
+    Tolerance: central differences at ``h = 1e-7`` carry ~1e-7 relative
+    truncation error of their own, so agreement is asserted at ``2e-6``.
+    """
+
+    FD_H = 1e-7
+    FD_RTOL = 2e-6
+
+    #: Offsets from the forward, including exactly ATM and either side of the
+    #: series/closed-form crossover (|z| ~ 1e-4 in z, far smaller in strike).
+    OFFSETS = (-0.02, -0.005, -1e-6, -1e-9, 0.0, 1e-9, 1e-6, 0.005, 0.02)
+
+    @staticmethod
+    def _central(fn, x, h):
+        return (float(fn(x + h)) - float(fn(x - h))) / (2.0 * h)
+
+    def _assert_matches_fd(self, ad, fd):
+        rel = abs(ad - fd) / max(abs(fd), 1e-12)
+        assert rel < self.FD_RTOL, f"AD={ad!r} FD={fd!r} rel={rel:.3e}"
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_lognormal_forward_derivative_matches_fd(self, offset):
+        model = SABRModel(
+            alpha=jnp.array(0.22), beta=jnp.array(0.5),
+            rho=jnp.array(-0.25), nu=jnp.array(0.40),
+        )
+        f0 = jnp.array(0.03)
+        strike = f0 + offset
+
+        def vol(f):
+            return sabr_implied_vol(model, f, strike, jnp.array(1.0))
+
+        self._assert_matches_fd(
+            float(jax.grad(vol)(f0)), self._central(vol, f0, self.FD_H)
+        )
+
+    @pytest.mark.parametrize("offset", OFFSETS)
+    def test_normal_forward_derivative_matches_fd(self, offset):
+        model = SABRModel(
+            alpha=jnp.array(0.0075), beta=jnp.array(0.0),
+            rho=jnp.array(-0.25), nu=jnp.array(0.40),
+        )
+        f0 = jnp.array(0.03)
+        strike = f0 + offset
+
+        def vol(f):
+            return sabr_normal_implied_vol(
+                model, f, strike, jnp.array(1.0), jnp.array(0.0)
+            )
+
+        self._assert_matches_fd(
+            float(jax.grad(vol)(f0)), self._central(vol, f0, self.FD_H)
+        )
+
+    def test_atm_forward_derivative_is_not_zero(self):
+        """The sharpest form of the regression: the normal branch read 0.0."""
+        model = SABRModel(
+            alpha=jnp.array(0.0075), beta=jnp.array(0.0),
+            rho=jnp.array(-0.25), nu=jnp.array(0.40),
+        )
+        f0 = jnp.array(0.03)
+        g = jax.grad(
+            lambda f: sabr_normal_implied_vol(
+                model, f, f0, jnp.array(1.0), jnp.array(0.0)
+            )
+        )(f0)
+        assert abs(float(g)) > 1e-3
+
+    @pytest.mark.parametrize("param", ["alpha", "rho", "nu"])
+    def test_atm_parameter_derivatives_match_fd(self, param):
+        """These were always correct; guard them against the fix regressing."""
+        base = dict(
+            alpha=jnp.array(0.22), beta=jnp.array(0.5),
+            rho=jnp.array(-0.25), nu=jnp.array(0.40),
+        )
+        f0 = jnp.array(0.03)
+
+        def vol(v):
+            kwargs = dict(base)
+            kwargs[param] = v
+            return sabr_implied_vol(
+                SABRModel(**kwargs), f0, f0, jnp.array(1.0)
+            )
+
+        v0 = base[param]
+        self._assert_matches_fd(
+            float(jax.grad(vol)(v0)), self._central(vol, v0, self.FD_H)
+        )
+
+    def test_derivative_is_continuous_across_the_branch_crossover(self):
+        r"""No kink where the series hands over to the closed form.
+
+        ``_z_over_x`` switches at :math:`|z| = ` ``_ATM_Z_TOL``, which on this
+        fixture is a strike offset of ~9.5e-6. A jump would show up in the
+        value; a *kink* -- the subtler failure, and the one that breaks a
+        gradient -- shows up only in the derivative. So the derivative is
+        sampled either side of the crossover and required to vary smoothly:
+        the step across the boundary must be no larger than the step across a
+        comparable interval entirely inside the closed-form branch.
+        """
+        model = SABRModel(
+            alpha=jnp.array(0.22), beta=jnp.array(0.5),
+            rho=jnp.array(-0.25), nu=jnp.array(0.40),
+        )
+        f0 = jnp.array(0.03)
+        expiry = jnp.array(1.0)
+        dvol_df = jax.grad(
+            lambda f, k: sabr_implied_vol(model, f, k, expiry), argnums=0
+        )
+
+        # The crossover in strike space, and a window straddling it.
+        k_cross = 9.526e-6
+        inside = float(dvol_df(f0, f0 + 0.5 * k_cross))   # series branch
+        outside = float(dvol_df(f0, f0 + 2.0 * k_cross))  # closed-form branch
+        step_across = abs(outside - inside)
+
+        # A same-width window wholly inside the closed-form branch.
+        a = float(dvol_df(f0, f0 + 10.0 * k_cross))
+        b = float(dvol_df(f0, f0 + 11.5 * k_cross))
+        step_within = abs(b - a)
+
+        assert step_across < 10.0 * max(step_within, 1e-9), (
+            f"derivative steps by {step_across:.3e} across the crossover but "
+            f"only {step_within:.3e} over a comparable smooth interval "
+            "-- a kink at the branch boundary"
+        )
+
+    def test_the_two_branches_agree_at_the_crossover(self):
+        """Directly: series vs closed form at ``|z| = _ATM_Z_TOL``."""
+        rho = jnp.array(-0.25)
+        z = jnp.array(_ATM_Z_TOL)
+        series = 1.0 - 0.5 * rho * z + (1.0 / 6.0 - 0.25 * rho**2) * z**2
+        s = jnp.sqrt(1.0 - 2.0 * rho * z + z**2)
+        closed = z / jnp.log((s + z - rho) / (1.0 - rho))
+        assert abs(float(series - closed)) < 1e-11
+
+    def test_second_derivative_is_finite_at_the_money(self):
+        """A constant branch also zeroed the ATM curvature."""
+        model = SABRModel(
+            alpha=jnp.array(0.22), beta=jnp.array(0.5),
+            rho=jnp.array(-0.25), nu=jnp.array(0.40),
+        )
+        f0 = jnp.array(0.03)
+        d2 = jax.grad(
+            jax.grad(lambda f: sabr_implied_vol(model, f, f0, jnp.array(1.0)))
+        )(f0)
+        assert jnp.isfinite(d2)

@@ -120,7 +120,7 @@ class TestNormalCalibration:
 
         Guards against the historical vol_fn plumbing bug where normal quotes
         were silently fit with the lognormal formula (see
-        examples/pitfalls/01_normal_sabr_calibration_divergence.py).
+        examples/pitfalls/01_sabr_vol_convention_mismatch.py).
         """
         forward = 0.025
         shift = 0.03

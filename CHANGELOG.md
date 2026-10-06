@@ -132,14 +132,54 @@ the six paths by which curves enter model calibration, and a missing
   degenerate axis is now flat along that direction. Surfaced by calibrating a
   one-node cube, which is the smallest curve-aware fit and a legitimate thing to
   do.
-- **Verification note.** `forward_bar` is gated against a full-rebuild finite
-  difference under `atm_offset` quoting, and against `optimistix`'s own
-  `ImplicitAdjoint` through `calibrate_sabr` under `absolute_strike`. The latter
-  is deliberate: with the strikes pinned, a forward shift is very nearly
-  absorbable by `(α, ρ, ν)`, the least-squares Hessian's condition number is
-  ~1e6, and a Levenberg-Marquardt run terminates along a flat valley — so a
-  difference quotient is *stable in `h` and still wrong*. Two independent
-  formulations of the theorem agreeing to 1e-9 is the stronger statement.
+- **Verification.** Both input blocks are gated against full-rebuild central
+  finite differences at two bump sizes, under both quote forms. The
+  `optimistix` `ImplicitAdjoint` comparison is kept as a *consistency* check
+  and labelled as such — it shares `sabr_implied_vol` with the adjoint under
+  test, so it is not independent evidence.
+
+### Fixed — `sabr_implied_vol` lost its ATM forward derivative
+
+Hagan's expansions contain `z / x(z)`, which is `0/0` at the money. It was
+guarded by pinning the ratio to the constant `1.0` — the correct *value*, and
+zero *slope*, so automatic differentiation discarded the whole `z/x`
+contribution. Since `z ∝ log(F/K)`, that corrupted `∂σ/∂F` at the
+at-the-money strike by **18%** in the lognormal branch and to **identically
+zero** in the normal branch. The `α`, `ρ`, `ν` derivatives were always correct
+(at `F = K` their `∂z/∂·` terms carry a vanishing `log(F/K)` factor), and
+**no price was ever affected** — which is why it survived.
+
+- `_z_over_x` now hands over to the Taylor series
+  `1 − (ρ/2)z + (1/6 − ρ²/4)z² + O(z³)` instead of to a constant, so both
+  branches are smooth and carry the right slope. Extracted once and shared by
+  `sabr_implied_vol` and `sabr_normal_implied_vol`; the outer double-`jnp.where`
+  is retained, since that part genuinely prevents NaN gradients leaking from the
+  inactive branch.
+- The crossover moved from `1e-7` to `_ATM_Z_TOL = 1e-4`, chosen by balancing
+  series truncation `O(z³)` against the closed form's cancellation `O(ε/z)`:
+  `z³ ~ ε/z` gives `z ~ ε^(1/4)`, where both branches are accurate to ~1e-12.
+  The old `1e-7` was *too small* — it kept the ill-conditioned closed form in
+  play across a decade where the series was already better.
+- At-the-money values are **bit-identical** before and after (the series is
+  exactly `1` at `z = 0`).
+- **Who was affected:** `dynamics="sabr_backbone"` deltas at ATM, and the
+  `forward_bar` leg of `vol_quote_vegas` whenever an ATM strike was in the fit.
+  Both shipped in this same release cycle; no tagged release contained the
+  corrupted adjoint.
+- Regression: `tests/test_models/test_sabr.py::TestATMDerivatives` checks AD
+  against finite differences *at* the money for both expansions, asserts the ATM
+  forward derivative is non-zero, and checks the two branches agree at the
+  crossover with no jump or kink.
+
+Found while building the λ_v gate, and the way it hid is the point: a
+full-rebuild finite difference disagreed and was *dismissed* because a second
+"independent" adjoint — `optimistix`'s `ImplicitAdjoint`, different code,
+different parametrisation — agreed with the first bit-for-bit. It shared
+`sabr_implied_vol` underneath, so it shared the defect: two votes that were
+really one. An ill-conditioned least-squares Hessian (κ ≈ 2e6) then supplied a
+plausible but false mechanism for distrusting the finite difference. Written up
+as entry 5 of `docs/architecture/numerical-pitfalls.md`, with a runnable
+reproduction in `examples/pitfalls/02_where_guard_kills_the_derivative.py`.
 
 ### Added — Quote-space (hedge-space) adjoint risk
 

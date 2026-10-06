@@ -210,3 +210,18 @@ Highlights:
 - **Non-tautological calibration check** — the fit RMSE is compared against the *empirical* noise RMSE on the same draw; a passing test means the optimiser is at the noise floor, not that "calibrating SABR on SABR-generated data recovers SABR" (which would only test the optimiser).
 - **Closed loop in one script** — every stage uses outputs of the previous, so any inconsistency surfaces immediately.
 - **Arbitrage backlog reporting** — Stage 6 deliberately breaks a vector of total variances and prints the diagnosis the library *would* raise once detection lands.  The corresponding xfail tests turn green the day a detector is added.
+
+---
+
+## Pitfalls — things that do *not* work, and why
+
+**[`examples/pitfalls/`](https://github.com/ACea15/VALAX/tree/main/examples/pitfalls)** — a lab bench of **known failure modes**: numerical traps, solver fragilities and modelling gotchas found while building VALAX, each reduced to the smallest runnable reproduction and handed to you with the knobs still attached.
+
+These are deliberately *red*. They are not examples of correct usage — they demonstrate something broken or subtle so you can poke at it: flip a solver, tighten a tolerance, re-break the fix and watch it fail again. Each script carries a **SYMPTOM / ROOT CAUSE / KNOBS** header and a **WAY OUT** section naming the fix without applying it, and is wrapped so it runs end-to-end even where the underlying call diverges or raises.
+
+| Script | Pitfall |
+|---|---|
+| [`01_sabr_vol_convention_mismatch.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/01_sabr_vol_convention_mismatch.py) | Fitting a **normal**-quoted SABR smile with the **lognormal** Hagan formula. The solver reports a small residual and returns nonsense parameters — so a small calibration residual is necessary but *not sufficient*. |
+| [`02_where_guard_kills_the_derivative.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/02_where_guard_kills_the_derivative.py) | A `jnp.where` guard on a removable singularity with the **right value and no derivative**. Two "independent" adjoints agreed bit-for-bit and were both wrong, because they shared the broken primitive; the finite difference nobody believed was right all along. |
+
+The prose counterpart is [Numerical Pitfalls](architecture/numerical-pitfalls.md), which keeps one write-up per bug — symptom, the signals that pointed the wrong way, root cause, fix, and the generalisable lesson — together with the debugging methodology that localised it.
