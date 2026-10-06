@@ -12,6 +12,47 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Payment lag: accrual end and payment date are now separate roles
+
+A coupon has two dates that matter, and until now VALAX's curve quote types
+carried only one. `_floating_leg_pv` used a single array as both the accrual
+end (what the coupon is worth) and the payment date (when you get it, and
+therefore how it is discounted), which is correct only when the two coincide.
+Real overnight-index swaps pay one or two business days after accrual ends,
+so every OIS-bootstrapped discount factor was very slightly misplaced.
+
+- **New fields.** `payment_dates` and `payment_lag` on `SwapRate` and
+  `OISSwapRate`; `fixed_payment_dates` / `float_payment_dates` on
+  `IborSwapRate`; `leg_a_payment_dates` / `leg_b_payment_dates` on
+  `TenorBasisSwap`; `dom_payment_dates` / `for_payment_dates` on
+  `CrossCurrencyBasisSwap`. `payment_lag` is a uniform shift in **calendar**
+  days; an explicit array is the route for a business-day-adjusted schedule,
+  since VALAX still has no holiday calendars. Supplying both for one leg
+  raises, as does a negative lag or a schedule of the wrong length.
+- **OIS floating leg generalised.** The telescoping identity
+  `DF(T_0) - DF(T_n)` holds only at zero lag. The leg is now the per-period
+  sum `Σ_i P_d(0,T_i^p)(P_d(0,T_i^s)/P_d(0,T_i^e) - 1)`
+  (`_compounded_float_leg_pv`), with the closed telescope retained as an
+  explicit fast path when no lag is configured.
+- **Numbers are unchanged by default.** With neither field set the fast path
+  is taken and every pre-existing curve, residual and bootstrap reproduces bit
+  for bit. The two forms agree to 8e-17 — pure summation order.
+- **Under the constant-notional cross-currency variant** the final notional
+  re-exchange is paid with the last coupon, so it now discounts at the last
+  payment date rather than the last accrual end.
+- **Direction of the effect.** A uniform lag always *lowers* the par rate,
+  whatever the shape of the curve, and by exactly nothing on a flat one: the
+  par-rate weights pick up a factor `P(0,T^p)/P(0,T^e) ≈ exp(-f_i ℓ)` that
+  decreases in that period's own forward, so the lag shifts weight away from
+  the high-forward periods. The magnitude tracks the *dispersion* of the
+  forwards, not their level.
+- **Still neglected,** and now recorded as such rather than implied by the
+  missing feature: the payment-lag *timing convexity*. The discount factor
+  moves to `T^p` but the compounded coupon gets no drift correction for
+  ceasing to be a martingale under the `T^p`-forward measure.
+- Closes spec requirement N-3 and the T-5 gate; narrows C-1. See
+  [Bootstrap instruments § Payment lag](docs/guide/curves.md#payment-lag-accrual-end-vs-payment-date).
+
 ### Changed (**breaking**) — Vol sources are now handed the live forward
 
 A smile is a function of moneyness, so *which* forward it is anchored to decides

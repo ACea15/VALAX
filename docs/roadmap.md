@@ -612,8 +612,11 @@ the forwards genuinely are exogenous.
 - [ ] **Over-determined bootstrap** — an `optimistix.least_squares` variant
   of `bootstrap_curve_graph` with per-quote weights
 - [ ] **Fixings seasoning** — `OISSwapRate` and the futures residual do
-  `del fixings` (MVP: telescope only); partially-seasoned swaps ignore
-  realised fixings. `index_id` is reserved for this
+  `del fixings`, so partially-seasoned swaps ignore realised fixings and
+  assume the curve already encodes them through `DF(start_date)`.
+  `index_id` is reserved for this. (Unrelated to the payment-lag work
+  above: the OIS leg is no longer telescope-only, but it is still
+  fixing-free)
 - [ ] **Constrained curves** — forward-rate positivity, calendar-spread
   no-arbitrage for inflation curves
 
@@ -816,6 +819,7 @@ These are foundational pieces that block almost everything else. They should be 
 - [x] **Basis curve** support (e.g., 1M vs 3M SOFR basis) — via `TenorBasisSwap` inside the joint solver
 - [x] **Cross-currency graph** — `CrossCurrencyBasisSwap` + `FXForward` inside the joint solver (EUR-USD four-curve build verified)
 - [x] **Jacobian of discount factors w.r.t. input rates** via autodiff (free with JAX, verified in tests)
+- [x] **Payment lag** — accrual end $T^e$ and payment date $T^p$ are separate roles on every swap quote type (`payment_dates` / `payment_lag` on `SwapRate`, `OISSwapRate`, and per leg on `IborSwapRate`, `TenorBasisSwap`, `CrossCurrencyBasisSwap`), discounting at $T^p$ via `_floating_leg_pv(payment_dates=…)`. The OIS floating leg is now the per-period sum `_compounded_float_leg_pv`, with the telescoping identity retained as a zero-lag fast path (spec N-3; gated by `tests/test_curves/test_instrument_residuals.py::TestPaymentLagTelescoping`). Calendar-day lags only — business-day rolling still needs [Tier 1.3](#13-business-calendars-and-holiday-schedules), so an exact schedule must be supplied as `payment_dates`
 - [ ] **Turn-of-year effects** and stub handling (`TurnInstrument` quote type shipped; genuine step-function interpolation deferred to MC-Curves-3)
 - [ ] **Alternative interpolation modes** on `CurveSpec.interp` — linear-zero, monotone-convex (Hagan-West), tension spline (MC-Curves-3)
 - [ ] **Hull-White futures convexity** (`hull_white_convexity_adj`) — plug-in framework in place, closed-form factory pending
@@ -845,7 +849,7 @@ These are foundational pieces that block almost everything else. They should be 
       `strip_optionlet_surface` in `valax/surfaces/caplet_stripping.py`:
       flat quoted cap vols → per-optionlet term structure → per-expiry
       SABR surface, projecting off the tenor curve and discounting off
-      OIS. See [Multi-Curve Framework §3](#3-vol-surface-construction-is-curve-free-closed-for-capsfloors)
+      OIS. See [Multi-Curve Framework §3](#3-vol-surface-construction-is-curve-free-closed-for-capsfloors-and-swaptions)
 - [ ] **SSVI** — global arbitrage-free parameterization (Gatheral-Jacquier)
 - [ ] **Sticky-strike vs sticky-delta** conventions
 - [x] **Local vol extraction** from implied vol surface (Dupire formula) — shipped
@@ -950,7 +954,7 @@ New stochastic models that unlock entire product categories.
       the only model in the library with no calibrator, so its parameters must
       be supplied by hand and it cannot be fitted to market. **Its input now
       exists**: the caplet-stripping prerequisite shipped
-      ([Multi-Curve Framework §3](#3-vol-surface-construction-is-curve-free-closed-for-capsfloors)),
+      ([Multi-Curve Framework §3](#3-vol-surface-construction-is-curve-free-closed-for-capsfloors-and-swaptions)),
       so `strip_optionlet_surface` produces the per-expiry optionlet surface
       the calibrator has to match. What is left is the fit itself — the
       `RebonatoVol` abcd surface and the correlation parameters against that

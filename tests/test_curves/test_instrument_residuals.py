@@ -1989,3 +1989,477 @@ class TestResidualUnderTransforms:
         grads = eqx.filter_grad(f)(graph)
         ois_grad = grads.curves["_default_"].discount_factors
         assert jnp.any(jnp.abs(ois_grad) > 1e-12)
+
+
+# ── Payment lag (spec N-3 / C-1) ─────────────────────────────────────
+
+
+#: Tolerance for the T-5 telescoping identity, in units of a unit-notional
+#: floating-leg PV.  The per-period sum and the closed telescope differ only
+#: by floating-point summation order, so this is a round-off budget, not a
+#: modelling tolerance.
+T5_ATOL = 1e-14
+
+#: Annual OIS schedule used throughout: 5 annual accrual periods from REF.
+_ANNUAL = jnp.array(
+    [int(_make_date(2025 + k, 1, 1)) for k in range(1, 6)],
+    dtype=jnp.int32,
+)
+
+
+def _sloped_curve(short: float, slope: float) -> DiscountCurve:
+    """Curve with zero rate ``z(t) = short + slope * t`` (t in years).
+
+    ``slope == 0`` gives a flat continuously-compounded curve, for which
+    the per-period payment-lag discount factor
+    :math:`P(T^e + \\ell)/P(T^e)` is the *same* constant in every period.
+    That degeneracy is what makes the flat case an exact invariant below.
+    """
+    pillars = jnp.array(
+        [int(REF) + 365 * k for k in range(11)], dtype=jnp.int32
+    )
+    times = (pillars - int(REF)).astype(jnp.float64) / 365.0
+    dfs = jnp.exp(-(short + slope * times) * times)
+    return DiscountCurve(
+        pillar_dates=pillars,
+        discount_factors=dfs,
+        reference_date=REF,
+        day_count="act_365",
+    )
+
+
+def _ois_float_pv(curve: DiscountCurve, **kwargs) -> float:
+    """Isolate the floating-leg PV from an :class:`OISSwapRate` residual.
+
+    ``residual = r * A - PV_float``, so evaluating it at ``r = 0`` returns
+    ``-PV_float``.  Reading the leg out of the residual (rather than
+    re-implementing it) is deliberate: the identity under test is a
+    property of the shipped residual, not of a test-local copy.
+    """
+    inst = OISSwapRate(
+        start_date=REF,
+        fixed_dates=_ANNUAL,
+        rate=jnp.asarray(0.0),
+        **kwargs,
+    )
+    return -float(inst.residual(_wrap_default(curve), NO_FIXINGS, REF))
+
+
+def _ois_par_rate(curve: DiscountCurve, **kwargs) -> float:
+    """Par fixed rate implied by an :class:`OISSwapRate` residual.
+
+    The residual is affine in ``rate`` with slope equal to the annuity, so
+    two evaluations recover both the annuity and the par rate exactly.
+    """
+    graph = _wrap_default(curve)
+
+    def at(r: float) -> float:
+        inst = OISSwapRate(
+            start_date=REF,
+            fixed_dates=_ANNUAL,
+            rate=jnp.asarray(r),
+            **kwargs,
+        )
+        return float(inst.residual(graph, NO_FIXINGS, REF))
+
+    r0 = at(0.0)
+    annuity = at(1.0) - r0
+    return -r0 / annuity
+
+
+class TestPaymentLagTelescoping:
+    """Spec T-5: the zero-lag OIS floating leg telescopes.
+
+    The generalised floating leg is
+    :math:`\\sum_i P(0,T_i^p)\\,(P(0,T_i^s)/P(0,T_i^e) - 1)`.  Only when
+    :math:`T^p = T^e` does each term collapse to
+    :math:`P(0,T_i^s) - P(0,T_i^e)` and the sum telescope to
+    :math:`P(0,T_0) - P(0,T_n)`.  Before payment lags existed the
+    telescope was the *only* form in the code, so the test was vacuous;
+    it now pins the per-period path against an independent reference.
+    """
+
+    @pytest.mark.audit
+    def test_t5_zero_lag_float_leg_telescopes(self):
+        """T-5 gate: per-period sum == P_d(0,T_0) - P_d(0,T_n)."""
+        curve = _sloped_curve(0.03, 0.004)
+        # Independent reference: two curve reads, no summation at all.
+        expected = float(curve(REF) - curve(_ANNUAL[-1]))
+        # Explicit payment dates equal to the accrual ends force the
+        # per-period branch while leaving the economics lag-free.
+        per_period = _ois_float_pv(curve, payment_dates=_ANNUAL)
+        assert per_period == pytest.approx(expected, abs=T5_ATOL)
+
+    def test_default_path_is_the_closed_telescope(self):
+        """With no lag configured the residual takes the fast path and
+        returns the closed telescope *exactly* — bit for bit, which is
+        what preserves every pre-existing bootstrap number."""
+        curve = _sloped_curve(0.03, 0.004)
+        assert _ois_float_pv(curve) == -float(
+            curve(_ANNUAL[-1]) - curve(REF)
+        )
+
+    def test_fast_path_and_per_period_path_agree(self):
+        """The two branches are the same number up to summation order."""
+        curve = _sloped_curve(0.03, 0.004)
+        assert _ois_float_pv(curve) == pytest.approx(
+            _ois_float_pv(curve, payment_dates=_ANNUAL), abs=T5_ATOL
+        )
+
+    def test_telescope_does_not_survive_a_lag(self):
+        """A non-zero lag breaks the identity — the point of the gate."""
+        curve = _sloped_curve(0.03, 0.004)
+        telescoped = float(curve(REF) - curve(_ANNUAL[-1]))
+        lagged = _ois_float_pv(curve, payment_lag=2)
+        assert abs(lagged - telescoped) > 1e-7
+        # Paying later is worth less on a positive-rate curve.
+        assert lagged < telescoped
+
+    def test_swap_rate_shares_the_treatment(self):
+        """:class:`SwapRate`'s single-curve float leg is the same
+        expression, so it gets the same two branches."""
+        curve = _sloped_curve(0.03, 0.004)
+        graph = _wrap_default(curve)
+
+        def float_pv(**kw):
+            inst = SwapRate(
+                start_date=REF,
+                fixed_dates=_ANNUAL,
+                rate=jnp.asarray(0.0),
+                **kw,
+            )
+            return -float(inst.residual(graph, NO_FIXINGS, REF))
+
+        expected = float(curve(REF) - curve(_ANNUAL[-1]))
+        assert float_pv() == pytest.approx(expected, abs=T5_ATOL)
+        assert float_pv(payment_dates=_ANNUAL) == pytest.approx(
+            expected, abs=T5_ATOL
+        )
+        assert float_pv(payment_lag=2) < expected
+
+
+class TestPaymentLagDirection:
+    """What a uniform payment lag does to the *par rate*.
+
+    Testing the residual at a fixed quoted rate is a weak gate: a uniform
+    lag multiplies both legs by very nearly the same factor, so the
+    residual just rescales and the sign of the change tells you little.
+    The par rate is the sharp statement.
+
+    Write the par rate as a weighted average of the period forwards,
+    :math:`r^{*} = \\sum_i w_i f_i / \\sum_i w_i` with
+    :math:`w_i \\propto \\tau_i P(0,T_i^p)`.  Lagging payment multiplies
+    each weight by :math:`\\delta_i = P(0,T_i^p)/P(0,T_i^e) \\approx
+    e^{-f_i \\ell}`, a *decreasing function of that period's own forward*.
+    So the lag always shifts weight away from the high-forward periods and
+    the par rate always falls — whatever the shape of the curve — by an
+    amount governed by the dispersion of the forwards, and by exactly
+    nothing when they are all equal.
+    """
+
+    def test_flat_curve_par_rate_is_lag_invariant(self):
+        """Zero dispersion, zero effect — and exactly so, not just
+        approximately: on a flat continuously-compounded curve every
+        period shares one delta, which cancels between numerator and
+        denominator."""
+        curve = _sloped_curve(0.03, 0.0)
+        assert _ois_par_rate(curve, payment_lag=2) == pytest.approx(
+            _ois_par_rate(curve), abs=1e-15
+        )
+
+    @pytest.mark.parametrize("slope", [0.004, -0.004])
+    def test_lag_lowers_the_par_rate_whatever_the_slope(self, slope):
+        """Upward or inverted, the par rate falls."""
+        curve = _sloped_curve(0.03, slope)
+        assert _ois_par_rate(curve, payment_lag=2) < _ois_par_rate(curve)
+
+    def test_effect_grows_with_the_dispersion_of_the_forwards(self):
+        """Doubling the slope roughly quadruples the shift — the
+        signature of a variance-driven effect rather than a level one."""
+        base = _sloped_curve(0.03, 0.002)
+        steep = _sloped_curve(0.03, 0.004)
+        d_base = _ois_par_rate(base) - _ois_par_rate(base, payment_lag=2)
+        d_steep = _ois_par_rate(steep) - _ois_par_rate(
+            steep, payment_lag=2
+        )
+        assert d_base > 0.0 and d_steep > 0.0
+        assert d_steep / d_base == pytest.approx(4.0, rel=0.05)
+
+    def test_lag_scales_the_effect(self):
+        """Two days move the par rate about twice as far as one."""
+        curve = _sloped_curve(0.03, 0.004)
+        base = _ois_par_rate(curve)
+        d1 = base - _ois_par_rate(curve, payment_lag=1)
+        d2 = base - _ois_par_rate(curve, payment_lag=2)
+        assert d2 / d1 == pytest.approx(2.0, rel=0.02)
+
+
+class TestPaymentLagPerLeg:
+    """Payment dates are resolved leg by leg, and discounting uses them."""
+
+    def _ibor(self, **kwargs) -> IborSwapRate:
+        semis = jnp.array(
+            [int(REF) + 182 * k for k in range(1, 11)], dtype=jnp.int32
+        )
+        starts = jnp.concatenate([jnp.asarray(REF)[None], semis[:-1]])
+        return IborSwapRate(
+            start_date=REF,
+            fixed_dates=_ANNUAL,
+            float_dates=semis,
+            fixing_dates=starts,
+            rate=jnp.asarray(0.03),
+            **kwargs,
+        )
+
+    def test_explicit_dates_equal_to_accrual_ends_are_a_no_op(self):
+        """Handing back the accrual schedule as the payment schedule must
+        change nothing — it is the lag-free convention written out."""
+        curve = _sloped_curve(0.03, 0.004)
+        graph = _wrap_default(curve)
+        plain = self._ibor()
+        spelled = self._ibor(
+            fixed_payment_dates=plain.fixed_dates,
+            float_payment_dates=plain.float_dates,
+        )
+        assert float(
+            spelled.residual(graph, NO_FIXINGS, REF)
+        ) == pytest.approx(
+            float(plain.residual(graph, NO_FIXINGS, REF)), abs=T5_ATOL
+        )
+
+    def test_each_leg_moves_independently(self):
+        """Lagging only the fixed leg, only the float leg, and both give
+        three different residuals — so neither leg is silently reusing
+        the other's payment schedule."""
+        curve = _sloped_curve(0.03, 0.004)
+        graph = _wrap_default(curve)
+        plain = self._ibor()
+
+        def resid(inst):
+            return float(inst.residual(graph, NO_FIXINGS, REF))
+
+        base = resid(plain)
+        fixed_only = resid(
+            self._ibor(fixed_payment_dates=plain.fixed_dates + 2)
+        )
+        float_only = resid(
+            self._ibor(float_payment_dates=plain.float_dates + 2)
+        )
+        both = resid(self._ibor(payment_lag=2))
+
+        for other in (fixed_only, float_only, both):
+            assert abs(other - base) > 1e-9
+        assert abs(fixed_only - float_only) > 1e-9
+        # The two single-leg effects are additive to first order.
+        assert (fixed_only - base) + (float_only - base) == pytest.approx(
+            both - base, rel=1e-4
+        )
+
+    def test_flat_curve_par_rate_is_lag_invariant(self):
+        """The dual-curve par rate inherits the flat-curve invariance."""
+        curve = _sloped_curve(0.03, 0.0)
+        graph = _wrap_default(curve)
+
+        def par(**kw):
+            def at(r):
+                inst = eqx.tree_at(
+                    lambda i: i.rate, self._ibor(**kw), jnp.asarray(r)
+                )
+                return float(inst.residual(graph, NO_FIXINGS, REF))
+
+            r0 = at(0.0)
+            return -r0 / (at(1.0) - r0)
+
+        assert par(payment_lag=2) == pytest.approx(par(), abs=1e-15)
+
+    def test_tenor_basis_swap_discounts_at_payment_dates(self):
+        curve = _sloped_curve(0.03, 0.004)
+        graph = _wrap_default(curve)
+        quarters = jnp.array(
+            [int(REF) + 91 * k for k in range(1, 21)], dtype=jnp.int32
+        )
+        semis = jnp.array(
+            [int(REF) + 182 * k for k in range(1, 11)], dtype=jnp.int32
+        )
+
+        def resid(**kw):
+            inst = TenorBasisSwap(
+                start_date=REF,
+                leg_a_dates=quarters,
+                leg_a_fixing_dates=jnp.concatenate(
+                    [jnp.asarray(REF)[None], quarters[:-1]]
+                ),
+                leg_b_dates=semis,
+                leg_b_fixing_dates=jnp.concatenate(
+                    [jnp.asarray(REF)[None], semis[:-1]]
+                ),
+                spread=jnp.asarray(0.002),
+                **kw,
+            )
+            return float(inst.residual(graph, NO_FIXINGS, REF))
+
+        base = resid()
+        assert resid(
+            leg_a_payment_dates=quarters, leg_b_payment_dates=semis
+        ) == pytest.approx(base, abs=T5_ATOL)
+        assert abs(resid(payment_lag=2) - base) > 1e-9
+
+    def test_xccy_notional_redemption_follows_the_payment_date(self):
+        """Under ``constant_notional`` the final notional re-exchange is
+        paid with the last coupon, so a lag must move it too."""
+        curve = _sloped_curve(0.03, 0.004)
+        foreign = _sloped_curve(0.02, 0.003)
+        graph = CurveGraph(
+            curves={"_default_": curve, "FOR": foreign}
+        )
+        semis = jnp.array(
+            [int(REF) + 182 * k for k in range(1, 11)], dtype=jnp.int32
+        )
+        fixings = jnp.concatenate([jnp.asarray(REF)[None], semis[:-1]])
+
+        def resid(**kw):
+            inst = CrossCurrencyBasisSwap(
+                start_date=REF,
+                dom_dates=semis,
+                dom_fixing_dates=fixings,
+                for_dates=semis,
+                for_fixing_dates=fixings,
+                fx_spot=jnp.asarray(1.1),
+                spread=jnp.asarray(-0.005),
+                curves_touched=(
+                    "_default_", "_default_", "FOR", "FOR",
+                ),
+                **kw,
+            )
+            return float(inst.residual(graph, fixings=NO_FIXINGS, ref_date=REF))
+
+        base = resid()
+        assert resid(
+            dom_payment_dates=semis, for_payment_dates=semis
+        ) == pytest.approx(base, abs=T5_ATOL)
+        lagged = resid(payment_lag=5)
+        assert abs(lagged - base) > 1e-9
+
+        # The redemption term is what carries most of the move: holding
+        # the coupons lag-free but shifting only the last payment date
+        # must still change the answer.
+        shifted_last = semis.at[-1].add(5)
+        only_redemption = resid(
+            dom_payment_dates=shifted_last,
+            for_payment_dates=shifted_last,
+        )
+        assert abs(only_redemption - base) > 1e-9
+
+
+class TestPaymentLagValidation:
+    """Configuration errors are raised at the user boundary."""
+
+    def test_negative_lag_rejected(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            OISSwapRate(
+                start_date=REF,
+                fixed_dates=_ANNUAL,
+                rate=jnp.asarray(0.03),
+                payment_lag=-1,
+            )
+
+    def test_explicit_dates_and_lag_together_rejected(self):
+        with pytest.raises(ValueError, match="contradict each other"):
+            OISSwapRate(
+                start_date=REF,
+                fixed_dates=_ANNUAL,
+                rate=jnp.asarray(0.03),
+                payment_dates=_ANNUAL,
+                payment_lag=2,
+            )
+
+    def test_mismatched_schedule_length_rejected(self):
+        with pytest.raises(ValueError, match="one payment per period"):
+            OISSwapRate(
+                start_date=REF,
+                fixed_dates=_ANNUAL,
+                rate=jnp.asarray(0.03),
+                payment_dates=_ANNUAL[:-1],
+            )
+
+    def test_wrong_leg_is_named(self):
+        """The message says which leg is misconfigured."""
+        with pytest.raises(ValueError, match="float leg"):
+            IborSwapRate(
+                start_date=REF,
+                fixed_dates=_ANNUAL,
+                float_dates=_ANNUAL,
+                fixing_dates=_ANNUAL,
+                rate=jnp.asarray(0.03),
+                float_payment_dates=_ANNUAL[:-1],
+            )
+
+
+class TestPaymentLagUnderTransforms:
+    """The lagged branch is JIT-safe and differentiable."""
+
+    def test_jit(self):
+        curve = _sloped_curve(0.03, 0.004)
+        inst = OISSwapRate(
+            start_date=REF,
+            fixed_dates=_ANNUAL,
+            rate=jnp.asarray(0.03),
+            payment_lag=2,
+        )
+
+        @eqx.filter_jit
+        def f(i, g):
+            return i.residual(g, NO_FIXINGS, REF)
+
+        traced = float(f(inst, _wrap_default(curve)))
+        eager = float(inst.residual(_wrap_default(curve), NO_FIXINGS, REF))
+        assert traced == pytest.approx(eager, abs=1e-14)
+
+    def test_grad_flows_to_the_curve(self):
+        curve = _sloped_curve(0.03, 0.004)
+        inst = OISSwapRate(
+            start_date=REF,
+            fixed_dates=_ANNUAL,
+            rate=jnp.asarray(0.03),
+            payment_lag=2,
+        )
+        grads = eqx.filter_grad(
+            lambda g: inst.residual(g, NO_FIXINGS, REF)
+        )(_wrap_default(curve))
+        dfs_bar = grads.curves["_default_"].discount_factors
+        assert jnp.any(jnp.abs(dfs_bar) > 1e-12)
+        assert jnp.all(jnp.isfinite(dfs_bar))
+
+    def test_bootstrap_converges_with_a_lag(self):
+        """End to end: a lagged OIS strip still solves to machine zero,
+        and to a *different* curve than the lag-free strip."""
+        from valax.curves.bootstrap_graph import bootstrap_curve_graph
+        from valax.curves.graph import CurveSpec
+
+        spec = CurveSpec(
+            curve_id="USD.SOFR.OIS",
+            currency="USD",
+            pillar_dates=_ANNUAL,
+            day_count="act_365",
+        )
+
+        def build(lag: int):
+            quotes = [
+                OISSwapRate(
+                    start_date=REF,
+                    fixed_dates=_ANNUAL[: k + 1],
+                    rate=jnp.asarray(0.03 + 0.001 * k),
+                    curves_touched=("USD.SOFR.OIS",),
+                    payment_lag=lag,
+                )
+                for k in range(len(_ANNUAL))
+            ]
+            return bootstrap_curve_graph(REF, [spec], quotes)
+
+        lagged, diag = build(2)
+        assert diag.converged
+        assert float(diag.max_abs_residual) < 1e-12
+        plain, _ = build(0)
+        a = lagged.curves["USD.SOFR.OIS"].discount_factors
+        b = plain.curves["USD.SOFR.OIS"].discount_factors
+        assert jnp.any(jnp.abs(a - b) > 1e-9)

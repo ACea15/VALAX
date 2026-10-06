@@ -44,17 +44,139 @@ from valax.dates.daycounts import year_fraction
 _DEFAULT_CURVE_ID = "_default_"
 
 
+def _resolve_payment_dates(
+    accrual_end_dates: Int[Array, " n"],
+    payment_dates: Int[Array, " n"] | None,
+    payment_lag: int,
+) -> Int[Array, " n"]:
+    """Resolve a leg's payment dates :math:`T^p` from its accrual ends.
+
+    Three mutually exclusive sources, in precedence order: an explicit
+    ``payment_dates`` array (the general case, already business-day
+    adjusted by the caller), a uniform ``payment_lag`` in **calendar**
+    days added to each accrual end, or — when neither is supplied —
+    :math:`T^p_i = T^e_i`, the lag-free convention.
+
+    Args:
+        accrual_end_dates: Accrual end dates :math:`T^e_i` (ordinals).
+        payment_dates: Explicit payment dates, or ``None`` to derive
+            them from ``payment_lag``.
+        payment_lag: Uniform calendar-day lag applied when
+            ``payment_dates`` is ``None``.
+
+    Returns:
+        The payment date of each coupon, as date ordinals.
+    """
+    if payment_dates is not None:
+        return payment_dates
+    if payment_lag == 0:
+        return accrual_end_dates
+    return jnp.asarray(accrual_end_dates) + payment_lag
+
+
+def _validate_payment_schedule(
+    leg: str,
+    accrual_end_dates: Int[Array, " n"],
+    payment_dates: Int[Array, " n"] | None,
+    payment_lag: int,
+) -> None:
+    """Validate a leg's payment-schedule configuration at construction.
+
+    Called from ``__check_init__``, i.e. at the user boundary before
+    tracing, so Python ``raise`` is appropriate here (AGENTS.md).  Only
+    *shapes* and the static ``payment_lag`` are inspected, never array
+    values, so the check is safe on traced date arrays.
+
+    Args:
+        leg: Human-readable leg name, used in the error message.
+        accrual_end_dates: The leg's accrual end dates.
+        payment_dates: The leg's explicit payment dates, or ``None``.
+        payment_lag: The uniform calendar-day lag.
+
+    Raises:
+        ValueError: If ``payment_lag`` is negative, if both an explicit
+            payment schedule and a non-zero lag are supplied (the two
+            would contradict each other), or if the explicit schedule
+            does not have one payment per accrual period.
+    """
+    if payment_lag < 0:
+        raise ValueError(
+            f"payment_lag must be non-negative, got {payment_lag}; "
+            f"a payment cannot precede its accrual end."
+        )
+    if payment_dates is None:
+        return
+    if payment_lag != 0:
+        raise ValueError(
+            f"{leg}: explicit payment dates and payment_lag="
+            f"{payment_lag} contradict each other; supply one or the "
+            f"other."
+        )
+    pay_shape = jnp.shape(payment_dates)
+    accrual_shape = jnp.shape(accrual_end_dates)
+    if pay_shape != accrual_shape:
+        raise ValueError(
+            f"{leg}: payment dates have shape {pay_shape} but the "
+            f"accrual schedule has shape {accrual_shape}; one payment "
+            f"per period is required."
+        )
+
+
+def _compounded_float_leg_pv(
+    curve,
+    start_date: Int[Array, ""],
+    accrual_end_dates: Int[Array, " n"],
+    payment_dates: Int[Array, " n"],
+) -> Float[Array, ""]:
+    """Present value of a single-curve compounded floating leg, period
+    by period, discounting each coupon at its payment date.
+
+    .. math::
+        \\text{PV} = \\sum_i P(0,T_i^p)
+        \\left(\\frac{P(0,T_i^s)}{P(0,T_i^e)} - 1\\right)
+
+    This is the general form of the telescoping identity: when
+    :math:`T^p = T^e` every term collapses to
+    :math:`P(0,T_i^s) - P(0,T_i^e)` and the sum telescopes to
+    :math:`P(0,T_0) - P(0,T_n)`.  Callers keep the closed telescope as a
+    fast path at zero lag — it is the same number up to summation order,
+    and bit-identical to what VALAX produced before payment lags existed.
+
+    Note that the day count never appears: the compounded coupon is
+    :math:`\\tau_i F_i = P(0,T_i^s)/P(0,T_i^e) - 1` by the definition of
+    the simply-compounded forward, so :math:`\\tau_i` cancels.  The same
+    expression therefore serves an overnight-compounded leg and a
+    single-curve IBOR leg alike.
+
+    Args:
+        curve: The discount/projection curve (one curve, by
+            construction of the single-curve par-swap residual).
+        start_date: Effective date :math:`T_0`.
+        accrual_end_dates: Accrual end dates :math:`T_i^e`.
+        payment_dates: Payment dates :math:`T_i^p`.
+
+    Returns:
+        The floating-leg present value for unit notional.
+    """
+    starts = jnp.concatenate([start_date[None], accrual_end_dates[:-1]])
+    df_starts = curve(starts)
+    df_ends = curve(accrual_end_dates)
+    df_pay = curve(payment_dates)
+    return jnp.sum(df_pay * (df_starts / df_ends - 1.0))
+
+
 def _floating_leg_pv(
     graph: CurveGraph,
     fixings: FixingHistory,
     start_date: Int[Array, ""],
-    payment_dates: Int[Array, " n"],
+    accrual_end_dates: Int[Array, " n"],
     fixing_dates: Int[Array, " n"],
     day_count: str,
     index_id: str,
     discount_curve_id: str,
     forward_curve_id: str,
     spread_addon: Float[Array, ""],
+    payment_dates: Int[Array, " n"] | None = None,
 ) -> Float[Array, ""]:
     """Present value of a floating leg under the dual-curve framework.
 
@@ -63,19 +185,43 @@ def _floating_leg_pv(
     :class:`CrossCurrencyBasisSwap`).  Computes
 
     .. math::
-        \\text{PV} = \\sum_j (F_j + s)\\,\\tau_j\\,DF_{\\text{disc}}(T_j),
+        \\text{PV} = \\sum_j (F_j + s)\\,\\tau_j\\,DF_{\\text{disc}}(T_j^p),
 
     where each :math:`F_j` is a realised fixing if recorded under
     ``index_id``, else the curve-projected forward
-    :math:`(DF_{\\text{fwd}}(T_{j-1}) / DF_{\\text{fwd}}(T_j) - 1)/\\tau_j`.
+    :math:`(DF_{\\text{fwd}}(T_{j-1}^e) / DF_{\\text{fwd}}(T_j^e) - 1)/\\tau_j`.
+
+    Accrual and payment are kept in separate roles: projection and
+    :math:`\\tau` come from the accrual schedule, discounting from the
+    payment schedule.  The two coincide only when there is no payment
+    lag, which is the default.
+
+    Args:
+        graph: The curve graph supplying both curves.
+        fixings: Realised-fixing registry consulted before projection.
+        start_date: Leg effective date; the first accrual start.
+        accrual_end_dates: Accrual end dates :math:`T_j^e`.
+        fixing_dates: Fixing date of each coupon.
+        day_count: Day count used for the accrual fractions.
+        index_id: Key under which realised fixings are stored.
+        discount_curve_id: Curve used to discount at :math:`T_j^p`.
+        forward_curve_id: Curve used to project :math:`F_j`.
+        spread_addon: Spread added to every coupon rate.
+        payment_dates: Payment dates :math:`T_j^p`.  ``None`` means
+            no payment lag, i.e. :math:`T^p = T^e`.
+
+    Returns:
+        The floating-leg present value for unit notional.
     """
     discount_curve = graph[discount_curve_id]
     forward_curve = graph[forward_curve_id]
+    if payment_dates is None:
+        payment_dates = accrual_end_dates
 
-    starts = jnp.concatenate([start_date[None], payment_dates[:-1]])
-    taus = year_fraction(starts, payment_dates, day_count)
+    starts = jnp.concatenate([start_date[None], accrual_end_dates[:-1]])
+    taus = year_fraction(starts, accrual_end_dates, day_count)
     df_starts_fwd = forward_curve(starts)
-    df_ends_fwd = forward_curve(payment_dates)
+    df_ends_fwd = forward_curve(accrual_end_dates)
     projected = (df_starts_fwd / df_ends_fwd - 1.0) / taus
 
     if index_id in fixings.indices:
@@ -182,11 +328,17 @@ class SwapRate(eqx.Module):
     The par condition is:
 
     .. math::
-        r \\sum_i \\tau_i\\,DF(T_i) = DF(\\text{start}) - DF(\\text{maturity})
+        r \\sum_i \\tau_i\\,DF(T_i^p) = \\text{PV}_{\\text{float}}
 
     where the annuity sum runs over the fixed-leg payment dates.  The
     residual is the difference of the two sides (zero when the curve
     is correctly calibrated).
+
+    Without a payment lag (:math:`T^p = T^e`, the default) the floating
+    leg telescopes to :math:`DF(T_0) - DF(T_n)` and the condition is the
+    familiar :math:`r\\,A = DF(\\text{start}) - DF(\\text{maturity})`.
+    With a lag it does not telescope and becomes the per-period sum of
+    :func:`_compounded_float_leg_pv`.
 
     Distinct from :class:`~valax.instruments.rates.InterestRateSwap`,
     which represents a tradeable swap contract with notional and
@@ -194,13 +346,23 @@ class SwapRate(eqx.Module):
 
     Attributes:
         start_date: Swap effective date (ordinal).
-        fixed_dates: Fixed leg payment dates including maturity
-            (ordinal, shape ``n``).
+        fixed_dates: Accrual end dates of the schedule, including
+            maturity (ordinal, shape ``n``).  Both legs share this
+            schedule; with no payment lag these are also the payment
+            dates, which is where the field name comes from.
         rate: Par swap rate (annualized).
         day_count: Day count convention for fixed leg accrual.
         curves_touched: Curve identifier this instrument prices against.
             For a single-curve build, the same curve is used for
             forward projection and discounting.
+        payment_dates: Optional explicit payment dates :math:`T_i^p`
+            (shape ``n``), already business-day adjusted by the caller.
+            ``None`` (the default) means pay at accrual end.
+        payment_lag: Uniform payment lag in **calendar** days, applied
+            to every coupon when ``payment_dates`` is ``None``.  A
+            convenience for quoting a convention such as "1 business day
+            lag" approximately; for an exact business-day roll, supply
+            ``payment_dates`` instead.
     """
 
     start_date: Int[Array, ""]
@@ -210,6 +372,14 @@ class SwapRate(eqx.Module):
     curves_touched: tuple = eqx.field(
         static=True, default=(_DEFAULT_CURVE_ID,)
     )
+    payment_dates: Int[Array, " n"] | None = None
+    payment_lag: int = eqx.field(static=True, default=0)
+
+    def __check_init__(self):
+        _validate_payment_schedule(
+            "SwapRate", self.fixed_dates, self.payment_dates,
+            self.payment_lag,
+        )
 
     def residual(
         self,
@@ -217,39 +387,64 @@ class SwapRate(eqx.Module):
         fixings: FixingHistory,
         ref_date: Int[Array, ""],
     ) -> Float[Array, ""]:
-        """Repricing residual: ``r * annuity - (DF(start) - DF(maturity))``."""
+        """Repricing residual: ``r * annuity - float_pv``.
+
+        At zero payment lag the floating leg is evaluated by the closed
+        telescope ``DF(start) - DF(maturity)``; with a lag it is the
+        per-period sum discounted at :math:`T^p`.
+        """
         del fixings, ref_date  # single-curve swap residual ignores fixings
         curve = graph[self.curves_touched[0]]
         starts = jnp.concatenate(
             [self.start_date[None], self.fixed_dates[:-1]]
         )
         taus = year_fraction(starts, self.fixed_dates, self.day_count)
-        fixed_dfs = curve(self.fixed_dates)
-        annuity = jnp.sum(taus * fixed_dfs)
-        df_start = curve(self.start_date)
-        df_mat = curve(self.fixed_dates[-1])
-        return self.rate * annuity - (df_start - df_mat)
+        if self.payment_dates is None and self.payment_lag == 0:
+            fixed_dfs = curve(self.fixed_dates)
+            annuity = jnp.sum(taus * fixed_dfs)
+            df_start = curve(self.start_date)
+            df_mat = curve(self.fixed_dates[-1])
+            return self.rate * annuity - (df_start - df_mat)
+        pay_dates = _resolve_payment_dates(
+            self.fixed_dates, self.payment_dates, self.payment_lag
+        )
+        annuity = jnp.sum(taus * curve(pay_dates))
+        float_pv = _compounded_float_leg_pv(
+            curve, self.start_date, self.fixed_dates, pay_dates
+        )
+        return self.rate * annuity - float_pv
 
 
 class OISSwapRate(eqx.Module):
-    """Par OIS swap rate quote (single-curve, telescoping float leg).
+    """Par OIS swap rate quote (single-curve compounded float leg).
 
     The floating leg compounds the overnight rate (SOFR, €STR, SONIA,
-    TONA, etc.) over each accrual period.  Under a single OIS curve,
-    the floating-leg present value collapses via the telescoping
-    identity:
+    TONA, etc.) over each accrual period.  Under a single OIS curve the
+    floating-leg present value is
 
     .. math::
-        \\text{PV}_{\\text{float}} = DF(T_0) - DF(T_n)
+        \\text{PV}_{\\text{float}} = \\sum_i P_d(0,T_i^p)
+        \\left(\\frac{P_d(0,T_i^s)}{P_d(0,T_i^e)} - 1\\right),
 
-    where :math:`T_0` is ``start_date`` and :math:`T_n` is the swap's
-    maturity (``fixed_dates[-1]``).  The par condition is therefore:
+    and the par condition is
 
     .. math::
-        r \\sum_i \\tau_i\\,DF(T_i) = DF(T_0) - DF(T_n)
+        r \\sum_i \\tau_i\\,P_d(0,T_i^p) = \\text{PV}_{\\text{float}}.
 
-    which is structurally identical to :class:`SwapRate`'s residual
-    in the single-curve case.  The distinction is semantic and
+    **Payment lag.**  Overnight-index swaps pay a business day or two
+    after the accrual period ends (USD SOFR: 2 business days; EUR €STR
+    and GBP SONIA: 1).  Only when that lag is zero, :math:`T^p = T^e`,
+    does each term collapse to :math:`P_d(0,T_i^s) - P_d(0,T_i^e)` and
+    the sum telescope to the familiar
+
+    .. math::
+        \\text{PV}_{\\text{float}} = DF(T_0) - DF(T_n).
+
+    That closed form is retained as a fast path when no lag is
+    configured — it is the default, and it reproduces VALAX's
+    pre-payment-lag numbers bit for bit.  With a lag the sum is
+    evaluated period by period, which is structurally identical to
+    :class:`SwapRate`'s residual.  The distinction is semantic and
     forward-looking: ``OISSwapRate`` is the canonical name for OIS
     quotes once the joint solver lands (MC-Curves-2), where IBOR
     swaps will be a *dual*-curve quote (:class:`IborSwapRate`,
@@ -267,8 +462,10 @@ class OISSwapRate(eqx.Module):
 
     Attributes:
         start_date: Swap effective date (ordinal).
-        fixed_dates: Fixed leg payment dates including maturity
-            (ordinal, shape ``n``).
+        fixed_dates: Accrual end dates of the schedule, including
+            maturity (ordinal, shape ``n``).  Both legs share this
+            schedule; with no payment lag these are also the payment
+            dates, which is where the field name comes from.
         rate: Par fixed rate (annualized).
         day_count: Day count convention for the fixed leg accruals.
         curves_touched: Single-element tuple naming the OIS curve.
@@ -276,6 +473,22 @@ class OISSwapRate(eqx.Module):
         index_id: Identifier for the overnight index (e.g.
             ``"USD.SOFR"``, ``"EUR.ESTR"``).  Reserved for future
             seasoning support; not consumed by the current residual.
+        payment_dates: Optional explicit payment dates :math:`T_i^p`
+            (shape ``n``), already business-day adjusted by the caller.
+            ``None`` (the default) means pay at accrual end.
+        payment_lag: Uniform payment lag in **calendar** days, applied
+            to every coupon when ``payment_dates`` is ``None``.  Use it
+            to express a convention approximately; for an exact
+            business-day roll (which is what the market actually uses),
+            supply ``payment_dates``.
+
+    Note:
+        The timing convexity from paying at :math:`T^p` rather than
+        :math:`T^e` — the compounded rate is no longer a martingale
+        under the :math:`T^p`-forward measure — is **neglected**, as is
+        standard.  Only the discount factor moves; the projected coupon
+        does not.  See the conformance map's documented choices
+        (spec C-7).
     """
 
     start_date: Int[Array, ""]
@@ -286,6 +499,14 @@ class OISSwapRate(eqx.Module):
         static=True, default=(_DEFAULT_CURVE_ID,)
     )
     index_id: str = eqx.field(static=True, default="OIS")
+    payment_dates: Int[Array, " n"] | None = None
+    payment_lag: int = eqx.field(static=True, default=0)
+
+    def __check_init__(self):
+        _validate_payment_schedule(
+            "OISSwapRate", self.fixed_dates, self.payment_dates,
+            self.payment_lag,
+        )
 
     def residual(
         self,
@@ -293,24 +514,35 @@ class OISSwapRate(eqx.Module):
         fixings: FixingHistory,
         ref_date: Int[Array, ""],
     ) -> Float[Array, ""]:
-        """Repricing residual: ``r * annuity - (DF(start) - DF(maturity))``.
+        """Repricing residual: ``r * annuity - float_pv``.
 
-        Telescoping form — the float leg PV equals
-        ``DF(start_date) - DF(fixed_dates[-1])``.  ``fixings`` is
-        accepted for protocol conformance but not consumed in the
-        MVP; see class docstring on partially-seasoned swaps.
+        At zero payment lag the float leg PV is evaluated by the closed
+        telescope ``DF(start_date) - DF(fixed_dates[-1])``; with a lag it
+        is summed period by period, each coupon discounted at its own
+        payment date.  ``fixings`` is accepted for protocol conformance
+        but not consumed in the MVP; see the class docstring on
+        partially-seasoned swaps.
         """
-        del fixings, ref_date  # MVP: fixings deferred, telescope only
+        del fixings, ref_date  # MVP: fixings deferred
         curve = graph[self.curves_touched[0]]
         starts = jnp.concatenate(
             [self.start_date[None], self.fixed_dates[:-1]]
         )
         taus = year_fraction(starts, self.fixed_dates, self.day_count)
-        fixed_dfs = curve(self.fixed_dates)
-        annuity = jnp.sum(taus * fixed_dfs)
-        df_start = curve(self.start_date)
-        df_mat = curve(self.fixed_dates[-1])
-        return self.rate * annuity - (df_start - df_mat)
+        if self.payment_dates is None and self.payment_lag == 0:
+            fixed_dfs = curve(self.fixed_dates)
+            annuity = jnp.sum(taus * fixed_dfs)
+            df_start = curve(self.start_date)
+            df_mat = curve(self.fixed_dates[-1])
+            return self.rate * annuity - (df_start - df_mat)
+        pay_dates = _resolve_payment_dates(
+            self.fixed_dates, self.payment_dates, self.payment_lag
+        )
+        annuity = jnp.sum(taus * curve(pay_dates))
+        float_pv = _compounded_float_leg_pv(
+            curve, self.start_date, self.fixed_dates, pay_dates
+        )
+        return self.rate * annuity - float_pv
 
 
 class IborSwapRate(eqx.Module):
@@ -328,8 +560,8 @@ class IborSwapRate(eqx.Module):
     The dual-curve par condition (theory.md §3.2) is
 
     .. math::
-        r \\sum_i \\tau^{\\text{fixed}}_i\\,DF_{\\text{disc}}(T^{\\text{fixed}}_i)
-        \\;=\\; \\sum_j F_j\\,\\tau^{\\text{float}}_j\\,DF_{\\text{disc}}(T^{\\text{float}}_j)
+        r \\sum_i \\tau^{\\text{fixed}}_i\\,DF_{\\text{disc}}(T^{\\text{fixed},p}_i)
+        \\;=\\; \\sum_j F_j\\,\\tau^{\\text{float}}_j\\,DF_{\\text{disc}}(T^{\\text{float},p}_j)
 
     where each forward :math:`F_j` is
 
@@ -350,9 +582,9 @@ class IborSwapRate(eqx.Module):
 
     Attributes:
         start_date: Swap effective date (ordinal).
-        fixed_dates: Fixed leg payment dates (ordinal, shape
+        fixed_dates: Fixed leg accrual end dates (ordinal, shape
             ``n_fixed``).
-        float_dates: Floating leg accrual end / payment dates (ordinal,
+        float_dates: Floating leg accrual end dates (ordinal,
             shape ``n_float``).  May differ from ``fixed_dates`` when
             payment frequencies differ.
         fixing_dates: Fixing date for each float coupon (ordinal,
@@ -370,6 +602,14 @@ class IborSwapRate(eqx.Module):
             tenor are stored in :class:`FixingHistory`.  Reserved
             ``"IBOR"`` sentinel by default; production users specify
             e.g. ``"USD.SOFR.3M"`` or ``"EUR.EURIBOR.6M"``.
+        fixed_payment_dates: Optional explicit fixed-leg payment dates
+            (shape ``n_fixed``).  ``None`` means pay at accrual end.
+        float_payment_dates: Optional explicit float-leg payment dates
+            (shape ``n_float``).  ``None`` means pay at accrual end.
+        payment_lag: Uniform payment lag in **calendar** days, applied
+            to *both* legs for whichever of them has no explicit payment
+            schedule.  For an exact business-day roll, or for legs with
+            different lags, supply the explicit arrays instead.
     """
 
     start_date: Int[Array, ""]
@@ -384,6 +624,19 @@ class IborSwapRate(eqx.Module):
         default=(_DEFAULT_CURVE_ID, _DEFAULT_CURVE_ID),
     )
     index_id: str = eqx.field(static=True, default="IBOR")
+    fixed_payment_dates: Int[Array, " n_fixed"] | None = None
+    float_payment_dates: Int[Array, " n_float"] | None = None
+    payment_lag: int = eqx.field(static=True, default=0)
+
+    def __check_init__(self):
+        _validate_payment_schedule(
+            "IborSwapRate fixed leg", self.fixed_dates,
+            self.fixed_payment_dates, self.payment_lag,
+        )
+        _validate_payment_schedule(
+            "IborSwapRate float leg", self.float_dates,
+            self.float_payment_dates, self.payment_lag,
+        )
 
     def residual(
         self,
@@ -395,7 +648,9 @@ class IborSwapRate(eqx.Module):
 
         Float-leg coupons that have a realised fixing in
         ``fixings[index_id]`` use the realised rate; the rest are
-        projected from the forward curve.
+        projected from the forward curve.  Projection and accrual
+        fractions come from the accrual schedule; discounting from the
+        payment schedule.
         """
         del ref_date  # temporal selection is delegated to fixings
         float_pv = _floating_leg_pv(
@@ -409,6 +664,10 @@ class IborSwapRate(eqx.Module):
             self.curves_touched[0],
             self.curves_touched[1],
             jnp.asarray(0.0),
+            _resolve_payment_dates(
+                self.float_dates, self.float_payment_dates,
+                self.payment_lag,
+            ),
         )
         # Fixed leg annuity (no spread, no fixings).
         discount_curve = graph[self.curves_touched[0]]
@@ -418,7 +677,10 @@ class IborSwapRate(eqx.Module):
         fixed_taus = year_fraction(
             fixed_starts, self.fixed_dates, self.fixed_day_count
         )
-        annuity = jnp.sum(fixed_taus * discount_curve(self.fixed_dates))
+        fixed_pay = _resolve_payment_dates(
+            self.fixed_dates, self.fixed_payment_dates, self.payment_lag
+        )
+        annuity = jnp.sum(fixed_taus * discount_curve(fixed_pay))
         fixed_pv = self.rate * annuity
         return fixed_pv - float_pv
 
@@ -589,8 +851,8 @@ class TenorBasisSwap(eqx.Module):
     The par condition (theory.md §3.7) is
 
     .. math::
-        \\sum_i \\tau^a_i\\,(F^a_i + s_a)\\,DF_{\\text{disc}}(T^a_i)
-        \\;=\\; \\sum_j \\tau^b_j\\,(F^b_j + s_b)\\,DF_{\\text{disc}}(T^b_j),
+        \\sum_i \\tau^a_i\\,(F^a_i + s_a)\\,DF_{\\text{disc}}(T^{a,p}_i)
+        \\;=\\; \\sum_j \\tau^b_j\\,(F^b_j + s_b)\\,DF_{\\text{disc}}(T^{b,p}_j),
 
     where :math:`s_a`, :math:`s_b` are zero except on the leg
     indicated by ``spread_on_leg``.  The residual is
@@ -611,12 +873,12 @@ class TenorBasisSwap(eqx.Module):
     Attributes:
         start_date: Swap effective date (ordinal).
 
-        leg_a_dates: Leg-A payment dates (ordinal, shape ``n_a``).
+        leg_a_dates: Leg-A accrual end dates (ordinal, shape ``n_a``).
         leg_a_fixing_dates: Leg-A fixing dates (shape ``n_a``).
         leg_a_day_count: Leg-A day count convention.
         leg_a_index_id: Identifier for leg-A's IBOR fixings.
 
-        leg_b_dates: Leg-B payment dates (ordinal, shape ``n_b``).
+        leg_b_dates: Leg-B accrual end dates (ordinal, shape ``n_b``).
         leg_b_fixing_dates: Leg-B fixing dates (shape ``n_b``).
         leg_b_day_count: Leg-B day count convention.
         leg_b_index_id: Identifier for leg-B's IBOR fixings.
@@ -630,6 +892,13 @@ class TenorBasisSwap(eqx.Module):
         curves_touched: 3-tuple ``(discount_id, leg_a_id, leg_b_id)``.
             Defaults to ``(_default_, _default_, _default_)`` for
             single-curve degeneracy; multi-curve consumers override.
+
+        leg_a_payment_dates: Optional explicit leg-A payment dates
+            (shape ``n_a``).  ``None`` means pay at accrual end.
+        leg_b_payment_dates: Optional explicit leg-B payment dates
+            (shape ``n_b``).  ``None`` means pay at accrual end.
+        payment_lag: Uniform payment lag in **calendar** days, applied
+            to whichever legs have no explicit payment schedule.
     """
 
     # Required (array) fields — must come first in the dataclass.
@@ -656,6 +925,19 @@ class TenorBasisSwap(eqx.Module):
             _DEFAULT_CURVE_ID,
         ),
     )
+    leg_a_payment_dates: Int[Array, " n_a"] | None = None
+    leg_b_payment_dates: Int[Array, " n_b"] | None = None
+    payment_lag: int = eqx.field(static=True, default=0)
+
+    def __check_init__(self):
+        _validate_payment_schedule(
+            "TenorBasisSwap leg A", self.leg_a_dates,
+            self.leg_a_payment_dates, self.payment_lag,
+        )
+        _validate_payment_schedule(
+            "TenorBasisSwap leg B", self.leg_b_dates,
+            self.leg_b_payment_dates, self.payment_lag,
+        )
 
     def residual(
         self,
@@ -689,6 +971,10 @@ class TenorBasisSwap(eqx.Module):
             self.curves_touched[0],   # shared discount
             self.curves_touched[1],   # leg A forward
             a_addon,
+            _resolve_payment_dates(
+                self.leg_a_dates, self.leg_a_payment_dates,
+                self.payment_lag,
+            ),
         )
         b_pv = _floating_leg_pv(
             graph,
@@ -701,6 +987,10 @@ class TenorBasisSwap(eqx.Module):
             self.curves_touched[0],   # shared discount
             self.curves_touched[2],   # leg B forward
             b_addon,
+            _resolve_payment_dates(
+                self.leg_b_dates, self.leg_b_payment_dates,
+                self.payment_lag,
+            ),
         )
         return a_pv - b_pv
 
@@ -764,9 +1054,11 @@ class CrossCurrencyBasisSwap(eqx.Module):
     Attributes:
         start_date: Swap effective date (ordinal).
 
-        dom_dates: Domestic-leg payment dates (ordinal, shape ``n_dom``).
+        dom_dates: Domestic-leg accrual end dates (ordinal, shape
+            ``n_dom``).
         dom_fixing_dates: Domestic-leg fixing dates (shape ``n_dom``).
-        for_dates: Foreign-leg payment dates (ordinal, shape ``n_for``).
+        for_dates: Foreign-leg accrual end dates (ordinal, shape
+            ``n_for``).
         for_fixing_dates: Foreign-leg fixing dates (shape ``n_for``).
         fx_spot: Spot FX rate, in domestic per foreign units.  Stored
             for documentation; cancels in the normalised residual
@@ -781,6 +1073,15 @@ class CrossCurrencyBasisSwap(eqx.Module):
         variant: ``"constant_notional"`` or ``"mtm"``.
         curves_touched: 4-tuple of curve identifiers, in the order
             ``(dom_discount, dom_forward, for_discount, for_forward)``.
+        dom_payment_dates: Optional explicit domestic-leg payment dates
+            (shape ``n_dom``).  ``None`` means pay at accrual end.
+        for_payment_dates: Optional explicit foreign-leg payment dates
+            (shape ``n_for``).  ``None`` means pay at accrual end.
+        payment_lag: Uniform payment lag in **calendar** days, applied
+            to whichever legs have no explicit payment schedule.  Under
+            ``"constant_notional"`` the final notional re-exchange moves
+            with the coupon: it is discounted at each leg's **last
+            payment date**, not at its accrual end.
     """
 
     # Required (array) fields.
@@ -810,6 +1111,19 @@ class CrossCurrencyBasisSwap(eqx.Module):
             _DEFAULT_CURVE_ID,  # for forward
         ),
     )
+    dom_payment_dates: Int[Array, " n_dom"] | None = None
+    for_payment_dates: Int[Array, " n_for"] | None = None
+    payment_lag: int = eqx.field(static=True, default=0)
+
+    def __check_init__(self):
+        _validate_payment_schedule(
+            "CrossCurrencyBasisSwap domestic leg", self.dom_dates,
+            self.dom_payment_dates, self.payment_lag,
+        )
+        _validate_payment_schedule(
+            "CrossCurrencyBasisSwap foreign leg", self.for_dates,
+            self.for_payment_dates, self.payment_lag,
+        )
 
     def residual(
         self,
@@ -836,6 +1150,13 @@ class CrossCurrencyBasisSwap(eqx.Module):
         for_disc_id = self.curves_touched[2]
         for_fwd_id = self.curves_touched[3]
 
+        dom_pay = _resolve_payment_dates(
+            self.dom_dates, self.dom_payment_dates, self.payment_lag
+        )
+        for_pay = _resolve_payment_dates(
+            self.for_dates, self.for_payment_dates, self.payment_lag
+        )
+
         # Domestic-leg coupons (always discounted with domestic OIS).
         dom_coupon_pv = _floating_leg_pv(
             graph,
@@ -848,6 +1169,7 @@ class CrossCurrencyBasisSwap(eqx.Module):
             dom_disc_id,
             dom_fwd_id,
             dom_addon,
+            dom_pay,
         )
 
         if self.variant == "mtm":
@@ -864,6 +1186,7 @@ class CrossCurrencyBasisSwap(eqx.Module):
                 dom_disc_id,   # ← key MTM detail
                 for_fwd_id,
                 for_addon,
+                for_pay,
             )
             return dom_coupon_pv - for_coupon_pv_in_dom
 
@@ -880,9 +1203,10 @@ class CrossCurrencyBasisSwap(eqx.Module):
                 for_disc_id,
                 for_fwd_id,
                 for_addon,
+                for_pay,
             )
-            df_dom_mat = graph[dom_disc_id](self.dom_dates[-1])
-            df_for_mat = graph[for_disc_id](self.for_dates[-1])
+            df_dom_mat = graph[dom_disc_id](dom_pay[-1])
+            df_for_mat = graph[for_disc_id](for_pay[-1])
             return (
                 (dom_coupon_pv + (1.0 - df_dom_mat))
                 - (for_coupon_pv + (1.0 - df_for_mat))

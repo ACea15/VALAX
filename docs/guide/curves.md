@@ -115,7 +115,89 @@ Each one encodes a single no-arbitrage equation on the curve:
 |------------|----------|
 | `DepositRate` | $DF(\text{end}) = DF(\text{start}) / (1 + r \tau)$ |
 | `FRA` | $DF(\text{end}) = DF(\text{start}) / (1 + r \tau)$ (with $\text{start} > t_0$) |
-| `SwapRate` | $r \sum_i \tau_i\,DF(T_i) = DF(\text{start}) - DF(T_n)$ |
+| `SwapRate` | $r \sum_i \tau_i\,DF(T_i^p) = \sum_i DF(T_i^p)\left(DF(T_i^s)/DF(T_i^e) - 1\right)$ |
+
+### Payment lag: accrual end vs payment date
+
+Overnight-index swaps do not pay on the day the accrual period ends.  USD SOFR
+OIS pays two business days later, EUR €STR and GBP SONIA one.  So each coupon
+has *two* dates that matter — the accrual end $T^e_i$, which determines what
+the coupon is worth, and the payment date $T^p_i$, which determines when you
+receive it and therefore how it is discounted.
+
+Every swap quote type keeps these in separate roles.  Projection and the
+accrual fraction $\tau_i$ come from the accrual schedule; discounting comes
+from the payment schedule:
+
+$$
+S^{\mathrm{OIS}}(\theta_d)
+= \frac{\sum_i P_d(0,T_i^p)\left(\dfrac{P_d(0,T_i^s)}{P_d(0,T_i^e)} - 1\right)}
+       {\sum_j \tau_j\, P_d(0,T_j^p)}
+$$
+
+There are two ways to say where the payments fall, and supplying both raises:
+
+```python
+from valax.curves.instruments import OISSwapRate
+from valax.dates import generate_schedule, ymd_to_ordinal
+import jax.numpy as jnp
+
+ref = ymd_to_ordinal(2025, 1, 1)
+accruals = generate_schedule(
+    2025, 1, 1, 2030, 1, 1, frequency=1
+).payment_dates
+
+# (a) A uniform lag in *calendar* days — convenient, approximate.
+ois_lagged = OISSwapRate(
+    start_date=ref,
+    fixed_dates=accruals,          # accrual ends
+    rate=jnp.array(0.0385),
+    day_count="act_360",
+    payment_lag=2,
+)
+
+# (b) An explicit payment schedule you have already rolled over a
+#     holiday calendar — the production route.
+ois_exact = OISSwapRate(
+    start_date=ref,
+    fixed_dates=accruals,
+    rate=jnp.array(0.0385),
+    day_count="act_360",
+    payment_dates=accruals + 2,    # substitute your own adjusted dates
+)
+```
+
+`payment_lag` shifts by calendar days, which is only an approximation to a
+business-day roll; VALAX has no holiday calendars (see
+[§8](#8-what-is-not-yet-implemented)).  When the distinction matters, compute
+the adjusted dates yourself and pass `payment_dates`.  Legs are resolved
+independently, so `IborSwapRate` takes `fixed_payment_dates` and
+`float_payment_dates`, `TenorBasisSwap` takes `leg_a_payment_dates` /
+`leg_b_payment_dates`, and `CrossCurrencyBasisSwap` takes
+`dom_payment_dates` / `for_payment_dates`.  Under the constant-notional
+cross-currency variant the final notional re-exchange travels with the last
+coupon, so it is discounted at the last *payment* date.
+
+!!! note "Defaults are unchanged, and the telescope survives as a fast path"
+    With neither field set, $T^p = T^e$ and the OIS floating leg collapses to
+    $DF(T_0) - DF(T_n)$ by the telescoping identity.  That closed form is kept
+    as an explicit branch, so every pre-existing curve reproduces bit for bit.
+    The identity holds *only* at zero lag — which is the point of the
+    conformance gate in
+    `tests/test_curves/test_instrument_residuals.py::TestPaymentLagTelescoping`.
+
+    A uniform lag always *lowers* the par rate, whatever the shape of the
+    curve, and by exactly nothing on a flat one.  The weights in the par-rate
+    average pick up a factor $P(0,T^p_i)/P(0,T^e_i) \approx e^{-f_i \ell}$,
+    which is a decreasing function of that period's own forward, so lagging
+    payment shifts weight away from the high-forward periods.  The size of the
+    effect is driven by the *dispersion* of the forwards, not their level.
+
+    What is **not** modelled is the timing convexity: the compounded rate is
+    no longer a martingale under the $T^p$-forward measure, and no drift
+    correction is applied.  This is the standard simplification, recorded in
+    the [conformance map](../architecture/aad-audit-conformance.md#documented-choices)
+    under C-7.
 
 ## 3. Sequential bootstrap
 
