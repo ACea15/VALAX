@@ -17,6 +17,8 @@ These tests are the contract that the future joint solver
 (``bootstrap_curve_graph`` in MC-Curves-2) will rely on.
 """
 
+import math
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -2349,6 +2351,307 @@ class TestPaymentLagPerLeg:
             for_payment_dates=shifted_last,
         )
         assert abs(only_redemption - base) > 1e-9
+
+
+class TestAveragedFutures:
+    """Compounded vs arithmetic-average money-market futures (spec § 4.2).
+
+    The compounded forward is a *product* of daily discount-factor ratios
+    minus one; the averaged forward is a *sum* of the same ratios minus
+    one.  The gap is the interest-on-interest that averaging discards, so
+    it survives on a perfectly flat curve — this is a compounding effect,
+    not a curve-shape effect.
+
+    The references below are **closed forms**, not rearrangements of the
+    implementation.  On a flat continuously-compounded curve at rate
+    :math:`r` with ``act_365`` curve basis and an ``act_360`` contract
+    basis, every daily ratio is exactly :math:`e^{r/365}`, so for
+    :math:`N` days
+
+    .. math::
+        \\bar{F} = 360\\left(e^{r/365} - 1\\right), \\qquad
+        F = \\frac{360}{N}\\left(e^{rN/365} - 1\\right).
+
+    Neither expression shares a line of code with the thing under test.
+    """
+
+    #: Flat curve rate used for the closed-form comparisons.
+    RATE = 0.04
+
+    def _curve(self, slope: float = 0.0) -> DiscountCurve:
+        pillars = jnp.array(
+            [int(REF) + 30 * k for k in range(0, 25)], dtype=jnp.int32
+        )
+        times = (pillars - int(REF)).astype(jnp.float64) / 365.0
+        dfs = jnp.exp(-(self.RATE + slope * times) * times)
+        return DiscountCurve(
+            pillar_dates=pillars,
+            discount_factors=dfs,
+            reference_date=REF,
+            day_count="act_365",
+        )
+
+    def _forward(self, curve, t0, t1, averaging) -> float:
+        """Curve-implied forward, read out of the residual at a zero
+        quote: ``residual = q - adj - F`` so ``F = -residual`` at
+        ``q = 0`` with no adjustment."""
+        future = MoneyMarketFuture(
+            start_date=jnp.asarray(t0),
+            end_date=jnp.asarray(t1),
+            futures_rate=jnp.asarray(0.0),
+            day_count="act_360",
+            averaging=averaging,
+        )
+        return -float(future.residual(_wrap_default(curve), NO_FIXINGS, REF))
+
+    def test_default_is_compounded(self):
+        """The new field must not change anybody's existing instrument."""
+        assert (
+            MoneyMarketFuture(
+                start_date=jnp.asarray(int(REF) + 30),
+                end_date=jnp.asarray(int(REF) + 120),
+                futures_rate=jnp.asarray(0.04),
+            ).averaging
+            == "compounded"
+        )
+
+    def test_compounded_branch_is_bit_for_bit_unchanged(self):
+        """Exact equality, not approximate: the compounded branch is the
+        same two-discount-factor expression it always was."""
+        curve = self._curve()
+        t0, t1 = int(REF) + 30, int(REF) + 120
+        tau = year_fraction(
+            jnp.asarray(t0), jnp.asarray(t1), "act_360"
+        )
+        expected = float(
+            (curve(jnp.asarray(t0)) / curve(jnp.asarray(t1)) - 1.0) / tau
+        )
+        assert self._forward(curve, t0, t1, "compounded") == expected
+
+    def test_averaged_forward_matches_its_closed_form(self):
+        """1M contract, flat curve: 360 (e^{r/365} - 1)."""
+        curve = self._curve()
+        t0, t1 = int(REF) + 30, int(REF) + 60
+        expected = 360.0 * (math.exp(self.RATE / 365.0) - 1.0)
+        assert self._forward(curve, t0, t1, "arithmetic") == pytest.approx(
+            expected, rel=1e-12
+        )
+
+    def test_compounded_forward_matches_its_closed_form(self):
+        curve = self._curve()
+        t0, t1, n = int(REF) + 30, int(REF) + 120, 90
+        expected = (360.0 / n) * (
+            math.exp(self.RATE * n / 365.0) - 1.0
+        )
+        assert self._forward(curve, t0, t1, "compounded") == pytest.approx(
+            expected, rel=1e-12
+        )
+
+    def test_the_two_differ_on_a_flat_curve(self):
+        """The distinction is compounding, so a flat curve does not make
+        it go away — which is exactly why calibrating a 1M contract as
+        though it were compounded is a real mis-specification."""
+        curve = self._curve()
+        t0, t1 = int(REF) + 30, int(REF) + 60
+        compounded = self._forward(curve, t0, t1, "compounded")
+        averaged = self._forward(curve, t0, t1, "arithmetic")
+        assert compounded > averaged
+        # Leading order is r^2 tau / 2; 1M at 4% is a fraction of a bp.
+        tau = 30.0 / 360.0
+        predicted = self.RATE**2 * tau / 2.0
+        assert (compounded - averaged) == pytest.approx(
+            predicted, rel=0.1
+        )
+        assert 1e-5 < (compounded - averaged) < 1e-4
+
+    def test_gap_grows_with_the_period(self):
+        """r^2 tau / 2 is linear in tau: a 3M contract shows ~3x a 1M."""
+        curve = self._curve()
+        t0 = int(REF) + 30
+        gap_1m = self._forward(
+            curve, t0, t0 + 30, "compounded"
+        ) - self._forward(curve, t0, t0 + 30, "arithmetic")
+        gap_3m = self._forward(
+            curve, t0, t0 + 90, "compounded"
+        ) - self._forward(curve, t0, t0 + 90, "arithmetic")
+        assert gap_3m / gap_1m == pytest.approx(3.0, rel=0.05)
+
+    def test_both_vanish_on_a_zero_rate_curve(self):
+        """Every daily ratio is exactly 1, so sum and product agree."""
+        pillars = jnp.array(
+            [int(REF) + 30 * k for k in range(0, 25)], dtype=jnp.int32
+        )
+        flat_one = DiscountCurve(
+            pillar_dates=pillars,
+            discount_factors=jnp.ones_like(pillars, dtype=jnp.float64),
+            reference_date=REF,
+            day_count="act_365",
+        )
+        t0, t1 = int(REF) + 30, int(REF) + 120
+        assert self._forward(flat_one, t0, t1, "compounded") == 0.0
+        assert self._forward(flat_one, t0, t1, "arithmetic") == 0.0
+
+    def test_daily_accruals_sum_to_the_period_accrual(self):
+        """Justifies collapsing the day-count-weighted average to
+        ``sum(rho_j - 1) / tau``: under ``act_360`` the daily accrual
+        fractions add up to the period's exactly, so ``tau`` really is
+        the sum of the weights."""
+        t0, t1 = int(REF) + 30, int(REF) + 120
+        daily = jnp.asarray(t0) + jnp.arange(t1 - t0 + 1)
+        deltas = year_fraction(daily[:-1], daily[1:], "act_360")
+        tau = year_fraction(jnp.asarray(t0), jnp.asarray(t1), "act_360")
+        assert float(jnp.sum(deltas)) == float(tau)
+
+    def test_only_the_averaged_contract_sees_inside_its_own_period(self):
+        """A structural difference in the *risk*, not just the level.
+
+        The compounded forward is a telescoping product of daily ratios,
+        so interior pillars cancel identically and it is sensitive only
+        to the two endpoint discount factors — on any curve.  The
+        averaged forward is a sum, which does not telescope, so it picks
+        up genuine exposure to the shape of the curve inside its own
+        period.  That exposure vanishes on a flat curve (adjacent daily
+        ratios are then equal and cancel), so this has to be checked on
+        a sloped one.
+        """
+        curve = self._curve(slope=0.05)
+        graph = _wrap_default(curve)
+        t0, t1 = int(REF) + 30, int(REF) + 120
+
+        def pillar_grad(averaging):
+            future = MoneyMarketFuture(
+                start_date=jnp.asarray(t0),
+                end_date=jnp.asarray(t1),
+                futures_rate=jnp.asarray(0.0),
+                day_count="act_360",
+                averaging=averaging,
+            )
+            grads = eqx.filter_grad(
+                lambda g: future.residual(g, NO_FIXINGS, REF)
+            )(graph)
+            return grads.curves["_default_"].discount_factors
+
+        pillars = curve.pillar_dates
+        interior = jnp.asarray(
+            [(int(p) > t0) and (int(p) < t1) for p in pillars]
+        )
+        assert bool(jnp.any(interior)), "need interior pillars to test"
+
+        comp = pillar_grad("compounded")
+        arith = pillar_grad("arithmetic")
+        # Compounded: interior sensitivity is *identically* zero.
+        assert jnp.all(comp[interior] == 0.0)
+        # Averaged: it is not.
+        assert jnp.any(jnp.abs(arith[interior]) > 1e-9)
+        # Both still see the endpoints, and with opposite signs.
+        assert float(jnp.sum(arith[pillars == t0])) < 0.0
+        assert float(jnp.sum(arith[pillars == t1])) > 0.0
+
+    def test_rejects_an_unknown_convention(self):
+        with pytest.raises(ValueError, match="averaging must be one of"):
+            MoneyMarketFuture(
+                start_date=jnp.asarray(int(REF)),
+                end_date=jnp.asarray(int(REF) + 30),
+                futures_rate=jnp.asarray(0.04),
+                averaging="average",
+            )
+
+    def test_rejects_a_degenerate_span(self):
+        """An averaged contract needs at least one rate day."""
+        future = MoneyMarketFuture(
+            start_date=jnp.asarray(int(REF) + 30),
+            end_date=jnp.asarray(int(REF) + 30),
+            futures_rate=jnp.asarray(0.04),
+            averaging="arithmetic",
+        )
+        with pytest.raises(ValueError, match="at least one"):
+            future.residual(
+                _wrap_default(self._curve()), NO_FIXINGS, REF
+            )
+
+    def test_traced_dates_raise_a_pointed_error(self):
+        """The daily subdivision needs a concrete span.  Failing loudly
+        with a message naming the way out beats silently averaging over
+        the wrong number of days."""
+        curve = self._curve()
+        graph = _wrap_default(curve)
+
+        def f(t0, t1):
+            return MoneyMarketFuture(
+                start_date=t0,
+                end_date=t1,
+                futures_rate=jnp.asarray(0.0),
+                averaging="arithmetic",
+            ).residual(graph, NO_FIXINGS, REF)
+
+        with pytest.raises(ValueError, match="concrete day count"):
+            jax.jit(f)(
+                jnp.asarray(int(REF) + 30), jnp.asarray(int(REF) + 120)
+            )
+
+    def test_jit_and_grad_with_the_instrument_closed_over(self):
+        """The realistic pattern: quotes are Python data, the graph is
+        the traced argument."""
+        curve = self._curve()
+        future = MoneyMarketFuture(
+            start_date=jnp.asarray(int(REF) + 30),
+            end_date=jnp.asarray(int(REF) + 120),
+            futures_rate=jnp.asarray(0.04),
+            day_count="act_360",
+            averaging="arithmetic",
+        )
+
+        def f(g):
+            return future.residual(g, NO_FIXINGS, REF)
+
+        graph = _wrap_default(curve)
+        assert float(eqx.filter_jit(f)(graph)) == pytest.approx(
+            float(f(graph)), abs=1e-14
+        )
+        dfs_bar = eqx.filter_grad(f)(graph).curves[
+            "_default_"
+        ].discount_factors
+        assert jnp.all(jnp.isfinite(dfs_bar))
+        assert jnp.any(jnp.abs(dfs_bar) > 1e-12)
+
+    def test_bootstraps_to_a_different_curve(self):
+        """End to end: an averaged strip converges, and lands somewhere
+        measurably different from the same quotes read as compounded."""
+        from valax.curves.bootstrap_graph import bootstrap_curve_graph
+        from valax.curves.graph import CurveSpec
+
+        pillars = jnp.array(
+            [int(REF) + 90 * k for k in range(1, 5)], dtype=jnp.int32
+        )
+        spec = CurveSpec(
+            curve_id="USD.SOFR.1M",
+            currency="USD",
+            pillar_dates=pillars,
+            day_count="act_365",
+        )
+
+        def build(averaging):
+            quotes = [
+                MoneyMarketFuture(
+                    start_date=jnp.asarray(int(p) - 90),
+                    end_date=jnp.asarray(int(p)),
+                    futures_rate=jnp.asarray(0.04 + 0.001 * k),
+                    curves_touched=("USD.SOFR.1M",),
+                    averaging=averaging,
+                )
+                for k, p in enumerate(pillars)
+            ]
+            return bootstrap_curve_graph(REF, [spec], quotes)
+
+        averaged, diag_a = build("arithmetic")
+        compounded, diag_c = build("compounded")
+        assert diag_a.converged and diag_c.converged
+        assert float(diag_a.max_abs_residual) < 1e-12
+        gap = jnp.abs(
+            averaged["USD.SOFR.1M"].discount_factors
+            - compounded["USD.SOFR.1M"].discount_factors
+        )
+        assert float(jnp.max(gap)) > 1e-5
 
 
 class TestPaymentLagValidation:

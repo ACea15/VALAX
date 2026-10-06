@@ -199,6 +199,74 @@ coupon, so it is discounted at the last *payment* date.
     the [conformance map](../architecture/aad-audit-conformance.md#documented-choices)
     under C-7.
 
+### Compounded vs averaged futures
+
+Three-month RFR futures settle on the *compounded* overnight index.
+One-month RFR futures settle on the *arithmetic average* of the daily index
+values.  Writing $\rho_j = DF(t_j)/DF(t_{j+1})$ for the daily discount-factor
+ratios, the two are a product and a sum of the same quantities:
+
+$$
+F = \frac{1}{\tau}\Big(\underbrace{\textstyle\prod_j \rho_j}_{\text{compounded}} - 1\Big),
+\qquad
+\bar{F} = \frac{1}{\tau}\sum_j \big(\rho_j - 1\big).
+$$
+
+Select the convention with the static `averaging` field, which defaults to
+`"compounded"`:
+
+```python
+from valax.curves.instruments import MoneyMarketFuture
+from valax.dates import ymd_to_ordinal
+import jax.numpy as jnp
+
+sofr_1m = MoneyMarketFuture(
+    start_date=ymd_to_ordinal(2025, 3, 1),
+    end_date=ymd_to_ordinal(2025, 4, 1),
+    futures_rate=jnp.array(0.0432),
+    day_count="act_360",
+    averaging="arithmetic",      # 1M SOFR settles on the average
+)
+```
+
+Two consequences worth internalising:
+
+**The difference does not vanish on a flat curve.** The gap between a product
+and a sum of the same ratios is the cross terms — the interest-on-interest
+that averaging discards — of order $r^2\tau/2$. On a one-month contract at 4%
+that is about 0.6 bp, and it is there even when every daily forward is
+identical. This is a *compounding* effect, not a curve-shape effect, so
+calibrating a 1M contract as though it were compounded mis-places the short
+end by a real amount rather than by something that averages out.
+
+**Only the averaged contract has exposure inside its own period.** The
+compounded forward is a telescoping product, so it is sensitive to exactly two
+discount factors — the endpoints — and interior pillars cancel identically.
+The averaged forward is a sum, which does not telescope, so it picks up
+genuine sensitivity to the *shape* of the curve between its start and end
+dates.  (That shape exposure vanishes on a flat curve, where adjacent $\rho_j$
+are equal and cancel pairwise.)  Both facts are gated in
+`tests/test_curves/test_instrument_residuals.py::TestAveragedFutures`.
+
+!!! note "Calendars are not needed here, but a concrete day span is"
+    The market convention carries the preceding business day's rate across
+    weekends and holidays *weighted by calendar days*, which is exactly what a
+    calendar-daily subdivision of a smooth curve reproduces — so the absence
+    of holiday calendars costs nothing in this particular calculation.
+
+    What the averaged branch does need is a concrete number of days over
+    `[start_date, end_date]`, since it reads one discount factor per day.  The
+    span is read pre-trace; building the instrument inside a `jit` whose
+    arguments include its dates raises a `ValueError` naming the way out
+    rather than silently averaging over the wrong number of days.  Closing
+    over the instrument and tracing only the curve — the normal pattern, since
+    quotes are Python data — works fine.
+
+    The convexity adjustment is a separate, orthogonal choice: an averaged
+    contract has its own, different from the compounded one.
+    `convexity_adj_fn` is the plug-in point, and the default for both is
+    explicitly none.
+
 ## 3. Sequential bootstrap
 
 For non-overlapping instruments sorted by maturity, each instrument adds one

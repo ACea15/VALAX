@@ -12,6 +12,40 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Averaged money-market futures
+
+`MoneyMarketFuture` had one forward: the compounded, two-discount-factor one.
+Three-month RFR futures do settle on that, but one-month RFR futures settle on
+the *arithmetic average* of the daily index values, which is a different
+functional of the same curve.
+
+- **New static field** `averaging` ∈ `("compounded", "arithmetic")`,
+  defaulting to `"compounded"`; `AVERAGING_CONVENTIONS` is exported from
+  `valax.curves`. The compounded branch is bit-for-bit what it always was.
+- **The two are a product and a sum of the same daily ratios.** With
+  `ρ_j = DF(t_j)/DF(t_{j+1})`, compounded is `(Π ρ_j - 1)/τ` and averaged is
+  `Σ(ρ_j - 1)/τ`. The day-count-weighted average collapses to that sum
+  because `r_j δ_j = ρ_j - 1` by definition, and under `act_*` the daily
+  accrual fractions sum to the period's exactly.
+- **The gap does not vanish on a flat curve.** It is the cross terms — the
+  interest-on-interest averaging discards — of order `r²τ/2`: measured 0.628
+  bp on a 1M contract at 4% against 0.667 bp predicted, and 1.93 bp on a 3M.
+  So reading a 1M contract as compounded mis-places the short end by a real
+  amount rather than by something that averages out.
+- **Only the averaged contract has exposure inside its own period.** The
+  compounded forward telescopes, so interior pillars have *identically* zero
+  sensitivity; the sum does not telescope, so the averaged forward picks up
+  genuine sensitivity to the shape of the curve between its own start and end
+  dates. That shape exposure vanishes on a flat curve, where adjacent `ρ_j`
+  cancel pairwise — which is why the gate checks it on a sloped one.
+- **No calendars required.** The market carries the preceding business day's
+  rate across weekends weighted by *calendar* days, which is what a
+  calendar-daily subdivision of a smooth curve reproduces. A concrete day span
+  *is* required; traced dates raise a `ValueError` naming the way out instead
+  of averaging over the wrong number of days.
+- Narrows spec requirement C-1. See
+  [Bootstrap instruments § Compounded vs averaged futures](docs/guide/curves.md#compounded-vs-averaged-futures).
+
 ### Added — Payment lag: accrual end and payment date are now separate roles
 
 A coupon has two dates that matter, and until now VALAX's curve quote types

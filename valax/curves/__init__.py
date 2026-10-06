@@ -2,6 +2,7 @@
 
 from valax.curves.discount import DiscountCurve, forward_rate, zero_rate
 from valax.curves.instruments import (
+    AVERAGING_CONVENTIONS,
     CrossCurrencyBasisSwap,
     DepositRate,
     FRA,

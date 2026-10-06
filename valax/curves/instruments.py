@@ -29,6 +29,7 @@ Multi-curve users override ``curves_touched`` at construction time::
 
 import equinox as eqx
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Float, Int
 from jax import Array
 
@@ -163,6 +164,111 @@ def _compounded_float_leg_pv(
     df_ends = curve(accrual_end_dates)
     df_pay = curve(payment_dates)
     return jnp.sum(df_pay * (df_starts / df_ends - 1.0))
+
+
+#: Averaging conventions available to :class:`MoneyMarketFuture`.
+AVERAGING_CONVENTIONS = ("compounded", "arithmetic")
+
+
+def _daily_boundaries(
+    start_date: Int[Array, ""],
+    end_date: Int[Array, ""],
+) -> Int[Array, " n_days_plus_1"]:
+    """Daily date boundaries spanning ``[start_date, end_date]``.
+
+    The arithmetic average of an overnight index is defined *per rate
+    day*, so the subdivision has to be the actual days — subdividing into
+    some arbitrary number of equal buckets would compute a different
+    quantity, not a coarser approximation of the same one.  The number of
+    days is therefore read **pre-trace** with NumPy, mirroring
+    ``valax.surfaces.caplet_stripping._concrete``: it is contract
+    metadata, never a differentiated number.
+
+    Only the *span* must be concrete; the dates themselves may still be
+    traced, since the boundaries are built as ``start_date + arange(n)``.
+
+    Args:
+        start_date: Period start :math:`T_0` (ordinal).
+        end_date: Period end :math:`T_1` (ordinal).
+
+    Returns:
+        Ordinals :math:`T_0, T_0+1, \\ldots, T_1`, of length
+        ``int(T_1 - T_0) + 1``.
+
+    Raises:
+        ValueError: If the span cannot be read at trace time, or is not
+            at least one day.
+    """
+    try:
+        n_days = int(np.asarray(end_date) - np.asarray(start_date))
+    except Exception as exc:  # pragma: no cover - traced dates
+        raise ValueError(
+            "An arithmetic-average future needs a concrete day count "
+            "over [start_date, end_date], but the dates are traced. "
+            "Build the instrument outside the jit boundary, or use "
+            "averaging='compounded', which needs only the two endpoint "
+            "discount factors."
+        ) from exc
+    if n_days < 1:
+        raise ValueError(
+            f"An arithmetic-average future spans {n_days} days; it needs "
+            f"at least one. Check start_date < end_date."
+        )
+    return jnp.asarray(start_date) + jnp.arange(n_days + 1)
+
+
+def _arithmetic_average_forward(
+    curve,
+    start_date: Int[Array, ""],
+    end_date: Int[Array, ""],
+    tau: Float[Array, ""],
+) -> Float[Array, ""]:
+    """Day-count-weighted arithmetic average of the daily overnight
+    forwards over :math:`[T_0, T_1]`.
+
+    Averaged futures (1M SOFR) settle to the average of the daily index
+    values, each weighted by the number of calendar days it applies for.
+    Writing :math:`\\rho_j = P(0,t_j)/P(0,t_{j+1})`, the day-:math:`j`
+    forward is :math:`r_j = (\\rho_j - 1)/\\delta_j`, so the weighted
+    average collapses to a sum of ratios:
+
+    .. math::
+        \\bar{F} = \\frac{\\sum_j r_j \\delta_j}{\\sum_j \\delta_j}
+                 = \\frac{1}{\\tau}\\sum_j (\\rho_j - 1).
+
+    Set that beside the compounded forward over the same ratios,
+
+    .. math::
+        F = \\frac{1}{\\tau}\\left(\\prod_j \\rho_j - 1\\right),
+
+    and the whole distinction is :math:`\\sum (\\rho_j - 1)` versus
+    :math:`\\prod \\rho_j - 1` — a sum against a product.  The gap is the
+    cross terms, i.e. the interest-on-interest that averaging discards.
+    It survives on a perfectly flat curve, where every
+    :math:`\\rho_j` is the same constant and
+    :math:`\\rho^N - 1 > N(\\rho - 1)`; this is a compounding effect, not
+    a curve-shape effect, and is of order :math:`r^2\\tau/2`.
+
+    Weekends and holidays need no calendar here.  The market convention
+    carries the preceding business day's rate across non-business days
+    *weighted by calendar days*, which is exactly what a calendar-daily
+    subdivision of a smooth curve reproduces.
+
+    Args:
+        curve: The projection curve the future calibrates.
+        start_date: Period start :math:`T_0` (ordinal).
+        end_date: Period end :math:`T_1` (ordinal).
+        tau: Accrual fraction over the whole period, in the future's own
+            day count.  For the ``act_*`` conventions used by overnight
+            futures this equals :math:`\\sum_j \\delta_j` exactly, which
+            is what makes the expression above a true weighted average.
+
+    Returns:
+        The averaged forward rate, annualised.
+    """
+    boundaries = _daily_boundaries(start_date, end_date)
+    ratios = curve(boundaries[:-1]) / curve(boundaries[1:])
+    return jnp.sum(ratios - 1.0) / tau
 
 
 def _floating_leg_pv(
@@ -1307,8 +1413,31 @@ class MoneyMarketFuture(eqx.Module):
     .. math::
         F^{fut} - \\text{adj} - F^{curve}(T_0, T_1) = 0,
 
-    where :math:`F^{curve}(T_0, T_1) = (DF(T_0)/DF(T_1) - 1)/\\tau`
-    is the simply-compounded forward rate over the futures period.
+    where :math:`F^{curve}(T_0, T_1)` is the curve-implied forward over
+    the futures period, in the convention the contract settles on.
+
+    **Compounded vs averaged.**  Three-month RFR futures (3M SOFR) settle
+    on the *compounded* index, which is the simply-compounded forward
+
+    .. math::
+        F = \\frac{1}{\\tau}\\left(\\frac{DF(T_0)}{DF(T_1)} - 1\\right)
+          = \\frac{1}{\\tau}\\left(\\prod_j \\rho_j - 1\\right),
+        \\qquad \\rho_j = \\frac{DF(t_j)}{DF(t_{j+1})}.
+
+    One-month RFR futures (1M SOFR) settle on the *arithmetic average* of
+    the daily index values instead, which is a sum of the same ratios
+    rather than their product:
+
+    .. math::
+        \\bar{F} = \\frac{1}{\\tau}\\sum_j (\\rho_j - 1).
+
+    These are genuinely different equations — the gap is the
+    interest-on-interest that averaging discards, of order
+    :math:`r^2\\tau/2`, and it does **not** vanish on a flat curve.
+    Calibrating an averaged contract as though it were compounded
+    therefore mis-places the short end by a real amount (roughly 0.6 bp
+    on a one-month contract at 4%).  Select the convention with the
+    static ``averaging`` field; see :func:`_arithmetic_average_forward`.
 
     Convexity adjustment is pluggable via :data:`ConvexityAdjFn`
     (see :mod:`valax.curves.convexity`):
@@ -1336,6 +1465,18 @@ class MoneyMarketFuture(eqx.Module):
             :func:`no_convexity_adj` so the simplest construction
             (``MoneyMarketFuture(start, end, rate)``) treats the
             future as a pure forward.
+        averaging: Settlement convention — ``"compounded"`` (the
+            default, 3M RFR and IBOR-style futures) or ``"arithmetic"``
+            (1M RFR futures).  The compounded branch reads two discount
+            factors; the arithmetic branch reads one per day over the
+            contract period and therefore needs a concrete day span.
+
+    Note:
+        The convexity adjustment is a separate, orthogonal choice: an
+        averaged contract has its own adjustment, different from the
+        compounded one.  ``convexity_adj_fn`` is pluggable precisely so
+        that the right one can be supplied, and the default for both is
+        explicitly "none" (spec C-7).
     """
 
     start_date: Int[Array, ""]
@@ -1348,6 +1489,14 @@ class MoneyMarketFuture(eqx.Module):
     convexity_adj_fn: ConvexityAdjFn = eqx.field(
         static=True, default_factory=no_convexity_adj
     )
+    averaging: str = eqx.field(static=True, default="compounded")
+
+    def __check_init__(self):
+        if self.averaging not in AVERAGING_CONVENTIONS:
+            raise ValueError(
+                f"averaging must be one of {AVERAGING_CONVENTIONS}, got "
+                f"'{self.averaging}'."
+            )
 
     def residual(
         self,
@@ -1357,9 +1506,10 @@ class MoneyMarketFuture(eqx.Module):
     ) -> Float[Array, ""]:
         """Repricing residual: ``futures_rate - adj - forward_rate(curve)``.
 
-        Returns zero when the curve's simply-compounded forward rate
-        over :math:`[T_0, T_1]` equals the futures rate minus the
-        convexity adjustment.
+        Returns zero when the curve-implied forward over
+        :math:`[T_0, T_1]` — compounded or averaged per the static
+        ``averaging`` field — equals the futures rate minus the convexity
+        adjustment.
         """
         del fixings, ref_date  # not consumed by the futures residual
         curve = graph[self.curves_touched[0]]
@@ -1368,7 +1518,12 @@ class MoneyMarketFuture(eqx.Module):
         # a non-standard day count, override curves with the appropriate
         # convention or compute the forward inline below.
         tau = year_fraction(self.start_date, self.end_date, self.day_count)
-        df_start = curve(self.start_date)
-        df_end = curve(self.end_date)
-        curve_forward = (df_start / df_end - 1.0) / tau
+        if self.averaging == "arithmetic":
+            curve_forward = _arithmetic_average_forward(
+                curve, self.start_date, self.end_date, tau
+            )
+        else:
+            df_start = curve(self.start_date)
+            df_end = curve(self.end_date)
+            curve_forward = (df_start / df_end - 1.0) / tau
         return self.futures_rate - adj - curve_forward

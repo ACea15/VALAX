@@ -95,7 +95,7 @@ of the six paths by which curves enter Layer 2 (see **M-3** below).
 
 | ID | Requirement | MUST/SHOULD | Implementing symbol | Status | Gap |
 |---|---|---|---|---|---|
-| C-1 | Each residual matches its specified formula, including payment lag, leg day counts, frequencies | MUST | The eleven quote types in `valax.curves.instruments` ([inventory](#instrument-residual-inventory)) | 🟡 | Day counts, frequencies and **payment lag** (N-3) are all correct, and the OIS floating leg is now the per-period sum `Σ_i P_d(0,T_i^p)(P_d(0,T_i^s)/P_d(0,T_i^e) − 1)`, with the telescope kept only as a zero-lag fast path. Two § 4.2 variants remain unimplemented: **averaged** (as opposed to compounded) money-market futures, and the tenor-basis convention that compounds the short leg up to the long leg's payment frequency |
+| C-1 | Each residual matches its specified formula, including payment lag, leg day counts, frequencies | MUST | The eleven quote types in `valax.curves.instruments` ([inventory](#instrument-residual-inventory)) | 🟡 | Day counts, frequencies and **payment lag** (N-3) are all correct, and the OIS floating leg is now the per-period sum `Σ_i P_d(0,T_i^p)(P_d(0,T_i^s)/P_d(0,T_i^e) − 1)`, with the telescope kept only as a zero-lag fast path. **Averaged** money-market futures are implemented too — `MoneyMarketFuture.averaging` ∈ `{"compounded", "arithmetic"}`, gated by `…::TestAveragedFutures`. One § 4.2 variant remains unimplemented: the tenor-basis convention that compounds the short leg up to the long leg's payment frequency |
 | C-2 | The discount curve is the collateral curve of the trade's CSA; projection curves never discount | MUST | `CurveSpec.currency`; `discount_id` / `forward_id` selectors on rates and bond instruments | 🟡 | The discount/projection *split* is enforced (N-4), but there is no CSA model: `CurveSpec.currency` is declared and never consumed, and a trade cannot name its collateral agreement |
 | C-3 | Coupons fixing on or before the valuation date use the stored fixing; partly-accrued RFR coupons blend realised compounding with the curve forward | MUST | `valax.curves.FixingHistory`; `_floating_leg_pv` | 🟡 | Fixing lookup works and is all-or-nothing per period; a period *straddling* today is treated as fully projected |
 | C-4 | The interpolation operator is differentiable, or piecewise differentiable with kinks only at nodes; limiter-based schemes flagged | MUST | `DiscountCurve` (log-linear in DF ⇒ piecewise-constant instantaneous forwards, kinks only at pillars) | 🟡 | Compliant as far as it goes, and no limiter-based scheme exists to flag. But it is the *only* mode, and `CurveSpec.interp` is validated without being consumed — see [deferred work](#deferred-with-rationale) |
@@ -205,7 +205,7 @@ Every Layer-1a quote type, its primary quote scalar (the column it owns in
 | `SwapRate` | `.rate` | one curve (single-curve compounded float leg) |
 | `OISSwapRate` | `.rate` | discount curve |
 | `IborSwapRate` | `.rate` | discount + projection (coupled) |
-| `MoneyMarketFuture` | `.futures_rate` | projection curve, short end |
+| `MoneyMarketFuture` | `.futures_rate` | projection curve, short end; `averaging` selects the compounded (product of daily ratios) or arithmetic-average (sum of them) settlement functional |
 | `TenorBasisSwap` | `.spread` | two projection curves + discount |
 | `CrossCurrencyBasisSwap` | `.spread` | two discount curves + projection; `variant` selects constant-notional or mark-to-market reset |
 | `FXForward` | `.quoted_forward` | two short-end curves (covered interest parity) |
