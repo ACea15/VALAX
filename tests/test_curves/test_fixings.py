@@ -297,3 +297,156 @@ class TestEmptyFixingHistory:
         d = jnp.asarray(int(ymd_to_ordinal(2025, 1, 1)), dtype=jnp.int32)
         with pytest.raises(KeyError):
             h.lookup("USD.SOFR", d)
+
+
+# ── Realised compounding (spec C-3) ──────────────────────────────────
+
+
+class TestCompoundedFactor:
+    """``FixingSeries.compounded_factor`` reduces a daily history to the
+    realised compounding factor over a window.
+
+    This is the market-data half of a partly-accrued RFR coupon: no
+    curve enters it, which is what makes a coupon's realised portion
+    carry no curve sensitivity by construction.
+    """
+
+    def test_matches_the_closed_form_on_a_constant_history(self):
+        """``N`` days at a constant rate ``r`` gives ``(1 + r·δ)^N``."""
+        start = int(ymd_to_ordinal(2025, 1, 1))
+        n, rate = 90, 0.04
+        series = FixingSeries(
+            fixing_dates=jnp.arange(start, start + n + 1),
+            fixings=jnp.full(n + 1, rate),
+        )
+        got = float(
+            series.compounded_factor(
+                jnp.asarray(start), jnp.asarray(start + n), "act_360"
+            )
+        )
+        assert got == pytest.approx(
+            (1.0 + rate / 360.0) ** n, rel=1e-13
+        )
+
+    def test_empty_window_is_exactly_one(self):
+        """Nothing accrued means a factor of exactly 1.0, so the blend
+        that consumes it degenerates to pure projection."""
+        start = int(ymd_to_ordinal(2025, 1, 1))
+        series = FixingSeries(
+            fixing_dates=jnp.arange(start, start + 10),
+            fixings=jnp.full(10, 0.04),
+        )
+        assert (
+            float(
+                series.compounded_factor(
+                    jnp.asarray(start), jnp.asarray(start)
+                )
+            )
+            == 1.0
+        )
+
+    def test_empty_series_is_exactly_one(self):
+        series = FixingSeries(
+            fixing_dates=jnp.array([], dtype=jnp.int32),
+            fixings=jnp.array([]),
+        )
+        assert (
+            float(
+                series.compounded_factor(jnp.asarray(0), jnp.asarray(90))
+            )
+            == 1.0
+        )
+
+    def test_a_fixing_dated_at_the_window_end_is_excluded(self):
+        """The overnight rate set today is earned over [today, tomorrow],
+        which has not happened yet."""
+        start = int(ymd_to_ordinal(2025, 1, 1))
+        series = FixingSeries(
+            fixing_dates=jnp.arange(start, start + 5),
+            fixings=jnp.full(5, 0.04),
+        )
+        three = float(
+            series.compounded_factor(
+                jnp.asarray(start), jnp.asarray(start + 3), "act_360"
+            )
+        )
+        assert three == pytest.approx(
+            (1.0 + 0.04 / 360.0) ** 3, rel=1e-13
+        )
+
+    def test_a_gap_carries_the_previous_rate_across_it(self):
+        """Weekend convention, for free: a series with no entry for a
+        non-business day leaves the preceding rate applying across the
+        gap, weighted by calendar days.  Here one entry covering three
+        days must equal three single-day entries at the same rate."""
+        start = int(ymd_to_ordinal(2025, 1, 1))
+        rate = 0.04
+        gapped = FixingSeries(
+            fixing_dates=jnp.asarray([start]),
+            fixings=jnp.asarray([rate]),
+        )
+        daily = FixingSeries(
+            fixing_dates=jnp.arange(start, start + 3),
+            fixings=jnp.full(3, rate),
+        )
+        end = jnp.asarray(start + 3)
+        gapped_factor = float(
+            gapped.compounded_factor(jnp.asarray(start), end, "act_360")
+        )
+        daily_factor = float(
+            daily.compounded_factor(jnp.asarray(start), end, "act_360")
+        )
+        # One 3-day accrual is simple; three 1-day accruals compound.
+        assert gapped_factor == pytest.approx(
+            1.0 + rate * 3.0 / 360.0, rel=1e-13
+        )
+        assert daily_factor > gapped_factor
+        assert daily_factor == pytest.approx(
+            (1.0 + rate / 360.0) ** 3, rel=1e-13
+        )
+
+    def test_history_dispatch_tolerates_an_unknown_index(self):
+        """Unlike ``lookup``, which raises: a missing *history* means
+        nothing has accrued, whereas a missing *fixing* for a coupon
+        that needs one is a configuration error."""
+        assert (
+            float(
+                empty_fixing_history().compounded_factor(
+                    "NO.SUCH.INDEX", jnp.asarray(0), jnp.asarray(90)
+                )
+            )
+            == 1.0
+        )
+
+    def test_history_dispatch_matches_the_series(self, history):
+        start = int(ymd_to_ordinal(2025, 1, 1))
+        end = int(ymd_to_ordinal(2025, 2, 1))
+        assert float(
+            history.compounded_factor(
+                "USD.SOFR", jnp.asarray(start), jnp.asarray(end)
+            )
+        ) == float(
+            history.indices["USD.SOFR"].compounded_factor(
+                jnp.asarray(start), jnp.asarray(end)
+            )
+        )
+
+    def test_jit_and_grad(self, sofr_series):
+        start = int(ymd_to_ordinal(2025, 1, 1))
+        end = int(ymd_to_ordinal(2025, 2, 1))
+
+        def f(series):
+            return series.compounded_factor(
+                jnp.asarray(start), jnp.asarray(end), "act_360"
+            )
+
+        assert float(eqx.filter_jit(f)(sofr_series)) == pytest.approx(
+            float(f(sofr_series)), rel=1e-14
+        )
+        grads = eqx.filter_grad(f)(sofr_series)
+        # Only the fixings inside the window move the factor.
+        inside = (sofr_series.fixing_dates >= start) & (
+            sofr_series.fixing_dates < end
+        )
+        assert jnp.all(grads.fixings[~inside] == 0.0)
+        assert jnp.all(jnp.abs(grads.fixings[inside]) > 0.0)

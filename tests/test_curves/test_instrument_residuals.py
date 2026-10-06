@@ -2654,6 +2654,358 @@ class TestAveragedFutures:
         assert float(jnp.max(gap)) > 1e-5
 
 
+class TestPartlyAccruedFixings:
+    """Spec C-3 / T-11: a coupon's rate has three possible sources.
+
+    A recorded fixing fully determines the coupon.  A period that has
+    *begun but not ended* is neither realised nor forward-looking: part
+    of its overnight compounding has happened and the rest has not, and
+    the two must be combined as
+
+    .. math::
+        1 + \\tau_j F_j = A \\cdot P_x(0,t_0)/P_x(0,T_j^e).
+
+    Everything else is projected.  The gates below pin the two
+    degeneracies of that formula, the consistency property that makes it
+    credible, and the zero curve-sensitivity of a realised coupon.
+    """
+
+    #: Realised rate used for the daily history, deliberately below the
+    #: projection curve so the blend moves the answer in a signed way.
+    REALISED = 0.04
+
+    def _graph(self, ref):
+        pillars = jnp.array(
+            [int(REF) + 30 * k for k in range(0, 40)], dtype=jnp.int32
+        )
+        times = (pillars - int(REF)).astype(jnp.float64) / 365.0
+        return CurveGraph(
+            curves={
+                "DISC": DiscountCurve(
+                    pillar_dates=pillars,
+                    discount_factors=jnp.exp(-0.040 * times),
+                    reference_date=ref,
+                    day_count="act_365",
+                ),
+                "FWD": DiscountCurve(
+                    pillar_dates=pillars,
+                    discount_factors=jnp.exp(-0.045 * times),
+                    reference_date=ref,
+                    day_count="act_365",
+                ),
+            }
+        )
+
+    def _series(self, n_days=120):
+        return FixingSeries(
+            fixing_dates=jnp.arange(int(REF), int(REF) + n_days + 1),
+            fixings=jnp.full(n_days + 1, self.REALISED),
+        )
+
+    def _leg(self, accrued=None, float_dates=None, **kwargs):
+        """One-period float leg over [REF, REF+90] unless overridden."""
+        floats = (
+            jnp.asarray([int(REF) + 90], dtype=jnp.int32)
+            if float_dates is None
+            else float_dates
+        )
+        fixing_dates = jnp.concatenate(
+            [jnp.asarray(REF)[None], floats[:-1]]
+        )
+        return IborSwapRate(
+            start_date=REF,
+            fixed_dates=jnp.asarray([int(REF) + 90], dtype=jnp.int32),
+            float_dates=floats,
+            fixing_dates=fixing_dates,
+            rate=jnp.asarray(0.0),
+            float_day_count="act_360",
+            index_id="RFR.TENOR",
+            curves_touched=("DISC", "FWD"),
+            accrued_compounding=accrued,
+            **kwargs,
+        )
+
+    def _float_pv(self, ref, accrued=None, fixings=None, **kwargs):
+        """``residual`` at ``rate=0`` is ``-float_pv``."""
+        leg = self._leg(accrued=accrued, **kwargs)
+        return -float(
+            leg.residual(
+                self._graph(ref),
+                fixings if fixings is not None else NO_FIXINGS,
+                jnp.asarray(ref),
+            )
+        )
+
+    # ── the two degeneracies ─────────────────────────────────────────
+
+    def test_nothing_accrued_is_exactly_the_projected_forward(self):
+        """At ``t_0 = T^s`` nothing has accrued, ``A = 1``, and the blend
+        must reduce to pure projection — exactly, not approximately."""
+        ref = int(REF)
+        assert self._float_pv(
+            ref, accrued=jnp.asarray(1.0)
+        ) == self._float_pv(ref)
+
+    def test_a_realised_part_matching_the_curve_is_an_exact_no_op(self):
+        """The consistency property that makes the blend credible.
+
+        If the realised rates happen to be exactly what the curve had
+        projected for the elapsed part — i.e. ``A`` equals the curve's
+        own compounding ``P_x(T^s)/P_x(t_0)`` — then substituting
+        realised data for projected data cannot change the answer.  It
+        holds to the last bit, which also pins down that the blend uses
+        ``P_x(t_0)`` and not some neighbouring date.
+        """
+        ref = int(REF) + 45
+        fwd = self._graph(ref)["FWD"]
+        a_curve = fwd(jnp.asarray(int(REF))) / fwd(jnp.asarray(ref))
+        assert self._float_pv(ref, accrued=a_curve) == self._float_pv(ref)
+
+    def test_blend_tends_to_purely_realised_at_the_far_end(self):
+        """As ``t_0`` approaches ``T^e`` the projected remainder shrinks
+        to nothing and the coupon tends to ``(A - 1)/tau``."""
+        end = int(REF) + 90
+        graph_ref = end - 1
+        series = self._series()
+        full_a = float(
+            series.compounded_factor(
+                jnp.asarray(int(REF)), jnp.asarray(end), "act_360"
+            )
+        )
+        realised_only = full_a - 1.0
+        disc = float(self._graph(graph_ref)["DISC"](jnp.asarray(end)))
+
+        def gap(ref):
+            a = series.compounded_factor(
+                jnp.asarray(int(REF)), jnp.asarray(ref), "act_360"
+            )
+            return abs(
+                self._float_pv(ref, accrued=a) - realised_only * disc
+            )
+
+        # Monotonically closing on the purely-realised value.
+        assert gap(int(REF) + 89) < gap(int(REF) + 60) < gap(int(REF) + 30)
+
+    # ── signed behaviour ─────────────────────────────────────────────
+
+    def test_blend_is_monotone_in_the_realised_factor(self):
+        ref = int(REF) + 45
+        pvs = [
+            self._float_pv(ref, accrued=jnp.asarray(a))
+            for a in (1.001, 1.005, 1.010)
+        ]
+        assert pvs[0] < pvs[1] < pvs[2]
+
+    def test_realised_above_or_below_the_curve_moves_it_the_right_way(
+        self,
+    ):
+        ref = int(REF) + 45
+        fwd = self._graph(ref)["FWD"]
+        a_curve = fwd(jnp.asarray(int(REF))) / fwd(jnp.asarray(ref))
+        plain = self._float_pv(ref)
+        assert self._float_pv(ref, accrued=a_curve * 1.001) > plain
+        assert self._float_pv(ref, accrued=a_curve * 0.999) < plain
+
+    # ── uniqueness of the straddling period ──────────────────────────
+
+    def test_only_one_period_straddles_a_boundary_date(self):
+        """The half-open test ``T^s <= t_0 < T^e`` must match exactly one
+        period when ``t_0`` lands on an accrual boundary.  Closing both
+        ends would match the period ending there *and* the one starting
+        there, and they cannot share one realised factor.  Checked by
+        supplying ``A = 1``: a unique match then makes the blend a
+        provable no-op, whereas a double match would not be.
+        """
+        boundary = int(REF) + 45
+        two_periods = jnp.asarray(
+            [boundary, int(REF) + 90], dtype=jnp.int32
+        )
+        assert self._float_pv(
+            boundary, accrued=jnp.asarray(1.0), float_dates=two_periods
+        ) == self._float_pv(boundary, float_dates=two_periods)
+
+    # ── T-11 ─────────────────────────────────────────────────────────
+
+    @pytest.mark.audit
+    def test_t11_recorded_coupon_has_no_projection_curve_sensitivity(
+        self,
+    ):
+        """T-11 gate, first half.
+
+        A coupon whose fixing is recorded is not a function of any curve,
+        so its sensitivity to the *projection* curve must be identically
+        zero — not small, zero.  It must still be discounted, so the
+        discount-curve sensitivity has to survive; asserting both is what
+        stops the test passing for the trivial reason that nothing is
+        connected.
+
+        Tolerance: exact equality to ``0.0``.  This is achievable because
+        the selection is a ``jnp.where`` over a NaN-free replacement, so
+        the unselected branch receives a zero cotangent rather than a
+        small one.
+        """
+        ref = int(REF)
+        history = FixingHistory(
+            indices={
+                "RFR.TENOR": FixingSeries(
+                    fixing_dates=jnp.asarray([int(REF)]),
+                    fixings=jnp.asarray([0.0375]),
+                )
+            }
+        )
+        leg = self._leg()
+        grads = eqx.filter_grad(
+            lambda g: leg.residual(g, history, jnp.asarray(ref))
+        )(self._graph(ref))
+        projection_bar = grads.curves["FWD"].discount_factors
+        discount_bar = grads.curves["DISC"].discount_factors
+
+        assert jnp.all(projection_bar == 0.0)
+        assert jnp.any(jnp.abs(discount_bar) > 1e-12)
+
+    @pytest.mark.audit
+    def test_t11_sensitivity_to_the_stored_fixing_is_non_zero(self):
+        """T-11 gate, second half — the complement that proves the first
+        half is not vacuous.  The coupon *does* depend on the recorded
+        value; what it does not depend on is the curve."""
+        ref = int(REF)
+        history = FixingHistory(
+            indices={
+                "RFR.TENOR": FixingSeries(
+                    fixing_dates=jnp.asarray([int(REF)]),
+                    fixings=jnp.asarray([0.0375]),
+                )
+            }
+        )
+        leg = self._leg()
+        grads = eqx.filter_grad(
+            lambda h: leg.residual(self._graph(ref), h, jnp.asarray(ref))
+        )(history)
+        assert abs(
+            float(grads.indices["RFR.TENOR"].fixings[0])
+        ) > 1e-6
+
+    @pytest.mark.audit
+    def test_t11_straddling_period_uses_both_sources(self):
+        """T-11 gate, third part: on a date straddling a fixing the
+        coupon draws on realised data *and* the curve.  Both
+        sensitivities must be non-zero, and the answer must differ from
+        both pure alternatives."""
+        ref = int(REF) + 45
+        series = self._series()
+        a = series.compounded_factor(
+            jnp.asarray(int(REF)), jnp.asarray(ref), "act_360"
+        )
+
+        # Depends on the curve ...
+        leg = self._leg(accrued=a)
+        curve_bar = eqx.filter_grad(
+            lambda g: leg.residual(g, NO_FIXINGS, jnp.asarray(ref))
+        )(self._graph(ref)).curves["FWD"].discount_factors
+        assert jnp.any(jnp.abs(curve_bar) > 1e-9)
+
+        # ... and on the realised factor.
+        a_bar = eqx.filter_grad(
+            lambda x: self._leg(accrued=x).residual(
+                self._graph(ref), NO_FIXINGS, jnp.asarray(ref)
+            )
+        )(a)
+        assert abs(float(a_bar)) > 1e-6
+
+    def test_a_recorded_fixing_outranks_the_blend(self):
+        """Documented precedence: a recorded value for the coupon is
+        strictly more information than a partial accrual, so an absurd
+        ``A`` must be ignored when a fixing exists."""
+        ref = int(REF) + 45
+        history = FixingHistory(
+            indices={
+                "RFR.TENOR": FixingSeries(
+                    fixing_dates=jnp.asarray([int(REF)]),
+                    fixings=jnp.asarray([0.0375]),
+                )
+            }
+        )
+        assert self._float_pv(
+            ref, accrued=jnp.asarray(1.5), fixings=history
+        ) == self._float_pv(ref, fixings=history)
+
+    def test_accrued_compounding_without_a_ref_date_raises(self):
+        from valax.curves.instruments import _floating_leg_pv
+
+        with pytest.raises(ValueError, match="needs ref_date"):
+            _floating_leg_pv(
+                self._graph(int(REF)),
+                NO_FIXINGS,
+                REF,
+                jnp.asarray([int(REF) + 90], dtype=jnp.int32),
+                jnp.asarray([int(REF)], dtype=jnp.int32),
+                "act_360",
+                "RFR.TENOR",
+                "DISC",
+                "FWD",
+                jnp.asarray(0.0),
+                None,
+                None,
+                jnp.asarray(1.01),
+            )
+
+    def test_default_is_off_and_changes_nothing(self):
+        """No field set means no blend: every coupon is either recorded
+        or fully projected, exactly as before."""
+        assert self._leg().accrued_compounding is None
+
+    def test_jit_and_grad_through_the_blend(self):
+        ref = int(REF) + 45
+        leg = self._leg(accrued=jnp.asarray(1.005))
+
+        def f(g):
+            return leg.residual(g, NO_FIXINGS, jnp.asarray(ref))
+
+        graph = self._graph(ref)
+        assert float(eqx.filter_jit(f)(graph)) == pytest.approx(
+            float(f(graph)), abs=1e-14
+        )
+        bars = eqx.filter_grad(f)(graph).curves["FWD"].discount_factors
+        assert jnp.all(jnp.isfinite(bars))
+
+    def test_basis_swap_legs_blend_independently(self):
+        """Each leg of a tenor-basis swap resolves its own realised
+        factor, so blending one must not move the other."""
+        ref = int(REF) + 45
+        graph = self._graph(ref)
+        quarters = jnp.asarray(
+            [int(REF) + 91 * k for k in range(1, 9)], dtype=jnp.int32
+        )
+        semis = jnp.asarray(
+            [int(REF) + 182 * k for k in range(1, 5)], dtype=jnp.int32
+        )
+
+        def resid(**kw):
+            swap = TenorBasisSwap(
+                start_date=REF,
+                leg_a_dates=quarters,
+                leg_a_fixing_dates=jnp.concatenate(
+                    [jnp.asarray(REF)[None], quarters[:-1]]
+                ),
+                leg_b_dates=semis,
+                leg_b_fixing_dates=jnp.concatenate(
+                    [jnp.asarray(REF)[None], semis[:-1]]
+                ),
+                spread=jnp.asarray(0.002),
+                curves_touched=("DISC", "FWD", "FWD"),
+                **kw,
+            )
+            return float(swap.residual(graph, NO_FIXINGS, jnp.asarray(ref)))
+
+        base = resid()
+        a_only = resid(leg_a_accrued_compounding=jnp.asarray(1.02))
+        b_only = resid(leg_b_accrued_compounding=jnp.asarray(1.02))
+        assert abs(a_only - base) > 1e-9
+        assert abs(b_only - base) > 1e-9
+        # Opposite signs: the legs enter the residual as a - b.
+        assert (a_only - base) * (b_only - base) < 0.0
+
+
 class TestPaymentLagValidation:
     """Configuration errors are raised at the user boundary."""
 

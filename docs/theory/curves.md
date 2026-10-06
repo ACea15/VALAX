@@ -460,4 +460,12 @@ Ignoring fixings causes a sneaky mis-bootstrap: the first coupon of every season
 
 VALAX's `FixingHistory` (§11.8) is the data structure that carries realised fixings into the bootstrap; each `BootstrapInstrument` reads from it before falling back to forward projection. This is mandatory infrastructure for production curve builds, not an optimisation.
 
+For an *overnight-compounded* coupon the dichotomy above is too coarse. Such a coupon has no single fixing date: it accrues daily across the whole period, so a period that has begun but not ended is partly realised and partly forward-looking. The compounding factor over the period factorises exactly into the two parts,
+
+$$
+1 + \tau_j F_j = \underbrace{\prod_{t_k < t_0}\left(1 + \hat{r}_k \delta_k\right)}_{A,\ \text{realised}} \cdot \underbrace{\frac{P_x(0,t_0)}{P_x(0,T_j^e)}}_{\text{projected remainder}},
+$$
+
+which is what `FixingSeries.compounded_factor` and the `accrued_compounding` field implement. See [Bootstrap instruments § Partly-accrued periods](../guide/curves.md#partly-accrued-periods) for the recipe and the degeneracy properties.
+
 **VALAX implementation:** Shipped in MC-Curves-1 and MC-Curves-2. `MoneyMarketFuture` in `valax/curves/instruments.py` carries a pluggable `convexity_adj_fn: ConvexityAdjFn` static field with `no_convexity_adj` and `constant_convexity_adj` factories in `valax/curves/convexity.py`, and an `averaging` field selecting the *settlement* convention — `"compounded"` (3M RFR, the default) or `"arithmetic"` (1M RFR). These are orthogonal choices: an averaged contract both settles on a different functional of the curve *and* carries its own convexity adjustment. See [Bootstrap instruments § Compounded vs averaged futures](../guide/curves.md#compounded-vs-averaged-futures) for the two formulas and why the distinction survives on a flat curve. `FixingHistory` and `FixingSeries` in `valax/curves/fixings.py` are the JIT-friendly registries every floating-leg residual (`IborSwapRate`, `TenorBasisSwap`, both legs of `CrossCurrencyBasisSwap`) consults before falling back to forward projection. The Hull-White-derived `hull_white_convexity_adj(model)` factory is still pending (queued for MC-Curves-3) because it depends on threading the calibrated short-rate model through the curve build; the plug-in point is in place.

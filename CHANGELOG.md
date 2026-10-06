@@ -12,6 +12,45 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Partly-accrued overnight coupons blend realised and projected
+
+`_floating_leg_pv` treated every coupon as all-or-nothing: either a recorded
+fixing existed for its fixing date, or the whole period was projected off the
+curve. For a term rate that is right. For an *overnight-compounded* coupon it
+is not — such a coupon has no single fixing date, it accrues daily, so a
+period that has begun and not ended is partly realised and partly
+forward-looking, and projecting all of it discards weeks of known data.
+
+- **New `FixingSeries.compounded_factor(start, end, day_count)`** reduces a
+  daily history to the realised compounding factor
+  `A = Π(1 + r̂_j δ_j)`, plus `FixingHistory.compounded_factor(index_id, …)`
+  which returns exactly `1.0` for an unrecorded index (a missing *history*
+  legitimately means nothing has accrued, unlike a missing *fixing* for a
+  coupon that needs one, which stays a `KeyError`). Weekends need no calendar:
+  an absent entry leaves the preceding rate applying across the gap weighted
+  by calendar days, which is the market convention.
+- **New `accrued_compounding`** on `IborSwapRate`, and per leg as
+  `leg_a_/leg_b_accrued_compounding` on `TenorBasisSwap` and
+  `dom_/for_accrued_compounding` on `CrossCurrencyBasisSwap`. The blend is
+  exact rather than an approximation, because the compounding factor over the
+  period *is* the product of the realised and remaining factors:
+  `1 + τ_j F_j = A · P_x(0,t_0)/P_x(0,T_j^e)`.
+- **`ref_date` is finally used.** Every floating-leg residual used to `del` it;
+  it now locates the straddling period, by the half-open test
+  `T^s ≤ t_0 < T^e`. Closing both ends would match *two* periods whenever
+  `t_0` lands on an accrual boundary — the one ending there and the one
+  starting there — which cannot share one realised factor.
+- **Precedence is explicit:** recorded fixing → blend → projection. A recorded
+  value outranks a partial accrual because for a tenor index it *is* the
+  compounded coupon rate for the whole period.
+- **A fully-ended period is deliberately out of scope**, since its rate is
+  entirely known. Where a payment lag leaves one ended but unpaid, record its
+  compounded rate under `index_id`; reaching for `accrued_compounding` there
+  would silently leave it projected. Documented on `_floating_leg_pv`.
+- **Default is off**, so nothing changes for anyone who does not set the field.
+- Closes spec requirement C-3 and the T-11 gate. See
+  [Bootstrap instruments § Partly-accrued periods](docs/guide/curves.md#partly-accrued-periods).
+
 ### Added — Averaged money-market futures
 
 `MoneyMarketFuture` had one forward: the compounded, two-discount-factor one.

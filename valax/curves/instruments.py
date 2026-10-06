@@ -283,6 +283,8 @@ def _floating_leg_pv(
     forward_curve_id: str,
     spread_addon: Float[Array, ""],
     payment_dates: Int[Array, " n"] | None = None,
+    ref_date: Int[Array, ""] | None = None,
+    accrued_compounding: Float[Array, ""] | None = None,
 ) -> Float[Array, ""]:
     """Present value of a floating leg under the dual-curve framework.
 
@@ -302,6 +304,54 @@ def _floating_leg_pv(
     payment schedule.  The two coincide only when there is no payment
     lag, which is the default.
 
+    **Three sources for a coupon rate, in strict precedence order**
+    (spec C-3):
+
+    1. A **recorded fixing** for the coupon, if ``fixing_dates[j]`` is
+       present in the history under ``index_id``.  The coupon rate is
+       then fully determined and no curve enters it.
+    2. The **partly-accrued blend**, for the one period straddling
+       ``ref_date``, when ``accrued_compounding`` is supplied.  An
+       overnight-compounded coupon whose period has begun but not ended
+       is neither realised nor forward-looking: part of its compounding
+       has happened and the rest has not.  Writing :math:`A` for the
+       realised factor over :math:`[T_j^s, t_0]`,
+
+       .. math::
+           1 + \\tau_j F_j = A \\cdot
+           \\frac{P_x(0,t_0)}{P_x(0,T_j^e)},
+
+       because the compounding factor over the whole period is the
+       product of the factor over the realised part and the factor over
+       the remainder, and the latter is exactly the projection curve's
+       discount-factor ratio.  The blend degenerates correctly at both
+       ends: with :math:`t_0 = T_j^s` nothing has accrued, :math:`A = 1`
+       and the expression reduces *exactly* to the fully projected
+       forward; as :math:`t_0 \\to T_j^e` the ratio tends to 1 and the
+       coupon tends to purely realised.
+    3. The **curve-projected forward**, for everything else.
+
+    The straddling period is identified by the half-open test
+    :math:`T_j^s \\le t_0 < T_j^e`, which makes it unique.  Closing both
+    ends would match two periods whenever :math:`t_0` falls exactly on
+    an accrual boundary, and they cannot share one realised factor.
+
+    Note:
+        A recorded fixing outranks the blend because it is strictly more
+        information — for a tenor index such as ``"USD.SOFR.3M"`` the
+        recorded value *is* the compounded coupon rate for the whole
+        period.  Supplying both for the same coupon is contradictory
+        input, and the recorded value wins.
+
+    Note:
+        A period that has **fully** ended (:math:`T_j^e \\le t_0`) is not
+        partly accrued and is deliberately out of the blend's scope; its
+        rate is entirely known, so it must come from a recorded fixing.
+        This matters when a payment lag leaves such a period ended but
+        unpaid: it still contributes PV, and supplying only
+        ``accrued_compounding`` would leave it projected.  Record the
+        compounded coupon rate under ``index_id`` instead.
+
     Args:
         graph: The curve graph supplying both curves.
         fixings: Realised-fixing registry consulted before projection.
@@ -315,9 +365,21 @@ def _floating_leg_pv(
         spread_addon: Spread added to every coupon rate.
         payment_dates: Payment dates :math:`T_j^p`.  ``None`` means
             no payment lag, i.e. :math:`T^p = T^e`.
+        ref_date: Valuation date :math:`t_0`, used only to locate the
+            straddling period.  Required when ``accrued_compounding``
+            is given.
+        accrued_compounding: Realised compounding factor :math:`A` over
+            the elapsed part of the straddling period, as produced by
+            :meth:`valax.curves.FixingSeries.compounded_factor`.
+            ``None`` disables the blend, which is the default and leaves
+            every coupon either recorded or fully projected.
 
     Returns:
         The floating-leg present value for unit notional.
+
+    Raises:
+        ValueError: If ``accrued_compounding`` is supplied without
+            ``ref_date``.
     """
     discount_curve = graph[discount_curve_id]
     forward_curve = graph[forward_curve_id]
@@ -332,9 +394,34 @@ def _floating_leg_pv(
 
     if index_id in fixings.indices:
         realised = fixings.lookup_many(index_id, fixing_dates)
-        rates = jnp.where(jnp.isnan(realised), projected, realised)
+        has_realised = ~jnp.isnan(realised)
+        # ``jnp.where`` on a NaN-free replacement keeps the gradient of
+        # the unselected branch at exactly zero, which is what makes a
+        # recorded coupon carry no projection-curve sensitivity (T-11).
+        rates = jnp.where(has_realised, jnp.nan_to_num(realised), projected)
     else:
+        has_realised = jnp.zeros(taus.shape, dtype=bool)
         rates = projected
+
+    if accrued_compounding is not None:
+        if ref_date is None:
+            raise ValueError(
+                "accrued_compounding needs ref_date to locate the "
+                "straddling accrual period; pass the valuation date."
+            )
+        ref = jnp.asarray(ref_date)
+        # Half-open: T^s <= t_0 < T^e.  Closing both ends would match
+        # *two* periods whenever t_0 lands exactly on an accrual
+        # boundary — the one ending there and the one starting there —
+        # and they cannot share one realised factor.  Half-open makes
+        # the straddling period unique, and degenerates correctly at
+        # t_0 = T^s, where nothing has accrued, A = 1, and the blend
+        # reduces to the fully projected forward.
+        straddles = (starts <= ref) & (accrual_end_dates > ref)
+        blended = (
+            accrued_compounding * forward_curve(ref) / df_ends_fwd - 1.0
+        ) / taus
+        rates = jnp.where(straddles & ~has_realised, blended, rates)
 
     df_disc = discount_curve(payment_dates)
     return jnp.sum((rates + spread_addon) * taus * df_disc)
@@ -716,6 +803,12 @@ class IborSwapRate(eqx.Module):
             to *both* legs for whichever of them has no explicit payment
             schedule.  For an exact business-day roll, or for legs with
             different lags, supply the explicit arrays instead.
+        accrued_compounding: Realised compounding factor over the
+            elapsed part of the float period straddling ``ref_date``,
+            for an overnight-compounded index.  Build it with
+            :meth:`valax.curves.FixingSeries.compounded_factor`.
+            ``None`` (the default) leaves every coupon either recorded
+            or fully projected.
     """
 
     start_date: Int[Array, ""]
@@ -733,6 +826,7 @@ class IborSwapRate(eqx.Module):
     fixed_payment_dates: Int[Array, " n_fixed"] | None = None
     float_payment_dates: Int[Array, " n_float"] | None = None
     payment_lag: int = eqx.field(static=True, default=0)
+    accrued_compounding: Float[Array, ""] | None = None
 
     def __check_init__(self):
         _validate_payment_schedule(
@@ -756,9 +850,10 @@ class IborSwapRate(eqx.Module):
         ``fixings[index_id]`` use the realised rate; the rest are
         projected from the forward curve.  Projection and accrual
         fractions come from the accrual schedule; discounting from the
-        payment schedule.
+        payment schedule.  When ``accrued_compounding`` is set, the
+        period straddling ``ref_date`` blends realised compounding with
+        the curve forward for the remainder.
         """
-        del ref_date  # temporal selection is delegated to fixings
         float_pv = _floating_leg_pv(
             graph,
             fixings,
@@ -774,6 +869,8 @@ class IborSwapRate(eqx.Module):
                 self.float_dates, self.float_payment_dates,
                 self.payment_lag,
             ),
+            ref_date,
+            self.accrued_compounding,
         )
         # Fixed leg annuity (no spread, no fixings).
         discount_curve = graph[self.curves_touched[0]]
@@ -1005,6 +1102,9 @@ class TenorBasisSwap(eqx.Module):
             (shape ``n_b``).  ``None`` means pay at accrual end.
         payment_lag: Uniform payment lag in **calendar** days, applied
             to whichever legs have no explicit payment schedule.
+        leg_a_accrued_compounding: Realised compounding factor over the
+            elapsed part of leg A's straddling period, or ``None``.
+        leg_b_accrued_compounding: The same for leg B.
     """
 
     # Required (array) fields — must come first in the dataclass.
@@ -1034,6 +1134,8 @@ class TenorBasisSwap(eqx.Module):
     leg_a_payment_dates: Int[Array, " n_a"] | None = None
     leg_b_payment_dates: Int[Array, " n_b"] | None = None
     payment_lag: int = eqx.field(static=True, default=0)
+    leg_a_accrued_compounding: Float[Array, ""] | None = None
+    leg_b_accrued_compounding: Float[Array, ""] | None = None
 
     def __check_init__(self):
         _validate_payment_schedule(
@@ -1054,8 +1156,6 @@ class TenorBasisSwap(eqx.Module):
         """Repricing residual: ``leg_a_pv - leg_b_pv`` with the spread
         added (per period) to the leg indicated by ``spread_on_leg``.
         """
-        del ref_date  # temporal selection is delegated to fixings
-
         if self.spread_on_leg == "a":
             a_addon, b_addon = self.spread, jnp.asarray(0.0)
         elif self.spread_on_leg == "b":
@@ -1081,6 +1181,8 @@ class TenorBasisSwap(eqx.Module):
                 self.leg_a_dates, self.leg_a_payment_dates,
                 self.payment_lag,
             ),
+            ref_date,
+            self.leg_a_accrued_compounding,
         )
         b_pv = _floating_leg_pv(
             graph,
@@ -1097,6 +1199,8 @@ class TenorBasisSwap(eqx.Module):
                 self.leg_b_dates, self.leg_b_payment_dates,
                 self.payment_lag,
             ),
+            ref_date,
+            self.leg_b_accrued_compounding,
         )
         return a_pv - b_pv
 
@@ -1188,6 +1292,10 @@ class CrossCurrencyBasisSwap(eqx.Module):
             ``"constant_notional"`` the final notional re-exchange moves
             with the coupon: it is discounted at each leg's **last
             payment date**, not at its accrual end.
+        dom_accrued_compounding: Realised compounding factor over the
+            elapsed part of the domestic leg's straddling period, or
+            ``None``.
+        for_accrued_compounding: The same for the foreign leg.
     """
 
     # Required (array) fields.
@@ -1220,6 +1328,8 @@ class CrossCurrencyBasisSwap(eqx.Module):
     dom_payment_dates: Int[Array, " n_dom"] | None = None
     for_payment_dates: Int[Array, " n_for"] | None = None
     payment_lag: int = eqx.field(static=True, default=0)
+    dom_accrued_compounding: Float[Array, ""] | None = None
+    for_accrued_compounding: Float[Array, ""] | None = None
 
     def __check_init__(self):
         _validate_payment_schedule(
@@ -1239,8 +1349,6 @@ class CrossCurrencyBasisSwap(eqx.Module):
     ) -> Float[Array, ""]:
         """CCBS residual; selects between MTM and constant-notional
         per the static ``variant`` field."""
-        del ref_date  # temporal selection delegated to fixings
-
         if self.spread_on_leg == "domestic":
             dom_addon, for_addon = self.spread, jnp.asarray(0.0)
         elif self.spread_on_leg == "foreign":
@@ -1276,6 +1384,8 @@ class CrossCurrencyBasisSwap(eqx.Module):
             dom_fwd_id,
             dom_addon,
             dom_pay,
+            ref_date,
+            self.dom_accrued_compounding,
         )
 
         if self.variant == "mtm":
@@ -1293,6 +1403,8 @@ class CrossCurrencyBasisSwap(eqx.Module):
                 for_fwd_id,
                 for_addon,
                 for_pay,
+                ref_date,
+                self.for_accrued_compounding,
             )
             return dom_coupon_pv - for_coupon_pv_in_dom
 
@@ -1310,6 +1422,8 @@ class CrossCurrencyBasisSwap(eqx.Module):
                 for_fwd_id,
                 for_addon,
                 for_pay,
+                ref_date,
+                self.for_accrued_compounding,
             )
             df_dom_mat = graph[dom_disc_id](dom_pay[-1])
             df_for_mat = graph[for_disc_id](for_pay[-1])

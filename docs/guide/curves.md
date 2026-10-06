@@ -267,6 +267,98 @@ are equal and cancel pairwise.)  Both facts are gated in
     `convexity_adj_fn` is the plug-in point, and the default for both is
     explicitly none.
 
+### Partly-accrued periods
+
+A coupon whose fixing date has passed uses the stored fixing rather than the
+curve — that much is just a lookup, and `FixingHistory` has always done it.
+But an *overnight-compounded* coupon whose period has begun and not yet ended
+is neither realised nor forward-looking. Part of its compounding has happened
+and the rest has not, and the two have to be combined:
+
+$$
+1 + \tau_j F_j \;=\; \underbrace{A}_{\text{realised}} \cdot
+\underbrace{\frac{P_x(0,t_0)}{P_x(0,T_j^e)}}_{\text{projected remainder}}
+$$
+
+where $A = \prod_j (1 + \hat{r}_j \delta_j)$ is the realised compounding factor
+over the elapsed part. This is exact rather than an approximation: the
+compounding factor over the whole period *is* the product of the factor over
+the realised part and the factor over the remainder.
+
+Build $A$ from the recorded history and hand it to the leg:
+
+```python
+from valax.curves.fixings import FixingHistory, FixingSeries
+from valax.curves.instruments import IborSwapRate
+from valax.dates import ymd_to_ordinal
+import jax.numpy as jnp
+
+t0 = ymd_to_ordinal(2025, 6, 15)          # valuation date
+accrual_start = ymd_to_ordinal(2025, 5, 1)  # period began six weeks ago
+
+sofr = FixingSeries(
+    fixing_dates=jnp.arange(accrual_start, t0),
+    fixings=jnp.full(t0 - accrual_start, 0.0433),
+)
+
+realised = sofr.compounded_factor(accrual_start, t0, "act_360")
+
+swap = IborSwapRate(
+    start_date=accrual_start,
+    fixed_dates=jnp.array([ymd_to_ordinal(2026, 5, 1)]),
+    float_dates=jnp.array([ymd_to_ordinal(2025, 8, 1),
+                           ymd_to_ordinal(2025, 11, 1),
+                           ymd_to_ordinal(2026, 2, 1),
+                           ymd_to_ordinal(2026, 5, 1)]),
+    fixing_dates=jnp.array([accrual_start,
+                            ymd_to_ordinal(2025, 8, 1),
+                            ymd_to_ordinal(2025, 11, 1),
+                            ymd_to_ordinal(2026, 2, 1)]),
+    rate=jnp.array(0.0385),
+    index_id="USD.SOFR.3M",
+    accrued_compounding=realised,      # ← the blend
+)
+```
+
+`TenorBasisSwap` takes `leg_a_accrued_compounding` /
+`leg_b_accrued_compounding` and `CrossCurrencyBasisSwap` takes
+`dom_accrued_compounding` / `for_accrued_compounding`, each resolved
+independently per leg.
+
+**Precedence.** Three sources, strictly ordered: a recorded fixing for the
+coupon wins, then the blend for the straddling period, then curve projection.
+A recorded value outranks a partial accrual because it is strictly more
+information — for a tenor index such as `USD.SOFR.3M` the recorded value *is*
+the compounded coupon rate for the whole period.
+
+**Which period straddles.** The test is half-open, $T^s_j \le t_0 < T^e_j$,
+which makes the straddling period unique. Closing both ends would match two
+periods whenever $t_0$ lands exactly on an accrual boundary — the one ending
+there and the one starting there — and they cannot share one realised factor.
+A consequence worth knowing: a period that has *fully* ended is deliberately
+outside the blend's scope, because its rate is entirely known. If a payment
+lag leaves such a period ended but unpaid, record its compounded coupon rate
+under `index_id` rather than reaching for `accrued_compounding`.
+
+!!! note "Two degeneracies and one consistency check"
+    The formula is pinned at both ends and in the middle, in
+    `tests/test_curves/test_instrument_residuals.py::TestPartlyAccruedFixings`:
+
+    - At $t_0 = T^s$ nothing has accrued, $A = 1$, and the blend reduces to
+      the fully projected forward — **exactly**, to the last bit.
+    - As $t_0 \to T^e$ the projected remainder shrinks and the coupon tends to
+      the purely realised $(A-1)/\tau$.
+    - If the realised rates happen to be exactly what the curve had projected
+      for the elapsed part — $A = P_x(T^s)/P_x(t_0)$ — then substituting
+      realised data for projected data cannot change the answer, and it
+      doesn't, again exactly. This is the property that would break first if
+      the blend read the curve at the wrong date.
+
+    Because $A$ is computed from recorded values only, with no curve input, a
+    realised coupon carries **identically zero** projection-curve sensitivity
+    while still being discounted. That is the
+    [T-11 gate](../architecture/aad-audit-conformance.md#t-verification-tests).
+
 ## 3. Sequential bootstrap
 
 For non-overlapping instruments sorted by maturity, each instrument adds one
