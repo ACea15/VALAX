@@ -12,6 +12,71 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — fixed-input (`p`) adjoints and snapshot provenance (A-8, M-5, Q-1, Q-5, T-14)
+
+A calibration has two kinds of input: the quotes it solves against, and
+everything else it holds still — mean reversion, the SABR exponent and shift,
+futures convexity adjustments, turn spreads, wing settings. The second kind
+moved the price and appeared in no report, which is an unhedged position
+nobody is looking at.
+
+**`valax.greeks.fixed_inputs`** adds `FixedInput`, `FixedInputs`,
+`fixed_input_adjoints` and `FixedInputAdjoint`. The design decision worth
+recording is that a `FixedInput` stores **where** the value lives, not the
+value. Those numbers already sit on the model and surface pytrees the pricer
+consumes; a container holding copies would be a second source of truth, and
+the day the two disagreed the risk report would describe a model nobody priced
+with — reproducing A-8's own failure mode in a new place. The adjoint is taken
+by reading the leaf out of the live pytree, re-injecting it, and
+differentiating through the injection, so the reported number belongs to the
+priced leaf by construction. There is nothing to keep in sync.
+
+**Direct and total are both supported, and they are not close.** A fixed input
+can reach the price directly, or through what the calibration lands on when it
+moves. On a 3y×7y Hull-White swaption, mean-reversion sensitivity is −1.34e5
+with the model frozen and −2.03e4 once σ is allowed to re-fit — a factor of
+6.6, because recalibration offsets most of the direct effect. Quoting the
+frozen number as the exposure overstates it more than six times over. Which
+one you get is decided by the function handed to `fixed_input_adjoints`, so
+the choice is explicit. Neither needs an implicit-function-theorem step: `p` is
+held constant *through* the solve, and `optimistix` differentiates its own
+implicit solution rather than taping iterations.
+
+A fixed input must be a **whole, scalar leaf**. Indexing into one
+(`lambda c: c.betas[0, 0]`) is not a lens `equinox.tree_at` accepts, and a grid
+is a set of fixed inputs rather than one; both are now refused with a message
+saying what to do instead, rather than surfacing as the opaque
+`'_LeafWrapper' object is not subscriptable` the tree surgery would otherwise
+raise.
+
+**`valax.market.provenance`** adds `QuoteProvenance` and `SnapshotProvenance`:
+per-quote type, units, source, timestamp and stale flag under one snapshot id
+(Q-1, Q-6), with `label(q_bar)` turning an anonymous sensitivity vector into a
+named report. `from_instruments` derives type and units from the bootstrap
+instruments in solver order, so the names and the numbers come from the same
+sequence and a reordered quote list cannot mislabel; a length mismatch raises
+rather than zipping short.
+
+It is kept **alongside** `MarketState`, not inside it. Every field is a string
+or an integer so nothing is differentiated — but it could have been carried as
+static fields without being differentiated, and that would still have been
+wrong: static fields participate in JIT cache keys, and provenance changes on
+every snapshot by definition, so each new timestamp would recompile every
+jitted pricer.
+
+**Known gap, recorded rather than papered over:** the futures convexity
+adjustment is a closure over a constant (`constant_convexity_adj`) rather than
+a pytree leaf, so it has no lens and no `p̄` today. The carrier supports it the
+moment it becomes a leaf.
+
+Gated by `tests/test_greeks/test_fixed_inputs.py` (**T-14**) and
+`tests/test_market/test_provenance.py` (Q-1/Q-5/Q-6). T-14's three clauses are
+asserted separately — present, non-zero where expected *and exactly `0.0`
+where not*, matching finite differences at two bump sizes — because any two
+can hold while the third fails: without the zero complement a carrier
+fabricating numbers would look healthy, and without the non-zero case one
+returning zeros would.
+
 ### Added — single-curve limit, smoothness and basket-repricing gates (T-4, T-8, T-9)
 
 `tests/test_calibration/test_audit_conformance.py` closes the last three

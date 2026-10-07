@@ -315,6 +315,31 @@ These are intentionally *not* provided by the current synthetic layer:
   are in place; the corresponding library-side checkers are tracked
   as `xfail` items in the test suite.
 
+## Snapshot provenance
+
+A quote vector on its own is anonymous: `q_bar[7] = -41.3` is not a risk
+report until something says entry 7 was a 5Y OIS par rate in decimal, from a
+named source, at a named time, under a named snapshot.
+
+`SnapshotProvenance` is kept **alongside** `MarketState`, not inside it. Every
+field is a string or an integer, so it is never a differentiated leaf; it
+could be carried as static fields on the market without being differentiated,
+but static fields participate in JIT cache keys, and provenance changes on
+every snapshot by definition — so that would recompile every jitted pricer
+each time a timestamp moved.
+
+[`from_instruments`](#valax.market.SnapshotProvenance.from_instruments)
+derives each quote's type and units from the bootstrap instrument itself, in
+solver order, which is what makes
+[`label`](#valax.market.SnapshotProvenance.label) safe: both the sensitivity
+vector and the names come from the same sequence, so a reordered quote list
+cannot silently mislabel a report. A length mismatch raises rather than
+zipping short.
+
+::: valax.market.QuoteProvenance
+
+::: valax.market.SnapshotProvenance
+
 ## See also
 
 - [User Guide → Synthetic Market Data](../guide/synthetic_market.md) — tutorial walkthrough.

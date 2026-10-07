@@ -112,6 +112,37 @@ for the runnable example and for what the observed numbers mean.
 
 ::: valax.greeks.condition_alert
 
+## Fixed inputs (`p`)
+
+A calibration has two kinds of input. The **quotes** are solved against and
+come back as hedge-space deltas above. The **fixed inputs** are everything
+else the answer depends on but the solver holds still — Hull-White's mean
+reversion, the SABR exponent and shift, futures convexity adjustments, turn
+spreads, wing settings. They are not tradeable, so they are reported
+*separately* from `q_bar` rather than folded into it: a desk cannot hedge mean
+reversion, only size and govern the exposure to it.
+
+A [`FixedInput`](#valax.greeks.FixedInput) stores **where** the value lives,
+not the value. Those numbers already sit on the model and surface pytrees the
+pricer consumes, so a container that copied them would be a second source of
+truth — and the day it disagreed, the risk report would describe a model
+nobody priced with. Differentiating through the re-injection makes the
+reported sensitivity belong, by construction, to the leaf that was priced.
+
+See [Calibration § 9](../guide/calibration.md#9-what-a-risk-report-has-to-contain)
+for the runnable example, and in particular for why the *direct* and
+*recalibrated* sensitivities to the same input differ by a factor of six.
+
+::: valax.greeks.FixedInput
+
+::: valax.greeks.FixedInputs
+
+::: valax.greeks.fixed_inputs_from_paths
+
+::: valax.greeks.fixed_input_adjoints
+
+::: valax.greeks.FixedInputAdjoint
+
 ### Vega to volatility quotes
 
 The same step one layer up. A smile fit is not a square root-find — there are

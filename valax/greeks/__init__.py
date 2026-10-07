@@ -26,6 +26,13 @@ from valax.greeks.adjoint import (
     level_condition_number,
     quote_deltas_from_cotangent,
 )
+from valax.greeks.fixed_inputs import (
+    FixedInput,
+    FixedInputAdjoint,
+    FixedInputs,
+    fixed_input_adjoints,
+    fixed_inputs_from_paths,
+)
 from valax.greeks.vol_adjoint import (
     SABRSliceInputs,
     SliceVolAdjoint,
@@ -67,6 +74,11 @@ __all__ = [
     "ILL_CONDITIONED_THRESHOLD",
     "level_condition_number",
     "condition_alert",
+    "FixedInput",
+    "FixedInputs",
+    "FixedInputAdjoint",
+    "fixed_input_adjoints",
+    "fixed_inputs_from_paths",
     "CurveAdjoint",
     "curve_adjoint",
     "curve_log_df_cotangent",

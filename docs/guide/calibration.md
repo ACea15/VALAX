@@ -587,3 +587,117 @@ residual rows identical and leaves one pillar unconstrained. The build fails to
 converge and $\kappa$ comes back non-finite, which `condition_alert` reports
 distinctly — the implicit function theorem does not apply at all there, so the
 sensitivities are meaningless rather than merely imprecise.
+
+## 9. What a Risk Report Has to Contain
+
+A calibration chain produces three outputs, not one, and the two that are not
+delta are the ones that go missing:
+
+| Output | What it is | Where |
+|---|---|---|
+| $\bar q_c$ | Delta to each **curve quote** | [`curve_quote_deltas`](../api/greeks.md#quote-space-hedge-space-risk) |
+| $\bar q_v$ | Vega to each **vol quote** | [`vol_quote_vegas`](../api/greeks.md#vega-to-volatility-quotes) |
+| $\bar p$ | Sensitivity to each **fixed input** | `fixed_input_adjoints`, below |
+
+### 9.1 Fixed inputs: the numbers nobody quotes
+
+The fixed inputs $p$ are what the calibration holds still rather than solves
+for: mean reversion, the SABR exponent $\beta$ and any displacement shift,
+futures convexity adjustments, turn spreads, wing settings. They are neither
+market quotes nor calibrated parameters, which is precisely why they tend to
+appear in no report at all — and a number that moves the price but is
+monitored nowhere is an unhedged position.
+
+`FixedInput` records **where** a value lives, not the value. Those numbers
+already sit on the model and surface pytrees; a container that copied them
+would be a second source of truth, and the day it disagreed the report would
+describe a model nobody priced with. Differentiating through the re-injection
+makes the number belong, by construction, to the leaf that was priced.
+
+```python
+import jax.numpy as jnp
+
+from valax.calibration.hull_white import calibrate_hull_white, hw_swaption_prices
+from valax.greeks import fixed_input_adjoints, fixed_inputs_from_paths
+from valax.pricing.analytic.hull_white_swaptions import hw_swaption_price
+
+# `model`, `curve`, `trade` and `basket` as built in the Hull-White recipe
+# of §6; `targets = hw_swaption_prices(model, basket)`.
+
+p = fixed_inputs_from_paths(
+    [("hull_white.mean_reversion", lambda m: m.mean_reversion)],
+    units=("1/year",),
+)
+
+# (a) Direct: the model frozen at its calibrated parameters.
+direct = fixed_input_adjoints(lambda m: hw_swaption_price(trade, m), model, p)
+
+# (b) Total: mean reversion moves, and the model is re-fitted to the
+#     same basket before pricing.
+def recalibrate_and_price(m):
+    fitted, _ = calibrate_hull_white(
+        basket, targets, curve, fixed_mean_reversion=m.mean_reversion
+    )
+    return hw_swaption_price(trade, fitted)
+
+total = fixed_input_adjoints(recalibrate_and_price, model, p)
+
+print(f"p                        = {float(direct.values[0]):.3f} /year")
+print(f"dV/dp, model frozen      = {float(direct.adjoints[0]):,.0f}")
+print(f"dV/dp, model re-fitted   = {float(total.adjoints[0]):,.0f}")
+```
+
+```
+p                        = 0.080 /year
+dV/dp, model frozen      = -133,734
+dV/dp, model re-fitted   = -20,258
+```
+
+**The two differ by a factor of 6.6, and choosing wrongly is worse than not
+reporting.** Moving mean reversion changes what the calibration lands on:
+$\sigma$ re-fits and offsets most of the direct effect. Quoting the frozen
+number as the exposure overstates it more than six times over. Which one you
+get is decided entirely by the function you hand to `fixed_input_adjoints` —
+a plain pricer gives (a), a recalibrate-then-price gives (b) — so the choice
+is explicit rather than accidental.
+
+No implicit-function-theorem step is needed for either. A fixed input is held
+constant *through* the solve, so differentiating the recalibration directly is
+correct, and it is cheap because `optimistix` differentiates its own implicit
+solution rather than taping the iterations.
+
+!!! note "A fixed input must be a scalar leaf"
+    `FixedInput.where` must select a whole, scalar leaf. Indexing into one
+    (`lambda c: c.betas[0, 0]`) is not a lens `equinox.tree_at` accepts, and a
+    grid is a *set* of fixed inputs rather than one. Both are refused with a
+    message saying so. The per-node $\beta$ grid on a `SwaptionCube` is
+    therefore reported through a scalar-$\beta$ `SABRModel`, not through the
+    cube.
+
+### 9.2 Provenance: which quote was which
+
+`SnapshotProvenance` records, per quote, its type, units, source and
+timestamp under one snapshot id, and labels a sensitivity vector with them:
+
+```python
+from valax.market import SnapshotProvenance
+
+provenance = SnapshotProvenance.from_instruments(
+    "USD.2025-01-01.EOD", ref, quotes,
+    source="INTERNAL-EOD", timestamp="2025-01-01T17:00:00Z",
+    quote_ids=("USD.ON.1Y", "USD.OIS.2Y", "USD.OIS.5Y"),
+)
+provenance.label(q_bar)       # (("USD.ON.1Y", -12.3), ...)
+provenance.stale_quote_ids()  # quotes flagged stale or overridden
+```
+
+Type and units are derived from the instruments in solver order, so the names
+and the numbers come from the same sequence and a reordered quote list cannot
+mislabel the report; a length mismatch raises rather than zipping short.
+
+The record is kept **alongside** `MarketState`, never inside it. Every field
+is a string or an integer, so it is not a differentiated leaf — but it could
+have been carried as a static field without being differentiated, and that
+would still have been wrong: static fields participate in JIT cache keys, and
+provenance changes on every snapshot by definition, so every jitted pricer
+would recompile whenever a timestamp moved.

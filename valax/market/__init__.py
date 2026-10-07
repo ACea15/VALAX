@@ -1,6 +1,7 @@
 """Market data containers, scenarios, and synthetic-market generators."""
 
 from valax.market.data import MarketData
+from valax.market.provenance import QuoteProvenance, SnapshotProvenance
 from valax.market.scenario import (
     MarketScenario,
     ScenarioSet,

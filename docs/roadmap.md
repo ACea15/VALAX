@@ -218,6 +218,22 @@ space, so a curve move reaches the volatility layer. The equity surfaces and
   Hull-White (a, σ) ≈ 5.6e3 vs ≈ 1 for σ alone — so the diagnostic quantifies
   the standing advice to fix β and to fix mean reversion. Gated by
   `tests/test_greeks/test_level_conditioning.py` (T-13, `pytest -m audit`)
+- [x] **Fixed-input (`p`) adjoints and snapshot provenance** —
+  `valax.greeks.fixed_inputs` (`FixedInput`, `FixedInputs`,
+  `fixed_input_adjoints`, `FixedInputAdjoint`) reports sensitivities to the
+  quasi-market inputs the calibration holds still — mean reversion, SABR β
+  and shift — separately from `q̄`, as spec A-8/M-5 require. A `FixedInput`
+  stores *where* the value lives rather than a copy of it, so the reported
+  number belongs by construction to the leaf that was priced. Both readings
+  are supported: direct (`∂V/∂p`, objects frozen) and total
+  (recalibrate-then-price); they differ by **6.6×** on mean reversion, so
+  reporting the wrong one overstates the exposure several times over.
+  `valax.market.SnapshotProvenance` / `QuoteProvenance` carry per-quote type,
+  units, source and timestamp under one snapshot id (Q-1), derived from the
+  instruments in solver order so `label(q̄)` cannot mislabel; kept alongside
+  `MarketState` rather than inside it, since even all-static metadata would
+  enter JIT cache keys. Gated by `tests/test_greeks/test_fixed_inputs.py`
+  (T-14) and `tests/test_market/test_provenance.py` (Q-1/Q-5/Q-6)
 - [x] **Single-curve limit, smoothness and basket-repricing gated** —
   `tests/test_calibration/test_audit_conformance.py` (T-4, T-8, T-9).
   T-4 passes `forward_curve=curve` *explicitly* so the dual-curve path runs
