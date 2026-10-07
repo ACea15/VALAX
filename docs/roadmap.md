@@ -218,6 +218,17 @@ space, so a curve move reaches the volatility layer. The equity surfaces and
   Hull-White (a, σ) ≈ 5.6e3 vs ≈ 1 for σ alone — so the diagnostic quantifies
   the standing advice to fix β and to fix mean reversion. Gated by
   `tests/test_greeks/test_level_conditioning.py` (T-13, `pytest -m audit`)
+- [x] **Single-curve limit, smoothness and basket-repricing gated** —
+  `tests/test_calibration/test_audit_conformance.py` (T-4, T-8, T-9).
+  T-4 passes `forward_curve=curve` *explicitly* so the dual-curve path runs
+  and must land on the single-curve answer — exact to 0.0 at the pricers,
+  verified at all three layers (pricer, bootstrap, model fit), with a 25 bp
+  basis gated as the non-degenerate complement. T-8 phrases "no steps" as a
+  refinement rate (`max|Δ²price|` must fall 4×, `max|Δdelta|` 2×; observed
+  3.99 and 2.00), which a discontinuity cannot satisfy at any tolerance.
+  T-9 reprices the calibrated Hull-White basket with the production PDE and
+  shows by grid refinement that the 1.5e-4 residual is discretisation error,
+  not misfit
 - [x] **Smile-dynamics delta gated** —
   `tests/test_surfaces/test_smile_dynamics.py::TestT12SmileDynamicsDelta`
   (T-12). At the fitted forward all three conventions return the same vol and

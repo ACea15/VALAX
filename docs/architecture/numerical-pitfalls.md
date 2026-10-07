@@ -426,6 +426,18 @@ Corollaries:
   *contractual* details and reserve the mesh for the genuinely unknown part —
   here, the continuation value.
 
+### Where this lesson is now enforced
+
+Both halves of it are load-bearing in the audit T-suite
+([conformance map](aad-audit-conformance.md)), which is where the lesson stops
+being advice and becomes a gate:
+
+| Gate | Which half | How |
+|---|---|---|
+| **T-8** (smoothness scan) | Convergence *order* | "No steps" is not assertable at any tolerance: every smooth function has non-zero second differences, and a bound on near-linearity would fail on the price's genuine curvature across the scan. The discriminator is the refinement ratio: halving the grid must shrink `max|Δ²price|` fourfold and `max|Δdelta|` twofold, which a single discontinuity pins near one. Observed 3.99 and 2.00. Its anti-vacuity companion — asserting the scan actually moves the price — is entry 3's lesson |
+| **T-9** (basket repriced by the PDE) | Convergence *order* | A single residual cannot say whether 1.5e-4 is discretisation error or calibration misfit. Doubling the grid drops it to 3.7e-5 — ratio 4 — which attributes it to the mesh |
+| **T-6** (put–call parity) | Shared approximation | VALAX derives the floorlet and the receiver *from* parity, so the identity is exact by construction and asserting it tests nothing. Each leg is checked against an independently written closed form instead, with the put as $K\Phi(-d_2) - F\Phi(-d_1)$ rather than $\text{call} - (F-K)$ |
+
 ---
 
 ## 5. A value-correct guard with no derivative: `jnp.where` on a removable singularity

@@ -12,6 +12,53 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — single-curve limit, smoothness and basket-repricing gates (T-4, T-8, T-9)
+
+`tests/test_calibration/test_audit_conformance.py` closes the last three
+T-suite gates that do not depend on the `FixedInputs` carrier.
+
+**T-4** is the one where the existing coverage looked adequate and was not.
+Two tests already claimed the single-curve limit, but one compares two
+*solvers* and the other compares `forward_curve=None` against the default —
+which is the same branch, so neither can detect a broken dual-curve path. The
+gate now passes `forward_curve=curve` **explicitly**, so the dual-curve code
+runs with a basis of exactly one and must land on the single-curve answer. It
+does, to 0.0 exactly for the float leg, par rate, swap price, annuity and
+caplet forward, and to one ulp (1.4e-17) on the swaption forward — as it
+should, since `_dual_curve_float_pv`'s summands telescope on one curve rather
+than approximate anything. Verified at all three layers (pricers, bootstrap,
+Hull-White fit), with the par rate additionally checked against a closed form
+in two discount factors built in the test. The complement is gated: a 25 bp
+basis must *not* degenerate, so a bug that aliased the two curves could not
+pass.
+
+**T-8** asks for "no steps or jumps", which is not assertable at any
+tolerance — every smooth function has non-zero second differences, and any
+step hides under a loose enough bound. Asserting near-linearity across the
+scan would be worse, since the price has genuine curvature over ±2 bp; that is
+the mistake numerical-pitfalls entry 3 records. The gate instead uses the
+**refinement rate**, which separates the cases rather than trading them off:
+halving the scan spacing must shrink `max|Δ²price|` by 4 (`O(h²)`) and
+`max|Δdelta|` by 2 (`O(h)`), while a single discontinuity pins both near 1.
+Observed 3.99 and 2.00. Every scan point rebuilds the graph, adjoint and
+factorisation from the quotes, so nothing is carried between bumps — the R-6 /
+M-6 condition. No tolerance is placed on the differences themselves,
+deliberately: their magnitude carries no information, only their scaling does.
+
+**T-9** reprices the calibrated basket with the production PDE. Repricing with
+the *analytic* Jamshidian formula the fit itself drove to target is
+near-tautological and returns 2e-15; that is recorded explicitly so it is
+clear what the PDE adds. The PDE residual is 1.47e-04 at a 200×200 grid, and
+doubling the grid drops it to 3.67e-05 — a ratio of 4. That refinement is the
+assertion that matters, because a single reported residual cannot say whether
+it is discretisation error or calibration misfit. M-6 is gated alongside by
+requiring bit-identical repricing from a reused `PDEConfig`.
+
+`docs/architecture/numerical-pitfalls.md` entry 4 — which owns both the
+"measure the convergence order, not the error" lesson and its
+shared-approximation corollary — gains a table of where those are now
+enforced as gates rather than left as advice (T-8, T-9 and T-6).
+
 ### Added — smile-dynamics delta gate (T-12)
 
 `tests/test_surfaces/test_smile_dynamics.py::TestT12SmileDynamicsDelta` closes
