@@ -107,10 +107,13 @@ class CurveBuildDiagnostics(eqx.Module):
             via :data:`_QUOTE_FIELD` (shape ``(n_instruments,)``).
         jacobian_condition_number: 2-norm condition number of the
             residual Jacobian ``d(residuals)/d(log_dfs)`` at the
-            solution.  A very large value (say ``> 1e10``) flags
-            an ill-posed curve build — typically caused by pillars
-            placed too close together or an instrument that
-            constrains an already-anchored region.
+            solution.  A large value flags an ill-posed curve build —
+            typically caused by pillars placed too close together or an
+            instrument that constrains an already-anchored region.  Pass
+            it to :func:`valax.greeks.adjoint.condition_alert` to test it
+            against the shared
+            :data:`~valax.greeks.adjoint.ILL_CONDITIONED_THRESHOLD`
+            rather than against a locally restated number.
     """
 
     residuals: Float[Array, " n_instruments"]

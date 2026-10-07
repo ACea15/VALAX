@@ -12,6 +12,112 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — rates option parity and Bachelier ATM gates (T-6, T-7)
+
+`tests/test_surfaces/test_audit_parities.py` gates the two option identities
+the audit specification asks for. The interesting part is why the obvious
+version of T-6 would have been worthless.
+
+VALAX does not price a floorlet or a receiver from its own formula — it prices
+the caplet/payer and subtracts the forward value (`caplets.py`,
+`swaptions.py`). So "caplet − floorlet = FRA" and "payer − receiver =
+A_d(S_x − K)" are true *by construction*, to the last bit, and asserting them
+tests only that subtraction is subtraction. That is the failure already
+recorded as entry 4 of `docs/architecture/numerical-pitfalls.md`:
+corroboration from something that shares your approximation is worthless.
+
+The gate therefore builds two independent references. Each leg is checked
+against its own closed form, with the put written as `K Φ(−d₂) − F Φ(−d₁)`
+rather than as `call − (F − K)`, which is what makes the out-of-the-money leg
+genuinely checkable. And `τ`, `A_d`, `S_x` and `P_d(T_e)` are reconstructed by
+hand from the definitions, by explicit loop over curve reads — because that is
+the part that actually bites: the annuity's first period accrues from *expiry*,
+the dual-curve floating leg does not telescope, and the discount factor is read
+at the payment date. Mis-wire any of those and parity still holds while the
+reconstruction fails. Everything runs single- *and* dual-curve, since a
+swapped `P_d`/`P_x` is invisible when the two curves are the same object.
+
+T-7 (ATM straddle = `2 A_d σ √(T/2π)`) is the only gate here that constrains
+the volatility scale at all — T-6 is vol-insensitive by construction — so it
+is what would catch a missing `√(2π)`, a doubled `√T`, or a variance/vol
+mix-up. It is not weakened by the receiver coming from parity, because the
+parity term vanishes at the money. Two corollaries are gated with it: the ATM
+straddle is exactly linear in σ, and the Black-76 ATM straddle converges to
+the Bachelier one — asserted as a convergence *rate* (halving σ must shrink
+the relative gap fourfold, the leading correction being `O((σ√T)²)`) rather
+than at a fixed tolerance, which would pass equally well against a wrong
+formula that happened to be close.
+
+`docs/theory/rate-derivatives.md` now records that the out-of-the-money leg is
+derived from parity: it guarantees a floor inherits exactly the smile
+treatment its cap received, and it is the reason the gate is built the way it
+is.
+
+### Added — conditioning reported at every calibration level, with a shared alert threshold
+
+`dR/dθ`'s condition number decides how much of the double-precision mantissa
+survives the transposed solve that every quote sensitivity goes through. It was
+reported only for Layer 1a (`CurveBuildDiagnostics`, `CurveAdjoint`), and the
+`1e10` threshold everyone referred to existed only in prose — as a bare literal
+in two docstrings and one doctest, with no constant and no alert anywhere in
+code.
+
+- `valax.greeks.adjoint.ILL_CONDITIONED_THRESHOLD` (`1e10`) is now the single
+  source of truth; the docstrings and the doctest refer to it instead of
+  restating it.
+- `level_condition_number(level)` reports `κ(dR/dθ)` for **any**
+  `CalibrationLevel` — curve, smile or model — accepting a pytree `θ` and
+  rectangular (least-squares) levels as well as square ones. It deliberately
+  *does* materialise `dR/dθ`, since a condition number is a property of the
+  whole matrix; it is a per-snapshot diagnostic and the sensitivity path
+  itself stays Jacobian-free.
+- `condition_alert(κ, level_name=..., threshold=...)` returns a message or
+  `None`, rather than warning or raising, so the caller picks the channel. A
+  non-finite `κ` gets a distinct message: that is a singular system where the
+  implicit function theorem does not apply at all, so the sensitivities are
+  meaningless rather than imprecise.
+
+Measured across the three layers (all four or more orders of magnitude inside
+the threshold): curve build ≈ 1.1, SABR slice ≈ 2.2e4 with β fixed and
+≈ 5.6e6 with β free, Hull-White (a, σ) ≈ 5.6e3 against ≈ 1 for σ alone. The
+diagnostic therefore puts numbers on two pieces of standing advice — fix β,
+fix mean reversion — that were previously folklore. It also retires the
+concern recorded in the conformance map that a `1e10` alert would fire on
+healthy smile fits: the worst healthy fit measured is 1e4 short of it.
+
+Two findings worth recording, both measured rather than assumed. A VALAX curve
+build is **structurally** near-perfectly conditioned: an OIS floating leg
+telescopes, so in log-DF space the `P(T_n)` term dominates the annuity term and
+each quote very nearly pins its own maturity pillar — crowding two pillars to
+one day apart leaves κ ≈ 1.15, so ill-conditioning cannot be provoked from
+pillar spacing. The failure mode that *is* real is a **duplicated quote**: it
+keeps the system square, so no shape check rejects it, but it makes two
+residual rows identical and leaves a pillar unconstrained.
+
+Gated by `tests/test_greeks/test_level_conditioning.py` (**T-13**,
+`pytest -m audit`), which asserts the three reports of the same Layer-1a
+Jacobian agree to `rtol = 1e-10` and drives the alert's finite branch from a
+synthetic Hilbert level — a documented choice, since no realistic level
+reaches the threshold.
+
+### Added — day-count and schedule reference-data gate (T-10)
+
+`tests/test_dates/test_audit_conventions.py` pins τ and generated schedule
+dates against references derived from the published conventions using the
+**standard library only** (`datetime`, `calendar`) or integer arithmetic
+transcribed from the rule. The independence is the point: `ymd_to_ordinal` and
+`thirty_360` both route through VALAX's own Hinnant ordinal/calendar
+conversion, so checking one against the other would prove only that the
+algorithm is used twice.
+
+Dates match exactly (integer equality). `act_360`, `act_365` and `30_360` match
+**bit-for-bit**. `act_act` matches to `atol = 1e-14` (observed worst 2.9e-15)
+and cannot be exact: `valax.dates.daycounts.act_act` evaluates a cumulative
+function and subtracts, while ISDA 4.16(b) sums per-year contributions — equal
+in exact arithmetic, different floating-point operation sequences. The closed
+form is the better-conditioned of the two, so the implementation is not the
+thing being corrected by the tolerance.
+
 ### Changed — `CurveSpec.interp` is no longer a field that could be silently ignored
 
 `CurveSpec.interp` was validated against `graph._SUPPORTED_INTERP` and then

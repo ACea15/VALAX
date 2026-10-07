@@ -207,6 +207,30 @@ space, so a curve move reaches the volatility layer. The equity surfaces and
   central finite differences for every quote at two bump sizes, plus the
   parallel-shift identity and the quotes-fixed vs nodes-fixed distinction
   (`tests/test_greeks/test_quote_adjoint.py`, `pytest -m audit`)
+- [x] **Conditioning reported at every calibration level** —
+  `valax.greeks.adjoint.level_condition_number` reports `κ(dR/dθ)` for any
+  `CalibrationLevel` (curve, smile or model; square or least-squares, flat or
+  pytree `θ`), and `condition_alert` tests it against the single shared
+  `ILL_CONDITIONED_THRESHOLD` (`1e10`), returning a message rather than
+  warning so the caller picks the channel. Closes the gap where only Layer 1a
+  had a conditioning report and no threshold existed anywhere in code.
+  Measured: curve build ≈ 1.1, SABR slice ≈ 2.2e4 (≈ 5.6e6 with β free),
+  Hull-White (a, σ) ≈ 5.6e3 vs ≈ 1 for σ alone — so the diagnostic quantifies
+  the standing advice to fix β and to fix mean reversion. Gated by
+  `tests/test_greeks/test_level_conditioning.py` (T-13, `pytest -m audit`)
+- [x] **Rates option parities and the Bachelier ATM identity gated** —
+  `tests/test_surfaces/test_audit_parities.py` (T-6, T-7). The naive form of
+  T-6 is vacuous, because VALAX derives the floorlet and the receiver *by*
+  parity, so each leg is instead checked against an independently written
+  closed form and the forward, annuity, accrual and discount factor are
+  rebuilt by hand — single- and dual-curve, since a `P_d`/`P_x` swap is
+  invisible when the curves are the same object
+- [x] **Day-count and schedule reference data gated** —
+  `tests/test_dates/test_audit_conventions.py` (T-10) pins τ and schedule
+  dates against references built from the **standard library only**, so a
+  self-consistent-but-wrong ordinal algebra cannot pass. `act_360`,
+  `act_365` and `30_360` match bit-for-bit; `act_act` to 1e-14, the
+  difference being cumulative-subtraction vs ISDA's per-year summation
 - [x] **Curve-id alphabet frozen** — `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]`,
   enforced by `valax.curves.graph._CURVE_ID_RE`; `_default_` grandfathered
 - [x] **Legacy paths migrated** — `bootstrap_simultaneous` and

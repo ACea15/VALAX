@@ -96,6 +96,22 @@ plug into.
 
 ::: valax.greeks.LevelAdjoint
 
+### Conditioning of a level
+
+The theorem needs `dR/dtheta` invertible; *how* invertible decides how many
+significant digits survive the transposed solve. A fit can converge to a tiny
+residual and still produce quote deltas whose leading digits are noise, and the
+residual norm will not say so. `level_condition_number` reports the condition
+number for any level — curve, smile or model — on one scale, and
+`condition_alert` tests it against the shared `ILL_CONDITIONED_THRESHOLD`.
+
+See [Calibration § 8](../guide/calibration.md#8-is-the-fit-trustworthy-conditioning-at-every-level)
+for the runnable example and for what the observed numbers mean.
+
+::: valax.greeks.level_condition_number
+
+::: valax.greeks.condition_alert
+
 ### Vega to volatility quotes
 
 The same step one layer up. A smile fit is not a square root-find — there are

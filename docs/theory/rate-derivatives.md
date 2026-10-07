@@ -54,6 +54,22 @@ $$
 
 **VALAX implementation:** `valax/pricing/analytic/caplets.py` (`caplet_price_black76`, `caplet_price_bachelier`, `cap_price_*`) is dual-curve aware and takes a per-caplet volatility term structure.
 
+!!! note "The out-of-the-money leg is *derived* from parity, not priced"
+    VALAX computes the floorlet as $\mathrm{Caplet} - \tau P_d(T_e)(F_x - K)$,
+    and likewise the receiver swaption as
+    $\mathrm{Payer} - A_d(S_x - K)$. The parity above therefore holds to the
+    last bit by construction rather than as a numerical result — which is
+    worth knowing twice over. It guarantees a floor inherits exactly the
+    smile treatment its cap received, so the two can never disagree about the
+    vol. But it also means *asserting* parity proves nothing about the
+    pricers: the conformance gate
+    (`tests/test_surfaces/test_audit_parities.py`, T-6) instead checks each
+    leg against an independently written closed form — the put as
+    $K\Phi(-d_2) - F\Phi(-d_1)$, never as $\mathrm{call} - (F-K)$ — and
+    rebuilds $\tau$, $A_d$, $S_x$ and $P_d$ by hand, since a swapped
+    projection/discount curve or a mis-anchored first accrual period leaves
+    parity perfectly intact.
+
 The market, however, quotes **one flat volatility per cap maturity** rather than the $\sigma_i$ above. Recovering the optionlet term structure from those quotes is a nested bootstrap — one scalar root-find per quoted maturity, projecting off the tenor curve and discounting off OIS — implemented by `valax/surfaces/caplet_stripping.py` (`strip_caplet_vols`, `strip_optionlet_surface`). Recipe and the bootstrap identity: [Volatility Surfaces § Cap → caplet stripping](../guide/vol-surfaces.md#cap-caplet-optionlet-stripping-rates).
 
 ### 9.3 Swaptions and the Annuity Measure

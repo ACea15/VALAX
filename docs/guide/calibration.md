@@ -477,3 +477,113 @@ Calibration minimizes weighted residuals in implied-vol space (default) or price
 $$\min_\theta \sum_i w_i \left( \sigma^\text{model}(K_i; \theta) - \sigma^\text{market}(K_i) \right)^2$$
 
 Vol-space calibration is more stable than price-space for SABR because it removes the option's moneyness dependence from the residuals.
+
+## 8. Is the Fit Trustworthy? Conditioning at Every Level
+
+A converged calibration is not automatically a usable one. Every VALAX
+calibration is a residual driven to zero, $R(\theta; \text{inputs}) = 0$, and
+every sensitivity taken through it (see
+[quote-space risk](../api/greeks.md#quote-space-hedge-space-risk)) solves a
+system built from $\partial R / \partial \theta$. How invertible that matrix is
+decides how much of the double-precision mantissa survives: a level at
+condition number $\kappa$ retains roughly $16 - \log_{10}\kappa$ significant
+digits.
+
+This is the failure mode the residual norm cannot see. A fit can land on a tiny
+residual — solver happy, repricing exact — and still hand back quote deltas
+whose leading digits are noise, because two parameters were nearly redundant
+and the solver had no way to tell you so.
+
+`level_condition_number` reports $\kappa$ for **any** calibration level, so the
+curve bootstrap, the smile fit and a model fit are all measured on one scale;
+`condition_alert` tests it against the shared threshold
+`ILL_CONDITIONED_THRESHOLD` (`1e10`) and returns a message, or `None` when the
+level is healthy. It returns text rather than warning or raising, so the caller
+picks the channel — log line, risk-report row, or a hard build failure.
+
+```python
+import jax
+import jax.numpy as jnp
+
+from valax.curves import CurveSpec, DepositRate, OISSwapRate, bootstrap_curve_graph
+from valax.dates import ymd_to_ordinal
+from valax.greeks import condition_alert, level_condition_number
+from valax.greeks.vol_adjoint import sabr_slice_level
+from valax.models.sabr import SABRModel
+from valax.pricing.analytic.sabr import sabr_implied_vol
+
+ref = ymd_to_ordinal(2025, 1, 1)
+ois = "USD.SOFR.OIS"
+pillars = [int(ymd_to_ordinal(y, 1, 1)) for y in (2026, 2027, 2030)]
+spec = CurveSpec(
+    curve_id=ois, currency="USD",
+    pillar_dates=jnp.array(pillars, jnp.int32), day_count="act_365",
+)
+quotes = [
+    DepositRate(start_date=ref, end_date=pillars[0], rate=jnp.array(0.045),
+                day_count="act_365", curves_touched=(ois,)),
+    OISSwapRate(start_date=ref, fixed_dates=jnp.array(pillars[:2], jnp.int32),
+                rate=jnp.array(0.047), day_count="act_365", curves_touched=(ois,)),
+    OISSwapRate(start_date=ref, fixed_dates=jnp.array(pillars, jnp.int32),
+                rate=jnp.array(0.050), day_count="act_365", curves_touched=(ois,)),
+]
+graph, diag = bootstrap_curve_graph(ref, [spec], quotes)
+
+# Layer 1a — the build reports its own conditioning.
+print(f"curve kappa      = {float(diag.jacobian_condition_number):.3e}")
+print("curve alert      =", condition_alert(diag.jacobian_condition_number,
+                                            level_name="USD.SOFR.OIS"))
+
+# Layer 1b — any level, through the generic helper.
+model = SABRModel(alpha=jnp.array(0.012), beta=jnp.array(0.5),
+                  rho=jnp.array(-0.25), nu=jnp.array(0.45))
+strikes = jnp.array([0.02, 0.03, 0.04, 0.05, 0.06])
+forward, expiry = jnp.array(0.04), jnp.array(5.0)
+vols = jax.vmap(lambda k: sabr_implied_vol(model, forward, k, expiry))(strikes)
+
+fixed_beta = sabr_slice_level(model, strikes, vols, forward, expiry)
+free_beta = sabr_slice_level(model, strikes, vols, forward, expiry, free_beta=True)
+print(f"smile kappa      = {float(level_condition_number(fixed_beta)):.3e}")
+print(f"  with beta free = {float(level_condition_number(free_beta)):.3e}")
+```
+
+```
+curve kappa      = 1.137e+00
+curve alert      = None
+smile kappa      = 2.160e+04
+  with beta free = 5.585e+06
+```
+
+Reading those numbers:
+
+- **The curve is near-perfectly conditioned** ($\kappa \approx 1.1$). That is
+  structural, not luck. An OIS floating leg telescopes, so each swap residual
+  is $r \cdot A - (P(T_0) - P(T_n))$, and in $\log DF$ space the
+  $P(T_n)$ term (order $0.9$) dominates the annuity term (order
+  $r\tau P$, so order $0.05$). Each quote therefore very nearly pins its own
+  maturity pillar. Crowding two pillars one day apart does *not* spoil this —
+  measured, and gated, in `tests/test_greeks/test_level_conditioning.py`.
+- **Freeing $\beta$ costs 260× of conditioning.** A SABR smile has three shape
+  degrees of freedom and four parameters, so $\alpha$ and $\beta$ trade off
+  against each other almost perfectly. This is the quantitative form of the
+  advice in [§3](#3-sabr-smile-calibration) to fix $\beta$; both numbers are
+  still far inside the threshold, so this is a *reported cost*, not a failure.
+
+The same reading applies to a model fit: holding Hull-White's mean reversion
+fixed (`fixed_mean_reversion=`) improves its conditioning by orders of
+magnitude, which is why
+[`calibrate_hull_white`](../api/calibration.md#valax.calibration.calibrate_hull_white)
+recommends it.
+
+!!! warning "This diagnostic forms a matrix; the sensitivity path does not"
+    A condition number is a statement about a whole matrix, so there is no
+    vector-Jacobian shortcut and `level_condition_number` materialises
+    $\partial R/\partial\theta$. Call it **once per snapshot**, not per trade.
+    `level_adjoint` and `curve_quote_deltas` remain Jacobian-free.
+
+The one genuinely singular case worth knowing: quoting the **same instrument
+twice** keeps the system square, so no shape check rejects it, but it makes two
+residual rows identical and leaves one pillar unconstrained. The build fails to
+converge and $\kappa$ comes back non-finite, which `condition_alert` reports
+distinctly — the implicit function theorem does not apply at all there, so the
+sensitivities are meaningless rather than merely imprecise.

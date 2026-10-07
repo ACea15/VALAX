@@ -14,13 +14,16 @@ Two layers coexist:
 
 from valax.greeks.autodiff import greeks, greek
 from valax.greeks.adjoint import (
+    ILL_CONDITIONED_THRESHOLD,
     CalibrationLevel,
     CurveAdjoint,
     LevelAdjoint,
+    condition_alert,
     curve_adjoint,
     curve_log_df_cotangent,
     curve_quote_deltas,
     level_adjoint,
+    level_condition_number,
     quote_deltas_from_cotangent,
 )
 from valax.greeks.vol_adjoint import (
@@ -61,6 +64,9 @@ __all__ = [
     "CalibrationLevel",
     "LevelAdjoint",
     "level_adjoint",
+    "ILL_CONDITIONED_THRESHOLD",
+    "level_condition_number",
+    "condition_alert",
     "CurveAdjoint",
     "curve_adjoint",
     "curve_log_df_cotangent",
