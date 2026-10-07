@@ -1,13 +1,16 @@
 # Risk
 
 Scenario generation, shock application, and risk measures. Everything
-is fully differentiable — `jax.grad` flows through `apply_scenario`
-into the underlying `MarketData` fields, which is what powers
-`parametric_var`'s delta-normal computation.
+is fully differentiable — `jax.grad` flows through `shock` into the
+underlying `MarketState` (and through `apply_scenario` into the legacy
+`MarketData` fields), which is what powers both `group_market_gradient`
+and `parametric_var`'s delta-normal computation.
 
-For `MarketData`, `MarketScenario`, `ScenarioSet`, `zero_scenario`,
-and `stack_scenarios`, see [Market Data](market.md). This page covers
-the perturbation and measurement layer built on top.
+For `MarketData`, `MarketScenario`, `ScenarioSet`, `KeyedScenario`,
+`zero_scenario`, and `stack_scenarios`, see [Market Data](market.md).
+This page covers the perturbation and measurement layer built on top —
+both the legacy positional shocks on a `MarketData` and the keyed shocks
+on a `MarketState`.
 
 ## Shock application
 
@@ -64,7 +67,35 @@ analogue of an IR key-rate bump.
 
 ### Full scenario application
 
+`apply_scenario` is the **legacy** (positional) container-level shock: it
+maps the four flat `MarketScenario` vectors onto a `MarketData`. Because
+`rate_shocks` carries no curve identity it can only move the default
+curve — `discount_curve` plus the `"_default_"` entry of an attached
+`curve_graph`, which are the same curve seen through two views. Named
+projection / basis curves on the graph are carried through unshocked; use
+the keyed API below for those.
+
 ::: valax.risk.shocks.apply_scenario
+
+## Keyed shocks on a `MarketState`
+
+The keyed counterpart: `shock` applies a
+[`KeyedScenario`](market.md#keyed-scenarios-for-marketstate) to a
+[`MarketState`](core.md#marketstate), addressing curves, surfaces, spots
+and dividends **by identifier**. Curve moves are routed through
+`bump_graph_curve` above, so an OIS shock and a projection-curve (basis)
+shock are two separately expressible scenarios on one graph. Vol moves go
+through `shift_surface`, a parallel shift that is uniform across every
+surface type. The result is a new pytree (`eqx.tree_at`, never mutation)
+and is differentiable in both the base market and the shock magnitudes.
+
+The guide walkthrough, including the surface design fork and what it
+implies for the sensitivity ladders, is in
+[Scenarios & Shocks § Keyed scenarios](../risk-scenarios.md#keyed-scenarios-on-a-marketstate).
+
+::: valax.risk.state_shocks.shock
+
+::: valax.risk.state_shocks.shift_surface
 
 ## Scenario generation
 
@@ -82,15 +113,108 @@ analogue of an IR key-rate bump.
 
 ::: valax.risk.scenarios.butterfly
 
-## Pricing function adapter
+::: valax.risk.scenarios.curve_shape_bumps
+
+## Keyed, per-curve factor layout
+
+The replacement for the flat positional `[spots, vols, rates, dividends]`
+layout: an ordered tuple of blocks, **one per named market object**, so
+every curve on the graph owns its own coordinates in a scenario, in a
+covariance matrix and in a ladder alike. Rationale and recipes:
+[Scenarios & Shocks § Keyed generators](../risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout).
+
+::: valax.risk.scenarios.FactorBlock
+
+::: valax.risk.scenarios.KeyedFactorLayout
+
+### The basis as a coordinate
+
+`as_basis_layout` turns a projection curve's block into a **spread** over a
+discount curve, which is what gives
+`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>`
+([Risk Factors § 3.2](../risk-factors.md#32-interest-rates-multi-curve)) a variance, a
+P&L rung and a VaR contribution of its own rather than only a scenario.
+
+::: valax.risk.scenarios.as_basis_layout
+
+::: valax.risk.scenarios.basis_factor_prefix
+
+### Per-curve covariance assembly
+
+::: valax.risk.scenarios.block_covariance
+
+::: valax.risk.scenarios.historical_block_covariance
+
+::: valax.risk.scenarios.psd_factor
+
+### Keyed generators
+
+::: valax.risk.scenarios.keyed_parametric_scenarios
+
+::: valax.risk.scenarios.keyed_historical_scenarios
+
+::: valax.risk.scenarios.keyed_stress_scenario
+
+::: valax.risk.scenarios.keyed_curve_stress
+
+::: valax.risk.scenarios.keyed_steepener
+
+::: valax.risk.scenarios.keyed_flattener
+
+::: valax.risk.scenarios.keyed_butterfly
+
+::: valax.risk.scenarios.keyed_basis_shift
+
+## Group repricing on a `MarketState`
+
+Repricing, P&L and gradients for one **homogeneous group**, all routed
+through [`price`](core.md#the-unified-signature) — no pricing-function adapter. The
+group primitives return the three quantities that aggregate additively
+across groups (scalar PV, gradient pytree, P&L vector) and deliberately
+never a risk measure. Walkthrough and a runnable multi-curve example:
+[VaR & P&L § Repricing through `price()`](../risk-var.md#repricing-through-price).
+
+A shock the group's model *shadows* — a curve shock against a model
+carrying its own scalar `rate`, for instance — cannot reach the price and
+contributes exactly zero P&L. `group_reprice` and `group_scenario_pnl`
+emit a `UserWarning` rather than return that zero silently; see
+[the warning's rationale](../risk-var.md#repricing-through-price).
+
+::: valax.risk.state_var.group_pv
+
+::: valax.risk.state_var.group_prices
+
+::: valax.risk.state_var.group_reprice
+
+::: valax.risk.state_var.group_scenario_pnl
+
+::: valax.risk.state_var.group_market_gradient
+
+::: valax.risk.state_var.group_model_gradient
+
+::: valax.risk.state_var.group_size
+
+## Pricing function adapter (deprecated)
 
 Adapts equity-style `(instrument, spot, vol, rate, dividend) -> price`
 pricers to the market-data-aware signature
-`(instrument, MarketData) -> price` used by the risk engine.
+`(instrument, MarketData) -> price` used by the legacy risk engine.
+
+!!! warning "Deprecated — removed with `MarketData`"
+    Emits a `DeprecationWarning`. The wrapper collapses the discount
+    curve to a single pillar's zero rate (`_extract_short_rate`), so a
+    wrapped payoff carries no sensitivity to any other pillar. Use the
+    group primitives above, which need no adapter and see the whole
+    curve.
 
 ::: valax.risk.var.wrap_equity_pricing_fn
 
 ## Risk measures
+
+`value_at_risk` / `expected_shortfall` take any P&L vector, including one
+from `group_scenario_pnl`. The repricing entry points below are the
+legacy `MarketData` / `MarketScenario` path, frozen for one deprecation
+cycle.
 
 ::: valax.risk.var.reprice_under_scenario
 
@@ -223,6 +347,43 @@ workflows.
 ::: valax.risk.ladders.waterfall_pnl
 
 ::: valax.risk.ladders.waterfall_pnl_report
+
+## Keyed ladders on a `MarketState`
+
+The counterpart of the above for the container the unified pricer takes,
+indexed by a
+[`KeyedFactorLayout`](#keyed-per-curve-factor-layout) rather than
+positionally — so a dual-curve book reports an OIS ladder and a projection
+(or basis) ladder instead of one summed `delta_rate` vector.
+
+Sensitivities are taken with respect to the **shock magnitudes** of a
+keyed scenario rather than the market leaves, which removes the
+DF → zero-rate chain rule entirely and gives one well-defined vega per
+surface whatever its type. Rationale and recipes:
+[Sensitivity Ladders § Keyed ladders](../risk-ladders.md#keyed-ladders-on-a-marketstate).
+
+::: valax.risk.state_ladders.KeyedLadder
+
+::: valax.risk.state_ladders.keyed_ladder
+
+### Per-block waterfall
+
+::: valax.risk.state_ladders.KeyedWaterfall
+
+::: valax.risk.state_ladders.keyed_waterfall_pnl
+
+::: valax.risk.state_ladders.keyed_waterfall_report
+
+### Per-curve delta-normal VaR
+
+`keyed_component_var` is the number the flat layout cannot produce: an
+additive decomposition of the book's VaR in which a projection curve — or,
+on an `as_basis_layout` layout, the `IR.BASIS...` factor — carries its own
+contribution.
+
+::: valax.risk.state_ladders.keyed_parametric_var
+
+::: valax.risk.state_ladders.keyed_component_var
 
 ## Backtesting
 

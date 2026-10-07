@@ -46,9 +46,10 @@ class CDS(eqx.Module):
         recovery_rate: Expected recovery rate (e.g., 0.4 for 40%).
         is_protection_buyer: True if this position is buying protection
             (short credit risk).
-        premium_frequency: Premiums per year (1, 2, or 4). Default is
-            quarterly (market standard).
-        day_count: Day count convention for premium accrual.
+        day_count: Day count convention for premium accrual. Premium
+            amounts are sized from the accrual period between successive
+            ``premium_dates`` under this convention, so no separate
+            frequency field is carried.
     """
 
     effective_date: Int[Array, ""]
@@ -58,7 +59,6 @@ class CDS(eqx.Module):
     notional: Float[Array, ""]
     recovery_rate: Float[Array, ""]
     is_protection_buyer: bool = eqx.field(static=True, default=True)
-    premium_frequency: int = eqx.field(static=True, default=4)
     day_count: str = eqx.field(static=True, default="act_360")
 
 

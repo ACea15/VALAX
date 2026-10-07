@@ -243,6 +243,12 @@ forwards) plus its bootstrap. Superseded by the joint
 [`bootstrap_curve_graph`](#joint-multi-curve-solver) for new callers;
 still supported for existing code paths.
 
+Since MC-Curves-2b `MultiCurveSet` is a **two-tier view over a
+`CurveGraph`** — `from_graph` / `to_graph` convert between the shapes
+without copying or re-solving — and `bootstrap_multi_curve` is a thin
+wrapper that solves every curve in **one** joint Newton iteration
+(so `jax.grad` flows through the build via `ImplicitAdjoint`).
+
 ::: valax.curves.MultiCurveSet
 
 ::: valax.curves.bootstrap_multi_curve

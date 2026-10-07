@@ -39,8 +39,8 @@ Autodiff notes:
   is fully differentiable.
 
 See ``production.md`` §11.4 for the design spec and
-``docs/architecture/mc-curves-2.md`` for the session-handoff notes
-that motivated this module.
+``docs/roadmap.md`` ("Multi-Curve Framework — What Ships, What's Left")
+for the status of the wider multi-curve workstream.
 """
 
 from __future__ import annotations
@@ -54,7 +54,11 @@ from jaxtyping import Float, Int
 from jax import Array
 
 from valax.curves.bootstrap_proto import BootstrapInstrument
-from valax.curves.discount import DiscountCurve, zero_rate
+from valax.curves.discount import (
+    DISCOUNT_CURVE_INTERP,
+    DiscountCurve,
+    zero_rate,
+)
 from valax.curves.fixings import FixingHistory, empty_fixing_history
 from valax.curves.graph import CurveGraph, CurveSpec
 from valax.dates.daycounts import year_fraction
@@ -103,10 +107,13 @@ class CurveBuildDiagnostics(eqx.Module):
             via :data:`_QUOTE_FIELD` (shape ``(n_instruments,)``).
         jacobian_condition_number: 2-norm condition number of the
             residual Jacobian ``d(residuals)/d(log_dfs)`` at the
-            solution.  A very large value (say ``> 1e10``) flags
-            an ill-posed curve build — typically caused by pillars
-            placed too close together or an instrument that
-            constrains an already-anchored region.
+            solution.  A large value flags an ill-posed curve build —
+            typically caused by pillars placed too close together or an
+            instrument that constrains an already-anchored region.  Pass
+            it to :func:`valax.greeks.adjoint.condition_alert` to test it
+            against the shared
+            :data:`~valax.greeks.adjoint.ILL_CONDITIONED_THRESHOLD`
+            rather than against a locally restated number.
     """
 
     residuals: Float[Array, " n_instruments"]
@@ -180,6 +187,23 @@ def _build_graph_from_log_dfs(
     ref_int = reference_date.astype(jnp.int32)
     curves: dict[str, DiscountCurve] = {}
     for i, spec in enumerate(curve_specs):
+        # This is the one place a declared interpolation mode would have
+        # to be forwarded, and ``DiscountCurve`` has no field to forward
+        # it to — it hard-codes log-linear-in-DF.  Today that is not a
+        # defect, because ``CurveSpec.__check_init__`` admits only the
+        # mode the curve implements.  The guard exists so that widening
+        # ``_SUPPORTED_INTERP`` without first teaching ``DiscountCurve``
+        # to dispatch fails loudly here, instead of silently honouring a
+        # mode the caller did not ask for.
+        if spec.interp != DISCOUNT_CURVE_INTERP:
+            raise NotImplementedError(
+                f"CurveSpec(curve_id={spec.curve_id!r}) declares "
+                f"interp={spec.interp!r}, but DiscountCurve only "
+                f"implements {DISCOUNT_CURVE_INTERP!r}. Give "
+                f"DiscountCurve a static `interp` field and dispatch on "
+                f"it in its __call__ before admitting this mode in "
+                f"valax.curves.graph._SUPPORTED_INTERP."
+            )
         chunk = log_dfs[offsets[i] : offsets[i + 1]]
         dfs = jnp.concatenate([jnp.ones(1), jnp.exp(chunk)])
         dates = jnp.concatenate(
@@ -192,6 +216,30 @@ def _build_graph_from_log_dfs(
             day_count=spec.day_count,
         )
     return CurveGraph(curves=curves)
+
+
+def _graph_residual(
+    log_dfs: Float[Array, " n_total"],
+    curve_specs: Sequence[CurveSpec],
+    offsets: tuple[int, ...],
+    instruments: Sequence[BootstrapInstrument],
+    fixings: FixingHistory,
+    ref_date: Int[Array, ""],
+) -> Float[Array, " n_instruments"]:
+    """The residual vector ``R(theta_c)`` of the joint curve system.
+
+    The single implementation of the Layer-1a residual.  Both
+    :func:`bootstrap_curve_graph` (which drives it to zero) and
+    :func:`curve_residual_fn` (which exposes it for adjoint
+    differentiation) route through here, so the solved system and the
+    differentiated system are the *same code path* by construction.
+    """
+    graph = _build_graph_from_log_dfs(
+        log_dfs, curve_specs, offsets, ref_date
+    )
+    return jnp.stack(
+        [inst.residual(graph, fixings, ref_date) for inst in instruments]
+    )
 
 
 def _default_initial_guess(
@@ -424,8 +472,8 @@ def bootstrap_curve_graph(
     References:
         * ``docs/architecture/production.md`` §11.4 for the design
           spec.
-        * ``docs/architecture/mc-curves-2.md`` for the session-handoff
-          notes.
+        * ``docs/roadmap.md`` ("Multi-Curve Framework — What Ships,
+          What's Left") for the workstream status.
         * ``docs/theory.md`` §3.7, §3.8 for the no-arbitrage identities
           that each instrument's residual encodes.
     """
@@ -452,14 +500,14 @@ def bootstrap_curve_graph(
         args,
     ) -> Float[Array, " n_instruments"]:
         ref_inner, fixings_inner = args
-        graph = _build_graph_from_log_dfs(
-            log_dfs, curve_specs, offsets, ref_inner
+        return _graph_residual(
+            log_dfs,
+            curve_specs,
+            offsets,
+            instruments,
+            fixings_inner,
+            ref_inner,
         )
-        residuals = [
-            inst.residual(graph, fixings_inner, ref_inner)
-            for inst in instruments
-        ]
-        return jnp.stack(residuals)
 
     args = (ref_i32, fixings)
 
@@ -517,6 +565,114 @@ def bootstrap_curve_graph(
     )
 
     return graph, diagnostics
+
+
+# ── Residual / state accessors for adjoint differentiation ───────────
+
+
+def curve_quote_vector(
+    instruments: Sequence[BootstrapInstrument],
+) -> Float[Array, " n_quotes"]:
+    """Stack the primary quote scalar of every instrument into ``q_c``.
+
+    The column ordering of every quote-space sensitivity in VALAX --
+    :func:`quote_jacobian` and
+    :func:`valax.greeks.adjoint.curve_quote_deltas` alike -- is the
+    order of ``instruments``.
+
+    Args:
+        instruments: Bootstrap quotes, each with a primary-quote field
+            registered in :data:`_QUOTE_FIELD`.
+
+    Returns:
+        The quote vector, one entry per instrument.
+
+    Raises:
+        TypeError: If any instrument type has no registered
+            primary-quote field.
+    """
+    return jnp.stack([_extract_quote_rate(i) for i in instruments])
+
+
+def log_dfs_from_graph(
+    graph: CurveGraph,
+    curve_specs: Sequence[CurveSpec],
+) -> Float[Array, " n_total"]:
+    """Recover the solver state ``theta_c`` from a calibrated graph.
+
+    Inverts the layout of :func:`_build_graph_from_log_dfs`: drops each
+    curve's reference-date pillar (where ``DF == 1`` by construction, so
+    it is not a free unknown) and concatenates ``log(DF)`` across curves
+    in ``curve_specs`` order.
+
+    Args:
+        graph: A calibrated :class:`CurveGraph`.
+        curve_specs: The specs the graph was built from; their order
+            defines the layout of the returned vector.
+
+    Returns:
+        The flat log-DF state vector, length
+        ``sum(spec.pillar_dates.shape[0])``.
+    """
+    return jnp.concatenate(
+        [
+            jnp.log(graph[spec.curve_id].discount_factors[1:])
+            for spec in curve_specs
+        ]
+    )
+
+
+def curve_residual_fn(
+    reference_date: Int[Array, ""],
+    curve_specs: Sequence[CurveSpec],
+    instruments: Sequence[BootstrapInstrument],
+    *,
+    fixings: FixingHistory | None = None,
+):
+    """Expose the Layer-1a residual as ``R(theta_c, q_c)`` for the adjoint.
+
+    Returns the *same* residual :func:`bootstrap_curve_graph` drives to
+    zero (both call :func:`_graph_residual`), re-parameterised so the
+    quote vector is an explicit differentiable argument.  This is what
+    lets :mod:`valax.greeks.adjoint` form the two vector-Jacobian
+    products of the implicit function theorem --
+    ``(dR/dtheta)^T lambda`` and ``(dR/dq)^T lambda`` -- without ever
+    re-implementing the residual.
+
+    Note that VALAX residuals are **not** uniformly in quote units: a
+    futures residual is a rate difference (``dR/dq = +I``) while a swap
+    residual is ``rate * annuity - float_pv`` (PV units, so
+    ``dR/dq = annuity``).  Consumers must therefore differentiate
+    ``dR/dq`` rather than assume ``-I``.
+
+    Args:
+        reference_date: Valuation date as an integer ordinal scalar.
+        curve_specs: The curve specs defining the state layout.
+        instruments: Bootstrap quotes; column order of ``q_c``.
+        fixings: Optional realised-fixings registry; defaults to empty.
+
+    Returns:
+        A callable ``residual(log_dfs, quotes)`` returning the residual
+        vector of shape ``(n_instruments,)``.
+    """
+    offsets = _spec_offsets(curve_specs)
+    insts = tuple(instruments)
+    fix = empty_fixing_history() if fixings is None else fixings
+    ref_i32 = jnp.asarray(reference_date, dtype=jnp.int32)
+
+    def residual(
+        log_dfs: Float[Array, " n_total"],
+        quotes: Float[Array, " n_quotes"],
+    ) -> Float[Array, " n_instruments"]:
+        rebuilt = tuple(
+            _replace_quote_rate(inst, quotes[k])
+            for k, inst in enumerate(insts)
+        )
+        return _graph_residual(
+            log_dfs, curve_specs, offsets, rebuilt, fix, ref_i32
+        )
+
+    return residual
 
 
 # ── Quote-sensitivity Jacobian ───────────────────────────────────────

@@ -1,7 +1,13 @@
 """Yield curve construction, interpolation, and bootstrapping."""
 
-from valax.curves.discount import DiscountCurve, forward_rate, zero_rate
+from valax.curves.discount import (
+    DISCOUNT_CURVE_INTERP,
+    DiscountCurve,
+    forward_rate,
+    zero_rate,
+)
 from valax.curves.instruments import (
+    AVERAGING_CONVENTIONS,
     CrossCurrencyBasisSwap,
     DepositRate,
     FRA,
@@ -18,6 +24,9 @@ from valax.curves.bootstrap import bootstrap_sequential, bootstrap_simultaneous
 from valax.curves.bootstrap_graph import (
     CurveBuildDiagnostics,
     bootstrap_curve_graph,
+    curve_quote_vector,
+    curve_residual_fn,
+    log_dfs_from_graph,
     quote_jacobian,
 )
 from valax.curves.multi_curve import MultiCurveSet, bootstrap_multi_curve

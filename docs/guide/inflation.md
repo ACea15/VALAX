@@ -123,7 +123,7 @@ import jax.numpy as jnp
 
 yyis = YearOnYearInflationSwap(
     effective_date=ymd_to_ordinal(2025, 1, 15),
-    payment_dates=generate_schedule(2026, 1, 15, 2030, 1, 15, frequency=1),
+    payment_dates=generate_schedule(2026, 1, 15, 2030, 1, 15, frequency=1).payment_dates,
     fixed_rate=jnp.array(0.024),    # 2.4% fixed rate
     notional=jnp.array(25_000_000.0),
     base_cpi=jnp.array(311.2),
@@ -169,7 +169,7 @@ import jax.numpy as jnp
 # 5-year inflation cap struck at 3%
 inflation_cap = InflationCapFloor(
     effective_date=ymd_to_ordinal(2025, 1, 15),
-    payment_dates=generate_schedule(2026, 1, 15, 2030, 1, 15, frequency=1),
+    payment_dates=generate_schedule(2026, 1, 15, 2030, 1, 15, frequency=1).payment_dates,
     strike=jnp.array(0.03),         # 3% strike
     notional=jnp.array(100_000_000.0),
     base_cpi=jnp.array(311.2),

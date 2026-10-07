@@ -31,6 +31,8 @@ class Caplet(eqx.Module):
     notional: Float[Array, ""]
     is_cap: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class Cap(eqx.Module):
@@ -53,6 +55,8 @@ class Cap(eqx.Module):
     notional: Float[Array, ""]
     is_cap: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class InterestRateSwap(eqx.Module):
@@ -76,6 +80,8 @@ class InterestRateSwap(eqx.Module):
     notional: Float[Array, ""]
     pay_fixed: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class Swaption(eqx.Module):
@@ -99,6 +105,8 @@ class Swaption(eqx.Module):
     notional: Float[Array, ""]
     is_payer: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class CMSSwap(eqx.Module):
@@ -131,6 +139,8 @@ class CMSSwap(eqx.Module):
     cms_tenor: int = eqx.field(static=True, default=10)
     pay_fixed: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class CMSSpreadSwap(eqx.Module):
@@ -176,6 +186,8 @@ class CMSSpreadSwap(eqx.Module):
     cms_tenor_short: int = eqx.field(static=True, default=2)
     pay_fixed: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class CMSCapFloor(eqx.Module):
@@ -204,6 +216,8 @@ class CMSCapFloor(eqx.Module):
     cms_tenor: int = eqx.field(static=True, default=10)
     is_cap: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class RangeAccrual(eqx.Module):
@@ -239,6 +253,8 @@ class RangeAccrual(eqx.Module):
     notional: Float[Array, ""]
     reference_index: str = eqx.field(static=True, default="rate")
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class OISSwap(eqx.Module):
@@ -312,6 +328,8 @@ class CrossCurrencySwap(eqx.Module):
     exchange_notional: bool = eqx.field(static=True, default=True)
     currency_pair: str = eqx.field(static=True, default="FOR/DOM")
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class TotalReturnSwap(eqx.Module):
@@ -342,6 +360,8 @@ class TotalReturnSwap(eqx.Module):
     funding_spread: Float[Array, ""]
     is_total_return_receiver: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)
 
 
 class BermudanSwaption(eqx.Module):
@@ -371,3 +391,5 @@ class BermudanSwaption(eqx.Module):
     notional: Float[Array, ""]
     is_payer: bool = eqx.field(static=True, default=True)
     day_count: str = eqx.field(static=True, default="act_360")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    forward_id: Optional[str] = eqx.field(static=True, default=None)

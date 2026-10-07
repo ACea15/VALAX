@@ -793,6 +793,17 @@ instruments, and the calibration diagnostics.
 
 ### 11.1 Status today
 
+!!! note "This table is the pre-MC-Curves-1 baseline"
+    It records the state that motivated the §11 design and is kept as
+    such; it is **not** a live status board.  Most ❌ rows below have
+    since shipped (MC-Curves-1/2/2b).  The canonical maps are
+    [`docs/roadmap.md` §1.1](../roadmap.md#11-multi-curve-bootstrapping)
+    and the [coverage matrix](../applications/instrument-pricing.md).
+    In particular `bootstrap_multi_curve` is no longer "sequential
+    between curves" — since MC-Curves-2b it delegates to
+    `bootstrap_curve_graph`, and `MultiCurveSet` is a view over
+    `CurveGraph`.
+
 | Capability                                  | Module                                       | State |
 |---------------------------------------------|----------------------------------------------|:-----:|
 | `DiscountCurve` pytree, log-linear DF interp| `valax/curves/discount.py`                   | ✅    |
@@ -1384,8 +1395,10 @@ real desks.
 - **Deliverable:** every quote type a real curve build needs is
   representable as a `BootstrapInstrument`. ✅
 
-For the next-session handoff (state snapshot, open questions, initial
-task plan for MC-Curves-2), see [`mc-curves-2.md`](mc-curves-2.md).
+MC-Curves-2 has since shipped; for the current status of the wider
+multi-curve workstream — what ships end to end, and the remaining gaps
+in risk, calibration, surfaces and the curve build — see
+[Multi-Curve Framework](../roadmap.md#multi-curve-framework-what-ships-whats-left).
 
 #### MC-Curves-2 — Joint global solver
 *Estimated effort: ~2 weeks*
@@ -1397,6 +1410,10 @@ task plan for MC-Curves-2), see [`mc-curves-2.md`](mc-curves-2.md).
 - Replace `bootstrap_multi_curve` internals with a graph call that
   solves a two-curve subgraph; the public function keeps its
   signature for one minor release with a deprecation warning.
+  *(Shipped in MC-Curves-2b: the two-tier input is translated into
+  `CurveSpec`s + graph instruments — forward-leg `SwapRate` quotes
+  become dual-curve `IborSwapRate` residuals — and `MultiCurveSet`
+  became a view over `CurveGraph` via `from_graph` / `to_graph`.)*
 - Tests: USD 3M (futures + IBOR swap) reproduces today's dual-curve
   result; cross-currency basis swap closes the EURUSD curve graph
   to micro-bps; gradients flow through `bootstrap_curve_graph` via

@@ -29,6 +29,8 @@ References:
     Brigo & Mercurio (2006), *Interest Rate Models*, ch. 3.
 """
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import equinox as eqx
@@ -36,6 +38,7 @@ from jaxtyping import Float
 from jax import Array
 
 from valax.curves.discount import DiscountCurve
+from valax.curves.graph import _DEFAULT_CURVE_ID
 from valax.dates.daycounts import year_fraction
 
 
@@ -52,6 +55,58 @@ class HullWhiteModel(eqx.Module):
     mean_reversion: Float[Array, ""]
     volatility: Float[Array, ""]
     initial_curve: DiscountCurve
+    curve_id: str = eqx.field(static=True, default=_DEFAULT_CURVE_ID)
+
+    @classmethod
+    def from_market(
+        cls,
+        market: Any,
+        *,
+        mean_reversion: Float[Array, ""],
+        volatility: Float[Array, ""],
+        curve_id: str = _DEFAULT_CURVE_ID,
+    ) -> "HullWhiteModel":
+        """Build a Hull-White model bound to a ``MarketState`` curve by id.
+
+        Resolves ``curve_id`` on ``market`` and embeds it as the model's
+        initial curve, recording the id so the model-market linkage is
+        explicit and re-bindable (pricing-ontology §3.1-§3.2). The curve is
+        still embedded in ``initial_curve`` for backward compatibility.
+
+        Args:
+            market: A ``MarketState`` (or anything exposing ``.curve(id)``).
+            mean_reversion: Mean-reversion speed.
+            volatility: Short-rate volatility.
+            curve_id: Curve identifier to read the initial term structure
+                from; defaults to the ``"_default_"`` single-curve sentinel.
+
+        Returns:
+            A ``HullWhiteModel`` whose ``initial_curve`` is ``market``'s
+            curve for ``curve_id``.
+        """
+        return cls(
+            mean_reversion=jnp.asarray(mean_reversion),
+            volatility=jnp.asarray(volatility),
+            initial_curve=market.curve(curve_id),
+            curve_id=curve_id,
+        )
+
+    def with_market_curve(self, market: Any) -> "HullWhiteModel":
+        """Re-bind the initial curve to ``market`` by this model's ``curve_id``.
+
+        Returns a copy whose ``initial_curve`` is refreshed from ``market``,
+        so a scenario-shocked ``MarketState`` flows through the model without
+        rebuilding it.
+
+        Args:
+            market: A ``MarketState`` (or anything exposing ``.curve(id)``).
+
+        Returns:
+            A re-bound ``HullWhiteModel``.
+        """
+        return eqx.tree_at(
+            lambda m: m.initial_curve, self, market.curve(self.curve_id)
+        )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────

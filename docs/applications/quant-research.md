@@ -8,17 +8,7 @@
 
 ## 1. The summary — differentiable pricing as a categorical research advantage
 
-This section is the whole argument on one screen; the rest of the page is the worked detail. For quant research the JAX-native architecture is not a "nice implementation choice" — it is the primary source of research-productivity leverage, and it compounds:
-
-| Design choice | Research payoff |
-|---|---|
-| **Autodiff Greeks** | Every new pricer ships with all Greeks. New model → new sensitivities → next model. No numerical noise, no bump-width tuning, no maintenance tax. |
-| **Composable pure functions** | A new payoff is a Python function, not a class subtree. Iteration speed is Python speed. |
-| **`vmap` everywhere** | Parameter sweeps, MC experiments, calibration-robustness studies — one line each, GPU-accelerated. |
-| **`equinox.Module` pytrees** | Models, networks, and pricers share the same container. Pass a pricer to a network trainer, no serialisation. |
-| **JAX ecosystem integration** | `optax`, `flax`, `blackjax`, `jaxopt` all work out of the box. Neural surrogate today, MCMC calibration tomorrow, deep hedging next week. |
-| **JIT + XLA** | Prototype runs at C++ speed with no C++ code. Deployment is a `pip install`. |
-| **Pure functions + explicit PRNG** | Bit-identical reproducibility across machines and years. Submissions and validators both trust the outputs. |
+This section is the whole argument on one screen; the rest of the page is the worked detail. For quant research the JAX-native architecture is not a "nice implementation choice" — it is the primary source of research-productivity leverage. The distinctive capabilities and their `QR` payoff are enumerated in [Applications § 2](index.md#2-what-makes-valax-distinctive-capability-by-capability) (with the deeper *why* in [Design Rationale § 3](../design-rationale.md#3-the-seven-choices-valax-commits-to-and-what-each-one-buys)); the point for research is that they **compound**.
 
 The compounding effect: **every model you have already implemented becomes a differentiable primitive for the next one.** A team of five researchers on VALAX outpaces a team of twenty on a C++ analytics library — not because JAX is magic, but because the tax of maintaining bump-and-reprice / serialisation-boundary / class-hierarchy infrastructure disappears entirely.
 
@@ -242,26 +232,9 @@ For academics, submissions ship with a working git tag rather than "code availab
 
 ## 10. Coverage today vs. roadmap
 
-Most of what quant research needs is already in the library — research productivity was a founding design goal:
+The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#5-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `QR`).
 
-| Research need | Status | Component(s) |
-|---|---|---|
-| Differentiable pricer signature | ✅ | Every `valax/pricing/*` function |
-| Autodiff Greeks (any order) | ✅ | `jax.grad` / `jax.hessian` / `greeks` wrappers |
-| SDE path simulation (differentiable) | ✅ | `diffrax` — GBM, Heston, LMM, SABR, local vol, SLV |
-| Gradient-based calibration | ✅ | `optimistix` LM + `optax` — Heston, SABR, SLV shipped |
-| Neural network container | ✅ | `equinox.Module` |
-| `vmap` for parameter sweeps | ✅ | `jax.vmap` everywhere |
-| GPU / TPU support | ✅ | JAX / XLA — same code, no changes |
-| QuantLib comparison for validation | ✅ | `tests/test_quantlib_comparison/` (14 modules) |
-| Golden tests for reproducibility | ✅ | `tests/golden/` with `golden_manifest.json` |
-| Vol surface models (SABR, SVI, SLV, Dupire) | ✅ | `valax/surfaces/`, `valax/models/slv.py`, `valax/models/local_vol.py` |
-| Neural surrogate example (worked end-to-end) | 📋 | Pattern documented; example notebook planned |
-| Deep hedging example (worked end-to-end) | 📋 | All primitives shipped; canonical example planned |
-| Differentiable portfolio construction | 📋 | Roadmap — the P5 frontier item in [Vision](../vision.md) |
-| Rough volatility / neural SDE calibration | 📋 | `diffrax` supports the paths; canonical example planned |
-
-The pattern: **the infrastructure is complete; the canonical worked examples are the roadmap.** For a research team this is close to ideal — you're not building tooling, you're doing research.
+The pattern: **the infrastructure is complete; the canonical worked examples — neural-surrogate, deep-hedging, and neural-SDE calibration notebooks — are the roadmap.** For a research team this is close to ideal: you're not building tooling, you're doing research.
 
 ---
 

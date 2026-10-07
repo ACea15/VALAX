@@ -32,6 +32,10 @@ from jax import Array
 
 from valax.instruments.bonds import CallableBond, PuttableBond
 from valax.models.hull_white import HullWhiteModel, _market_df, _pillar_times
+from valax.dates.accrual import (
+    bond_accrued_interest_at_dates,
+    fixed_coupon_amounts,
+)
 from valax.dates.daycounts import year_fraction
 
 
@@ -293,6 +297,35 @@ def _snap_dates_to_steps(
     return jnp.round(times / dt).astype(jnp.int32)
 
 
+def _accrued_by_step(
+    bond,
+    ref_date: Int[Array, ""],
+    dt: Float[Array, ""],
+    n_steps: int,
+) -> Float[Array, " n_steps_plus_1"]:
+    """Accrued interest at each tree step.
+
+    Args:
+        bond: Callable or puttable bond instrument.
+        ref_date: Curve reference date as an integer ordinal.
+        dt: Tree time-step size in year fractions.
+        n_steps: Number of tree steps.
+
+    Returns:
+        Accrued interest at steps ``0 .. n_steps``.
+    """
+    starts, ends = accrual_periods(
+        bond.payment_dates, bond.accrual_start_dates, bond.frequency
+    )
+    return accrued_interest_by_time(
+        jnp.arange(n_steps + 1) * dt,
+        year_fraction(ref_date, starts, bond.day_count),
+        year_fraction(ref_date, ends, bond.day_count),
+        bond.coupon_rate,
+        bond.face_value,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Callable bond pricing
 # ─────────────────────────────────────────────────────────────────────
@@ -327,7 +360,7 @@ def callable_bond_price(
     tree = build_hull_white_tree(model, maturity_time, n_steps, j_max=j_max)
 
     n_states = 2 * tree.j_max + 1
-    coupon = bond.face_value * bond.coupon_rate / bond.frequency
+    coupons = fixed_coupon_amounts(bond)
 
     # Map event dates to tree steps.
     cpn_steps = _snap_dates_to_steps(
@@ -341,22 +374,36 @@ def callable_bond_price(
     # coupon_at_step[i] = coupon amount if step i is a coupon date, else 0.
     # call_price_at_step[i] = call price if step i is a call date, else +inf.
     n = tree.n_steps
-    # Build a binary indicator for coupon steps and multiply by the
-    # coupon amount.  This keeps `coupon` as a traced JAX value so that
-    # jax.grad can flow through coupon_rate / face_value.
-    cpn_indicator = jnp.zeros(n + 1)
+    # Scatter each coupon onto its tree step.  Accumulating the traced
+    # `coupons[k]` values directly (rather than a binary indicator times a
+    # scalar) keeps jax.grad flowing through coupon_rate / face_value while
+    # allowing the amounts to differ period by period, as day-count accrual
+    # requires.
+    coupon_at_step = jnp.zeros(n + 1)
     for k in range(bond.payment_dates.shape[0]):
         step_k = int(cpn_steps[k])
         if 0 <= step_k <= n:
-            cpn_indicator = cpn_indicator.at[step_k].add(1.0)
-    coupon_at_step = cpn_indicator * coupon
+            coupon_at_step = coupon_at_step.at[step_k].add(coupons[k])
+
+    # Call prices are quoted *clean*; the continuation value they are compared
+    # against is a PV of remaining cashflows and is therefore *dirty*. An
+    # issuer calling mid-period must hand over the redemption amount plus the
+    # interest accrued since the last coupon, so adding accrual to the
+    # obstacle puts both sides on the same footing. On a coupon date accrual
+    # is zero and nothing changes — which is why every existing test, all of
+    # which align call and coupon dates, could not see the difference.
+    #
+    # Accrual is measured on the true call date, not at the step it snaps to,
+    # so the obstacle is independent of `n_steps` and the tree agrees with
+    # the PDE rather than drifting from it as the grids diverge.
+    accrued_at_call = bond_accrued_interest_at_dates(bond, bond.call_dates)
 
     call_price_at_step = jnp.full(n + 1, jnp.inf)
     for k in range(bond.call_dates.shape[0]):
         step_k = int(call_steps[k])
         if 0 <= step_k <= n:
             call_price_at_step = call_price_at_step.at[step_k].set(
-                bond.call_prices[k] * bond.face_value
+                bond.call_prices[k] * bond.face_value + accrued_at_call[k]
             )
 
     # Terminal value: face + final coupon (if maturity is a coupon date).
@@ -369,11 +416,11 @@ def callable_bond_price(
         rates_step = tree.rates[step]
         cont = _backward_one_step(values, rates_step, tree.dt, tree.probs, tree.targets)
 
-        # Call exercise: issuer calls if the *ex-coupon* continuation value
-        # exceeds the call price.  The call price is quoted ex-coupon, so a
-        # holder called on a coupon date receives the redemption amount *plus*
-        # that date's coupon — hence the exercise decision is taken before the
-        # coupon is added, not after.
+        # Call exercise: the issuer calls if the *ex-coupon* continuation
+        # value exceeds the call price.  A holder called on a coupon date
+        # still receives that date's coupon, hence the decision is taken
+        # before the coupon is added.  `call_price_at_step` already carries
+        # accrued interest, so this is a like-for-like comparison.
         cont = jnp.minimum(cont, call_price_at_step[step])
 
         # Coupon is paid whether or not the bond is called.
@@ -419,7 +466,7 @@ def puttable_bond_price(
     tree = build_hull_white_tree(model, maturity_time, n_steps, j_max=j_max)
 
     n_states = 2 * tree.j_max + 1
-    coupon = bond.face_value * bond.coupon_rate / bond.frequency
+    coupons = fixed_coupon_amounts(bond)
 
     cpn_steps = _snap_dates_to_steps(
         bond.payment_dates, ref, tree.dt, bond.day_count
@@ -429,19 +476,22 @@ def puttable_bond_price(
     )
 
     n = tree.n_steps
-    cpn_indicator = jnp.zeros(n + 1)
+    coupon_at_step = jnp.zeros(n + 1)
     for k in range(bond.payment_dates.shape[0]):
         step_k = int(cpn_steps[k])
         if 0 <= step_k <= n:
-            cpn_indicator = cpn_indicator.at[step_k].add(1.0)
-    coupon_at_step = cpn_indicator * coupon
+            coupon_at_step = coupon_at_step.at[step_k].add(coupons[k])
+
+    # Put prices are quoted clean; see `callable_bond_price` for why accrual
+    # is added to the obstacle and why it is measured on the true put date.
+    accrued_at_put = bond_accrued_interest_at_dates(bond, bond.put_dates)
 
     put_price_at_step = jnp.full(n + 1, -jnp.inf)
     for k in range(bond.put_dates.shape[0]):
         step_k = int(put_steps[k])
         if 0 <= step_k <= n:
             put_price_at_step = put_price_at_step.at[step_k].set(
-                bond.put_prices[k] * bond.face_value
+                bond.put_prices[k] * bond.face_value + accrued_at_put[k]
             )
 
     # Terminal value.
@@ -451,9 +501,10 @@ def puttable_bond_price(
         step = n - 1 - i_fwd
         rates_step = tree.rates[step]
         cont = _backward_one_step(values, rates_step, tree.dt, tree.probs, tree.targets)
-        # Put exercise on the *ex-coupon* continuation value: the put price is
-        # quoted ex-coupon, so a holder who puts on a coupon date still
-        # receives that date's coupon.  See `callable_bond_price`.
+        # Put exercise on the *ex-coupon* continuation value: a holder who
+        # puts on a coupon date still receives that date's coupon.  The
+        # obstacle already carries accrued interest.  See
+        # `callable_bond_price`.
         cont = jnp.maximum(cont, put_price_at_step[step])
         # Coupon is paid whether or not the bond is put.
         cont = cont + coupon_at_step[step]

@@ -1,14 +1,102 @@
 """Coupon schedule generation for fixed income instruments.
 
-Generates arrays of payment dates as integer ordinals, suitable for
-use inside JIT-traced code.
+A schedule is generated **eagerly, at the user boundary** — before any
+tracing — because it depends on calendar structure (month lengths, leap
+years, stub placement) that is Python-level configuration rather than
+differentiable data.  The arrays it returns are ordinary ordinal arrays
+and are safe to close over inside JIT.
+
+The generator returns three aligned arrays rather than one, because a
+coupon is not determined by its payment date alone.  Sizing a coupon
+needs the period it accrues over, and discounting it needs the date the
+cash actually moves; collapsing those into a single array is what forced
+every downstream pricer to guess at accrual periods.
 """
 
+from typing import Iterator, Optional
+
+import equinox as eqx
 import jax.numpy as jnp
 from jaxtyping import Int
 from jax import Array
 
+from valax.dates.conventions import VALID_FREQUENCIES, ScheduleConventions
 from valax.dates.daycounts import ymd_to_ordinal
+
+#: Sanity bound on generated periods; guards the roll loops against a
+#: pathological tenor silently consuming memory.
+_MAX_PERIODS = 12_000
+
+
+class Schedule(eqx.Module):
+    """A generated cashflow grid.
+
+    Three aligned arrays of equal length ``n_periods``. Period ``i``
+    accrues over ``[accrual_start[i], accrual_end[i])`` and pays on
+    ``payment_dates[i]``.
+
+    ``payment_dates`` is currently always equal to ``accrual_end``: it is
+    a separate field because business-day adjustment (roadmap Tier 1.3)
+    moves the payment without moving the accrual, and every consumer that
+    discounts a cashflow should already be reading the payment leg so
+    that nothing downstream has to change when 1.3 lands.
+
+    Unpacks as a 3-tuple::
+
+        accrual_start, accrual_end, payment_dates = generate_schedule(...)
+
+    Attributes:
+        accrual_start: Ordinals of each period's accrual start.
+        accrual_end: Ordinals of each period's accrual end.
+        payment_dates: Ordinals on which each period's cashflow settles.
+    """
+
+    accrual_start: Int[Array, " n_periods"]
+    accrual_end: Int[Array, " n_periods"]
+    payment_dates: Int[Array, " n_periods"]
+
+    def __iter__(self) -> Iterator[Int[Array, " n_periods"]]:
+        """Yield ``(accrual_start, accrual_end, payment_dates)``."""
+        return iter((self.accrual_start, self.accrual_end, self.payment_dates))
+
+    @property
+    def n_periods(self) -> int:
+        """Number of accrual periods in the schedule."""
+        return int(self.payment_dates.shape[0])
+
+
+# ── Calendar helpers (eager, Python-level) ───────────────────────────
+
+def _is_leap(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+def _days_in_month(year: int, month: int) -> int:
+    if month == 2:
+        return 29 if _is_leap(year) else 28
+    return 30 if month in (4, 6, 9, 11) else 31
+
+
+def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    """Shift ``(year, month)`` by ``delta`` months, normalising the month."""
+    index = (year * 12 + (month - 1)) + delta
+    return index // 12, index % 12 + 1
+
+
+def _rolled_ordinal(
+    year: int, month: int, roll_day: int, end_of_month: bool
+) -> int:
+    """Place the roll day inside ``(year, month)`` and return its ordinal.
+
+    Day-of-month is preserved, not truncated. It is clamped only when the
+    target month is too short to hold it, and the clamp does not persist:
+    the roll day is re-applied from the original anchor each period, so a
+    31st-of-month bond goes 31 Jan → 28 Feb → 31 Mar rather than
+    ratcheting down to the 28th for the rest of its life.
+    """
+    last = _days_in_month(year, month)
+    day = last if end_of_month else min(roll_day, last)
+    return int(ymd_to_ordinal(year, month, day))
 
 
 def generate_schedule(
@@ -19,43 +107,167 @@ def generate_schedule(
     end_month: int,
     end_day: int,
     frequency: int = 2,
-) -> Int[Array, " n_dates"]:
-    """Generate a coupon schedule as an array of ordinal dates.
+    conventions: Optional[ScheduleConventions] = None,
+) -> Schedule:
+    """Generate an accrual and payment schedule.
 
-    Produces dates from (exclusive) start to (inclusive) end at the
-    given frequency (payments per year). Dates are generated backward
-    from maturity, which is standard for bond schedules.
+    Periods are rolled from the anchor implied by the stub placement: a
+    front stub rolls **backward** from maturity (the market convention
+    for bonds, and what makes maturity land exactly on its stated day),
+    a back stub rolls **forward** from the start date.
+
+    The start date is the **first accrual start** — the dated date — and
+    is inclusive; the end date is maturity. Both appear verbatim in the
+    output, so a bond maturing on the 31st accrues to the 31st.
 
     Args:
-        start_year: Year of the issue/settlement date.
-        start_month: Month of the issue/settlement date (1-12).
-        start_day: Day of the issue/settlement date (1-31).
-        end_year: Year of the maturity date.
-        end_month: Month of the maturity date (1-12).
-        end_day: Day of the maturity date (1-31).
-        frequency: Coupons per year (1=annual, 2=semi, 4=quarterly).
+        start_year: Year of the dated/issue date.
+        start_month: Month of the dated/issue date (1-12).
+        start_day: Day of the dated/issue date (1-31).
+        end_year: Year of maturity.
+        end_month: Month of maturity (1-12).
+        end_day: Day of maturity (1-31).
+        frequency: Coupons per year; one of
+            :data:`~valax.dates.conventions.VALID_FREQUENCIES`.
+        conventions: Stub placement, end-of-month rule and roll-day
+            anchor. Defaults to a short front stub with day-of-month
+            preservation.
 
     Returns:
-        1-D array of ordinal dates (payment dates including maturity).
+        A :class:`Schedule` of ``n_periods`` accrual starts, accrual ends
+        and payment dates, ascending and contiguous
+        (``accrual_start[i + 1] == accrual_end[i]``).
+
+    Raises:
+        ValueError: If ``frequency`` is not a whole number of months, if
+            the start date is not strictly before maturity, if either
+            date is not a valid calendar date, or if
+            ``conventions.stub == "none"`` but the tenor is not a whole
+            number of coupon periods.
+
+    Example:
+        >>> from valax.dates import generate_schedule
+        >>> starts, ends, pays = generate_schedule(
+        ...     2025, 1, 31, 2027, 1, 31, frequency=2
+        ... )
+        >>> pays.shape
+        (4,)
     """
-    months_between = (end_year - start_year) * 12 + (end_month - start_month)
+    conventions = conventions if conventions is not None else ScheduleConventions()
+
+    if frequency not in VALID_FREQUENCIES:
+        raise ValueError(
+            f"frequency must be a whole number of months per period, i.e. "
+            f"one of {list(VALID_FREQUENCIES)}; got {frequency}."
+        )
+    _validate_calendar_date(start_year, start_month, start_day, "start")
+    _validate_calendar_date(end_year, end_month, end_day, "end")
+
+    start_ordinal = int(ymd_to_ordinal(start_year, start_month, start_day))
+    end_ordinal = int(ymd_to_ordinal(end_year, end_month, end_day))
+    if start_ordinal >= end_ordinal:
+        raise ValueError(
+            f"Schedule start ({start_year}-{start_month:02d}-{start_day:02d}) "
+            f"must be strictly before end "
+            f"({end_year}-{end_month:02d}-{end_day:02d}); a schedule with no "
+            f"accrual period is never what the caller meant."
+        )
+
     step_months = 12 // frequency
-    n_periods = months_between // step_months
+    stub = conventions.stub
+    eom = conventions.end_of_month
+    roll_backward = stub in ("none", "short_front", "long_front")
 
-    dates = []
-    for i in range(n_periods - 1, 0, -1):
-        # Walk backward from maturity
-        total_months_back = i * step_months
-        m = end_month - (total_months_back % 12)
-        y = end_year - (total_months_back // 12)
-        if m <= 0:
-            m += 12
-            y -= 1
-        dates.append(ymd_to_ordinal(y, m, min(end_day, 28)))
+    if roll_backward:
+        roll_day = conventions.roll_day or end_day
+        interior, on_grid = _roll_backward(
+            end_year, end_month, start_ordinal, step_months, roll_day, eom
+        )
+    else:
+        roll_day = conventions.roll_day or start_day
+        interior, on_grid = _roll_forward(
+            start_year, start_month, end_ordinal, step_months, roll_day, eom
+        )
 
-    # Always include maturity
-    dates.append(ymd_to_ordinal(end_year, end_month, end_day))
+    if not on_grid:
+        if stub == "none":
+            raise ValueError(
+                f"Tenor is not a whole number of {step_months}-month periods, "
+                f"but conventions.stub == 'none'. Choose a stub placement "
+                f"explicitly (one of 'short_front', 'long_front', "
+                f"'short_back', 'long_back') rather than leaving the odd "
+                f"period to be silently dropped."
+            )
+        # A long stub is a short stub merged into its neighbouring regular
+        # period, i.e. the boundary between them is simply removed.
+        if stub == "long_front" and interior:
+            interior = interior[1:]
+        elif stub == "long_back" and interior:
+            interior = interior[:-1]
 
-    # Sort ascending
-    dates.sort(key=lambda x: int(x))
-    return jnp.stack(dates)
+    boundaries = [start_ordinal, *interior, end_ordinal]
+    starts = jnp.asarray(boundaries[:-1], dtype=jnp.int32)
+    ends = jnp.asarray(boundaries[1:], dtype=jnp.int32)
+    return Schedule(accrual_start=starts, accrual_end=ends, payment_dates=ends)
+
+
+def _validate_calendar_date(year: int, month: int, day: int, label: str) -> None:
+    """Reject impossible dates at the boundary rather than rolling them."""
+    if not 1 <= month <= 12:
+        raise ValueError(f"{label} month must be in 1..12, got {month}.")
+    last = _days_in_month(year, month)
+    if not 1 <= day <= last:
+        raise ValueError(
+            f"{label} date {year}-{month:02d}-{day:02d} does not exist; "
+            f"{year}-{month:02d} has {last} days."
+        )
+
+
+def _roll_backward(
+    anchor_year: int,
+    anchor_month: int,
+    start_ordinal: int,
+    step_months: int,
+    roll_day: int,
+    end_of_month: bool,
+) -> tuple[list[int], bool]:
+    """Roll back from maturity, returning interior boundaries and exactness.
+
+    Returns the strictly-interior period boundaries in ascending order,
+    and whether the regular grid landed exactly on ``start_ordinal`` (in
+    which case there is no stub).
+    """
+    interior: list[int] = []
+    for k in range(1, _MAX_PERIODS + 1):
+        year, month = _add_months(anchor_year, anchor_month, -k * step_months)
+        ordinal = _rolled_ordinal(year, month, roll_day, end_of_month)
+        if ordinal <= start_ordinal:
+            interior.reverse()
+            return interior, ordinal == start_ordinal
+        interior.append(ordinal)
+    raise ValueError(
+        f"Schedule exceeds {_MAX_PERIODS} periods; check the dates and "
+        f"frequency."
+    )
+
+
+def _roll_forward(
+    anchor_year: int,
+    anchor_month: int,
+    end_ordinal: int,
+    step_months: int,
+    roll_day: int,
+    end_of_month: bool,
+) -> tuple[list[int], bool]:
+    """Roll forward from the start date; mirror of :func:`_roll_backward`."""
+    interior: list[int] = []
+    for k in range(1, _MAX_PERIODS + 1):
+        year, month = _add_months(anchor_year, anchor_month, k * step_months)
+        ordinal = _rolled_ordinal(year, month, roll_day, end_of_month)
+        if ordinal >= end_ordinal:
+            return interior, ordinal == end_ordinal
+        interior.append(ordinal)
+    raise ValueError(
+        f"Schedule exceeds {_MAX_PERIODS} periods; check the dates and "
+        f"frequency."
+    )

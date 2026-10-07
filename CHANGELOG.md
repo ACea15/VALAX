@@ -12,6 +12,812 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — audit conformance map reconciled against the code
+
+The T-suite is complete (**15/15**) and the conformance map now matches the
+code rather than the code as it stood several phases ago. Reconciling it
+turned up five pieces of drift, three of them pre-existing and one an
+outright internal contradiction:
+
+- **A-5 read ❌** ("no least-squares level is differentiated yet") while
+  **R-5 read ✅** in the same table, naming `sabr_slice_level` as a
+  least-squares level whose residual *is* the SSE gradient and whose
+  `dR/dθ` is therefore the exact full Hessian. A-5 is ✅; its `Λ` clause is
+  vacuous rather than skipped, since VALAX carries no regulariser (R-3) and
+  so has no damping term that could be omitted.
+- **M-8 read ❌** ("no production-engine repricing report") although T-9 had
+  just implemented precisely that. Now ✅.
+- **T-1 read "vol objects: no gate"** while the tolerance table two sections
+  below named the cube gate and its 1e-8 tolerance. The gate existed; it was
+  neither `audit`-marked nor recorded. All four levels T-1 names — curves,
+  caps, swaption cube, basket — are now marked and listed, so
+  `pytest -m audit` collects the whole T-suite.
+- **The up-front "three calibration levels" table** still said the swaption
+  cube "is not" curve-coupled and that `dθ_v/dθ_c = 0` identically, which
+  the V-1 and A-3 rows below it had contradicted since Phase C. Layer 1b is
+  ✅; five of the six paths by which curves enter Layer 2 are now
+  differentiable end to end, and the remaining gap is the `λ_m` level.
+- **T-1's curve tolerance** conflated two different units. It is two numbers:
+  `max_abs_residual < 1e-10` in residual units, and
+  `max|fitted_quotes − quoted_values| < 1e-8` in native quote units — the
+  latter looser by construction, being the residual scaled by ~`1/(DF·τ)`.
+
+Four 🟡 notes were narrowed to state what now exists: A-1 (a model
+calibrator *is* now differentiated through, by T-14's recalibrated reading),
+V-6 (β and the shift are in `p` with adjoints; weights and wing settings are
+not, and wing settings have no VALAX parameter to freeze), M-6 and R-6 (T-8
+and T-9 exercise the frozen-grid and frozen-choice conditions, though neither
+*enforces* them and T-8's scan is at the curve layer rather than through the
+PDE).
+
+A verification scoreboard now heads the page. Its counts are measured, not
+asserted: 50 requirement rows at **29 ✅ · 17 🟡 · 3 ❌ · 1 n-a**, with the
+three ❌ named as whole missing features rather than left as a number —
+business-day calendars (N-6), RFR optionlet accrual-period variance (V-4) and
+post-fit arbitrage checks (V-7).
+
+`docs/roadmap.md`'s unified quote-space item was likewise stale in its "still
+missing" clause, which listed the volatility leg; that shipped in Phase C. It
+now names only the model leg and the FX/credit breadth.
+
+### Added — fixed-input (`p`) adjoints and snapshot provenance (A-8, M-5, Q-1, Q-5, T-14)
+
+A calibration has two kinds of input: the quotes it solves against, and
+everything else it holds still — mean reversion, the SABR exponent and shift,
+futures convexity adjustments, turn spreads, wing settings. The second kind
+moved the price and appeared in no report, which is an unhedged position
+nobody is looking at.
+
+**`valax.greeks.fixed_inputs`** adds `FixedInput`, `FixedInputs`,
+`fixed_input_adjoints` and `FixedInputAdjoint`. The design decision worth
+recording is that a `FixedInput` stores **where** the value lives, not the
+value. Those numbers already sit on the model and surface pytrees the pricer
+consumes; a container holding copies would be a second source of truth, and
+the day the two disagreed the risk report would describe a model nobody priced
+with — reproducing A-8's own failure mode in a new place. The adjoint is taken
+by reading the leaf out of the live pytree, re-injecting it, and
+differentiating through the injection, so the reported number belongs to the
+priced leaf by construction. There is nothing to keep in sync.
+
+**Direct and total are both supported, and they are not close.** A fixed input
+can reach the price directly, or through what the calibration lands on when it
+moves. On a 3y×7y Hull-White swaption, mean-reversion sensitivity is −1.34e5
+with the model frozen and −2.03e4 once σ is allowed to re-fit — a factor of
+6.6, because recalibration offsets most of the direct effect. Quoting the
+frozen number as the exposure overstates it more than six times over. Which
+one you get is decided by the function handed to `fixed_input_adjoints`, so
+the choice is explicit. Neither needs an implicit-function-theorem step: `p` is
+held constant *through* the solve, and `optimistix` differentiates its own
+implicit solution rather than taping iterations.
+
+A fixed input must be a **whole, scalar leaf**. Indexing into one
+(`lambda c: c.betas[0, 0]`) is not a lens `equinox.tree_at` accepts, and a grid
+is a set of fixed inputs rather than one; both are now refused with a message
+saying what to do instead, rather than surfacing as the opaque
+`'_LeafWrapper' object is not subscriptable` the tree surgery would otherwise
+raise.
+
+**`valax.market.provenance`** adds `QuoteProvenance` and `SnapshotProvenance`:
+per-quote type, units, source, timestamp and stale flag under one snapshot id
+(Q-1, Q-6), with `label(q_bar)` turning an anonymous sensitivity vector into a
+named report. `from_instruments` derives type and units from the bootstrap
+instruments in solver order, so the names and the numbers come from the same
+sequence and a reordered quote list cannot mislabel; a length mismatch raises
+rather than zipping short.
+
+It is kept **alongside** `MarketState`, not inside it. Every field is a string
+or an integer so nothing is differentiated — but it could have been carried as
+static fields without being differentiated, and that would still have been
+wrong: static fields participate in JIT cache keys, and provenance changes on
+every snapshot by definition, so each new timestamp would recompile every
+jitted pricer.
+
+**Known gap, recorded rather than papered over:** the futures convexity
+adjustment is a closure over a constant (`constant_convexity_adj`) rather than
+a pytree leaf, so it has no lens and no `p̄` today. The carrier supports it the
+moment it becomes a leaf.
+
+Gated by `tests/test_greeks/test_fixed_inputs.py` (**T-14**) and
+`tests/test_market/test_provenance.py` (Q-1/Q-5/Q-6). T-14's three clauses are
+asserted separately — present, non-zero where expected *and exactly `0.0`
+where not*, matching finite differences at two bump sizes — because any two
+can hold while the third fails: without the zero complement a carrier
+fabricating numbers would look healthy, and without the non-zero case one
+returning zeros would.
+
+### Added — single-curve limit, smoothness and basket-repricing gates (T-4, T-8, T-9)
+
+`tests/test_calibration/test_audit_conformance.py` closes the last three
+T-suite gates that do not depend on the `FixedInputs` carrier.
+
+**T-4** is the one where the existing coverage looked adequate and was not.
+Two tests already claimed the single-curve limit, but one compares two
+*solvers* and the other compares `forward_curve=None` against the default —
+which is the same branch, so neither can detect a broken dual-curve path. The
+gate now passes `forward_curve=curve` **explicitly**, so the dual-curve code
+runs with a basis of exactly one and must land on the single-curve answer. It
+does, to 0.0 exactly for the float leg, par rate, swap price, annuity and
+caplet forward, and to one ulp (1.4e-17) on the swaption forward — as it
+should, since `_dual_curve_float_pv`'s summands telescope on one curve rather
+than approximate anything. Verified at all three layers (pricers, bootstrap,
+Hull-White fit), with the par rate additionally checked against a closed form
+in two discount factors built in the test. The complement is gated: a 25 bp
+basis must *not* degenerate, so a bug that aliased the two curves could not
+pass.
+
+**T-8** asks for "no steps or jumps", which is not assertable at any
+tolerance — every smooth function has non-zero second differences, and any
+step hides under a loose enough bound. Asserting near-linearity across the
+scan would be worse, since the price has genuine curvature over ±2 bp; that is
+the mistake numerical-pitfalls entry 3 records. The gate instead uses the
+**refinement rate**, which separates the cases rather than trading them off:
+halving the scan spacing must shrink `max|Δ²price|` by 4 (`O(h²)`) and
+`max|Δdelta|` by 2 (`O(h)`), while a single discontinuity pins both near 1.
+Observed 3.99 and 2.00. Every scan point rebuilds the graph, adjoint and
+factorisation from the quotes, so nothing is carried between bumps — the R-6 /
+M-6 condition. No tolerance is placed on the differences themselves,
+deliberately: their magnitude carries no information, only their scaling does.
+
+**T-9** reprices the calibrated basket with the production PDE. Repricing with
+the *analytic* Jamshidian formula the fit itself drove to target is
+near-tautological and returns 2e-15; that is recorded explicitly so it is
+clear what the PDE adds. The PDE residual is 1.47e-04 at a 200×200 grid, and
+doubling the grid drops it to 3.67e-05 — a ratio of 4. That refinement is the
+assertion that matters, because a single reported residual cannot say whether
+it is discretisation error or calibration misfit. M-6 is gated alongside by
+requiring bit-identical repricing from a reused `PDEConfig`.
+
+`docs/architecture/numerical-pitfalls.md` entry 4 — which owns both the
+"measure the convergence order, not the error" lesson and its
+shared-approximation corollary — gains a table of where those are now
+enforced as gates rather than left as advice (T-8, T-9 and T-6).
+
+### Added — smile-dynamics delta gate (T-12)
+
+`tests/test_surfaces/test_smile_dynamics.py::TestT12SmileDynamicsDelta` closes
+the last gate that was waiting on the `dynamics` field.
+
+The reason it is a *delta* gate and not a pricing one is the finding worth
+recording. Evaluated at the fitted forward $F_0$, all three conventions return
+the **same volatility**, so they price the swaption identically — 7709.22 on
+the gate's fixture, to the last digit, for all three. The convention is a
+statement about $d\sigma/dF$, nothing else, so no repricing or calibration
+check can ever detect a wrong one. Delta is the first quantity that can see
+it, and there the three differ by 14% across the extremes: sticky moneyness
++8.7% and the SABR backbone −5.2% against sticky strike.
+
+Each convention's $d\sigma/dF$ is checked against partials of
+`sabr_implied_vol` taken directly rather than against anything the cube
+produces, so the object under test does not get to define the right answer:
+`0` exactly for `sticky_strike` (the branch never consults the live forward,
+so the cotangent is structurally zero — asserted as exact equality, since a
+tolerance would mask it starting to read it), `−∂σ/∂K` for
+`sticky_moneyness`, `∂σ/∂F` for `sabr_backbone`. All three held to exactly
+zero relative error; the chain-rule decomposition to ~1e-16.
+
+Two anti-vacuity checks ship with it. The three deltas are required to differ
+by more than 2%, and a companion test pins that on a flat smile (ν=0, β=1,
+ρ=0) every convention gives `dσ/dF == 0` and the whole distinction
+disappears — so the skewed, convex, off-ATM fixture is load-bearing rather
+than incidental. That is the same degenerate-configuration failure this suite
+has now paid for four times.
+
+`docs/guide/vol-surfaces.md` § Smile dynamics, which owns the conventions,
+gains the measured delta table and the note that the choice is a hedge-ratio
+decision on an identically-priced trade.
+
+### Added — rates option parity and Bachelier ATM gates (T-6, T-7)
+
+`tests/test_surfaces/test_audit_parities.py` gates the two option identities
+the audit specification asks for. The interesting part is why the obvious
+version of T-6 would have been worthless.
+
+VALAX does not price a floorlet or a receiver from its own formula — it prices
+the caplet/payer and subtracts the forward value (`caplets.py`,
+`swaptions.py`). So "caplet − floorlet = FRA" and "payer − receiver =
+A_d(S_x − K)" are true *by construction*, to the last bit, and asserting them
+tests only that subtraction is subtraction. That is the failure already
+recorded as entry 4 of `docs/architecture/numerical-pitfalls.md`:
+corroboration from something that shares your approximation is worthless.
+
+The gate therefore builds two independent references. Each leg is checked
+against its own closed form, with the put written as `K Φ(−d₂) − F Φ(−d₁)`
+rather than as `call − (F − K)`, which is what makes the out-of-the-money leg
+genuinely checkable. And `τ`, `A_d`, `S_x` and `P_d(T_e)` are reconstructed by
+hand from the definitions, by explicit loop over curve reads — because that is
+the part that actually bites: the annuity's first period accrues from *expiry*,
+the dual-curve floating leg does not telescope, and the discount factor is read
+at the payment date. Mis-wire any of those and parity still holds while the
+reconstruction fails. Everything runs single- *and* dual-curve, since a
+swapped `P_d`/`P_x` is invisible when the two curves are the same object.
+
+T-7 (ATM straddle = `2 A_d σ √(T/2π)`) is the only gate here that constrains
+the volatility scale at all — T-6 is vol-insensitive by construction — so it
+is what would catch a missing `√(2π)`, a doubled `√T`, or a variance/vol
+mix-up. It is not weakened by the receiver coming from parity, because the
+parity term vanishes at the money. Two corollaries are gated with it: the ATM
+straddle is exactly linear in σ, and the Black-76 ATM straddle converges to
+the Bachelier one — asserted as a convergence *rate* (halving σ must shrink
+the relative gap fourfold, the leading correction being `O((σ√T)²)`) rather
+than at a fixed tolerance, which would pass equally well against a wrong
+formula that happened to be close.
+
+`docs/theory/rate-derivatives.md` now records that the out-of-the-money leg is
+derived from parity: it guarantees a floor inherits exactly the smile
+treatment its cap received, and it is the reason the gate is built the way it
+is.
+
+### Added — conditioning reported at every calibration level, with a shared alert threshold
+
+`dR/dθ`'s condition number decides how much of the double-precision mantissa
+survives the transposed solve that every quote sensitivity goes through. It was
+reported only for Layer 1a (`CurveBuildDiagnostics`, `CurveAdjoint`), and the
+`1e10` threshold everyone referred to existed only in prose — as a bare literal
+in two docstrings and one doctest, with no constant and no alert anywhere in
+code.
+
+- `valax.greeks.adjoint.ILL_CONDITIONED_THRESHOLD` (`1e10`) is now the single
+  source of truth; the docstrings and the doctest refer to it instead of
+  restating it.
+- `level_condition_number(level)` reports `κ(dR/dθ)` for **any**
+  `CalibrationLevel` — curve, smile or model — accepting a pytree `θ` and
+  rectangular (least-squares) levels as well as square ones. It deliberately
+  *does* materialise `dR/dθ`, since a condition number is a property of the
+  whole matrix; it is a per-snapshot diagnostic and the sensitivity path
+  itself stays Jacobian-free.
+- `condition_alert(κ, level_name=..., threshold=...)` returns a message or
+  `None`, rather than warning or raising, so the caller picks the channel. A
+  non-finite `κ` gets a distinct message: that is a singular system where the
+  implicit function theorem does not apply at all, so the sensitivities are
+  meaningless rather than imprecise.
+
+Measured across the three layers (all four or more orders of magnitude inside
+the threshold): curve build ≈ 1.1, SABR slice ≈ 2.2e4 with β fixed and
+≈ 5.6e6 with β free, Hull-White (a, σ) ≈ 5.6e3 against ≈ 1 for σ alone. The
+diagnostic therefore puts numbers on two pieces of standing advice — fix β,
+fix mean reversion — that were previously folklore. It also retires the
+concern recorded in the conformance map that a `1e10` alert would fire on
+healthy smile fits: the worst healthy fit measured is 1e4 short of it.
+
+Two findings worth recording, both measured rather than assumed. A VALAX curve
+build is **structurally** near-perfectly conditioned: an OIS floating leg
+telescopes, so in log-DF space the `P(T_n)` term dominates the annuity term and
+each quote very nearly pins its own maturity pillar — crowding two pillars to
+one day apart leaves κ ≈ 1.15, so ill-conditioning cannot be provoked from
+pillar spacing. The failure mode that *is* real is a **duplicated quote**: it
+keeps the system square, so no shape check rejects it, but it makes two
+residual rows identical and leaves a pillar unconstrained.
+
+Gated by `tests/test_greeks/test_level_conditioning.py` (**T-13**,
+`pytest -m audit`), which asserts the three reports of the same Layer-1a
+Jacobian agree to `rtol = 1e-10` and drives the alert's finite branch from a
+synthetic Hilbert level — a documented choice, since no realistic level
+reaches the threshold.
+
+### Added — day-count and schedule reference-data gate (T-10)
+
+`tests/test_dates/test_audit_conventions.py` pins τ and generated schedule
+dates against references derived from the published conventions using the
+**standard library only** (`datetime`, `calendar`) or integer arithmetic
+transcribed from the rule. The independence is the point: `ymd_to_ordinal` and
+`thirty_360` both route through VALAX's own Hinnant ordinal/calendar
+conversion, so checking one against the other would prove only that the
+algorithm is used twice.
+
+Dates match exactly (integer equality). `act_360`, `act_365` and `30_360` match
+**bit-for-bit**. `act_act` matches to `atol = 1e-14` (observed worst 2.9e-15)
+and cannot be exact: `valax.dates.daycounts.act_act` evaluates a cumulative
+function and subtracts, while ISDA 4.16(b) sums per-year contributions — equal
+in exact arithmetic, different floating-point operation sequences. The closed
+form is the better-conditioned of the two, so the implementation is not the
+thing being corrected by the tolerance.
+
+### Changed — `CurveSpec.interp` is no longer a field that could be silently ignored
+
+`CurveSpec.interp` was validated against `graph._SUPPORTED_INTERP` and then
+never forwarded anywhere, because `DiscountCurve` has no `interp` field — it
+hard-codes log-linear-in-DF. That was not a live bug: the supported tuple held
+exactly one entry, and that entry is precisely what the curve implements, so
+no caller could ask for something they did not get. It was a *latent* one.
+The day a second mode joined the tuple, every curve declaring it would have
+quietly carried on interpolating log-linearly.
+
+Rather than implement the dispatch (a curve-representation project, still
+deferred) or delete a field the interpolation workstream needs, the invariant
+is now enforced from both ends:
+
+- New `valax.curves.DISCOUNT_CURVE_INTERP` names the mode
+  `DiscountCurve.__call__` actually implements.
+- `graph._SUPPORTED_INTERP` is **derived from** it rather than spelled out, so
+  the declarable set cannot drift from the deliverable one by accident.
+- `bootstrap_graph._build_graph_from_log_dfs` re-checks the mode at the single
+  place it would have to be forwarded, raising `NotImplementedError` naming
+  exactly what a future implementer must do first.
+- `tests/test_curves/test_graph.py::TestCurveSpecInterp` asserts the one-mode
+  invariant directly, so widening the tuple fails the suite until the dispatch
+  lands.
+
+Behaviour is unchanged for every existing caller. Narrows spec C-4.
+
+### Added — Partly-accrued overnight coupons blend realised and projected
+
+`_floating_leg_pv` treated every coupon as all-or-nothing: either a recorded
+fixing existed for its fixing date, or the whole period was projected off the
+curve. For a term rate that is right. For an *overnight-compounded* coupon it
+is not — such a coupon has no single fixing date, it accrues daily, so a
+period that has begun and not ended is partly realised and partly
+forward-looking, and projecting all of it discards weeks of known data.
+
+- **New `FixingSeries.compounded_factor(start, end, day_count)`** reduces a
+  daily history to the realised compounding factor
+  `A = Π(1 + r̂_j δ_j)`, plus `FixingHistory.compounded_factor(index_id, …)`
+  which returns exactly `1.0` for an unrecorded index (a missing *history*
+  legitimately means nothing has accrued, unlike a missing *fixing* for a
+  coupon that needs one, which stays a `KeyError`). Weekends need no calendar:
+  an absent entry leaves the preceding rate applying across the gap weighted
+  by calendar days, which is the market convention.
+- **New `accrued_compounding`** on `IborSwapRate`, and per leg as
+  `leg_a_/leg_b_accrued_compounding` on `TenorBasisSwap` and
+  `dom_/for_accrued_compounding` on `CrossCurrencyBasisSwap`. The blend is
+  exact rather than an approximation, because the compounding factor over the
+  period *is* the product of the realised and remaining factors:
+  `1 + τ_j F_j = A · P_x(0,t_0)/P_x(0,T_j^e)`.
+- **`ref_date` is finally used.** Every floating-leg residual used to `del` it;
+  it now locates the straddling period, by the half-open test
+  `T^s ≤ t_0 < T^e`. Closing both ends would match *two* periods whenever
+  `t_0` lands on an accrual boundary — the one ending there and the one
+  starting there — which cannot share one realised factor.
+- **Precedence is explicit:** recorded fixing → blend → projection. A recorded
+  value outranks a partial accrual because for a tenor index it *is* the
+  compounded coupon rate for the whole period.
+- **A fully-ended period is deliberately out of scope**, since its rate is
+  entirely known. Where a payment lag leaves one ended but unpaid, record its
+  compounded rate under `index_id`; reaching for `accrued_compounding` there
+  would silently leave it projected. Documented on `_floating_leg_pv`.
+- **Default is off**, so nothing changes for anyone who does not set the field.
+- Closes spec requirement C-3 and the T-11 gate. See
+  [Bootstrap instruments § Partly-accrued periods](docs/guide/curves.md#partly-accrued-periods).
+
+### Added — Averaged money-market futures
+
+`MoneyMarketFuture` had one forward: the compounded, two-discount-factor one.
+Three-month RFR futures do settle on that, but one-month RFR futures settle on
+the *arithmetic average* of the daily index values, which is a different
+functional of the same curve.
+
+- **New static field** `averaging` ∈ `("compounded", "arithmetic")`,
+  defaulting to `"compounded"`; `AVERAGING_CONVENTIONS` is exported from
+  `valax.curves`. The compounded branch is bit-for-bit what it always was.
+- **The two are a product and a sum of the same daily ratios.** With
+  `ρ_j = DF(t_j)/DF(t_{j+1})`, compounded is `(Π ρ_j - 1)/τ` and averaged is
+  `Σ(ρ_j - 1)/τ`. The day-count-weighted average collapses to that sum
+  because `r_j δ_j = ρ_j - 1` by definition, and under `act_*` the daily
+  accrual fractions sum to the period's exactly.
+- **The gap does not vanish on a flat curve.** It is the cross terms — the
+  interest-on-interest averaging discards — of order `r²τ/2`: measured 0.628
+  bp on a 1M contract at 4% against 0.667 bp predicted, and 1.93 bp on a 3M.
+  So reading a 1M contract as compounded mis-places the short end by a real
+  amount rather than by something that averages out.
+- **Only the averaged contract has exposure inside its own period.** The
+  compounded forward telescopes, so interior pillars have *identically* zero
+  sensitivity; the sum does not telescope, so the averaged forward picks up
+  genuine sensitivity to the shape of the curve between its own start and end
+  dates. That shape exposure vanishes on a flat curve, where adjacent `ρ_j`
+  cancel pairwise — which is why the gate checks it on a sloped one.
+- **No calendars required.** The market carries the preceding business day's
+  rate across weekends weighted by *calendar* days, which is what a
+  calendar-daily subdivision of a smooth curve reproduces. A concrete day span
+  *is* required; traced dates raise a `ValueError` naming the way out instead
+  of averaging over the wrong number of days.
+- Narrows spec requirement C-1. See
+  [Bootstrap instruments § Compounded vs averaged futures](docs/guide/curves.md#compounded-vs-averaged-futures).
+
+### Added — Payment lag: accrual end and payment date are now separate roles
+
+A coupon has two dates that matter, and until now VALAX's curve quote types
+carried only one. `_floating_leg_pv` used a single array as both the accrual
+end (what the coupon is worth) and the payment date (when you get it, and
+therefore how it is discounted), which is correct only when the two coincide.
+Real overnight-index swaps pay one or two business days after accrual ends,
+so every OIS-bootstrapped discount factor was very slightly misplaced.
+
+- **New fields.** `payment_dates` and `payment_lag` on `SwapRate` and
+  `OISSwapRate`; `fixed_payment_dates` / `float_payment_dates` on
+  `IborSwapRate`; `leg_a_payment_dates` / `leg_b_payment_dates` on
+  `TenorBasisSwap`; `dom_payment_dates` / `for_payment_dates` on
+  `CrossCurrencyBasisSwap`. `payment_lag` is a uniform shift in **calendar**
+  days; an explicit array is the route for a business-day-adjusted schedule,
+  since VALAX still has no holiday calendars. Supplying both for one leg
+  raises, as does a negative lag or a schedule of the wrong length.
+- **OIS floating leg generalised.** The telescoping identity
+  `DF(T_0) - DF(T_n)` holds only at zero lag. The leg is now the per-period
+  sum `Σ_i P_d(0,T_i^p)(P_d(0,T_i^s)/P_d(0,T_i^e) - 1)`
+  (`_compounded_float_leg_pv`), with the closed telescope retained as an
+  explicit fast path when no lag is configured.
+- **Numbers are unchanged by default.** With neither field set the fast path
+  is taken and every pre-existing curve, residual and bootstrap reproduces bit
+  for bit. The two forms agree to 8e-17 — pure summation order.
+- **Under the constant-notional cross-currency variant** the final notional
+  re-exchange is paid with the last coupon, so it now discounts at the last
+  payment date rather than the last accrual end.
+- **Direction of the effect.** A uniform lag always *lowers* the par rate,
+  whatever the shape of the curve, and by exactly nothing on a flat one: the
+  par-rate weights pick up a factor `P(0,T^p)/P(0,T^e) ≈ exp(-f_i ℓ)` that
+  decreases in that period's own forward, so the lag shifts weight away from
+  the high-forward periods. The magnitude tracks the *dispersion* of the
+  forwards, not their level.
+- **Still neglected,** and now recorded as such rather than implied by the
+  missing feature: the payment-lag *timing convexity*. The discount factor
+  moves to `T^p` but the compounded coupon gets no drift correction for
+  ceasing to be a martingale under the `T^p`-forward measure.
+- Closes spec requirement N-3 and the T-5 gate; narrows C-1. See
+  [Bootstrap instruments § Payment lag](docs/guide/curves.md#payment-lag-accrual-end-vs-payment-date).
+
+### Changed (**breaking**) — Vol sources are now handed the live forward
+
+A smile is a function of moneyness, so *which* forward it is anchored to decides
+whether a curve move reprices the smile or merely slides along it. Until now a
+vol source was never told the forward the pricer was about to use: it was queried
+at `src(strike, expiry[, tenor])` and (for the SABR objects) read a forward frozen
+at calibration time, while the pricer computed the swap rate and annuity from the
+live curve. Vol and price could therefore see different forwards, and
+`∂σ/∂θ_curve` was structurally zero.
+
+- **Protocol.** A vol source is now called as
+  `src(strike, expiry[, tenor], forward=F)`, with `forward` keyword-only and `F`
+  the live curve-derived forward for that very instrument (forward par swap rate
+  for a swaption, projected period forward for an optionlet). Every source must
+  accept the keyword; flat sources ignore it. Affects
+  `valax.pricing.analytic.rates_smile` (`swaption_price`, `caplet_price`,
+  `cap_price`), `cms_convexity`, and the `cms_cap_floor` / `range_accrual`
+  pricers in `rates_exotics`.
+- **Numbers are unchanged.** `SwaptionCube.__call__` and
+  `OptionletVolSurface.__call__` accept `forward` and currently *ignore* it —
+  the sticky-absolute-strike convention — so every existing price is preserved
+  bit-for-bit. What the convention is, and what the alternatives would do, is
+  documented once in
+  [Smile dynamics](docs/guide/vol-surfaces.md#smile-dynamics-what-moves-when-the-curve-moves).
+- **Forward and annuity computed once.** New public observables
+  `valax.pricing.analytic.swaptions.annuity` (the promotion of the former private
+  `_annuity`; the old name remains as an alias),
+  `swaption_forward_and_annuity`, `caplets.caplet_forward` and
+  `caplets.cap_forwards`. `rates_smile.swaption_price` computes `(S, A_d)` once
+  and prices through the new `swaption_black76_from_forward` /
+  `swaption_bachelier_from_forward` cores; the caplet/cap pricers gained a
+  `forward=` / `forwards=` keyword so a caller can hand back the forward it read
+  its vol at. Vol and payoff now see the same forward *structurally*, not by
+  coincidence. `surfaces.caplet_stripping.optionlet_forwards` delegates to
+  `cap_forwards` instead of re-deriving the projection.
+- **Migration.** Custom vol sources must add `forward=None` to their
+  `__call__` signature (variadic sources: `def __call__(self, *coords,
+  forward=None)`). Callers of the surfaces' `__call__` are unaffected —
+  `forward` is optional.
+
+### Added — Smile dynamics are now a declared choice, not an accident
+
+Sticky-absolute-strike was previously the *only* expressible convention, and it
+was arrived at structurally (the surface was never handed a forward) rather than
+chosen. It is now named, validated and selectable.
+
+- **`valax.surfaces.dynamics`** (new module) owns the convention mechanics:
+  `SMILE_DYNAMICS`, `QUOTE_FORMS`, `CONSISTENT_DYNAMICS`,
+  `validate_smile_dynamics`, `default_dynamics_for`, `resolve_smile_query`.
+  One implementation, shared by both rates vol objects.
+- **`SwaptionCube` and `OptionletVolSurface`** gained two static fields:
+  - `dynamics` ∈ `{"sticky_strike", "sticky_moneyness", "sabr_backbone"}`,
+    default `"sticky_strike"` — so every existing price is unchanged.
+    `"sticky_strike"` evaluates Hagan at the fitted $F_0$;
+    `"sticky_moneyness"` at $(K - (F - F_0);\, F_0)$; `"sabr_backbone"` at the
+    live $F$ with the parameters held fixed.
+  - `quote_form` ∈ `{"absolute_strike", "atm_offset"}` (spec Q-3).
+  The pair is **validated at construction**: the dynamics is a consequence of
+  what the quote holds fixed, so absolute-strike + sticky-moneyness (and
+  atm-offset + sticky-strike) are configuration errors, not options. A
+  forward-dependent dynamics queried with no forward raises rather than
+  silently falling back.
+- **`forwards` is now documented as $F_0$** — "the forward this node was fitted
+  at" — on both objects and on `forward_at`, with the live forward supplied at
+  query time.
+- Under `"sticky_strike"`, `∂σ/∂θ_curve` is **exactly** zero and a new test
+  asserts it; under `"sabr_backbone"` it is non-zero. Both are now facts of
+  record rather than side effects.
+
+### Added — Curve-aware swaption cubes, premium quotes, and vega in quote space
+
+Closes the load-bearing gap in the adjoint chain. `calibrate_swaption_cube`
+takes a caller-supplied `forwards` array, and a forward handed in from outside
+is a constant as far as the fit is concerned — so `∂θ_v/∂θ_c` was *identically
+zero* and no curve risk could reach the volatility layer. That blocked three of
+the six paths by which curves enter model calibration, and a missing
+`dR_v/dθ_c` is the single most common cause of wrong deltas.
+
+- **`calibrate_swaption_cube_from_curves`** / **`_from_graph`** take the node
+  *schedules* — one representative `Swaption` per `(expiry, tenor)` — plus a
+  discount/projection pair, and derive everything else:
+  - `swaption_node_coordinates` builds the grid axes from the same expressions
+    `swaption_price` evaluates, so a node reprices at *its own* grid point
+    rather than a hair off it;
+  - `swaption_node_forwards_and_annuities` computes each node's `(S_x, A_d)`
+    through the pricer's own `swaption_forward_and_annuity`.
+  `quote_form="atm_offset"` converts offsets to absolute strikes per node using
+  that node's derived `F_0` (spec Q-3), and `dynamics` then defaults to the
+  convention that quote form implies. `calibrate_swaption_cube` survives as the
+  explicit opt-out. T-1 gate: every fitted quote reprices to `< 1e-8` in vol
+  units, both quote forms.
+- **`valax.surfaces.swaption_premium`** (new module) converts premium quotes:
+  `swaption_implied_normal_vol` solves
+  `N·𝒩(θ_c)·Bachelier(S_x(θ_c), K, σ_N, T) − q = 0` by scalar
+  `optimistix.Newton` with implicit differentiation, so the *implied vol*
+  carries curve risk. `settlement="physical"` uses the annuity `A_d`;
+  `"cash"` uses `P_d(0,T^p)·A_cash(S_x)` via the newly public
+  `valax.pricing.analytic.cash_settled_annuity` (the promotion of
+  `cms_convexity._standard_annuity`, now shared by Hagan and the cash branch).
+  The two settlements imply different vols from the same premium. Cash-settled
+  *convexity* is an explicitly documented deviation. The initial guess inverts
+  the **straddle** asymptote rather than the at-the-money one, which is a
+  guaranteed upper bound on `σ√T` and stays conditioned far from the money
+  where the naive seed collapses into underflowed vega.
+- **`valax.greeks.vol_adjoint`** (new module) adds λ_v. A smile fit is
+  over-determined, so the square system the implicit function theorem is applied
+  to is the fit's **first-order condition** — the stationarity of the weighted
+  SSE. `sabr_slice_level` states it; `vol_quote_vegas` returns both input
+  blocks: vega to the **quoted vols**, and `forward_bar = ∂V/∂F_0`, the
+  `dR_v/dθ_c` term (spec A-3). `cube_node_level` / `optionlet_slice_level` /
+  `cube_node_cotangent` wire it to the surface objects. Differentiating the SSE
+  *gradient* gives the **full** Hessian, not Gauss-Newton — the documented
+  resolution of spec R-5, chosen because the two coincide on a tight fit and so
+  the approximation only matters when the fit is loose.
+- **Bug fix — `bilinear_2d` returned NaN on a length-1 axis.** It divided by
+  `grid[0] - grid[0]`, so every query against a single-expiry or single-tenor
+  cube (and any `GridVolSurface` with one strike or one expiry) came back NaN. A
+  degenerate axis is now flat along that direction. Surfaced by calibrating a
+  one-node cube, which is the smallest curve-aware fit and a legitimate thing to
+  do.
+- **Verification.** Both input blocks are gated against full-rebuild central
+  finite differences at two bump sizes, under both quote forms. The
+  `optimistix` `ImplicitAdjoint` comparison is kept as a *consistency* check
+  and labelled as such — it shares `sabr_implied_vol` with the adjoint under
+  test, so it is not independent evidence.
+
+### Fixed — `sabr_implied_vol` lost its ATM forward derivative
+
+Hagan's expansions contain `z / x(z)`, which is `0/0` at the money. It was
+guarded by pinning the ratio to the constant `1.0` — the correct *value*, and
+zero *slope*, so automatic differentiation discarded the whole `z/x`
+contribution. Since `z ∝ log(F/K)`, that corrupted `∂σ/∂F` at the
+at-the-money strike by **18%** in the lognormal branch and to **identically
+zero** in the normal branch. The `α`, `ρ`, `ν` derivatives were always correct
+(at `F = K` their `∂z/∂·` terms carry a vanishing `log(F/K)` factor), and
+**no price was ever affected** — which is why it survived.
+
+- `_z_over_x` now hands over to the Taylor series
+  `1 − (ρ/2)z + (1/6 − ρ²/4)z² + O(z³)` instead of to a constant, so both
+  branches are smooth and carry the right slope. Extracted once and shared by
+  `sabr_implied_vol` and `sabr_normal_implied_vol`; the outer double-`jnp.where`
+  is retained, since that part genuinely prevents NaN gradients leaking from the
+  inactive branch.
+- The crossover moved from `1e-7` to `_ATM_Z_TOL = 1e-4`, chosen by balancing
+  series truncation `O(z³)` against the closed form's cancellation `O(ε/z)`:
+  `z³ ~ ε/z` gives `z ~ ε^(1/4)`, where both branches are accurate to ~1e-12.
+  The old `1e-7` was *too small* — it kept the ill-conditioned closed form in
+  play across a decade where the series was already better.
+- At-the-money values are **bit-identical** before and after (the series is
+  exactly `1` at `z = 0`).
+- **Who was affected:** `dynamics="sabr_backbone"` deltas at ATM, and the
+  `forward_bar` leg of `vol_quote_vegas` whenever an ATM strike was in the fit.
+  Both shipped in this same release cycle; no tagged release contained the
+  corrupted adjoint.
+- Regression: `tests/test_models/test_sabr.py::TestATMDerivatives` checks AD
+  against finite differences *at* the money for both expansions, asserts the ATM
+  forward derivative is non-zero, and checks the two branches agree at the
+  crossover with no jump or kink.
+
+Found while building the λ_v gate, and the way it hid is the point: a
+full-rebuild finite difference disagreed and was *dismissed* because a second
+"independent" adjoint — `optimistix`'s `ImplicitAdjoint`, different code,
+different parametrisation — agreed with the first bit-for-bit. It shared
+`sabr_implied_vol` underneath, so it shared the defect: two votes that were
+really one. An ill-conditioned least-squares Hessian (κ ≈ 2e6) then supplied a
+plausible but false mechanism for distrusting the finite difference. Written up
+as entry 5 of `docs/architecture/numerical-pitfalls.md`, with a runnable
+reproduction in `examples/pitfalls/02_where_guard_kills_the_derivative.py`.
+
+### Added — Quote-space (hedge-space) adjoint risk
+
+Closes the `J_build` leg of the Jacobian stack. `curve_pillar_deltas` already
+answered "how does the price move if a pillar discount factor moves", but a desk
+hedges in instruments, not pillars — and the two are not a rescaling of each
+other. Holding the other *quotes* fixed forces the whole curve graph to
+re-solve, so an OIS quote picks up its indirect effect on every projection curve
+calibrated against it; a bump that held projection *nodes* fixed misses that
+term entirely. On a dual-curve book the two conventions differ in magnitude
+*and* sign.
+
+- **`valax.greeks.adjoint`** (new module).
+  - `curve_adjoint(graph, ref, specs, instruments)` builds a per-snapshot
+    handle: the residual Jacobian `∂R_c/∂θ_c` at the solution, its condition
+    number, and a `lineax.LU` factorisation computed **once**.
+  - `curve_quote_deltas(instrument, model, market, adjoint=...)` returns
+    `∂price/∂quote` for every bootstrap instrument via the implicit function
+    theorem: one reverse sweep through the pricer, one transposed solve, one
+    reverse sweep through the residual. The quote Jacobian is never formed and
+    the Newton iterations are never taped, so cost is flat in the number of
+    quotes and each additional trade is a back-substitution.
+  - `CalibrationLevel` / `level_adjoint` / `LevelAdjoint` generalise the same
+    step to any calibration written as `R(θ; inputs) = 0` — the hook the
+    volatility and model layers will plug into. The generic path reproduces the
+    curve-specialised one bit-for-bit.
+  - `curve_log_df_cotangent` handles the change of variables from
+    `∂V/∂DF` (all pillars) to the solver's `log(DF)` space (reference pillar
+    excluded), so callers no longer hand-slice `[1:]`.
+- **Residual single-sourcing.** `valax.curves.curve_residual_fn` exposes the
+  residual as `R(θ_c, q_c)`, and both it and `bootstrap_curve_graph` now call
+  one extracted `_graph_residual`. The solved system and the differentiated
+  system are the same code path by construction, not by convention. Also added:
+  `curve_quote_vector`, `log_dfs_from_graph`.
+- **Mixed residual units handled by construction.** VALAX residuals are
+  deliberately not uniform — a futures residual is a rate difference, a swap
+  residual is `rate × annuity − float_pv`. The adjoint differentiates `∂R/∂q`
+  rather than assuming `−I`, so both scale correctly with no per-instrument
+  special-casing.
+- **Conformance gates.** New `audit` pytest marker (`pytest -m audit`) and
+  `tests/test_greeks/test_quote_adjoint.py`: AAD vs full-rebuild central finite
+  differences for every quote at 0.1 bp and 1 bp (single- and dual-curve), the
+  parallel-shift identity, and the quotes-fixed vs nodes-fixed distinction.
+  Observed agreement 1e-9 to 1e-11 relative.
+- **Docs.** New
+  [Audit Conformance Map](docs/architecture/aad-audit-conformance.md) scoring
+  VALAX requirement-by-requirement against the multi-curve / AAD risk audit
+  specification, including the identifier map, the instrument→residual
+  inventory, committed tolerances and the explicitly documented (and explicitly
+  *undecided*) convention choices.
+
+### Added — Dual-curve rates calibration (OIS discounting + tenor projection)
+
+Closes the consistency hole between pricing and calibration: since P5.1 the
+MC/PDE short-rate engines priced dual-curve, but *every* rates calibrator fitted
+single-curve, so the tenor basis leaked into the fitted volatility. Measured on
+a 50 bp basis, the old single-curve residual mis-fits Hull-White `σ` by **62 %**
+(0.016661 vs 0.010261) — a model that reprices its own calibration set and is
+wrong everywhere else. This violated the model/market consistency invariant that
+`price(instrument, model, market)` documents.
+
+- **Analytic dual-curve swaptions (the prerequisite).** Because the basis is
+  deterministic, a dual-curve swap stays an affine combination of discount
+  bonds, so both closed forms extend without losing their closed form:
+  `hw_swaption_price(swaption, model, forward_curve=None)` — Jamshidian's
+  critical rate now solves `CB(r*) = float_start` rather than `= 1`, via a new
+  `par_value` argument on `hw_critical_rate`; and
+  `g2pp_swaption_price(..., forward_curve=...)`, which previously **raised
+  `NotImplementedError`**, now solves its `ȳ(x)` boundary to `float_start` and
+  scales the eq.-(4.31) strike term by it. Both reuse
+  `valax.pricing.multicurve.{swap_leg_basis,apply_swap_basis}`, so there remains
+  exactly one implementation of the basis algebra shared with the MC/PDE
+  recipes.
+- **Calibration.** `calibrate_hull_white` and `calibrate_g2pp` take
+  `forward_curve=` (projection) and `curve_id=` (records the discount curve's
+  `MarketState` identifier on the fitted model, so `with_market_curve` can
+  re-bind it under a shocked market). `curve` remains the discount curve the
+  model is exact-fitted to. `swaption_prices_from_vols` takes `forward_curve=`
+  too — both legs of the residual must see both curves, since the same quoted
+  vol implies a different price once the forward swap rate is projected off a
+  different curve.
+- **Honest refusal where the engine cannot comply.** `calibrate_cheyette` and
+  `calibrate_cheyette_2f` accept `forward_curve` only to **raise** via
+  `require_single_curve`: the Cheyette PDE has no discount/projection split, and
+  a silently single-curve fit would be a wrong calibration with no signal.
+- **Fixed — `cap_price_black76` silently ignored `forward_curve`.** It accepted
+  the argument (its Bachelier sibling and both caplet pricers handle it) but
+  projected off the discount curve unconditionally, returning a single-curve
+  price for a dual-curve request. Regression-tested against the caplet strip.
+- **Single-curve is unchanged, bit-for-bit.** The basis is a *trace-time*
+  branch (`None` ⇒ `float_start = 1.0` and untouched cash flows), verified by
+  exact equality against the pre-change implementations across 18 payer/receiver
+  × strike × expiry/tenor configurations per model — not a tolerance. Multi-curve
+  is an upgrade, not a replacement.
+- **Validation** (`tests/test_pricing/test_dual_curve_swaptions.py`,
+  `tests/test_calibration/test_dual_curve_calibration.py`): payer-minus-receiver
+  parity equals the dual-curve forward swap value to ~2e-14 (model-independent,
+  so it isolates the discount/projection split); the closed forms agree with the
+  independent dual-curve PDE recipes to 1.5e-5 (HW) and 5.6e-5 (G2++); prices
+  are monotone in the basis and collapse exactly onto single-curve at zero
+  basis; dual-curve round-trips recover the generating parameters; and a
+  single-curve fit of dual-curve targets is asserted to *miss*, pinning the bug
+  this closes. Gradients flow to the projection curve's pillars, so basis risk
+  is autodiff rather than bumped.
+- Docs: new [calibration guide § 6](docs/guide/calibration.md), theory § 5.1 on
+  why the closed forms extend cheaply, coverage-matrix and roadmap updates, and
+  a roadmap item for the missing **QuantLib** cross-check of the rates
+  calibrators (none exists in either mode; current gates prove self-consistency,
+  not convention).
+
+### Changed — Pricing ontology: tutorial in the docs, ledger out of them
+
+- **New page `docs/guide/tutorial-unified-pricing.md`** (nav: *Examples →
+  Tutorial — The Unified Pricing Contract*) — the user-facing contract, taught
+  rather than specified: the four arguments and what each owns, one trade
+  through all four engines, method selection, `model=None` curve discounting,
+  `discount_id` / `forward_id` selectors turning a single-curve trade
+  multi-curve, keyed multi-asset markets and the surface-id alphabet,
+  `from_market` / `with_market_curve` model binding, the three sensitivity
+  families (including the theta autodiff-vs-bump policy and pillars → buckets →
+  quote-space), `register_pricer`, and a table of the failure modes with their
+  actual messages. Every snippet was executed in document order; the numbers in
+  the prose are its real output.
+- **`docs/architecture/pricing-ontology.md` → `PRICING_ONTOLOGY.md`** (repo
+  root, outside the MkDocs build). The migration report was half contract, half
+  phase-by-phase ledger; the contract half is now the tutorial, and what remains
+  is a contributor artefact — so it reads as one, led by a new **§0 Outstanding
+  work** backlog consolidating the old §12.8 / §13 / §14.2 items into a single
+  checklist.
+- Inbound references rewired: `mkdocs.yml` nav, `docs/api/core.md` (which now
+  defers the how-to material to the tutorial instead of restating it),
+  `docs/api/greeks.md`, `docs/roadmap.md`, `docs/theory/multi-curve-short-rate.md`,
+  and the docstring path references in `valax/core/`, `valax/greeks/`,
+  `valax/pricing/multicurve.py`. No code behaviour changed.
+
+### Added — Unified pricing signature and `MarketState` (pricing ontology, P2)
+
+- `valax/core/market_state.py`: **`MarketState`**, the calibrated market
+  container — a keyed `CurveGraph`, identifier-keyed vol surfaces, spots,
+  dividends, fixings, and the credit / inflation / FX corners in one
+  differentiable pytree. It *generalises* `MarketData` (one curve → keyed
+  graph; one scalar vol per asset → full surfaces) rather than renaming it:
+  `from_market_data` / `to_market_data` are a lossless two-way view, so the
+  `risk/var.py` scenario framework is untouched for one deprecation cycle.
+- `valax/core/pricing.py`: **`price(instrument, model, market, *, method,
+  config, key) -> PricingResult`** — one call convention replacing three
+  (loose analytic scalars, `(instrument, model, config, **market_args)`,
+  and `(instrument, market)`). **No pricer was rewritten.** Analytic and
+  lattice pricers are reached through thin adapters
+  (`valax/core/adapters.py`); the MC and PDE recipe registries are *bridged*,
+  not duplicated, so every recipe registered there is reachable through the
+  unified signature immediately and the registries cannot drift apart.
+- `method="auto"` keeps *availability* (the registry) separate from
+  *preference* (a policy table), falling back to `analytic → lattice → pde →
+  mc`. A subclass that only adds market selectors inherits its base class's
+  pricers (MRO resolution), which is the seam P3 will use.
+- `valax/core/resolve.py`: **`resolve`** binds an instrument's contractual
+  selectors (discount curve, projection curve, underlying) and a model's
+  surface reference against the market. Selectors are static strings with
+  sentinel defaults, so **single-curve pricing needs zero configuration** and
+  `forward_id=None` keeps the existing "project off the discount curve"
+  semantics bit-for-bit.
+- `model=None` is a first-class case for instruments priced by curve
+  discounting alone (fixed-rate bonds, vanilla and OIS swaps, FRNs).
+- Gates met (`tests/test_core/`): single-curve parity with the legacy calls to
+  ≤ 1e-10 with no selector configuration; MC/PDE prices bit-identical to the
+  dispatchers; `registered_pricers()` covers every pair in both legacy
+  registries; `jax.grad` through `price` yields market delta and model vega
+  together.
+- Design record: the five open questions in
+  `PRICING_ONTOLOGY.md` are now resolved (one
+  `PricingResult` container; a separate auto-policy table; the surface-id
+  alphabet `<UNDERLYING>.<KIND>[.<QUALIFIER>]`; a one-release `MarketData`
+  view; `theta` + `dual_delta` promoted). New page: `docs/api/core.md`.
+
+### Changed — MC-Curves-2b: `bootstrap_multi_curve` runs on the joint solver
+
+- `valax/curves/multi_curve.py` no longer contains a solver. The deprecated
+  two-tier entry point translates its input into `CurveSpec`s plus graph
+  instruments and makes a single `bootstrap_curve_graph` call; the sequential
+  OIS-then-tenor pipeline (`_bootstrap_forward_curve`, `_SwapData`,
+  `_pack_swap_data`, `_dual_curve_swap_residuals`) is deleted.
+- The semantic question that deferred this work is resolved by *translation*:
+  a forward-leg `SwapRate` — which the sequential code read as "project on the
+  tenor curve, discount on OIS" — becomes an `IborSwapRate` with
+  `float_dates == fixed_dates` and fixing dates at the period starts, which is
+  exactly the residual the old code computed. Discount-leg and forward-leg
+  deposit/FRA quotes keep their single-curve residual.
+- `MultiCurveSet` is now a **view** over `CurveGraph`: `from_graph` /
+  `to_graph` convert between the shapes without copying or re-solving, so
+  legacy containers can use the graph-aware pricers and shock primitives.
+- New behaviour the sequential path never had: one Newton solve for every
+  curve, and `jax.grad` through the build via `ImplicitAdjoint` — including
+  w.r.t. swap-leg quotes. Curves match an explicit joint-solver build to
+  ≤ 1e-12 (`tests/test_curves/test_multi_curve.py`); all pre-existing
+  multi-curve tests pass unchanged.
+
 ### Added — Hull-White short-rate PDE: Bermudan swaptions and callables (roadmap PR-3)
 
 - `valax/pricing/pde/hull_white.py`: finite-difference pricing under

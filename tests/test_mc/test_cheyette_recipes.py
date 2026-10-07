@@ -128,7 +128,7 @@ class TestFloatingBond:
             payment_dates=pay, fixing_dates=fixings,
             settlement_date=jnp.array(ref_date),
             spread=jnp.array(0.0), face_value=jnp.array(100.0),
-            frequency=1, day_count=_ACT365,
+day_count=_ACT365,
         )
         res = mc_price_dispatch(
             frn, model, MCConfig(n_paths=100_000, n_steps=60),

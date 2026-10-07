@@ -32,6 +32,20 @@ class ConstantVol(eqx.Module):
     vol: Float[Array, ""]
     is_normal: bool = eqx.field(static=True, default=False)
 
-    def __call__(self, *coords: Float[Array, ""]) -> Float[Array, ""]:
-        """Return the constant vol, ignoring any (strike, expiry, tenor) coords."""
+    def __call__(
+        self,
+        *coords: Float[Array, ""],
+        forward: Float[Array, ""] | None = None,
+    ) -> Float[Array, ""]:
+        """Return the constant vol.
+
+        Args:
+            *coords: Ignored ``(strike, expiry[, tenor])`` coordinates.
+            forward: Ignored live forward. Accepted so a flat vol remains a
+                drop-in replacement for a curve-aware smile under the vol-source
+                protocol of :mod:`valax.pricing.analytic.rates_smile`.
+
+        Returns:
+            The constant volatility.
+        """
         return jnp.asarray(self.vol)

@@ -1,10 +1,12 @@
 # Credit Derivatives
 
-!!! warning "Planned — not yet implemented"
-    Credit derivatives (CDS, CDO) are on the VALAX roadmap (Priority P2.4, Tier 3.4).
-    Survival curves, hazard rate bootstrapping, and CDS pricing are prerequisites for
-    the full XVA suite (CVA in particular). The content below documents the intended
-    interface and pricing approach. See the [Roadmap](../roadmap.md) — Priority 2 (Production Pricing Capabilities) and Tier 3.4 (Credit Derivatives).
+!!! warning "Partially implemented — instrument pricers on the roadmap"
+    The **survival / hazard-rate curve** bootstrapped from CDS spreads is implemented
+    (`valax.curves.survival` — `from_cds_spreads`, `from_hazard_rates`,
+    `SurvivalCurve`). The standalone **CDS and CDO-tranche pricers** documented below
+    are still on the roadmap (Priority P2.4, Tier 3.4) — prerequisites for the full
+    XVA suite (CVA in particular). The instrument pytrees exist; the sections below
+    document the intended pricing approach. See the [Roadmap](../roadmap.md).
 
 Credit derivatives transfer **credit risk** — the risk that a borrower defaults —
 between counterparties without transferring the underlying debt instrument.
@@ -63,8 +65,14 @@ where:
 2. **Reduced-form model with stochastic hazard rates.** Required for wrong-way
    risk, CVA, and portfolio credit models where default correlation matters.
 
-See [Analytical Pricing](analytical.md) for the deterministic-rates implementation
-and [Monte Carlo](monte-carlo.md) for stochastic hazard rate simulation.
+Neither standalone pricer ships yet; both are on the roadmap. What *is* available
+today is `valax.curves.survival.from_cds_spreads`, which turns quoted CDS spreads
+into the `SurvivalCurve` these pricers will consume — but via the closed-form
+credit-triangle approximation `h = s / (1 - R)`, **not** a bootstrap. It performs
+no root-find and never reprices the premium and protection legs, so the resulting
+curve does not exactly reprice its input quotes. A true repricing bootstrap (CDS
+quotes routed through `BootstrapInstrument` / `bootstrap_curve_graph`, as the
+rates quotes are) is on the roadmap and requires the CDS pricer first.
 
 ### Code Example
 
@@ -76,7 +84,7 @@ import jax.numpy as jnp
 cds = CDS(
     effective_date=ymd_to_ordinal(2025, 3, 20),
     maturity_date=ymd_to_ordinal(2030, 3, 20),
-    premium_dates=generate_schedule(2025, 6, 20, 2030, 3, 20, frequency=4),
+    premium_dates=generate_schedule(2025, 6, 20, 2030, 3, 20, frequency=4).payment_dates,
     spread=jnp.array(0.01),       # 100 bps annual spread
     notional=jnp.array(10_000_000.0),
     recovery_rate=jnp.array(0.4), # 40% — market standard for senior unsecured
@@ -154,7 +162,7 @@ import jax.numpy as jnp
 tranche = CDOTranche(
     effective_date=ymd_to_ordinal(2025, 3, 20),
     maturity_date=ymd_to_ordinal(2030, 3, 20),
-    premium_dates=generate_schedule(2025, 6, 20, 2030, 3, 20, frequency=4),
+    premium_dates=generate_schedule(2025, 6, 20, 2030, 3, 20, frequency=4).payment_dates,
     attachment=jnp.array(0.03),     # 3%
     detachment=jnp.array(0.07),     # 7%
     spread=jnp.array(0.05),         # 500 bps running

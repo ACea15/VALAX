@@ -334,6 +334,34 @@ jit_price(option, spot, vol, rate, div)
 
 ## 5. Documentation
 
+Documentation is part of *done*, not a follow-up — stale docs are the failure
+mode this project has already paid for. Two files are the canonical record of
+what VALAX can price and **must never be left inconsistent with the code**:
+
+- **Coverage matrix** — `docs/applications/instrument-pricing.md`: every
+  instrument × pricing method × model input × calibration route × status. The
+  single authoritative instrument→pricer map.
+- **Roadmap** — `docs/roadmap.md`: implemented (`[x]`) vs planned (`[ ]`), each
+  with the implementing symbol.
+
+Status legend (both files): ✅ implemented & tested · 🟡 instrument pytree
+defined but pricer not yet implemented · n-a (no vol input; curve discounting).
+
+**Single-source-of-truth ownership model** — document each instrument,
+derivation, or selling point exactly once and cross-link; never copy a formula,
+example, or status table between pages:
+
+- The **coverage matrix** holds instrument *definitions* + the matrix + theory
+  links — no pricing derivations.
+- **Instrument guides** (`docs/guide/{fixed-income,callable-bonds,rates-exotics,fx,inflation,equity-exotics,credit}.md`)
+  own each instrument's payoff maths and how-to recipe — on exactly one
+  asset-class page.
+- **Solver guides** (`docs/guide/{analytical,monte-carlo,pde,lattice}.md`) own
+  engine mechanics and that engine's model-coverage matrix — link to the
+  instrument guide instead of re-deriving payoffs.
+- **Theory** (`docs/theory/`) owns the maths; **API** (`docs/api/`) is
+  mkdocstrings autodoc of public symbols.
+
 ### 5.1 What goes where
 
 | Type of change | Doc to update |
@@ -343,9 +371,14 @@ jit_price(option, spot, vol, rate, div)
 | New pricing function | `docs/guide/<method>.md` and `docs/api/pricing.md` |
 | New model | `docs/guide/<area>.md` and `docs/api/models.md` |
 | New runnable demo | `examples/` and `docs/examples.md` |
-| Roadmap status change | `docs/roadmap.md` (move from 🟠/🟡 to ✅) |
+| Roadmap status change | `docs/roadmap.md` — flip `[ ]`→`[x]` and name the implementing symbol (🟡 if the pytree exists but the pricer doesn't) |
 | Release-worthy feature | `CHANGELOG.md` under `[Unreleased]` |
 | New MC (instrument, model) recipe | `valax/pricing/mc/recipes.py` + `@register` + test under `tests/test_mc/test_dispatch.py` + coverage-map row in `docs/guide/monte-carlo.md` |
+
+**Document once.** A new instrument is defined in the coverage matrix and
+written up on exactly one asset-class guide; every other page links to it. A
+change that defines an instrument pytree but no pricer is 🟡 (not ✅) in both
+the coverage matrix and the roadmap — mark ✅ only when a tested pricer exists.
 
 ### 5.2 Build docs locally before opening a PR
 
@@ -379,11 +412,15 @@ Before requesting review, confirm:
 - [ ] **Tests** added under `tests/` mirroring the source layout, covering:
   closed-form (if applicable), Greeks vs FD, JIT-compat, and edge cases.
 - [ ] **QuantLib comparison test** added if there's a QL counterpart.
-- [ ] **Docs updated** per §5.1.
+- [ ] **Docs updated** per §5 — documented on exactly one owning page (no
+  duplication), with the **coverage matrix** (`docs/applications/instrument-pricing.md`)
+  adjusted to match the code.
 - [ ] **`mkdocs build --strict`** passes locally.
 - [ ] **`pytest`** passes locally.
 - [ ] **`CHANGELOG.md`** updated under `[Unreleased]`.
-- [ ] **Roadmap entry** updated if this completes a planned item.
+- [ ] **Coverage matrix and roadmap reflect reality** — 🟡 pytree-only vs ✅
+  priced-and-tested; no implemented feature left unchecked, none marked done
+  before its pricer exists.
 - [ ] **Commit messages** follow the existing convention: imperative, descriptive,
   e.g. `Add spread option pricing: Margrabe and Kirk's approximation`.
 

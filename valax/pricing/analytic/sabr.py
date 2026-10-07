@@ -19,6 +19,67 @@ from valax.pricing.analytic.black76 import black76_price
 from valax.pricing.analytic.bachelier import bachelier_price
 
 
+#: Crossover below which :func:`_z_over_x` uses its series rather than the
+#: closed form. Chosen by balancing the two error sources rather than by picking
+#: a small-looking number: the series truncates at order ``z**3``, while the
+#: closed form loses precision like ``eps / z``, because ``x(z) -> z`` makes the
+#: ``log`` and the division cancel. Setting ``z**3 ~ eps / z`` gives
+#: ``z ~ eps**0.25 ~ 1e-4``, where both branches are accurate to about 1e-12.
+_ATM_Z_TOL = 1e-4
+
+
+def _z_over_x(
+    z: Float[Array, ""],
+    rho: Float[Array, ""],
+) -> Float[Array, ""]:
+    r"""The ratio :math:`z / x(z)` of Hagan's expansion, correct at the money.
+
+    .. math::
+
+        x(z) = \log\frac{\sqrt{1 - 2\rho z + z^2} + z - \rho}{1 - \rho},
+        \qquad \frac{z}{x(z)} \xrightarrow[z \to 0]{} 1.
+
+    Both SABR expansions need this ratio, and both hit :math:`z = 0` exactly at
+    the at-the-money strike, where the closed form is :math:`0/0`.
+
+    The obvious guard -- ``jnp.where(|z| < tol, 1.0, z / x(z))`` -- gets the
+    *value* right and the **derivative wrong**. A constant has zero derivative,
+    so differentiating through it discards the whole :math:`z/x` contribution;
+    since :math:`z \propto \log(F/K)`, that silently zeroes part of
+    :math:`\partial\sigma/\partial F` at the money. The error is invisible in
+    prices and fatal to a backbone delta.
+
+    The fix is to switch to the Taylor series rather than to a constant, so both
+    branches are smooth functions of ``z`` that agree to :math:`O(z^3)` *and*
+    have the right slope:
+
+    .. math::
+
+        \frac{z}{x(z)} = 1 - \frac{\rho}{2} z
+                         + \left(\frac{1}{6} - \frac{\rho^2}{4}\right) z^2
+                         + O(z^3).
+
+    The outer ``jnp.where`` still substitutes finite values into the inactive
+    branch, which is what keeps the large-``z`` path from leaking NaN gradients.
+
+    Args:
+        z: Hagan's moneyness variable; zero at the money.
+        rho: SABR correlation.
+
+    Returns:
+        The ratio :math:`z / x(z)`, with correct value and derivatives at and
+        near :math:`z = 0`.
+    """
+    sqrt_term = jnp.sqrt(1.0 - 2.0 * rho * z + z**2)
+    x_z = jnp.log((sqrt_term + z - rho) / (1.0 - rho))
+
+    is_small = jnp.abs(z) < _ATM_Z_TOL
+    safe_z = jnp.where(is_small, 1.0, z)
+    safe_x = jnp.where(is_small, 1.0, x_z)
+    series = 1.0 - 0.5 * rho * z + (1.0 / 6.0 - 0.25 * rho**2) * z**2
+    return jnp.where(is_small, series, safe_z / safe_x)
+
+
 def sabr_implied_vol(
     model: SABRModel,
     forward: Float[Array, ""],
@@ -57,17 +118,9 @@ def sabr_implied_vol(
     # z = (nu / alpha) * FK^((1-beta)/2) * log(F/K)
     z = (nu / alpha) * FK_beta * log_FK
 
-    # x(z) = log((sqrt(1 - 2*rho*z + z^2) + z - rho) / (1 - rho))
-    sqrt_term = jnp.sqrt(1.0 - 2.0 * rho * z + z**2)
-    x_z = jnp.log((sqrt_term + z - rho) / (1.0 - rho))
-
-    # Ratio z/x(z) with autodiff-safe ATM limit (z -> 0 => z/x -> 1).
-    # Use the JAX-safe jnp.where pattern: substitute finite values in the
-    # "inactive" branch to prevent NaN gradients from leaking through.
-    is_small = jnp.abs(z) < 1e-7
-    safe_z = jnp.where(is_small, 1.0, z)
-    safe_x = jnp.where(is_small, 1.0, x_z)
-    z_over_x = jnp.where(is_small, 1.0, safe_z / safe_x)
+    # Ratio z/x(z), series-continued at the money so the *derivatives* are
+    # right there too -- see :func:`_z_over_x`.
+    z_over_x = _z_over_x(z, rho)
 
     # Denominator corrections from the expansion
     # D1 = 1 + (1-beta)^2/24 * log^2(F/K) + (1-beta)^4/1920 * log^4(F/K)
@@ -167,14 +220,10 @@ def sabr_normal_implied_vol(
 
     # z = (nu / alpha) * (FK)^((1-beta)/2) * log(F/K); x(z) as in the paper.
     z = (nu / alpha) * FK_half_beta * log_FK
-    sqrt_term = jnp.sqrt(1.0 - 2.0 * rho * z + z**2)
-    x_z = jnp.log((sqrt_term + z - rho) / (1.0 - rho))
 
-    # z/x(z) with the autodiff-safe ATM limit (z -> 0 => z/x -> 1).
-    is_small = jnp.abs(z) < 1e-7
-    safe_z = jnp.where(is_small, 1.0, z)
-    safe_x = jnp.where(is_small, 1.0, x_z)
-    z_over_x = jnp.where(is_small, 1.0, safe_z / safe_x)
+    # z/x(z), series-continued at the money so the derivatives are right there
+    # too -- see :func:`_z_over_x`.
+    z_over_x = _z_over_x(z, rho)
 
     # Leading factor alpha * (FK)^(beta/2) times the moneyness series ratio.
     # Numerator series has coefficients (1/24, 1/1920); denominator carries the

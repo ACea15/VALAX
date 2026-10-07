@@ -46,8 +46,9 @@ runs path generation + payoff + discounting, and returns an `MCResult`
 (`price`, `stderr`, `n_paths`). Use `float(result)` as a shortcut for
 `float(result.price)`.
 
-VALAX ships with **16 built-in recipes** (10 single-asset equity × GBM/Heston,
-4 rates × LMM, 2 multi-asset × `MultiAssetGBMModel`). See the coverage map
+VALAX ships a broad set of built-in recipes spanning equity (GBM / Heston /
+local-vol / SLV), rates (LMM and the Hull-White / G2++ / Cheyette short-rate
+models), and multi-asset (`MultiAssetGBMModel`) pricing. See the coverage map
 in §2 and the built-in recipe list in the [API reference](../api/pricing.md#built-in-recipes).
 
 To swap the model, just pass a different one:
@@ -113,8 +114,8 @@ not yet wired), 🟠 = needs a new path generator, 🔴 = needs major infra.
 
 | Instrument | MC pricing | Blocker |
 |-----------|:---:|---|
-| `FixedRateBond` / `FloatingRateBond` | ✅ | `HullWhiteModel` |
-| `CallableBond` / `PuttableBond` | ✅ | `HullWhiteModel` (analytic affine continuation value) |
+| `FixedRateBond` / `FloatingRateBond` | ✓ | `HullWhiteModel` |
+| `CallableBond` / `PuttableBond` | ✓ | `HullWhiteModel` (analytic affine continuation value) |
 | `ConvertibleBond` | 🔴 | Equity + rates + credit coupled MC |
 
 Callable and puttable bonds do **not** need a Longstaff-Schwartz regression:
@@ -124,6 +125,52 @@ date. The policy is myopic across multiple exercise dates (it ignores the
 option value of deferring), which makes the MC price an upper bound on the
 trinomial-tree price — see
 `tests/test_mc/test_hull_white_recipes.py::TestTreeTriangulation`.
+
+### Multi-factor short-rate (G2++, Cheyette)
+
+Beyond Hull-White, the MC dispatcher also prices under the two-factor **G2++** and
+the quasi-Gaussian **Cheyette** (1F / 2F) short-rate models — fixed/floating bonds,
+caplets/caps, European swaptions, and CMS-spread swaps — via exact-conditional path
+generators (`generate_g2pp_paths` and the Cheyette path generators). See
+[API: Pricing](../api/pricing.md) for the full registered recipe list and the
+[Calibration](calibration.md) guide for fitting these models.
+
+### Multi-curve: OIS discounting with a separate projection curve
+
+The Hull-White and G2++ rates recipes take two optional market arguments,
+`discount_curve` and `forward_curve`:
+
+```python
+result = mc_price_dispatch(
+    frn, hw_model, MCConfig(n_paths=100_000, n_steps=100), key,
+    discount_curve=ois,          # collateral / OIS discounting
+    forward_curve=sofr_3m,       # tenor curve the coupons project off
+)
+```
+
+Through the unified front door the instrument names its own curves and
+`price(...)` binds them for you:
+
+```python
+frn = FloatingRateBond(..., discount_id="USD.SOFR.OIS", forward_id="USD.LIBOR.3M")
+market = MarketState(
+    curves=CurveGraph(curves={"USD.SOFR.OIS": ois, "USD.LIBOR.3M": sofr_3m})
+)
+result = price(frn, hw_model, market, method="mc", config=config, key=key)
+```
+
+Discounting is honoured by **re-fitting** the exact-fit model to the trade's
+discount curve; projection is the **frozen tenor-basis overlay** — see
+[Multi-Curve Short Rates](../theory/multi-curve-short-rate.md) for the
+derivation and for the one thing it cannot price (basis volatility). Path-wise,
+a floating coupon becomes \(b_i \hat D(0, T_{i-1}) - \hat D(0, T_i)\), whose
+expectation is the analytic dual-curve leg; with every \(b_i = 1\) the sum
+telescopes back to the par-at-reset identity above, so single-curve prices are
+unchanged bit-for-bit.
+
+Both arguments default to `None`. The G2++ CMS-spread recipe rebuilds its par
+swap rates from the model's own bond strip and therefore **raises** on a
+distinct projection curve rather than silently ignoring it.
 
 ### FX / Inflation / Credit
 
@@ -648,7 +695,7 @@ underlying theory.
 - **`vmap` across scenarios.** To reprice an instrument under 1000
   market scenarios, `vmap` the dispatcher over the scenario dimension.
   This is the foundation of the full-reval VaR/ES in
-  [Risk & Scenarios](risk.md).
+  [Scenarios & Shocks](../risk-scenarios.md).
 - **GPU.** Every MC pipeline in VALAX runs on GPU without source
   changes — `jax.config.update("jax_platform_name", "gpu")` or set
   `JAX_PLATFORMS=gpu`. See the [benchmarks page](../benchmarks.md)
@@ -658,6 +705,6 @@ underlying theory.
 
 - [Models & Theory §5.3](../theory/pricing-methods.md#53-monte-carlo-simulation) — risk-neutral expectation, SDE discretization, convergence, variance reduction, pathwise vs. likelihood-ratio Greeks.
 - [Models & Theory §6.3](../theory/greeks.md#63-pathwise-method-for-mc-greeks) — when pathwise differentiation works and when it doesn't.
-- [Greeks via Autodiff](greeks.md) — how `jax.grad` composes with the MC pipeline.
-- [Risk & Scenarios](risk.md) — vmapped MC pricing for VaR / ES.
+- [Greeks & Automatic Differentiation (Theory § 6)](../theory/greeks.md#6-greeks-and-automatic-differentiation) — how `jax.grad` composes with the MC pipeline.
+- [Scenarios & Shocks](../risk-scenarios.md) — vmapped MC pricing for VaR / ES.
 - [Roadmap](../roadmap.md) — execution order for the 🟡 / 🟠 / 🔴 items in the coverage map.

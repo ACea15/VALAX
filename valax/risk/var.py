@@ -24,8 +24,26 @@ swaptions — because the pricing function receives the full market state
 For equity-style pricing functions with signature
 ``(instrument, spot, vol, rate, dividend) -> price``, use
 ``wrap_equity_pricing_fn`` to adapt them.
+
+.. deprecated::
+    This module is the **legacy view**, frozen for one deprecation cycle
+    alongside :class:`~valax.market.data.MarketData` itself.  New code
+    should use :mod:`valax.risk.state_var`, which reprices a
+    :class:`~valax.core.market_state.MarketState` under a
+    :class:`~valax.market.keyed_scenario.KeyedScenario` through the
+    unified :func:`valax.core.pricing.price`, and so measures each named
+    curve of a :class:`~valax.curves.graph.CurveGraph` as a risk factor
+    in its own right.
+
+    The two paths are *not* one implementation behind two signatures, and
+    cannot be: a ``pricing_fn`` here is an opaque callable carrying no
+    model, while ``price`` dispatches on ``(instrument, model, method)``.
+    The bodies below are therefore held at their current behaviour, and
+    ``tests/test_risk/test_state_var.py`` pins the ported path against
+    them for exact equality on a flat single-curve equity book.
 """
 
+import warnings
 from typing import Callable
 
 import jax
@@ -35,6 +53,8 @@ from jax import Array
 
 import equinox as eqx
 
+from valax.curves.discount import DiscountCurve
+from valax.curves.graph import CurveGraph, _DEFAULT_CURVE_ID
 from valax.market.data import MarketData
 from valax.market.scenario import MarketScenario, ScenarioSet
 from valax.risk.shocks import apply_scenario
@@ -54,7 +74,37 @@ def wrap_equity_pricing_fn(fn: Callable) -> Callable:
 
     The scalar risk-free rate is extracted as the shortest-maturity
     zero rate from the discount curve.
+
+    .. deprecated::
+        Bridging into the loose-scalar convention is exactly what the
+        unified front door removes.  Price the group through
+        :mod:`valax.risk.state_var` instead — ``group_pv`` /
+        ``group_reprice`` / ``group_scenario_pnl`` take a
+        :class:`~valax.core.market_state.MarketState` and need no
+        adapter.
+
+        Note the approximation that disappears with the move: the
+        wrapper collapses the whole term structure to
+        :func:`_extract_short_rate`, a single pillar's zero rate, so a
+        wrapped payoff has *structurally zero* sensitivity to every other
+        pillar.  Exact for a flat curve, wrong for a sloped one.
+
+    Args:
+        fn: ``(instrument, spot, vol, rate, dividend) -> price``.
+
+    Returns:
+        The same pricer under the ``(instrument, MarketData) -> price``
+        signature the legacy risk engine takes.
     """
+    warnings.warn(
+        "wrap_equity_pricing_fn is deprecated and will be removed together "
+        "with MarketData. Use valax.risk.state_var (group_pv / "
+        "group_reprice / group_scenario_pnl) on a MarketState, which "
+        "prices through valax.core.price and needs no adapter — and which "
+        "does not collapse the discount curve to a single pillar.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     def wrapped(instrument, market: MarketData) -> Float[Array, ""]:
         rate = _extract_short_rate(market.discount_curve)
@@ -74,6 +124,88 @@ def _extract_short_rate(curve):
     return zero_rates[1] if curve.pillar_dates.shape[0] > 1 else zero_rates[0]
 
 
+# ── Curve-graph handling on the legacy scenario path ─────────────────
+
+
+def _frozen_graph_curves(base: MarketData) -> tuple[str, ...]:
+    """Graph curves an unkeyed ``rate_shocks`` vector cannot address.
+
+    ``MarketScenario.rate_shocks`` carries no curve identity, so
+    :func:`~valax.risk.shocks.apply_scenario` can only move the default
+    (``"_default_"`` sentinel) curve.  Every other curve on the graph is
+    held fixed, and any risk to it is therefore *not measured* by this
+    scenario.
+
+    Args:
+        base: Base market state.
+
+    Returns:
+        The sorted identifiers of the curves held fixed; empty when the
+        market is single-curve or its graph holds only the sentinel.
+    """
+    if base.curve_graph is None:
+        return ()
+    return tuple(
+        sorted(cid for cid in base.curve_graph.keys() if cid != _DEFAULT_CURVE_ID)
+    )
+
+
+def _warn_frozen_graph_curves(base: MarketData, caller: str) -> None:
+    """Warn that named graph curves are held fixed by a legacy scenario.
+
+    Called at the user boundary (pre-trace) so a dual-curve book cannot
+    get an under-measured number *silently*.  The graph itself is always
+    threaded through to the pricer — it is the per-curve *shock* that the
+    unkeyed vector cannot express, not the curve data.
+
+    Args:
+        base: Base market state.
+        caller: Name of the calling entry point, quoted in the message.
+    """
+    frozen = _frozen_graph_curves(base)
+    if not frozen:
+        return
+    warnings.warn(
+        f"{caller}: MarketScenario.rate_shocks carries no curve identity, "
+        f"so graph curves {list(frozen)} are held fixed and their risk is "
+        f"not measured (only the '{_DEFAULT_CURVE_ID}' curve moves). Use "
+        f"valax.risk.shock(market_state, KeyedScenario(curve_shocks={{...}})) "
+        f"for per-curve moves, or valax.risk.bump_graph_curve directly.",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
+def _graph_with_perturbed_default(
+    base: MarketData,
+    curve: DiscountCurve,
+) -> CurveGraph | None:
+    """Rebuild ``base.curve_graph`` around a perturbed default curve.
+
+    The Taylor / delta-normal paths differentiate a flat factor layout
+    ``[spots, vols, rates, dividends]`` whose single rate block is the
+    default curve's pillars.  The graph must therefore see *the same*
+    perturbed curve under the sentinel, otherwise a pricer that resolves
+    curves from the graph would be differentiated against an unperturbed
+    curve — zero rate risk, reported as if measured.
+
+    Args:
+        base: Base market state (supplies the graph to rebuild).
+        curve: The perturbed default :class:`DiscountCurve`.
+
+    Returns:
+        ``None`` when the market carries no graph, else a new
+        :class:`~valax.curves.graph.CurveGraph`.
+    """
+    if base.curve_graph is None:
+        return None
+    if _DEFAULT_CURVE_ID not in base.curve_graph:
+        return base.curve_graph
+    new_curves = dict(base.curve_graph.curves)
+    new_curves[_DEFAULT_CURVE_ID] = curve
+    return CurveGraph(curves=new_curves)
+
+
 # ── Full-revaluation repricing ───────────────────────────────────────
 
 
@@ -91,12 +223,19 @@ def reprice_under_scenario(
     The ``pricing_fn`` must have signature
     ``(instrument, market: MarketData) -> price``.
     It receives the full shocked ``MarketData`` including the complete
-    discount curve, so it works for any instrument type.
+    discount curve **and the optional ``curve_graph``**, so it works for
+    any instrument type, dual-curve pricers included.
 
     For equity-style functions, wrap them first::
 
         from valax.risk.var import wrap_equity_pricing_fn
         market_fn = wrap_equity_pricing_fn(black_scholes_price)
+
+    Both the wrapper and this entry point are the legacy view; the
+    ported equivalent needs neither::
+
+        from valax.risk import group_reprice
+        pv = group_reprice(instruments, model, market_state, scenario)
 
     Args:
         pricing_fn: ``(instrument, MarketData) -> price``.
@@ -106,17 +245,29 @@ def reprice_under_scenario(
 
     Returns:
         Portfolio value (sum of individual prices).
+
+    Warns:
+        UserWarning: If ``base.curve_graph`` holds curves other than the
+            ``"_default_"`` sentinel.  They are threaded through to the
+            pricer but held *fixed*, because an unkeyed
+            ``MarketScenario.rate_shocks`` vector cannot say which curve
+            it means; their risk is therefore not measured.  Use
+            :func:`valax.risk.state_shocks.shock` for per-curve moves.
     """
+    _warn_frozen_graph_curves(base, "reprice_under_scenario")
     shocked = apply_scenario(base, scenario)
 
     # vmap over instruments AND per-asset market data (spot, vol, dividend),
-    # while sharing the discount curve across all instruments.
+    # while sharing the discount curve *and the curve graph* across all
+    # instruments.  Dropping the graph here would silently reprice a
+    # dual-curve book single-curve.
     def _price_one(inst, spot, vol, div):
         per_inst_market = MarketData(
             spots=spot,
             vols=vol,
             dividends=div,
             discount_curve=shocked.discount_curve,
+            curve_graph=shocked.curve_graph,
         )
         return pricing_fn(inst, per_inst_market)
 
@@ -199,15 +350,27 @@ def parametric_var(
 
     Returns:
         Parametric VaR (positive = loss threshold).
+
+    Warns:
+        UserWarning: If ``base.curve_graph`` holds curves other than the
+            ``"_default_"`` sentinel.  The graph is threaded through to
+            the pricer (and its sentinel curve is the differentiated one),
+            but the flat factor layout above has exactly one rate block,
+            so named projection / basis curves contribute no delta and
+            their risk is not in the number.
     """
+    _warn_frozen_graph_curves(base, "parametric_var")
+
     def portfolio_value(spots, vols, dfs, dividends):
         curve = eqx.tree_at(
             lambda c: c.discount_factors, base.discount_curve, dfs,
         )
+        graph = _graph_with_perturbed_default(base, curve)
 
         def _price_one(inst, spot, vol, div):
             per_inst_market = MarketData(
                 spots=spot, vols=vol, dividends=div, discount_curve=curve,
+                curve_graph=graph,
             )
             return pricing_fn(inst, per_inst_market)
 
@@ -280,15 +443,25 @@ def pnl_attribution(
 
     Returns:
         Dict with attribution components.
+
+    Warns:
+        UserWarning: If ``base.curve_graph`` holds curves other than the
+            ``"_default_"`` sentinel — the ``delta_rate`` rung covers the
+            sentinel curve only, so moves of a named curve would land in
+            ``unexplained`` rather than in a rung of their own.
     """
+    _warn_frozen_graph_curves(base, "pnl_attribution")
+
     def portfolio_value_from_factors(spots, vols, dfs, dividends):
         curve = eqx.tree_at(
             lambda c: c.discount_factors, base.discount_curve, dfs,
         )
+        graph = _graph_with_perturbed_default(base, curve)
 
         def _price_one(inst, spot, vol, div):
             per_inst_market = MarketData(
                 spots=spot, vols=vol, dividends=div, discount_curve=curve,
+                curve_graph=graph,
             )
             return pricing_fn(inst, per_inst_market)
 

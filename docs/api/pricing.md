@@ -5,6 +5,14 @@ take an instrument and market inputs and return a scalar JAX array.
 This is the shape that `jax.grad`, `jax.jit`, and `jax.vmap` expect —
 Greeks, batch pricing, and calibration all compose out of the box.
 
+!!! tip "One call convention over all of them"
+    Every pricer on this page is also reachable through the unified
+    [`price(instrument, model, market, method=...)`](core.md) entry point,
+    which binds an instrument's curve/underlying selectors against a
+    [`MarketState`](core.md#marketstate) and picks a method for you. The
+    explicit signatures below remain the primary API; the unified one is
+    what portfolio, risk, and multi-method comparison code should use.
+
 ## Analytical (closed-form)
 
 ### Equity vanillas
@@ -127,9 +135,11 @@ the price is an exact **one-dimensional integral** over the first factor with a
 Jamshidian-style critical boundary on the second, evaluated by Gauss–Hermite
 quadrature. See [G2++: Two-Factor Gaussian](../theory/g2pp.md#3-european-swaptions-brigomercurio-integral).
 
-Discounting is taken from `model.initial_curve`. The `forward_curve` argument is
-reserved for a future deterministic-basis dual-curve extension and must be
-`None` (single-curve).
+Discounting is taken from `model.initial_curve`. The `forward_curve` argument on
+this *analytic* pricer is reserved for a future extension and must be `None`;
+for a dual-curve G2++ swaption today, use the PDE or MC recipe, which implement
+the deterministic tenor basis of
+[`valax.pricing.multicurve`](#multi-curve-overlay-for-the-short-rate-solvers).
 
 ::: valax.pricing.analytic.g2pp_swaption_price
 
@@ -324,6 +334,11 @@ Rates (short-rate, exact conditional simulation):
   `(Swaption, G2PPModel)`
 - `(CMSSpreadSwap, G2PPModel)` — decorrelation-sensitive steepener/flattener;
   both CMS rates are computed analytically per path from the G2++ affine ZCB.
+- `(FixedRateBond, CheyetteModel)`, `(FloatingRateBond, CheyetteModel)`,
+  `(Caplet, CheyetteModel)`, `(Cap, CheyetteModel)`, `(Swaption, CheyetteModel)`
+  — the skew-sensitive vanillas that motivate the Cheyette local volatility.
+- `(FixedRateBond, CheyetteModel2F)`, `(FloatingRateBond, CheyetteModel2F)`,
+  `(CMSSpreadSwap, CheyetteModel2F)`.
 
 ### Legacy entry points
 
@@ -467,9 +482,13 @@ recipes) if the pair is unregistered.
 
 Interest-rate instruments under `HullWhiteModel`, solved in the centred state
 variable \(x\) of \(r(t) = x(t) + \alpha(t)\). Recipes are registered for
-`FixedRateBond`, `CallableBond`, `PuttableBond`, `Swaption` and
-`BermudanSwaption`, and are reached through `pde_price_dispatch` like any other
-pair. See the theory note
+`FixedRateBond`, `CallableBond`, `PuttableBond`, `Caplet`, `Cap` (the `is_cap`
+flag selects cap vs floor), `Swaption` and `BermudanSwaption`, and are reached
+through `pde_price_dispatch` like any other pair. A caplet prices as a European
+option on the accrual-end zero-coupon bond; a cap/floor prices in a single
+backward sweep with each caplet's fixing-date value injected at its fixing
+level (see the [shared payoff layer](#shared-rates-payoff-layer)). See the
+theory note
 [Hull-White Finite Differences](../theory/hull-white-pde.md) for the
 discretisation, boundary treatment and validation.
 
@@ -493,14 +512,157 @@ The cross term \(\rho\sigma\eta\, V_{xy}\) — the source of tenor decorrelation
 is handled as a constant mixed operator exactly as Heston's is; the deterministic
 shift \(\varphi(t)\) is factored out and applied as an exact per-step scalar
 discount so the scheme preserves the initial-curve fit. Recipes are registered
-for `FixedRateBond`, `Swaption` and the headline `BermudanSwaption`, reached
-through `pde_price_dispatch` like any other pair. See the theory note
+for `FixedRateBond`, `Caplet`, `Cap`, `CallableBond`, `PuttableBond`,
+`Swaption` and the headline `BermudanSwaption`, reached through
+`pde_price_dispatch` like any other pair — the callable/puttable and caplet/cap
+payoffs reuse the [shared payoff layer](#shared-rates-payoff-layer) on the 2-D
+ADI grid. See the theory note
 [G2++ PDE](../theory/g2pp.md#8-pde-2-d-finite-differences) for the
 discretisation, boundary treatment and validation.
 
 ::: valax.pricing.pde.coefficients.g2pp_operator_2d
 
 ::: valax.pricing.pde.boundary.apply_linearity_bc_2d
+
+### Cheyette quasi-Gaussian short-rate PDE
+
+The Cheyette (quasi-Gaussian) model priced on the same short-rate substrate, in
+two tiers. **Tier 1 (frozen-\(y\), production)** freezes the accumulator to its
+Gaussian-limit value \(\bar y(t)\), so one factor is a 1-D PDE and two factors a
+2-D ADI PDE reusing the Hull–White / G2++ machinery — the only new ingredient is
+a *spatially-varying* diffusion \(\tfrac12\sigma^2(1+\beta(\tilde x + m))^2\)
+carrying the skew. Recipes are registered for `FixedRateBond`, `Caplet`, `Cap`,
+`Swaption`, `BermudanSwaption`, `CallableBond` and `PuttableBond` on **both**
+factors, reached through `pde_price_dispatch`. A caplet strike slice is the
+natural skew-\(\beta\) identification instrument for the PDE-based calibrator.
+**Tier 2 (exact-\(y\), one factor)** carries the accumulator as a real
+advection axis (`cheyette_exact_price`, which also supports a `Caplet`) for a
+bias-free, zero-Monte-Carlo-noise measurement of the frozen-\(y\) error. See
+the theory note [Cheyette §8 PDE](../theory/cheyette.md#8-pde-finite-differences).
+
+::: valax.pricing.pde.cheyette.cheyette_operator_stack
+
+::: valax.pricing.pde.cheyette.cheyette_operator_2d
+
+::: valax.pricing.pde.cheyette.cheyette_exact_price
+
+### Shared rates payoff layer
+
+The Hull–White, G2++ and Cheyette short-rate PDE recipes all price the same
+family of vanilla-rates payoffs — coupon bonds, swaps, caplets/caps, callable
+exercise — and the payoff arithmetic is model-agnostic: it needs only the
+model's affine bond value at the grid nodes plus the instrument schedule.
+`valax.pricing.pde.rates_payoffs` holds that backbone once; each recipe passes
+two thin closures (a coupon-portfolio valuer and a single-`P(t,T)` valuer over
+its grid) and reuses the shared swap-tail, coupon-injection, caplet-payoff and
+exercise-projection builders. This is what keeps the three modules DRY and made
+the caplet/cap/floor and two-factor callable/puttable recipes cheap to add.
+
+::: valax.pricing.pde.rates_payoffs.swap_tail_values
+
+::: valax.pricing.pde.rates_payoffs.coupon_values_by_level
+
+::: valax.pricing.pde.rates_payoffs.caplet_fixing_values
+
+::: valax.pricing.pde.rates_payoffs.caplet_values_by_level
+
+::: valax.pricing.pde.rates_payoffs.exercise_obstacle_by_level
+
+::: valax.pricing.pde.rates_payoffs.exercisable_terminal_and_event
+
+## Multi-curve overlay for the short-rate solvers
+
+Hull–White and G2++ are exact-fit-to-*one*-curve models, so multi-curve pricing
+(OIS discounting with a distinct projection curve) needs a modelling decision
+rather than plumbing. `valax.pricing.multicurve` holds that decision once: the
+discount curve is honoured by **re-fitting** the model to it, and projection by
+a **frozen multiplicative tenor basis** read off the two curves. Both are
+supplied to the recipes as the optional `discount_curve` / `forward_curve`
+market arguments, automatically from an instrument's `discount_id` /
+`forward_id` selectors when going through
+[`price`](core.md#the-unified-signature).
+
+`None` is the single-curve case throughout, and is a *trace-time* branch rather
+than a multiplication by one, so single-curve prices are unchanged
+bit-for-bit. See [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md)
+for the derivation and the limits of the approximation (no basis volatility).
+
+::: valax.pricing.multicurve.with_discount_curve
+
+::: valax.pricing.multicurve.tenor_basis
+
+::: valax.pricing.multicurve.swap_leg_basis
+
+::: valax.pricing.multicurve.apply_swap_basis
+
+::: valax.pricing.multicurve.require_single_curve
+
+## Cross-engine reconciliation
+
+`price_all_engines` runs whichever of the analytic / PDE / MC / QuantLib
+engines has a recipe for a given `(instrument, model)` and returns them in one
+table with absolute/relative differences against a reference engine. Engines
+are best-effort: a missing recipe (e.g. Hull–White caplet MC) or an absent
+optional dependency (QuantLib) is omitted rather than raising, so the same call
+spans the whole short-rate instrument matrix. It underpins the validation
+triangulation used across the tests and the `examples/comparisons/` scripts.
+
+::: valax.pricing.reconcile.price_all_engines
+
+::: valax.pricing.reconcile.ReconciliationTable
+
+::: valax.pricing.reconcile.EngineQuote
+
+## Short-rate engine coverage matrix
+
+Which numerical engines can price each vanilla-rates instrument under each
+short-rate model. **A** = analytic (closed form), **P** = finite-difference
+PDE, **M** = Monte Carlo, **Q** = QuantLib comparison available.
+
+| Instrument                       | Hull–White | G2++      | Cheyette 1F | Cheyette 2F |
+|----------------------------------|------------|-----------|-------------|-------------|
+| Fixed-rate bond                  | A P M      | A P M     | P M         | P M         |
+| Floating-rate note               | A M        | A M       | M           | M           |
+| Caplet / floorlet                | A P (Q)    | P         | P M         | P           |
+| Cap / floor                      | A P Q      | P         | P M         | P           |
+| European swaption                | A P M Q    | A P M Q   | P M         | P           |
+| Bermudan swaption                | P M Q      | P M Q     | P           | P           |
+| Callable / puttable bond         | P M Q      | P         | P           | P           |
+| CMS-spread swap                  | —          | P M       | —           | P M         |
+
+**Multi-curve.** The Hull–White and G2++ engines accept a trade's own
+`discount_curve` and `forward_curve` (see
+[the overlay above](#multi-curve-overlay-for-the-short-rate-solvers)); the
+Cheyette engines and the CMS-spread recipes are single-curve and reject a
+distinct projection curve rather than ignoring it.
+
+Notes: the Cheyette PDE is the frozen-\(y\) production engine; the one-factor
+exact-\(y\) PDE (`cheyette_exact_price`) additionally prices the fixed-rate
+bond, European swaption and caplet for a bias-free cross-check. There is no
+QuantLib Cheyette engine, so Cheyette is validated by reduction to Hull–White /
+G2++ at \(\beta = 0\) and against its own Monte-Carlo engine.
+
+### Why some instruments are MC-only
+
+A handful of instruments are deliberately **not** on the PDE (they stay
+Monte-Carlo-only), each for a structural reason rather than an omission:
+
+- **LMM (LIBOR Market Model)** — the state is the whole vector of forward
+  rates (one dimension per tenor), so there is no low-dimensional PDE; LMM is
+  intrinsically a simulation model.
+- **Range accruals** — the coupon depends on the *fraction of days* the index
+  spends in a band, a path-functional that a low-dimensional backward PDE
+  cannot carry without an extra occupation-time state.
+- **CMS in arrears / averaging** — the payoff observes a swap rate off its
+  natural measure with a path-average or timing shift; the convexity/timing
+  adjustment is naturally a simulation (or static-replication) quantity.
+- **Total-return and cross-currency swaps** — these carry an equity/FX (and,
+  for XCCY, a second-currency curve) factor on top of rates, pushing the PDE
+  dimension past what the short-rate substrate targets.
+- **Five-dimensional exact-\(y\) two-factor Cheyette** — the exact accumulator
+  is a \(2\times2\) symmetric matrix, giving a 5-D PDE; logged as out of scope
+  in `docs/research-ideas.md`. The frozen-\(y\) 2-D ADI PDE covers the
+  two-factor case in production.
 
 ## Lattice
 

@@ -37,7 +37,14 @@ def _interp1d_along_axis(
     Equivalent to ``jnp.interp(query, grid, values)`` but written with the
     explicit ``searchsorted`` + clamp pattern so it composes cleanly with
     the 2-D version below.
+
+    A single-point axis is flat everywhere: there is no bracketing interval to
+    blend across, and the generic path would divide by ``grid[0] - grid[0]``.
+    The branch is on a *shape*, so it is resolved at trace time.
     """
+    if grid.shape[0] == 1:
+        return values[0]
+
     q = jnp.clip(query, grid[0], grid[-1])
     idx = jnp.searchsorted(grid, q, side="right") - 1
     idx = jnp.clip(idx, 0, grid.shape[0] - 2)
@@ -62,7 +69,14 @@ def _interp1d_each_row(
     Equivalent to ``vmap(lambda row: jnp.interp(query, grid, row))(values)``
     but written without a vmap so the partial result is a plain array
     indexable column slice — slightly faster under jit than a vmap.
+
+    A single-column grid is flat along ``x`` (see
+    :func:`_interp1d_along_axis`); the branch is on a shape and so is resolved
+    at trace time.
     """
+    if grid.shape[0] == 1:
+        return values[:, 0]
+
     q = jnp.clip(query, grid[0], grid[-1])
     idx = jnp.searchsorted(grid, q, side="right") - 1
     idx = jnp.clip(idx, 0, grid.shape[0] - 2)
@@ -105,6 +119,10 @@ def bilinear_2d(
 
     Notes:
         * Queries outside the grid bounds are clamped (flat extrapolation).
+        * A degenerate axis of length 1 is flat along that axis rather than
+          NaN: there is no interval to blend across. This matters for a
+          single-node swaption cube (one expiry and/or one tenor), which is a
+          legitimate thing to calibrate.
         * Autodiff-clean: no ``where`` on raw zeros, no ``cond``.
     """
     row_at_x = _interp1d_each_row(values, x_grid, x_query)

@@ -9,6 +9,8 @@ import jax
 import jax.numpy as jnp
 import equinox as eqx
 import pytest
+from jaxtyping import Float
+from jax import Array
 
 from valax.instruments.rates import Caplet, Cap, Swaption
 from valax.curves.discount import DiscountCurve
@@ -17,16 +19,23 @@ from valax.dates.schedule import generate_schedule
 from valax.models.sabr import SABRModel
 
 from valax.pricing.analytic.swaptions import (
+    swaption_forward_and_annuity,
     swaption_price_black76,
     swaption_price_bachelier,
 )
-from valax.pricing.analytic.caplets import caplet_price_black76, cap_price_black76
+from valax.pricing.analytic.caplets import (
+    caplet_forward,
+    cap_forwards,
+    caplet_price_black76,
+    cap_price_black76,
+)
 from valax.pricing.analytic.rates_smile import (
     swaption_price,
     caplet_price,
     cap_price,
 )
 from valax.surfaces import SwaptionCube, OptionletVolSurface, ConstantVol
+from valax.surfaces.shifted import ShiftedVolSurface
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -57,7 +66,7 @@ def flat_curve(ref_date):
 def payer_swaption(ref_date):
     """1y x 5y payer swaption."""
     expiry = ymd_to_ordinal(2026, 1, 1)
-    fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1)
+    fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1).payment_dates
     return Swaption(
         expiry_date=expiry,
         fixed_dates=fixed_dates,
@@ -208,6 +217,149 @@ class TestSmileSources:
         got = caplet_price(caplet_3m6m, flat_curve, surf)
         want = caplet_price_black76(caplet_3m6m, flat_curve, v)
         assert float(got) == float(want)
+
+
+# ── The vol-source protocol passes the live forward (spec V-1) ────────
+
+class _ForwardProbe(eqx.Module):
+    """Vol source whose quote is ``base + forward``.
+
+    Makes the forward the pricers hand in observable *through the price*
+    rather than through a Python side effect, so the assertion still holds
+    under ``vmap`` (the cap strip) and inside ``jit``.
+    """
+
+    base: Float[Array, ""]
+    is_normal: bool = eqx.field(static=True, default=False)
+
+    def __call__(self, *coords, forward=None):
+        if forward is None:
+            raise AssertionError(
+                "vol source was queried without the live forward; the "
+                "curve-aware protocol requires forward=..."
+            )
+        return self.base + forward
+
+
+@pytest.fixture
+def steep_forward_curve(ref_date):
+    """A projection curve distinctly above the discount curve."""
+    pillars = jnp.array([
+        int(ymd_to_ordinal(2025, 1, 1)),
+        int(ymd_to_ordinal(2026, 1, 1)),
+        int(ymd_to_ordinal(2027, 1, 1)),
+        int(ymd_to_ordinal(2028, 1, 1)),
+        int(ymd_to_ordinal(2029, 1, 1)),
+        int(ymd_to_ordinal(2030, 1, 1)),
+        int(ymd_to_ordinal(2032, 1, 1)),
+        int(ymd_to_ordinal(2035, 1, 1)),
+    ], dtype=jnp.int32)
+    times = (pillars - int(ref_date)).astype(jnp.float64) / 365.0
+    dfs = jnp.exp(-(0.03 + 0.004 + 0.002 * times) * times)
+    return DiscountCurve(
+        pillar_dates=pillars, discount_factors=dfs, reference_date=ref_date
+    )
+
+
+class TestVolSourceProtocol:
+    """Every pricer must query the source at the forward it prices with."""
+
+    def test_swaption_source_sees_the_forward_par_swap_rate(
+        self, payer_swaption, flat_curve
+    ):
+        S, ann = swaption_forward_and_annuity(payer_swaption, flat_curve)
+        got = swaption_price(payer_swaption, flat_curve, _ForwardProbe(jnp.array(0.20)))
+        want = swaption_price_black76(payer_swaption, flat_curve, 0.20 + S)
+        assert float(got) == float(want)
+        # And the probe genuinely moved the vol, so the test has teeth.
+        assert float(S) > 1e-3
+
+    def test_swaption_source_sees_the_dual_curve_forward(
+        self, payer_swaption, flat_curve, steep_forward_curve
+    ):
+        S, _ = swaption_forward_and_annuity(
+            payer_swaption, flat_curve, steep_forward_curve
+        )
+        S_single, _ = swaption_forward_and_annuity(payer_swaption, flat_curve)
+        # The basis must actually change the forward handed to the source.
+        assert abs(float(S) - float(S_single)) > 1e-4
+        got = swaption_price(
+            payer_swaption, flat_curve,
+            _ForwardProbe(jnp.array(0.20)), steep_forward_curve,
+        )
+        want = swaption_price_black76(
+            payer_swaption, flat_curve, 0.20 + S, steep_forward_curve
+        )
+        assert float(got) == float(want)
+
+    def test_caplet_source_sees_the_period_forward(self, caplet_3m6m, flat_curve):
+        F = caplet_forward(caplet_3m6m, flat_curve)
+        got = caplet_price(caplet_3m6m, flat_curve, _ForwardProbe(jnp.array(0.25)))
+        want = caplet_price_black76(caplet_3m6m, flat_curve, 0.25 + F)
+        assert float(got) == float(want)
+
+    def test_cap_source_sees_each_periods_own_forward(self, cap_2y, flat_curve):
+        F = cap_forwards(cap_2y, flat_curve)
+        got = cap_price(cap_2y, flat_curve, _ForwardProbe(jnp.array(0.25)))
+        want = cap_price_black76(cap_2y, flat_curve, 0.25 + F)
+        assert abs(float(got) - float(want)) < 1e-9
+
+    def test_forward_helpers_match_the_pricers_own_projection(
+        self, caplet_3m6m, cap_2y, flat_curve, steep_forward_curve
+    ):
+        # Supplying the helper's forward explicitly must be a no-op against
+        # letting the pricer project it itself.
+        F = caplet_forward(caplet_3m6m, flat_curve, steep_forward_curve)
+        a = caplet_price_black76(
+            caplet_3m6m, flat_curve, jnp.array(0.25), steep_forward_curve
+        )
+        b = caplet_price_black76(
+            caplet_3m6m, flat_curve, jnp.array(0.25), steep_forward_curve,
+            forward=F,
+        )
+        assert float(a) == float(b)
+
+        Fs = cap_forwards(cap_2y, flat_curve, steep_forward_curve)
+        c = cap_price_black76(
+            cap_2y, flat_curve, jnp.array(0.25), steep_forward_curve
+        )
+        d = cap_price_black76(
+            cap_2y, flat_curve, jnp.array(0.25), steep_forward_curve,
+            forwards=Fs,
+        )
+        assert float(c) == float(d)
+
+    def test_shifted_surface_passes_the_forward_through(
+        self, payer_swaption, flat_curve
+    ):
+        probe = _ForwardProbe(jnp.array(0.20))
+        shifted = ShiftedVolSurface(base=probe, shift=jnp.array(0.01))
+        S, _ = swaption_forward_and_annuity(payer_swaption, flat_curve)
+        got = swaption_price(payer_swaption, flat_curve, shifted)
+        want = swaption_price_black76(payer_swaption, flat_curve, 0.21 + S)
+        assert float(got) == float(want)
+
+    def test_cube_and_surface_accept_but_ignore_the_forward(self, flat_curve):
+        # Task-6 contract: the default sticky-absolute-strike convention reads
+        # the stored forward, so passing a live one must not change the quote.
+        cube = _lognormal_cube()
+        a = cube(jnp.array(0.03), jnp.array(1.0), jnp.array(5.0))
+        b = cube(
+            jnp.array(0.03), jnp.array(1.0), jnp.array(5.0),
+            forward=jnp.array(0.055),
+        )
+        assert float(a) == float(b)
+
+        surf = _lognormal_optionlet_surface()
+        c = surf(jnp.array(0.03), jnp.array(1.0))
+        d = surf(jnp.array(0.03), jnp.array(1.0), forward=jnp.array(0.055))
+        assert float(c) == float(d)
+
+    def test_probe_price_is_jittable(self, payer_swaption, flat_curve):
+        price = eqx.filter_jit(swaption_price)(
+            payer_swaption, flat_curve, _ForwardProbe(jnp.array(0.20))
+        )
+        assert jnp.isfinite(price)
 
 
 class TestJit:

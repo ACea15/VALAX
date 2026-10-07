@@ -7,16 +7,16 @@ Because the entire solve is written in JAX, prices are differentiable
 end-to-end: **Greeks come from `jax.grad` through the solver**, never from
 bumping.
 
-!!! note "What ships today vs. the multivariate design"
-    The **1-D European Black–Scholes** solver described in
-    [§1–§4](#1-the-black-scholes-pde) is available now via
-    `valax.pricing.pde.pde_price`. The **multivariate subsystem** (2-D ADI,
-    early exercise, dispatch across models/instruments) described from
-    [§5](#5-the-multivariate-subsystem) onward is a design specification —
-    the interface below is the intended API and is being delivered in phases.
-    See the [PDE design doc](../architecture/pde-design.md) for the full
-    architecture and [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences) for
-    the math.
+!!! note "What ships today"
+    Beyond the **1-D European Black–Scholes** solver of [§1–§4](#1-the-black-scholes-pde)
+    (`valax.pricing.pde.pde_price`), most of the **multivariate subsystem** now ships
+    through `pde_price_dispatch`: 1-D equity (European / American / Digital / Barrier
+    under Black–Scholes, European under local vol), 2-D Heston European (ADI), and the
+    full short-rate PDE (Hull-White / G2++ / Cheyette across bonds, caps, swaptions,
+    Bermudans and CMS-spread; §5.6). The remaining 2-D items (American Heston, SLV,
+    spread) are in progress — see the per-row status in the §5.2 coverage matrix and
+    the [PDE design doc](../architecture/pde-design.md) and
+    [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences) for the math.
 
 ## 1. The Black-Scholes PDE
 
@@ -97,10 +97,12 @@ gamma = jax.grad(jax.grad(lambda s: pde_price(option, s, vol, rate, div, config)
 
 ## 5. The multivariate subsystem
 
-!!! warning "Design-stage interface"
-    Everything from here on describes the **intended** API of the multivariate
-    PDE package. Signatures are illustrative and subject to revision during
-    implementation. Track status in the [design doc](../architecture/pde-design.md#10-delivery-phases).
+!!! note "Mostly shipped — a few 2-D rows still in progress"
+    Most of the multivariate subsystem below ships today via `pde_price_dispatch`
+    (see the per-row status in the [coverage matrix](#52-coverage-matrix)). A few
+    2-D rows — American Heston, SLV, and spread options — remain in progress and
+    their signatures may still change. Track status in the
+    [design doc](../architecture/pde-design.md#10-delivery-phases).
 
 The multivariate subsystem generalises the 1-D solver along three axes:
 
@@ -126,21 +128,27 @@ price = float(result)          # PDEResult unwraps to a scalar
 available recipes if the pair is not registered — identical ergonomics to the
 MC dispatcher.
 
-### 5.2 Coverage matrix (target)
+### 5.2 Coverage matrix
 
-| Instrument | Model | Dimension | Scheme | Exercise | Cross-checked against |
-|---|---|---|---|---|---|
-| `EuropeanOption` | `BlackScholesModel` | 1-D | Crank–Nicolson | European | analytic BS |
-| `AmericanOption` | `BlackScholesModel` | 1-D | CN + penalty | American | binomial (`american=True`) |
-| `DigitalOption` | `BlackScholesModel` | 1-D | CN + Rannacher | European | tight call-spread proxy |
-| `EquityBarrierOption` | `BlackScholesModel` | 1-D | CN + absorbing BC | European | MC within `2·stderr` |
-| `EuropeanOption` | `HestonModel` | 2-D `(S,v)` | ADI (Craig–Sneyd) | European | Heston COS, QuantLib FD |
-| `AmericanOption` | `HestonModel` | 2-D `(S,v)` | ADI + penalty | American | MC / QuantLib FD |
-| `EuropeanOption` | `LocalVolModel` | 1-D | CN | European | Dupire MC |
-| `EuropeanOption` | `SLVModel` | 2-D `(S,v)` | ADI | European | SLV MC |
-| `SpreadOption` | `MultiAssetGBMModel` | 2-D `(S₁,S₂)` | ADI | European | Margrabe / Kirk |
-| `CallableBond` | `HullWhiteModel` | 1-D `r` | CN + projection | Bermudan | Hull–White tree |
-| `PuttableBond` | `HullWhiteModel` | 1-D `r` | CN + projection | Bermudan | Hull–White tree |
+Status: ✅ shipped via `pde_price_dispatch` · 🟡 in progress (design-stage).
+
+| Instrument | Model | Dimension | Scheme | Exercise | Status | Cross-checked against |
+|---|---|---|---|---|:---:|---|
+| `EuropeanOption` | `BlackScholesModel` | 1-D | Crank–Nicolson | European | ✅ | analytic BS |
+| `AmericanOption` | `BlackScholesModel` | 1-D | CN + penalty | American | ✅ | binomial (`american=True`) |
+| `DigitalOption` | `BlackScholesModel` | 1-D | CN + Rannacher | European | ✅ | tight call-spread proxy |
+| `EquityBarrierOption` | `BlackScholesModel` | 1-D | CN + absorbing BC | European | ✅ | MC within `2·stderr` |
+| `EuropeanOption` | `HestonModel` | 2-D `(S,v)` | ADI (Craig–Sneyd) | European | ✅ | Heston COS, QuantLib FD |
+| `AmericanOption` | `HestonModel` | 2-D `(S,v)` | ADI + penalty | American | 🟡 | MC / QuantLib FD |
+| `EuropeanOption` | `LocalVolModel` | 1-D | CN | European | ✅ | Dupire MC |
+| `EuropeanOption` | `SLVModel` | 2-D `(S,v)` | ADI | European | 🟡 | SLV MC |
+| `SpreadOption` | `MultiAssetGBMModel` | 2-D `(S₁,S₂)` | ADI | European | 🟡 | Margrabe / Kirk |
+| `CallableBond` | `HullWhiteModel` | 1-D `r` | CN + projection | Bermudan | ✅ | Hull–White tree |
+| `PuttableBond` | `HullWhiteModel` | 1-D `r` | CN + projection | Bermudan | ✅ | Hull–White tree |
+
+The short-rate rows above are the equity-facing subset; the Hull-White / G2++ /
+Cheyette PDE also prices fixed-rate bonds, caplets/caps, European and Bermudan
+swaptions, and CMS-spread swaps (see §5.6 below and [API: Pricing](../api/pricing.md)).
 
 ### 5.3 Early exercise
 
@@ -223,7 +231,11 @@ Three things differ from the equity recipes, each for a concrete reason:
 - **Coupons and exercise use a discrete-event hook** on the backward sweep,
   with exercise decided ex-coupon and cashflows scaled by the analytic
   Hull-White bond price from their snapped level to their true date (so
-  cashflow timing contributes no discretisation error).
+  cashflow timing contributes no discretisation error). Ex-coupon is not the
+  same as clean: the obstacle also carries the accrued interest owed on the
+  exercise date, measured on the true date rather than the snapped level, so
+  the exercise boundary does not depend on `n_time`. See
+  [Dates and Conventions](dates-and-conventions.md#accrued-interest-clean-and-dirty).
 
 Because schedules are scattered with traced indices, nothing has to be
 concrete — unlike the trinomial tree, whose half-width is an array shape. The
@@ -232,8 +244,59 @@ sensitivities to \(a\) and \(\sigma\) match finite differences to
 \(10^{-8}\)–\(10^{-11}\).
 
 See [Hull-White Finite Differences](../theory/hull-white-pde.md) for the
-derivation and validation, and [Short-Rate Models](short-rate.md) for how the
-PDE, tree and Monte-Carlo engines compare.
+derivation and validation, and [Callable Bonds](callable-bonds.md) for how the
+tree, PDE and Monte-Carlo engines compare on the same instrument.
+
+## 5.7 Multi-curve: OIS discounting with a separate projection curve
+
+Every Hull-White and G2++ recipe takes two optional market arguments,
+`discount_curve` and `forward_curve`:
+
+```python
+from valax.pricing.pde import PDEConfig, pde_price_dispatch
+
+config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
+result = pde_price_dispatch(
+    payer_swaption, hw_model, config,
+    discount_curve=ois,          # collateral / OIS discounting
+    forward_curve=sofr_3m,       # tenor curve the floating leg projects off
+)
+```
+
+Or, through the unified front door, by letting the instrument name its own
+curves — `price(...)` resolves `discount_id` / `forward_id` on the
+`MarketState` and forwards them for you:
+
+```python
+from valax.core.market_state import MarketState
+from valax.core.pricing import price
+from valax.curves.graph import CurveGraph
+
+swaption = Swaption(..., discount_id="USD.SOFR.OIS", forward_id="USD.LIBOR.3M")
+market = MarketState(
+    curves=CurveGraph(curves={"USD.SOFR.OIS": ois, "USD.LIBOR.3M": sofr_3m})
+)
+result = price(swaption, hw_model, market, method="pde", config=config)
+```
+
+Two mechanisms are at work, and they are different in kind:
+
+- **Discounting is a re-fit, not a re-weighting.** Hull-White and G2++ are
+  exact-fit models, so their `initial_curve` *is* the discount curve; passing
+  `discount_curve` re-fits \(\alpha\) (resp. \(\varphi\)) to it via
+  `valax.pricing.multicurve.with_discount_curve`. The calibrated dynamics are
+  untouched.
+- **Projection is a deterministic overlay.** A one-factor short rate produces
+  one term structure, so the tenor basis is *frozen* at its time-zero value
+  and enters each payoff as a constant multiplier. See
+  [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md) for the
+  derivation and — importantly — for what it cannot price (basis volatility).
+
+Both default to `None`, which is the single-curve case: the recipes then run
+the arithmetic they always ran, so single-curve prices are unchanged
+bit-for-bit. The G2++ CMS-spread recipe rebuilds its par swap rates from the
+model's own bond strip and therefore **raises** on a distinct projection curve
+rather than silently ignoring it.
 
 ## 6. When to use PDE
 
@@ -254,6 +317,8 @@ single asset, the [binomial tree](lattice.md) is a lightweight alternative.
   early-exercise rationale, delivery phases.
 - [Hull-White Finite Differences](../theory/hull-white-pde.md) — the short-rate
   PDE: state variable, boundary treatment, discrete events, validation.
+- [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md) — the frozen
+  tenor-basis overlay behind `discount_curve` / `forward_curve`.
 - [Numerical Pitfalls](../architecture/numerical-pitfalls.md) — a register of
   discretisation bugs this solver has actually shipped and fixed, each with the
   debugging playbook that localised it. Read before adding a scheme or a

@@ -17,6 +17,16 @@ pip install -e ".[dev]"
 
 ## First Steps
 
+The snippets below call the low-level pricers directly — the shortest path to a
+number, and the right level when you know exactly which formula you want.
+
+!!! tip "There is also one front door for everything"
+    `valax.core.price(instrument, model, market)` prices any registered
+    instrument/model pair on any engine, resolves the curves a trade names, and
+    is the call every Greek differentiates. If you would rather learn that
+    first, start with
+    [Tutorial — The Unified Pricing Contract](guide/tutorial-unified-pricing.md).
+
 ### Price a European Option
 
 ```python
@@ -88,7 +98,7 @@ from valax.pricing.analytic import fixed_rate_bond_price, modified_duration, yie
 # 5-year, 4% semi-annual bond
 ref = ymd_to_ordinal(2025, 1, 1)
 bond = FixedRateBond(
-    payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2),
+    payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates,
     settlement_date=ref,
     coupon_rate=jnp.array(0.04),
     face_value=jnp.array(100.0),
@@ -121,6 +131,8 @@ model = BlackScholesModel(
     rate=jnp.array(0.05),
     dividend=jnp.array(0.02),
 )
+# Any of these may instead be left out and read from the MarketState —
+# see API → Core § Model binding.
 
 price = mc_price(
     option, spot=jnp.array(100.0), model=model,

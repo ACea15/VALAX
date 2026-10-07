@@ -11,13 +11,20 @@ exploits this: because every zero-coupon bond price :math:`P(T_0, T_i)` is
     \qquad c_i = K\tau_i + \delta_{in},
 
 and there is a unique critical rate :math:`r^\star` with
-:math:`CB(r^\star) = 1`.  The option on the *coupon* bond therefore
-decomposes exactly into a portfolio of options on *zero-coupon* bonds, each
-struck at :math:`X_i = P(T_0, T_i, r^\star)`:
+:math:`CB(r^\star) = V`, where :math:`V` is the value of the floating leg at
+:math:`T_0` (:math:`V = 1` in the single-curve case, where the leg resets to
+par).  The option on the *coupon* bond therefore decomposes exactly into a
+portfolio of options on *zero-coupon* bonds, each struck at
+:math:`X_i = P(T_0, T_i, r^\star)`:
 
 .. math::
 
-    \bigl(1 - CB(r)\bigr)^+ = \sum_{i=1}^{n} c_i\,\bigl(X_i - P(T_0,T_i,r)\bigr)^+
+    \bigl(V - CB(r)\bigr)^+ = \sum_{i=1}^{n} c_i\,\bigl(X_i - P(T_0,T_i,r)\bigr)^+
+
+With a distinct projection curve, a frozen deterministic tenor basis makes
+:math:`V = b_1` and shifts each :math:`c_i` by :math:`1 - b_{i+1}`
+(:mod:`valax.pricing.multicurve`), so the decomposition above carries over
+unchanged — which is what keeps the dual-curve price closed-form.
 
 Each zero-coupon bond option has a Black-like closed form under Hull-White,
 so the swaption price is a finite sum of closed-form terms -- no lattice, no
@@ -58,6 +65,7 @@ from valax.models.hull_white import (
     hw_instantaneous_forward,
     hw_market_df,
 )
+from valax.pricing.multicurve import apply_swap_basis, swap_leg_basis
 
 # Floor for the zero-coupon-bond option volatility.  At zero time-to-expiry or
 # zero model volatility the option is worth its intrinsic value; clamping keeps
@@ -89,12 +97,21 @@ def hw_critical_rate(
     cashflow_times: Float[Array, " n_fixed"],
     cashflows: Float[Array, " n_fixed"],
     initial_guess: Float[Array, ""] | None = None,
+    par_value: Float[Array, ""] | float = 1.0,
 ) -> Float[Array, ""]:
     r"""Short rate :math:`r^\star` at which the coupon bond is worth par.
 
-    Solves :math:`\sum_i c_i P(T_0, T_i, r) = 1` for :math:`r`.  The left-hand
-    side is strictly decreasing in :math:`r` (every :math:`B(T_0,T_i) > 0`), so
-    the root is unique and Newton's method converges from any sensible start.
+    Solves :math:`\sum_i c_i P(T_0, T_i, r) = V` for :math:`r`, where
+    :math:`V` is ``par_value``.  The left-hand side is strictly decreasing in
+    :math:`r` (every :math:`B(T_0,T_i) > 0`, provided every :math:`c_i > 0`),
+    so the root is unique and Newton's method converges from any sensible
+    start.
+
+    ``par_value`` is ``1`` in the single-curve case, where the floating leg
+    resets to par.  With a deterministic tenor basis the floating leg is worth
+    ``float_start`` instead (see
+    :func:`valax.pricing.multicurve.apply_swap_basis`), and the exercise
+    boundary moves accordingly.
 
     Args:
         model: Hull-White model.
@@ -104,6 +121,8 @@ def hw_critical_rate(
             principal folded into the final flow).
         initial_guess: Starting short rate.  Defaults to the market
             instantaneous forward at ``expiry_time``.
+        par_value: Value the coupon bond must equal at :math:`r^\star` — the
+            swaption's effective strike on the bond.  Defaults to ``1.0``.
 
     Returns:
         Critical short rate :math:`r^\star`.
@@ -115,7 +134,7 @@ def hw_critical_rate(
         bond = jnp.sum(
             cashflows * hw_bond_price(model, r, expiry_time, cashflow_times)
         )
-        return bond - 1.0
+        return bond - par_value
 
     sol = optx.root_find(
         residual,
@@ -189,6 +208,7 @@ def hw_zcb_option_price(
 def hw_swaption_price(
     swaption: Swaption,
     model: HullWhiteModel,
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, ""]:
     r"""European swaption price under Hull-White (Jamshidian decomposition).
 
@@ -196,15 +216,36 @@ def hw_swaption_price(
     rewritten as a portfolio of :math:`n` zero-coupon bond options struck at
     the critical-rate bond prices, each of which has a closed form.
 
-    Note the discount curve comes from ``model.initial_curve``, so the price is
-    automatically consistent with the curve Hull-White was exact-fitted to.
+    Discounting uses ``model.initial_curve``, so the price is automatically
+    consistent with the curve Hull-White was exact-fitted to.  Passing a
+    distinct ``forward_curve`` projects the floating leg off that curve
+    instead, through the frozen deterministic tenor basis of
+    :mod:`valax.pricing.multicurve` — the same overlay (and the same
+    :func:`~valax.pricing.multicurve.apply_swap_basis` algebra) the MC and PDE
+    recipes use, so the analytic, lattice-free price stays consistent with
+    them.  The floating leg is assumed to pay on the fixed schedule, matching
+    the convention of :func:`valax.pricing.analytic.swaptions.swap_rate`.
 
     Args:
         swaption: Swaption contract (``is_payer`` selects payer vs receiver).
         model: Hull-White model carrying the initial discount curve.
+        forward_curve: Optional projection curve for the underlying swap's
+            floating leg.  ``None`` (or the discount curve itself) is the
+            single-curve case, evaluated by the pre-existing code path
+            bit-for-bit.
 
     Returns:
         Swaption price as of the curve reference date.
+
+    Notes:
+        Jamshidian's decomposition requires the coupon bond to be monotone in
+        :math:`r`, i.e. every adjusted cash flow :math:`c_i > 0`.  The basis
+        shifts each flow by :math:`1 - b_{i+1}`, which is small (a 50 bp
+        one-year basis moves a flow by ~0.005) and therefore harmless at
+        realistic strikes, but a near-zero strike combined with a very large
+        basis could in principle flip a flow negative and invalidate the
+        decomposition.  The dual-curve price is validated against the
+        independent PDE recipe in ``tests/test_pricing/test_dual_curve_swaptions.py``.
     """
     curve: DiscountCurve = model.initial_curve
     ref = curve.reference_date
@@ -218,7 +259,16 @@ def hw_swaption_price(
     cashflows = swaption.strike * taus
     cashflows = cashflows.at[-1].add(1.0)
 
-    r_star = hw_critical_rate(model, expiry_time, cashflow_times, cashflows)
+    # Frozen tenor basis: single-curve returns None, a trace-time branch that
+    # leaves `float_start = 1.0` and the cash flows untouched.
+    basis = swap_leg_basis(
+        curve, forward_curve, swaption.expiry_date, swaption.fixed_dates
+    )
+    float_start, cashflows = apply_swap_basis(cashflows, basis)
+
+    r_star = hw_critical_rate(
+        model, expiry_time, cashflow_times, cashflows, par_value=float_start
+    )
     strikes = hw_bond_price(model, r_star, expiry_time, cashflow_times)
 
     # Payer = put on the coupon bond, receiver = call.

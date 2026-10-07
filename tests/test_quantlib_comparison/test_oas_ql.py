@@ -17,9 +17,10 @@ Two conventions are exercised:
 * **The compounding trap.** Asked for its OAS on a ``ql.Compounded`` basis,
   QuantLib returns a *different* number (here several bp away), because a
   periodically-compounded parallel spread is not the same curve move as a
-  continuous one.  The gap is the exact systematic error the design notes in
-  ``RATES_SESSION_GUIDE.md`` §3b warn about; the test asserts it is material so
-  the convention can never be silently confused.
+  continuous one.  The gap is the exact systematic error documented in
+  ``docs/theory/risk-measures.md`` ("The compounding-convention trap"); the
+  test asserts it is material so the convention can never be silently
+  confused.
 
 Conventions match ``_ql_adapters.py``: evaluation date 2026-01-01,
 ``Actual365Fixed``, ``NullCalendar``, integer-day-aligned schedules, zero

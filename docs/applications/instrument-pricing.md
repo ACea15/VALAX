@@ -39,7 +39,7 @@ task-oriented *how-to* guide with runnable examples:
 | Asset class | How-to guide |
 |---|---|
 | Bonds & fixed income | [Fixed Income](../guide/fixed-income.md) · [Callable / Puttable / FRN / Convertible](../guide/callable-bonds.md) |
-| Interest-rate derivatives | [Rate Exotics](../guide/rates-exotics.md) · [Short-Rate Models](../guide/short-rate.md) |
+| Interest-rate derivatives | [Rate Exotics](../guide/rates-exotics.md) |
 | Equity options & exotics | [Equity Exotics](../guide/equity-exotics.md) |
 | FX derivatives | [FX](../guide/fx.md) |
 | Inflation derivatives | [Inflation](../guide/inflation.md) |
@@ -75,28 +75,40 @@ Vanilla contracts are documented on the pricing-method pages:
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [Caplet](#caplet-floorlet) | Analytic · MC | flat Black-76/Bachelier · `OptionletVolSurface` · LMM | SABR caplet strip | single forward per period | ✅ |
-| [Cap / Floor](#cap-floor) | Analytic · MC | flat · optionlet surface · LMM | SABR caplet strip | strip of independent caplets | ✅ |
+| [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR) | single forward per period | ✅ |
+| [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR) | strip of independent caplets | ✅ |
 | [Interest-rate swap](#interest-rate-swap) | Analytic | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
-| [Swaption](#swaption) | Analytic · MC · PDE | flat · `SwaptionCube` · Hull-White · LMM | SABR cube / HW→surface | annuity numeraire | ✅ |
+| [Swaption](#swaption) | Analytic · MC · PDE | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube; `calibrate_swaption_cube` for exogenous forwards) · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)) | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
 | [CMS swap](#cms-swap) | Analytic | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
+| [CMS-spread swap](#cms-spread-swap) | MC · PDE | G2++ · Cheyette-2F | HW → swaption surface | 2-factor decorrelation (steepener / flattener) | ✅ |
 | [CMS cap / floor](#cms-cap-floor) | Analytic | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |
 | [Range accrual](#range-accrual) | Analytic | `OptionletVolSurface` / scalar | SABR | snapshot digital replication | ✅ |
 | [OIS swap](#ois-swap) | Analytic | n-a (curves) | curve bootstrap | compounded overnight leg | ✅ |
 | [Cross-currency swap](#cross-currency-swap) | Analytic | n-a (curves + FX spot) | joint curve bootstrap | telescoping under CIP | ✅ |
 | [Total return swap](#total-return-swap) | Analytic | n-a (curves) | curve bootstrap | self-financing asset | ✅ |
-| [Bermudan swaption](#bermudan-swaption) | MC · PDE | Hull-White · LMM | HW→surface / LMM | early exercise | ✅ |
+| [Bermudan swaption](#bermudan-swaption) | MC · PDE | Hull-White · G2++ · Cheyette · LMM | HW→surface / LMM | early exercise | ✅ |
 
 ### Bonds & fixed income
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
 | [Zero-coupon bond](#zero-coupon-bond) | Analytic | n-a (curve) | curve bootstrap | single cash flow | ✅ |
-| [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | n-a · Hull-White | curve / HW | deterministic coupons | ✅ |
-| [Floating-rate bond](#floating-rate-note) | Analytic · MC | n-a (curves) · Hull-White | curve / HW | par-reset replication | ✅ |
-| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White | HW→swaptions | issuer-optimal call | ✅ |
-| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White | HW→swaptions | holder-optimal put | ✅ |
+| [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | n-a · Hull-White · G2++ · Cheyette | curve / HW | day-count accrual per period | ✅ |
+| [Floating-rate bond](#floating-rate-note) | Analytic · MC | n-a (curves) · Hull-White · G2++ · Cheyette | curve / HW | par-reset replication | ✅ |
+| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | issuer-optimal call, clean call price | ✅ |
+| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | holder-optimal put, clean put price | ✅ |
 | [Convertible bond](#convertible-bond) | — | equity-credit | — | equity conversion option | 🟡 |
+
+!!! note "Conventions that apply to every row above"
+    Coupons are sized from each period's **day-count year fraction**, never
+    from `coupon_rate / frequency`, so unequal periods (stubs, and the
+    181/184-day alternation of any semiannual actual/N bond) pay unequal
+    amounts. Every pricer returns a **dirty** price; call and put prices are
+    quoted **clean**. Schedules support day-of-month preservation,
+    end-of-month rolls and short/long front/back stubs, but are still
+    **holiday-agnostic** — business-day adjustment is
+    [Tier 1.3](../roadmap.md#13-business-calendars-and-holiday-schedules).
+    See [Dates and Conventions](../guide/dates-and-conventions.md).
 
 ### FX derivatives
 
@@ -113,15 +125,15 @@ Vanilla contracts are documented on the pricing-method pages:
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [CDS](#credit-default-swap-cds) | — (curve bootstrap ✅) | n-a (hazard curve) | `SurvivalCurve` from spreads | credit triangle; constant recovery | 🟡 |
+| [CDS](#credit-default-swap-cds) | — (hazard curve ✅) | n-a (hazard curve) | `SurvivalCurve` from spreads (closed-form credit triangle, not a repricing bootstrap) | credit triangle; constant recovery | 🟡 |
 | [CDO tranche](#cdo-tranche) | — | Gaussian copula | base correlation | one-factor copula | 🟡 |
 
 ### Inflation derivatives
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [Zero-coupon inflation swap](#zero-coupon-inflation-swap-zcis) | Analytic | n-a (inflation curve) | inflation bootstrap | index lag; single exchange | ✅ |
-| [Year-on-year inflation swap](#year-on-year-inflation-swap-yyis) | Analytic | n-a (inflation curve) | inflation bootstrap | YoY convexity ignored | ✅ |
+| [Zero-coupon inflation swap](#zero-coupon-inflation-swap-zcis) | Analytic | n-a (inflation curve) | algebraic (`from_zc_rates`) | index lag; single exchange | ✅ |
+| [Year-on-year inflation swap](#year-on-year-inflation-swap-yyis) | Analytic | n-a (inflation curve) | algebraic (`from_zc_rates`) | YoY convexity ignored | ✅ |
 | [Inflation cap / floor](#inflation-cap-floor) | Analytic | flat Black-76 | — | Black-76 on forward YoY | ✅ |
 
 ---
@@ -193,16 +205,19 @@ Usage: [Rates exotics guide](../guide/rates-exotics.md). Fields: [API](../api/in
 A single-period call/put on a simply-compounded forward rate $F_i$: pays $\tau_i\,(F_i(T_{i-1})-K)^+$ at $T_i$ (caplet). Priced by Black-76 or Bachelier under the $T_i$-forward measure; a per-expiry smile is supplied by an `OptionletVolSurface`. See [Theory §9.2](../theory/rate-derivatives.md#92-caps-floors-and-the-caplet-formula) and [§2.2](../theory/stochastic-models.md#22-black-76-futures-forwards)/[§2.3](../theory/stochastic-models.md#23-bachelier-normal-model).
 
 ### Cap / floor
-A strip of caplets/floorlets on a common strike over a payment schedule; the price is the sum of the constituent optionlet prices, each reading its own vol from the surface. See [Theory §9.2](../theory/rate-derivatives.md#92-caps-floors-and-the-caplet-formula).
+A strip of caplets/floorlets on a common strike over a payment schedule; the price is the sum of the constituent optionlet prices, each reading its own vol from the surface. Market quotes are *flat* per maturity and are converted into that per-expiry surface by the cap→caplet strip — see [Volatility Surfaces § Cap → caplet stripping](../guide/vol-surfaces.md#cap-caplet-optionlet-stripping-rates) and [Theory §9.2](../theory/rate-derivatives.md#92-caps-floors-and-the-caplet-formula).
 
 ### Interest-rate swap
 Exchange of a fixed leg for a floating leg. The floating leg values by the replication identity $\text{PV}=N\,(P(t_0)-P(t_N))$ (single-curve) or by projected forwards (multi-curve). See [Theory §3.2](../theory/curves.md#32-single-curve-vs-multi-curve-framework).
 
 ### Swaption
-European option to enter a payer/receiver swap at `expiry_date`. Under the **annuity (level) measure** the swap rate is a martingale and the price collapses to Black-76/Bachelier on the forward swap rate, times the annuity; a `SwaptionCube` supplies the strike/expiry/tenor smile. Alternatively priced in a one-factor [Hull-White](../theory/stochastic-models.md#28-hull-white-one-factor-short-rate-model) model via [Jamshidian decomposition](../theory/hull-white-swaptions.md). See [Theory §9.3](../theory/rate-derivatives.md#93-swaptions-and-the-annuity-measure).
+European option to enter a payer/receiver swap at `expiry_date`. Under the **annuity (level) measure** the swap rate is a martingale and the price collapses to Black-76/Bachelier on the forward swap rate, times the annuity; a `SwaptionCube` supplies the strike/expiry/tenor smile, anchored on forwards derived from the curves themselves and read under a declared [smile-dynamics convention](../guide/vol-surfaces.md#smile-dynamics-what-moves-when-the-curve-moves). Alternatively priced in a one-factor [Hull-White](../theory/stochastic-models.md#28-hull-white-one-factor-short-rate-model) model via [Jamshidian decomposition](../theory/hull-white-swaptions.md), or under G2++ by the Brigo-Mercurio quadrature — both of which also accept a distinct projection curve under the [deterministic tenor basis](../theory/multi-curve-short-rate.md#51-why-the-closed-forms-extend-so-cheaply). See [Theory §9.3](../theory/rate-derivatives.md#93-swaptions-and-the-annuity-measure).
 
 ### CMS swap
 One leg pays a **constant-maturity swap rate** (e.g. the 10y rate) fixed each period. Because a swap rate is a martingale only under its own annuity measure, its expectation under the payment measure needs a **convexity adjustment** (Hagan analytic or static replication), consuming the `SwaptionCube` smile. See [Theory §9.5](../theory/rate-derivatives.md#95-cms-and-convexity-adjustments).
+
+### CMS-spread swap
+A steepener / flattener whose coupon pays the spread between two constant-maturity swap rates of *different* tenors (e.g. 10y − 2y) net of a fixed strike, $C_i = N\,(S^{\text{long}}_i - S^{\text{short}}_i - K)\,\tau_i$. Its value depends on the **joint** distribution of short- and long-tenor rates — a decorrelation payoff a one-factor model structurally cannot express — so it is priced in a **two-factor** model (G2++ or two-factor Cheyette), never analytically as a single instrument. Two independent numerical routes agree within Monte-Carlo error: exact-conditional **Monte Carlo** (each CMS rate rebuilt analytically per path from the affine ZCB) and a **2-D ADI PDE** (each period's coupon injected at its fixing level as a linear function of the node state and discounted home in one sweep). See [Theory §9.5](../theory/rate-derivatives.md#95-cms-and-convexity-adjustments) and the [G2++ chapter](../theory/g2pp.md).
 
 ### CMS cap / floor
 A strip of options on the CMS rate, $ (\text{CMS}_i - K)^+ $, priced Black-76/Bachelier on the **convexity-adjusted** forward CMS rate with a per-period smile query. See [Theory §9.5](../theory/rate-derivatives.md#95-cms-and-convexity-adjustments).
@@ -240,10 +255,10 @@ Periodic fixed coupons plus face at maturity. Ships with yield-to-maturity, modi
 Coupons reset periodically off a reference rate plus a `spread`; values by par-reset replication (a floater prices near par at reset, plus the spread annuity). See [Theory §3.2](../theory/curves.md#32-single-curve-vs-multi-curve-framework).
 
 ### Callable bond
-A fixed-rate bond the *issuer* may redeem early at `call_prices` on `call_dates` — long a bond, short a call on the bond. Requires an exact-curve-fit short-rate model: priced on the [Hull-White trinomial tree](../theory/hull-white-pde.md), the HW PDE, or HW MC, with an issuer-optimal $\min(\text{continuation},\text{call})$ at each call date. See [Callable bonds guide](../guide/callable-bonds.md).
+A fixed-rate bond the *issuer* may redeem early at `call_prices` on `call_dates` — long a bond, short a call on the bond. Requires an exact-curve-fit short-rate model: priced on the [Hull-White trinomial tree](../theory/hull-white-pde.md), the HW PDE, or HW MC, with an issuer-optimal $\min(\text{continuation},\text{call} + \text{accrued})$ at each call date — the call price is quoted clean, so accrued interest is added to put both sides of the comparison on the same footing. See [Callable bonds guide](../guide/callable-bonds.md).
 
 ### Puttable bond
-As above but the *holder* may sell back at `put_prices` — long a bond, long a put — with a holder-optimal $\max(\text{continuation},\text{put})$ node rule. See [Callable bonds guide](../guide/callable-bonds.md).
+As above but the *holder* may sell back at `put_prices` — long a bond, long a put — with a holder-optimal $\max(\text{continuation},\text{put} + \text{accrued})$ node rule. See [Callable bonds guide](../guide/callable-bonds.md).
 
 ### Convertible bond
 A fixed-rate bond carrying an embedded option to convert into `conversion_ratio` shares — an equity-credit hybrid needing a joint equity/rates (and ideally default) model. *Equity-credit PDE on the roadmap.* 🟡
@@ -282,7 +297,7 @@ Underlying: a survival/hazard-rate curve bootstrapped from CDS spreads via the
 credit triangle. Usage: [Credit guide](../guide/credit.md).
 
 ### Credit default swap (CDS)
-Protection against default of a reference entity: the **protection leg** pays $(1-R)$ of notional on default, funded by a **premium leg** of periodic spread payments until default or maturity. VALAX bootstraps the `SurvivalCurve` from market spreads today; the standalone CDS *pricer is on the roadmap*. 🟡
+Protection against default of a reference entity: the **protection leg** pays $(1-R)$ of notional on default, funded by a **premium leg** of periodic spread payments until default or maturity. VALAX builds the `SurvivalCurve` from market spreads today via the closed-form credit triangle (no root-find, no leg repricing); both the standalone CDS *pricer* and a true repricing hazard bootstrap *are on the roadmap*. 🟡
 
 ### CDO tranche
 Exposure to portfolio losses in an $[\text{attachment},\text{detachment}]$ band, paying a spread on the surviving tranche notional. Priced by a one-factor Gaussian copula over `n_names`. *Pricer on the roadmap.* 🟡

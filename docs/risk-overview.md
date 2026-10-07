@@ -2,7 +2,7 @@
 
 *A narrative guide to why risk exists, who consumes it, and how every number on a risk report falls out of one tiny pure-functional primitive.*
 
-This page sits between the abstract maths in [Models & Theory § 7](theory/risk-measures.md#7-risk-measures) and the concrete code in the [Risk & Scenarios guide](guide/risk.md). Read it first if you have not built a bank risk system before. Read it again if you are about to extend the engine — it is the map that tells you where each new factor, instrument, or test fits in.
+This page sits between the abstract maths in [Models & Theory § 7](theory/risk-measures.md#7-risk-measures) and the concrete code in the Risk how-to pages — start with [Scenarios & Shocks](risk-scenarios.md). Read it first if you have not built a bank risk system before. Read it again if you are about to extend the engine — it is the map that tells you where each new factor, instrument, or test fits in.
 
 ---
 
@@ -90,6 +90,23 @@ Every number in §2 is produced by the same chain of transformations. From left 
    Capital:    bucketed Δ at FRTB vertices → SBA formula (planned)
 ```
 
+The container in that picture is `MarketData` because the **legacy** VaR
+engine consumes it. The calibrated container the unified pricer takes —
+`MarketState`, with a keyed `CurveGraph` and vol surfaces — has the same
+picture drawn in identifier-keyed coordinates, and that is the current
+path: `KeyedScenario` + `shock` for a single move
+([guide](risk-scenarios.md#keyed-scenarios-on-a-marketstate)),
+`KeyedFactorLayout` + `block_covariance` + the `keyed_*` generators for a
+whole distribution of them
+([guide](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout)),
+`group_pv` / `group_scenario_pnl` for the repricing loop
+([guide](risk-var.md#repricing-through-price)), and `KeyedLadder` +
+`keyed_component_var` for the sensitivities and their VaR
+([guide](risk-ladders.md#keyed-ladders-on-a-marketstate)). The practical
+difference: every curve on the graph — and the *basis* between two of them
+— is a named factor with its own P&L rung and its own VaR contribution,
+rather than being summed into one `rates` block.
+
 Three things are worth stressing about this picture:
 
 1. **There is only one pricing function.** Everything else (Greeks, ladders, scenarios, VaR, backtests) is a *derived* quantity. If `V(market)` is wrong, every downstream number is wrong; if `V(market)` is right and differentiable, every downstream number is right by construction.
@@ -120,7 +137,7 @@ $$
 \delta_x = \frac{\partial V}{\partial x}, \qquad \gamma_{xy} = \frac{\partial^2 V}{\partial x \partial y}
 $$
 
-In VALAX they come from `jax.grad` and `jax.hessian` on the pricing function — one reverse-mode pass per order — and are collected into a `SensitivityLadder` by [`compute_ladder`](guide/risk.md#sensitivity-ladders-and-waterfall-pl). No bump-and-reprice. No finite differences. **The "Greeks" a trader sees and the "key-rate DV01" a regulator wants are literally the same array, sliced and bucketed differently** — see [Theory § 6](theory/greeks.md#6-greeks-and-automatic-differentiation) for the autodiff derivation and [Theory § 7.4](theory/risk-measures.md#74-sensitivity-ladders) for ladders.
+In VALAX they come from `jax.grad` and `jax.hessian` on the pricing function — one reverse-mode pass per order — and are collected into a `SensitivityLadder` by [`compute_ladder`](risk-ladders.md#sensitivity-ladders-and-waterfall-pl). No bump-and-reprice. No finite differences. **The "Greeks" a trader sees and the "key-rate DV01" a regulator wants are literally the same array, sliced and bucketed differently** — see [Theory § 6](theory/greeks.md#6-greeks-and-automatic-differentiation) for the autodiff derivation and [Theory § 7.4](theory/risk-measures.md#74-sensitivity-ladders) for ladders.
 
 ### 4.3 What's a bad day for my book?
 
@@ -129,7 +146,7 @@ This is **VaR and Expected Shortfall**. A "bad day" is the left tail of the dist
 - $\text{VaR}_\alpha$ = the loss exceeded with probability $1-\alpha$.
 - $\text{ES}_\alpha$ = the average loss conditional on exceeding $\text{VaR}_\alpha$.
 
-The distribution comes from a **P&L vector**: full-revaluation under many scenarios (historical or Monte Carlo) gives **HPL**; passing the same scenarios through the second-order ladder gives **RTPL** much faster. Both vectors plug straight into [`value_at_risk`](api/risk.md) and [`expected_shortfall`](api/risk.md). The conceptual derivation lives in [Theory § 7.1](theory/risk-measures.md#71-value-at-risk-var) and [§ 7.2](theory/risk-measures.md#72-expected-shortfall-cvar); the workflow code is in the [guide](guide/risk.md#full-revaluation-var).
+The distribution comes from a **P&L vector**: full-revaluation under many scenarios (historical or Monte Carlo) gives **HPL**; passing the same scenarios through the second-order ladder gives **RTPL** much faster. Both vectors plug straight into [`value_at_risk`](api/risk.md) and [`expected_shortfall`](api/risk.md). The conceptual derivation lives in [Theory § 7.1](theory/risk-measures.md#71-value-at-risk-var) and [§ 7.2](theory/risk-measures.md#72-expected-shortfall-cvar); the workflow code is in the [VaR & P&L guide](risk-var.md#full-revaluation-var).
 
 ### 4.4 Is the risk model honest?
 
@@ -166,7 +183,7 @@ A regulator looking at fifty banks needs to compare them. A clearing house compu
 | Internal limits | Whatever the bank chooses, often coarser (e.g. "short / belly / wings"). |
 | PCA factor risk | Three to five data-driven components per curve. |
 
-VALAX exposes both transformation flavours — **linear** (`aggregate`, `BucketMap`) for FRTB / SIMM-style summation, and **Jacobian** (`pushforward_sensitivities`, `pca_jacobian`, `level_slope_curvature_jacobian`) for smooth reparameterizations like PCA or SVI/SABR parameter Greeks. The mathematics is in [Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations); the practical recipes are in the [guide](guide/risk.md#risk-bucketing); the full registry of which factors live where is in [Risk Factors § 7](risk-factors.md#7-bucketing).
+VALAX exposes both transformation flavours — **linear** (`aggregate`, `BucketMap`) for FRTB / SIMM-style summation, and **Jacobian** (`pushforward_sensitivities`, `pca_jacobian`, `level_slope_curvature_jacobian`) for smooth reparameterizations like PCA or SVI/SABR parameter Greeks. The mathematics is in [Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations); the practical recipes are in the [Risk Bucketing guide](risk-bucketing.md#risk-bucketing); the full registry of which factors live where is in [Risk Factors § 7](risk-factors.md#7-bucketing).
 
 A useful aphorism for engineers new to the area: **internal risk models live in autodiff-natural raw-factor space; the outside world lives in bucket space. The job of the bucketing layer is to be the FX desk between the two.**
 
@@ -198,20 +215,20 @@ What is in the library **today** (✅) and what is signposted for the next itera
 |---|---|---|
 | Market data containers | ✅ | `MarketData`, `MarketScenario`, `ScenarioSet`, `CurveGraph` (modern joint-solver output — dict of `DiscountCurve` keyed by identifier), `MultiCurveSet` (legacy single-currency two-tier view; deprecated), `SurvivalCurve`, `InflationCurve`, vol surfaces. |
 | Pricing engines | ✅ (broad) / 📋 (XVA, CDS) | Equity, FX, rates, inflation, callable / puttable bonds, credit CDS pricer planned. |
-| Sensitivity ladders | ✅ | First- and second-order ladder, ten-rung waterfall, autodiff throughout. |
-| Scenario generation | ✅ | Historical, parametric Gaussian / t, named stress (parallel, steepener, butterfly, …). |
-| Shock primitives | ✅ | Single-curve, multi-curve (basis), credit hazard. 📋 Vol surface, inflation, FX vol. |
-| P&L vectors | ✅ | HPL (`hypothetical_pnl_vector`), RTPL (`risk_theoretical_pnl_vector`), unexplained. |
-| VaR / ES | ✅ | Full-revaluation and parametric delta-normal. |
+| Sensitivity ladders | ✅ | First- and second-order ladder, ten-rung waterfall, autodiff throughout; plus identifier-keyed per-curve ladders (`KeyedLadder`) with a per-block waterfall. |
+| Scenario generation | ✅ | Historical, parametric Gaussian / t, named stress (parallel, steepener, butterfly, …) — in the flat layout and in the keyed per-curve layout (`KeyedFactorLayout`, incl. basis stresses). |
+| Shock primitives | ✅ | Single-curve, multi-curve (basis), credit hazard. 📋 Vol surface (node-level), inflation, FX vol. |
+| P&L vectors | ✅ | HPL (`hypothetical_pnl_vector`), RTPL (`risk_theoretical_pnl_vector`), unexplained. 🚧 RTPL still reads the positional ladder. |
+| VaR / ES | ✅ | Full-revaluation and parametric delta-normal, the latter with an additive per-curve / per-basis decomposition (`keyed_component_var`). |
 | Backtesting | ✅ | Breach detection, Kupiec POF, Christoffersen independence, Basel traffic light. |
 | FRTB PLA | ✅ | Spearman + KS, BCBS d558 zoning. |
 | Bucketing | ✅ | Linear `BucketMap` ops, Jacobian reparameterization, FRTB tenor / sector / PCA / L-S-C / autodiff Jacobian builders. |
 | **SBA capital aggregation** | 📋 | Bucket-level Δ + γ are computed today; the prescribed inter-bucket correlation matrices and curvature add-ons are next. |
 | **XVA (CVA / FVA / KVA)** | 📋 | Needs the planned CDS pricer + a credit-IR joint Monte Carlo path generator. |
 | **IMA stress-period selection** | 📋 | The 250-day historical window is currently chosen by the caller; automated stress-period identification will land alongside the SBA work. |
-| **Named factor registry** | 📋 | Factor IDs (`IR.OIS.USD.5Y`, …) are documented but the engine still uses positional layouts; the migration is roadmap item 7. |
+| **Named factor registry** | 🚧 | Factor IDs (`IR.OIS.USD.5Y`, `IR.BASIS.USD.SOFR3M.OIS.5Y`, …) are live for curves, surfaces, spots and dividends: `KeyedFactorLayout.factor_ids()` is the shared index of the keyed scenarios, the per-curve covariance and the `KeyedLadder`. Still positional: the legacy `MarketData` path, the FRTB PLA vectors, and the FX / credit / inflation / model-parameter families (roadmap item 7). |
 
-The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](risk-factors.md#4-roadmap) and the project-wide [Roadmap](roadmap.md). The shortest critical path to a desk-usable bank-style risk system is: **(a) multi-curve `MarketData` → (b) vol-surface risk factors → (c) FRTB SBA capital aggregation**, which between them close roughly 90 % of the gap to a single-desk production deployment.
+The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](risk-factors.md#4-roadmap) and the project-wide [Roadmap](roadmap.md). The shortest critical path to a desk-usable bank-style risk system was: **(a) multi-curve risk → (b) vol-surface risk factors → (c) FRTB SBA capital aggregation**. Step (a) has now landed on the `MarketState` path — keyed per-curve scenarios, covariance, repricing and ladders, with the basis as a named factor — so the live front is (b) node-level vega, plus portfolio aggregation above the group primitives and re-targeting the PLA vectors onto the keyed ladder.
 
 ---
 
@@ -220,8 +237,8 @@ The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](ri
 Different audiences will follow different paths from here:
 
 - **Quants / pricing developers** → [Models & Theory](theory/index.md) for the math, [Risk Factors](risk-factors.md) for what's in the engine, [API: Risk](api/risk.md) for signatures.
-- **Risk system developers / engineers** → [Risk & Scenarios guide](guide/risk.md) for the workflow, [Risk Factors § 5 Instrument → Factor matrix](risk-factors.md#5-instrument-factor-matrix) for coverage, [Roadmap](roadmap.md) for the priorities.
-- **Front-office (trader / structurer)** → [Greeks guide](guide/greeks.md) and the *Sensitivity Ladders* section of the [Risk guide](guide/risk.md#sensitivity-ladders-and-waterfall-pl).
+- **Risk system developers / engineers** → [Scenarios & Shocks](risk-scenarios.md) for the workflow, [Risk Factors § 5 Instrument → Factor matrix](risk-factors.md#5-instrument-factor-matrix) for coverage, [Roadmap](roadmap.md) for the priorities.
+- **Front-office (trader / structurer)** → [Greeks (Theory § 6)](theory/greeks.md#6-greeks-and-automatic-differentiation) and the [Sensitivity Ladders](risk-ladders.md#sensitivity-ladders-and-waterfall-pl) page.
 - **Regulators / validators** → [Theory § 7.6–7.8](theory/risk-measures.md#76-var-backtesting) for the backtesting + PLA + bucketing maths, [Risk Factors](risk-factors.md) for the audit-trail of what is and is not modelled.
 
 ---

@@ -135,6 +135,14 @@ def register(
     ``market_args`` the recipe needs (e.g. ``spot`` for equity models,
     ``taus`` + ``forward_indices`` for LMM rate payoffs).
 
+    Two ``market_args`` are special: ``discount_curve`` and
+    ``forward_curve``.  The unified :func:`valax.core.pricing.price`
+    supplies them from the instrument's ``discount_id`` / ``forward_id``
+    selectors, but **only to a recipe that names them explicitly** — a
+    ``**market_args`` catch-all does not count, so a recipe that has not
+    been migrated can never silently drop a projection curve.  See
+    :mod:`valax.pricing.multicurve`.
+
     Args:
         instrument_cls: The instrument pytree class (e.g. ``EuropeanOption``).
         model_cls: The model pytree class (e.g. ``BlackScholesModel``).

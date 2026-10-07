@@ -167,9 +167,26 @@ class TestAutodiffJIT:
         assert float(grads.volatility_y) > 0.0
 
 
-class TestForwardCurveGuard:
-    def test_distinct_forward_curve_rejected(self, ref_date, model):
+class TestForwardCurve:
+    """A distinct projection curve is now priced, not rejected.
+
+    G2++ dual-curve swaptions went from ``NotImplementedError`` to the frozen
+    deterministic tenor-basis overlay.  The substantive gates (PDE agreement,
+    payer/receiver parity against the dual-curve forward swap, basis
+    monotonicity) live in ``tests/test_pricing/test_dual_curve_swaptions.py``;
+    these two just pin the local contract.
+    """
+
+    def test_distinct_forward_curve_is_priced(self, ref_date, model):
         other = _flat_curve(ref_date, rate=0.04)
         s = _swaption(ref_date, 5, 5, 0.03, True)
-        with pytest.raises(NotImplementedError):
-            g2pp_swaption_price(s, model, forward_curve=other)
+        dual = g2pp_swaption_price(s, model, forward_curve=other)
+        assert jnp.isfinite(dual)
+        # Projection above the discount curve lifts a payer swaption.
+        assert float(dual) > float(g2pp_swaption_price(s, model))
+
+    def test_discount_curve_as_projection_is_single_curve(self, ref_date, model):
+        s = _swaption(ref_date, 5, 5, 0.03, True)
+        assert float(
+            g2pp_swaption_price(s, model, forward_curve=model.initial_curve)
+        ) == float(g2pp_swaption_price(s, model))

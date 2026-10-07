@@ -7,6 +7,8 @@ simulates and prices the one- and two-factor Cheyette models.
 
 Model: `valax/models/cheyette.py`.
 Monte Carlo: `valax/pricing/mc/cheyette_paths.py`.
+PDE: `valax/pricing/pde/cheyette.py`.
+Calibration: `valax/calibration/cheyette.py`.
 Recipes: `valax/pricing/mc/recipes.py`.
 
 ---
@@ -261,6 +263,145 @@ exact-fit and Gaussian-limit reductions (which pin the model against the already
 QuantLib-validated Hull–White and G2++), the internal MC↔analytic agreement, and
 model-free parity relations, in the spirit of the Andersen–Piterbarg
 quasi-Gaussian benchmarks.
+
+---
+
+## 8 · PDE (finite differences)
+
+The headline products — Bermudan swaptions, callables — have no closed form, so
+they are priced by solving the Cheyette backward PDE. The obstacle is
+dimensionality: the state is $(x, y)$ in one factor and
+$(x_1, x_2, y_{11}, y_{22}, y_{12})$ in two, i.e. a naive PDE is 2-D (1F) or 5-D
+(2F). The auxiliary $y$ is **advection-only** (a pure-drift accumulator, no
+Brownian term — see §6), which is what makes lower-dimensional treatments
+possible. VALAX ships two tiers.
+
+Source: `valax/pricing/pde/cheyette.py`.
+
+### Tier 1 — frozen-$y$ (the production engine)
+
+Replace the stochastic accumulator by its deterministic Gaussian-limit value
+$\bar y(t)$ (`cheyette_y_gaussian`), so **one factor becomes a genuine 1-D PDE**
+and **two factors a 2-D ADI PDE** — reusing the [Hull–White](hull-white-pde.md)
+and [G2++](g2pp.md) substrates almost verbatim. Working in the *centred* factor
+$\tilde x_i = x_i - m_i(t)$ with $m = $ `cheyette_gaussian_mean` recovers exactly
+the Gaussian centred dynamics $d\tilde x_i = -\kappa_i \tilde x_i\,dt +
+\sigma_{r,i}\,dW_i$, so the centred grid (`centred_state_grid`), the
+zero-curvature boundary (`apply_linearity_bc_1d` / `_2d`) and the exact-fit
+discount factoring all carry over. The one-factor backward equation is
+
+$$
+\frac{\partial W}{\partial t}
+    + \tfrac12\,\sigma_r(t, \tilde x + m)^2\,\frac{\partial^2 W}{\partial \tilde x^2}
+    - \kappa \tilde x\,\frac{\partial W}{\partial \tilde x}
+    - \bigl(\tilde x + \alpha_{\mathrm{Ch}}(t)\bigr) W = 0,
+$$
+
+with $\alpha_{\mathrm{Ch}}(t) = f^M(0,t) + m(t)$ (baked into the discount and
+exactly step-averaged, the Hull–White `hw_alpha_average` discipline) and, in two
+factors, the ADI cross term $\rho\,\sigma_{r,1}\sigma_{r,2}\,V_{\tilde x_1
+\tilde x_2}$ with $\varphi_{\mathrm{Ch}}(t) = f^M(0,t) + m_1(t) + m_2(t)$
+factored out per step (the G2++ $\varphi$ discipline). Exercise, coupon
+injection and tail-swap values plug into the same `event_fn` seam and are
+computed analytically from `cheyette_bond_price[_2f]` with the frozen $y = \bar
+y$.
+
+**The one new ingredient** is the diffusion coefficient $\tfrac12\sigma_r(t,
+\tilde x + m)^2 = \tfrac12\sigma^2(1 + \beta(\tilde x + m))^2$ — *spatially
+varying*, where Hull–White and G2++ carry a constant $\tfrac12\sigma^2$. The
+operator builders already accept a per-node diffusion field, so this is a new
+coefficient adapter (`cheyette_operator_stack`, `cheyette_operator_2d`), not new
+solver machinery. In two factors the cross term becomes node-dependent too.
+
+!!! note "Frozen-$y$ is a slightly different model for $\beta \neq 0$"
+    Freezing $y$ decouples the accumulator from the state, so for $\beta \neq 0$
+    the frozen-$y$ PDE and the true-$y$ Monte Carlo (§6) are *slightly different
+    models*: their cross-check measures the frozen-$y$ error, not machine
+    agreement. At $\beta = 0$ the accumulator is already deterministic and the
+    two coincide — which is the primary reduction oracle below.
+
+### Tier 2 — exact-$y$ (one-factor validation oracle)
+
+Carrying $y$ as a real axis gives a genuine **2-D** PDE in $(x, y)$ — the true
+model, no frozen-$y$ approximation:
+
+$$
+\frac{\partial V}{\partial t}
+    + \tfrac12\,\sigma_r(x)^2\,\frac{\partial^2 V}{\partial x^2}
+    + (y - \kappa x)\,\frac{\partial V}{\partial x}
+    + \bigl(\sigma_r(x)^2 - 2\kappa y\bigr)\,\frac{\partial V}{\partial y}
+    - x\,V = 0.
+$$
+
+The $x$ axis is parabolic (central differences); the $y$ axis is **pure
+advection** and uses first-order **upwinding** for stability. The deterministic
+$f^M(0,t)$ discount is factored out per step; the accumulator convexity is now
+generated *natively* by the $y$ dynamics, so there is no shift to add. Its value
+is diagnostic: `cheyette_exact_price(instrument, model, config)` gives the
+exact-$y$ price with **zero Monte-Carlo noise**, so the difference from Tier 1
+is a clean, deterministic measurement of the frozen-$y$ bias. Empirically that
+bias is a small fraction of the price for realistic rate volatilities — the
+quantitative justification for using the frozen-$y$ engine in production.
+
+The **two-factor** exact-$y$ PDE is 5-D (2 diffusive + 3 advective directions)
+and is intentionally *not* implemented: it is logged as a research spike in
+[`research-ideas.md`](../research-ideas.md), since carrying it through a
+differentiable, reverse-mode calibration loop is dominated by the
+scan-checkpoint memory cost, not the forward FLOPs.
+
+### PDE validation
+
+| Oracle | Agreement | What it tests |
+|---|---|---|
+| Hull–White PDE reduction ($\beta = 0$, same mesh) | `< 1e-10` abs | 1F operator + discount collapse to HW |
+| G2++ PDE reduction ($\beta_i = 0$, same mesh) | `< 1e-9` abs | 2F ADI operator collapses to G2++ |
+| QuantLib `FdHullWhite`/`Jamshidian` ($\beta = 0$) | `< 5e-4` rel | 1F, closing the chain to QuantLib |
+| QuantLib `FdG2SwaptionEngine` ($\beta_i = 0$) | `< 1.5e-2` rel | 2F FD vs FD |
+| Coupon bond reprices curve | `< 5e-5` abs (frozen), `< 5e-5` (exact-$y$) | Exact fit / scheme calibration |
+| Frozen-$y$ vs exact-$y$ ($\beta = 0$) | grid tolerance | The two tiers are the same model at zero skew |
+| MC ↔ frozen-$y$ PDE | within MC error $+$ frozen-$y$ bias | §6 engine vs §8 engine |
+| $\partial \text{price}/\partial(\sigma, \beta)$ finite | — | Autodiff flows through the backward sweep (for calibration) |
+
+Registered recipes (via `pde_price_dispatch`): `FixedRateBond` (the option-free
+calibration of the scheme), `Swaption`, `BermudanSwaption`, and — one factor —
+`CallableBond` / `PuttableBond`.
+
+---
+
+## 9 · Calibration
+
+Cheyette is calibrated *through the PDE* rather than an approximate-analytic
+swaption formula, because the PDE covers the full instrument set — caps,
+European and Bermudan swaptions, callables — on one consistent engine. Model
+prices come from the frozen-$y$ recipes (production) or, for one factor, the
+exact-$y$ solver (bias-free); both are cleanly reverse-mode differentiable — the
+backward sweep is `lineax` tridiagonal solves inside a `lax.scan` with nothing
+detached from autodiff — so the least-squares Jacobian is **exact autodiff
+through the PDE**. No finite-difference Greeks and no implicit-function-theorem
+adjoint are needed.
+
+Source: `valax/calibration/cheyette.py`.
+
+**Identification.** One factor $(\kappa, \sigma, \beta)$: fix $\kappa$ (weakly
+identified by the ATM level); $\sigma$ then sets the ATM level and $\beta$ the
+skew, so calibrating $\beta$ needs a **strike slice** of caplets or swaptions —
+the skew is invisible at a single strike. Two factors add $\rho$ for
+decorrelation: fix $\kappa_1, \kappa_2$ (well separated), start $\rho$ from a
+prior, and add a decorrelation-sensitive instrument (e.g. a CMS-spread option)
+to pin it.
+
+**Engine choice (one factor).** `calibrate_cheyette` selects the engine:
+`"frozen"` (default, fast) or `"exact"` (bias-free, more expensive per solve).
+`calibrate_cheyette_2f` is always frozen-$y$ (the exact-$y$ 2F PDE is the 5-D
+research spike above).
+
+**Solver.** A line-searched `optimistix.BFGS` on the relative-residual sum of
+squares, with `fixed_params` support and the curve pinned (exact-fitted, not a
+degree of freedom). Levenberg–Marquardt is deliberately not offered — the
+residual closes over a sequence of instrument pytrees, which trips `optimistix`
+0.1.0's LM (`List arity mismatch`), the same caveat as `calibrate_g2pp`. Because
+the PDE sits inside the optimiser loop, use a moderate grid and a small
+instrument set, reusing the mesh across iterations.
 
 ---
 

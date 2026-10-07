@@ -18,12 +18,19 @@ Jamshidian-style critical-boundary computed on the second factor:
 for a payer swaption (a put on the coupon bond), and the sign-flipped
 bracket for a receiver.  The outer integral is evaluated by Gauss-Hermite
 quadrature; for each quadrature node the exercise boundary :math:`\bar y(x)`
-solving :math:`\sum_i c_i A_i(x)\,e^{-B(b,T,t_i)\,y} = 1` is found with an
+solving :math:`\sum_i c_i A_i(x)\,e^{-B(b,T,t_i)\,y} = V` is found with an
 ``optimistix`` Newton root-find, which is implicitly differentiable so
 ``jax.grad`` flows through the boundary cleanly.
 
 The discount curve comes from ``model.initial_curve``, so the price is
-automatically consistent with the curve G2++ was exact-fitted to.
+automatically consistent with the curve G2++ was exact-fitted to.  :math:`V`
+above is the value of the floating leg at expiry — par (:math:`1`) in the
+single-curve case, and :math:`b_1` when a distinct projection curve is
+supplied, under the frozen deterministic tenor basis of
+:mod:`valax.pricing.multicurve`.  That single substitution (plus the matching
+rescale of the strike term :math:`\Phi(\mp h_1)`) is the whole dual-curve
+extension: the basis is deterministic, so the coupon bond stays an affine
+function of the two factors and the quadrature is unchanged.
 
 References:
     Brigo & Mercurio (2006), *Interest Rate Models*, §4.2.4 (eq. 4.31).
@@ -47,6 +54,7 @@ from valax.models.g2pp import (
     g2pp_bond_price,
     g2pp_market_df,
 )
+from valax.pricing.multicurve import apply_swap_basis, swap_leg_basis
 
 # Number of Gauss-Hermite quadrature nodes for the outer 1-D integral.  The
 # G2++ swaption integrand is smooth and near-Gaussian, so 64 nodes reprice to
@@ -127,9 +135,10 @@ def _forward_measure_moments(
 def _critical_y(
     lambdas0: Float[Array, " n_fixed"],
     B_b: Float[Array, " n_fixed"],
+    par_value: Float[Array, ""] | float = 1.0,
 ) -> Float[Array, ""]:
     r"""Exercise boundary :math:`\bar y` solving :math:`\sum_i \lambda_i^0
-    e^{-B(b,T,t_i) y} = 1`.
+    e^{-B(b,T,t_i) y} = V`.
 
     The left-hand side is strictly decreasing in :math:`y`, so the root is
     unique.  Solved with a Newton iteration (implicitly differentiable).
@@ -138,12 +147,15 @@ def _critical_y(
         lambdas0: Coefficients :math:`\lambda_i^0 = c_i A_i e^{-B(a,T,t_i)x}`
             at the current outer-integration node.
         B_b: Second-factor decay factors :math:`B(b, T, t_i)`.
+        par_value: Value :math:`V` the coupon bond must equal on the boundary
+            — ``1`` in the single-curve case (the floating leg resets to par),
+            ``float_start`` under a frozen tenor basis.
 
     Returns:
         Critical value :math:`\bar y`.
     """
     def residual(y: Float[Array, ""], args) -> Float[Array, ""]:
-        return jnp.sum(lambdas0 * jnp.exp(-B_b * y)) - 1.0
+        return jnp.sum(lambdas0 * jnp.exp(-B_b * y)) - par_value
 
     sol = optx.root_find(
         residual,
@@ -167,29 +179,37 @@ def g2pp_swaption_price(
     quadrature.  A payer swaption is a put on the fixed-coupon bond, a
     receiver a call.
 
-    Discounting uses ``model.initial_curve``.  The ``forward_curve`` argument
-    is reserved for a future deterministic-basis dual-curve extension (mirror
-    of the pattern in :mod:`valax.pricing.analytic.swaptions`); it must be
-    ``None`` or the discount curve itself, since the single-curve G2++
-    coupon-bond decomposition assumes the floating leg resets to par.
+    Discounting uses ``model.initial_curve``.  Passing a distinct
+    ``forward_curve`` projects the floating leg off that curve through the
+    frozen deterministic tenor basis of :mod:`valax.pricing.multicurve`: the
+    floating leg is then worth ``float_start`` rather than par at expiry, which
+    moves the exercise boundary :math:`\bar y` and rescales the strike leg of
+    eq. (4.31).  The basis algebra is shared with the MC and PDE recipes via
+    :func:`~valax.pricing.multicurve.apply_swap_basis`, so the semi-analytic
+    price stays consistent with them.  The floating leg is assumed to pay on
+    the fixed schedule.
 
     Args:
         swaption: Swaption contract (``is_payer`` selects payer vs receiver).
         model: G2++ model carrying the initial discount curve.
-        forward_curve: Reserved; must be ``None`` (single-curve).
+        forward_curve: Optional projection curve for the underlying swap's
+            floating leg.  ``None`` (or the discount curve itself) is the
+            single-curve case, evaluated by the pre-existing code path
+            bit-for-bit.
 
     Returns:
         Swaption price as of the curve reference date.
 
+    Notes:
+        As in the one-factor case, the coupon-bond decomposition needs every
+        adjusted cash flow to stay positive so the boundary stays unique; the
+        basis shifts each flow by :math:`1 - b_{i+1}`, which is negligible at
+        realistic strikes.  Validated against the independent dual-curve PDE
+        recipe in ``tests/test_pricing/test_dual_curve_swaptions.py``.
+
     References:
         Brigo & Mercurio (2006), *Interest Rate Models*, §4.2.4 (eq. 4.31).
     """
-    if forward_curve is not None and forward_curve is not model.initial_curve:
-        raise NotImplementedError(
-            "Dual-curve (deterministic-basis) G2++ swaptions are not yet "
-            "supported; pass forward_curve=None."
-        )
-
     curve: DiscountCurve = model.initial_curve
     ref = curve.reference_date
     day_count = swaption.day_count
@@ -201,6 +221,13 @@ def g2pp_swaption_price(
     taus = _swaption_accruals(swaption)
     cashflows = swaption.strike * taus
     cashflows = cashflows.at[-1].add(1.0)
+
+    # Frozen tenor basis: single-curve returns None, a trace-time branch that
+    # leaves `float_start = 1.0` and the cash flows untouched.
+    basis = swap_leg_basis(
+        curve, forward_curve, swaption.expiry_date, swaption.fixed_dates
+    )
+    float_start, cashflows = apply_swap_basis(cashflows, basis)
 
     # Deterministic ZCB coefficients: P(T, t_i | x, y) = A_i e^{-B_a,i x - B_b,i y}.
     A_i = g2pp_bond_price(
@@ -224,7 +251,7 @@ def g2pp_swaption_price(
         x = mu_x + jnp.sqrt(2.0) * sigma_x * z
 
         lambdas0 = cashflows * A_i * jnp.exp(-B_a * x)
-        y_bar = _critical_y(lambdas0, B_b)
+        y_bar = _critical_y(lambdas0, B_b, par_value=float_start)
 
         h1 = (y_bar - mu_y) / (sigma_y * sqrt_1m) - (
             rho_xy * (x - mu_x) / (sigma_x * sqrt_1m)
@@ -238,10 +265,13 @@ def g2pp_swaption_price(
         )
         terms = lambdas0 * jnp.exp(kappa)
 
+        # The strike leg is the floating leg's value at expiry: par in the
+        # single-curve case (`float_start == 1.0`, so the arithmetic is
+        # unchanged bit-for-bit), `b_1` under a frozen tenor basis.
         if is_payer:
-            bracket = _Phi(-h1) - jnp.sum(terms * _Phi(-h2))
+            bracket = float_start * _Phi(-h1) - jnp.sum(terms * _Phi(-h2))
         else:
-            bracket = jnp.sum(terms * _Phi(h2)) - _Phi(h1)
+            bracket = jnp.sum(terms * _Phi(h2)) - float_start * _Phi(h1)
         return bracket
 
     brackets = jax.vmap(per_node)(_GH_NODES)

@@ -29,6 +29,8 @@ import jax.numpy as jnp
 from jaxtyping import Bool, Float, Int
 from jax import Array
 
+from valax.dates.daycounts import year_fraction
+
 
 class FixingSeries(eqx.Module):
     """Sorted history of realised fixings for a single index.
@@ -100,6 +102,65 @@ class FixingSeries(eqx.Module):
         matches = in_range & (self.fixing_dates[safe_idx] == fixing_dates)
         return jnp.where(matches, self.fixings[safe_idx], jnp.nan)
 
+    def compounded_factor(
+        self,
+        start_date: Int[Array, ""],
+        end_date: Int[Array, ""],
+        day_count: str = "act_360",
+    ) -> Float[Array, ""]:
+        """Realised compounding factor over ``[start_date, end_date)``.
+
+        For an overnight index the coupon is not a single fixing but a
+        product over the accrual period:
+
+        .. math::
+            A = \\prod_j \\left(1 + \\hat{r}_j \\delta_j\\right),
+
+        where :math:`\\hat{r}_j` is the recorded value dated :math:`t_j`
+        and :math:`\\delta_j` the accrual fraction from :math:`t_j` to
+        the next recorded date, capped at ``end_date``.  A recorded
+        fixing dated :math:`t_j` is understood to apply *from*
+        :math:`t_j` onward, so one dated exactly ``end_date`` is
+        excluded: the overnight rate set today is earned over
+        ``[today, tomorrow]``, which has not happened yet.
+
+        Weekends and holidays need no special handling.  A series that
+        simply has no entry for a non-business day leaves the preceding
+        business day's rate applying across the gap, weighted by the
+        calendar days to the next entry — which is the market
+        convention.
+
+        This is the quantity to hand to a partly-accrued floating leg as
+        ``accrued_compounding``.  It is a *market-data* reduction,
+        computed from recorded values only: no curve enters, so a
+        coupon's realised part carries no curve sensitivity by
+        construction.
+
+        Args:
+            start_date: Accrual start of the period (ordinal).
+            end_date: Date to compound up to, exclusive — normally the
+                valuation date (ordinal).
+            day_count: Day count for the daily accrual fractions.
+
+        Returns:
+            The compounding factor, exactly ``1.0`` when no recorded
+            fixing falls in the window (nothing has accrued yet).
+        """
+        dates = self.fixing_dates
+        if dates.shape[0] == 0:
+            return jnp.asarray(1.0)
+        end = jnp.asarray(end_date)
+        # Each recorded fixing applies until the next recorded date,
+        # truncated at ``end`` so the final partial stub is included.
+        following = jnp.concatenate([dates[1:], end.reshape(1)])
+        period_end = jnp.minimum(following, end)
+        active = (dates >= jnp.asarray(start_date)) & (dates < end)
+        deltas = year_fraction(
+            dates, jnp.maximum(period_end, dates), day_count
+        )
+        factors = jnp.where(active, 1.0 + self.fixings * deltas, 1.0)
+        return jnp.prod(factors)
+
 
 class FixingHistory(eqx.Module):
     """Registry of fixing histories keyed by index identifier.
@@ -155,6 +216,37 @@ class FixingHistory(eqx.Module):
         """
         series = self.indices[index_id]
         return series.lookup_many(fixing_dates)
+
+    def compounded_factor(
+        self,
+        index_id: str,
+        start_date: Int[Array, ""],
+        end_date: Int[Array, ""],
+        day_count: str = "act_360",
+    ) -> Float[Array, ""]:
+        """Dispatch :meth:`FixingSeries.compounded_factor` by index id.
+
+        Returns exactly ``1.0`` for an unrecorded index, so a caller can
+        ask for the realised accrual of a leg whose index has no history
+        without branching.  This differs from :meth:`lookup`, which
+        raises on an unknown id: a missing *history* legitimately means
+        "nothing has accrued", whereas a missing *fixing* for a coupon
+        that needs one is a configuration error.
+
+        Args:
+            index_id: Index whose history to compound.
+            start_date: Accrual start of the period (ordinal).
+            end_date: Date to compound up to, exclusive (ordinal).
+            day_count: Day count for the daily accrual fractions.
+
+        Returns:
+            The realised compounding factor.
+        """
+        if index_id not in self.indices:
+            return jnp.asarray(1.0)
+        return self.indices[index_id].compounded_factor(
+            start_date, end_date, day_count
+        )
 
 
 def empty_fixing_history() -> FixingHistory:

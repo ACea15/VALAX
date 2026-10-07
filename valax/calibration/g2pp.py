@@ -25,6 +25,7 @@ References:
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 
 import equinox as eqx
@@ -48,6 +49,7 @@ from valax.pricing.analytic.g2pp_swaptions import g2pp_swaption_price
 def g2pp_swaption_prices(
     model: G2PPModel,
     swaptions: Sequence[Swaption],
+    forward_curve: DiscountCurve | None = None,
 ) -> Float[Array, " n_quotes"]:
     """G2++ model price for each swaption on the surface.
 
@@ -56,13 +58,17 @@ def g2pp_swaption_prices(
     each price is a cheap 1-D quadrature, so the unrolled graph is fine.
 
     Args:
-        model: G2++ model.
+        model: G2++ model; its ``initial_curve`` is the discount curve.
         swaptions: Swaption contracts, one per quote.
+        forward_curve: Optional projection curve, applied through the frozen
+            tenor-basis overlay.  ``None`` is single-curve.
 
     Returns:
         Model price of each swaption.
     """
-    return jnp.stack([g2pp_swaption_price(sw, model) for sw in swaptions])
+    return jnp.stack(
+        [g2pp_swaption_price(sw, model, forward_curve) for sw in swaptions]
+    )
 
 
 def _g2pp_price_residuals(
@@ -75,9 +81,16 @@ def _g2pp_price_residuals(
     an expiry/tenor grid span more than an order of magnitude, so absolute
     residuals would let the longest-dated quotes dominate the fit.
     """
-    transforms, template, swaptions, market_prices, weights, scale = args
+    (
+        transforms, template, swaptions, market_prices, weights, scale,
+        forward_curve,
+    ) = args
     model = unconstrained_to_model(raw_params, transforms, template)
-    return weights * (g2pp_swaption_prices(model, swaptions) - market_prices) / scale
+    return (
+        weights
+        * (g2pp_swaption_prices(model, swaptions, forward_curve) - market_prices)
+        / scale
+    )
 
 
 def _g2pp_sse(
@@ -98,8 +111,17 @@ def calibrate_g2pp(
     relative: bool = True,
     solver: str = "bfgs",
     max_steps: int = 512,
+    forward_curve: DiscountCurve | None = None,
+    curve_id: str | None = None,
 ) -> tuple[G2PPModel, optimistix.Solution]:
     r"""Fit G2++ :math:`(a, b, \sigma, \eta, \rho)` to a swaption surface.
+
+    **Single- and dual-curve.** By default this is the single-curve fit it
+    always was, bit-for-bit.  Passing ``forward_curve`` makes ``curve`` the
+    *discount* (e.g. OIS) curve and projects the underlying swaps' floating
+    legs off the projection curve through the frozen deterministic tenor-basis
+    overlay, matching the MC/PDE engines.  Multi-curve is an upgrade, not a
+    replacement.
 
     Args:
         swaptions: Swaption contracts, one per market quote.
@@ -107,7 +129,8 @@ def calibrate_g2pp(
             :func:`valax.calibration.swaption_prices_from_vols` to convert
             quoted volatilities.
         curve: Initial discount curve; G2++ is exact-fitted to it, so it is
-            *not* a calibration degree of freedom.
+            *not* a calibration degree of freedom.  With ``forward_curve`` set
+            this is the *discount* (e.g. OIS) curve.
         initial_guess: Starting model.  Defaults to
             :math:`a = 0.5, b = 0.1, \sigma = 0.01, \eta = 0.008,
             \rho = -0.7` (well-separated mean reversions to avoid the
@@ -131,6 +154,17 @@ def calibrate_g2pp(
             over a sequence of instrument pytrees, which trips ``optimistix``
             0.1.0's Levenberg-Marquardt with a ``List arity mismatch``.
         max_steps: Maximum optimiser iterations.
+        forward_curve: Optional projection curve for the underlying swaps'
+            floating legs, applied through the frozen deterministic tenor-basis
+            overlay.  ``None`` (the default) is the single-curve fit,
+            bit-for-bit as before.  Convert your target vols with the same
+            curve pair — see
+            :func:`valax.calibration.swaption_prices_from_vols`.
+        curve_id: Optional identifier of the discount curve in the
+            :class:`~valax.core.market_state.MarketState` it came from,
+            recorded on the fitted model so the linkage is explicit and
+            :meth:`~valax.models.g2pp.G2PPModel.with_market_curve` can re-bind
+            it under a shocked market.
 
     Returns:
         Tuple of the fitted model and the ``optimistix`` solution carrying
@@ -161,6 +195,11 @@ def calibrate_g2pp(
             lambda m: m.initial_curve, initial_guess, curve
         )
 
+    # ``curve_id`` is a static field, so it is not a pytree leaf and
+    # ``eqx.tree_at`` cannot reach it; rebuild the frozen module instead.
+    if curve_id is not None:
+        initial_guess = dataclasses.replace(initial_guess, curve_id=curve_id)
+
     transforms: dict[str, TransformSpec] = dict(G2PP_TRANSFORMS)
     if fixed_params is not None:
         for name, value in fixed_params.items():
@@ -184,6 +223,7 @@ def calibrate_g2pp(
     y0 = model_to_unconstrained(initial_guess, transforms)
     args = (
         transforms, initial_guess, tuple(swaptions), market_prices, weights, scale,
+        forward_curve,
     )
 
     if solver == "bfgs":

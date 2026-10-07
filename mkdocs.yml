@@ -60,31 +60,61 @@ watch:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
-  - "Where VALAX Fits": landscape.md
-  - "Direction & Rationale":
+  - Direction & Applications:
+      - Where VALAX Fits: landscape.md
       - Design Rationale: design-rationale.md
       - Vision: vision.md
+      - Applications Overview: applications/index.md
+      - Market Risk & Model Validation: applications/market-risk.md
+      - Quant Research: applications/quant-research.md
+      - Front-Office Trading: applications/trading-desk.md
+      - "Regulatory: FRTB & CCAR": applications/regulatory.md
+      - Treasury & ALM: applications/treasury.md
+  - Roadmap & Research:
       - Roadmap: roadmap.md
       - Research Ideas: research-ideas.md
-  - Applications:
-      - Overview: applications/index.md
-      - "Instrument Pricing": applications/instrument-pricing.md
-      - "Market Risk & Model Validation": applications/market-risk.md
-      - "Quant Research": applications/quant-research.md
-      - "Front-Office Trading": applications/trading-desk.md
-      - "Regulatory: FRTB & CCAR": applications/regulatory.md
-      - "Treasury & ALM": applications/treasury.md
-  - "Examples and Validation":
-      - Pricing: examples.md
-      - "QuantLib Validation Pyramid": architecture/quantlib-validation-pyramid.md
-      - Benchmarks: benchmarks.md
-  - Architecture:
+  - Solvers and Instruments:
+      - Overview: applications/instrument-pricing.md
+      - Instruments:
+          - Fixed Income: guide/fixed-income.md
+          - Callable/Puttable/FRN/Convertible Bonds: guide/callable-bonds.md
+          - Interest Rate Exotics: guide/rates-exotics.md
+          - FX Derivatives: guide/fx.md
+          - Inflation Derivatives: guide/inflation.md
+          - Equity Exotics: guide/equity-exotics.md
+          - Credit Derivatives: guide/credit.md
+      - Solvers:
+          - Analytical Pricing: guide/analytical.md
+          - Monte Carlo: guide/monte-carlo.md
+          - PDE Solvers: guide/pde.md
+          - Binomial Trees: guide/lattice.md
+      - Synthetic Market Data: guide/synthetic_market.md
+  - Conventions:
+      - Dates, Schedules & Accrual: guide/dates-and-conventions.md
+  - Calibration:
+      - Overview: guide/calibration.md
+      - Yield Curves & Bootstrapping: guide/curves.md
+      - Why Multi-Curve?: guide/why-multicurve.md
+      - Volatility Surfaces: guide/vol-surfaces.md
+      - Stochastic-Local Volatility: guide/slv.md
+  - Scaling Up:
+      - Overview: scaling/index.md
+      - Batch Pricing & JIT at Scale: scaling/batching.md
+      - Heterogeneous Portfolios: scaling/heterogeneous.md
+      - Reliable Greeks & Hedging at Scale: scaling/greeks-and-hedging.md
+      - Parallelism & Devices: scaling/parallelism.md
+  - Architecture & Validation:
       - Overview: architecture/overview.md
       - Productionisation Design: architecture/production.md
-      - "JAX Patterns": architecture/jax-patterns.md
-      - "PDE Solvers Design": architecture/pde-design.md
-      - "Numerical Pitfalls": architecture/numerical-pitfalls.md
-      - "MC-Curves-2 Handoff": architecture/mc-curves-2.md
+      - JAX Patterns: architecture/jax-patterns.md
+      - PDE Solvers Design: architecture/pde-design.md
+      - Numerical Pitfalls: architecture/numerical-pitfalls.md
+      - Validation:
+          - Pricing Examples: examples.md
+          - Multi-Curve / AAD Audit Conformance: architecture/aad-audit-conformance.md
+          - QuantLib Validation Pyramid: architecture/quantlib-validation-pyramid.md
+          - Benchmarks: benchmarks.md
+          - Reproducibility & Arbitrage Tests: guide/reproducibility_and_arbitrage_tests.md
   - Models & Theory:
       - Overview: theory/index.md
       - Foundational Framework: theory/foundations.md
@@ -103,33 +133,21 @@ nav:
           - "Hull-White Finite Differences: Bermudans and Callables": theory/hull-white-pde.md
           - "G2++: Two-Factor Gaussian and Decorrelation": theory/g2pp.md
           - "Cheyette: Quasi-Gaussian Skew": theory/cheyette.md
-  - "Risk: End-to-End": risk-overview.md
-  - Risk Factors: risk-factors.md
-  - User Guide:
-      - "Tutorial — Rates End-to-End": guide/tutorial-rates.md
-      - Analytical Pricing: guide/analytical.md
-      - Yield Curves & Bootstrapping: guide/curves.md
-      - Why Multi-Curve?: guide/why-multicurve.md
-      - Fixed Income: guide/fixed-income.md
-      - Callable/Puttable/FRN/Convertible Bonds: guide/callable-bonds.md
-      - Short-Rate Models: guide/short-rate.md
-      - FX Derivatives: guide/fx.md
-      - Inflation Derivatives: guide/inflation.md
-      - Interest Rate Exotics: guide/rates-exotics.md
-      - Equity Exotics: guide/equity-exotics.md
-      - Credit Derivatives: guide/credit.md
-      - Greeks via Autodiff: guide/greeks.md
-      - Monte Carlo: guide/monte-carlo.md
-      - PDE Solvers: guide/pde.md
-      - Binomial Trees: guide/lattice.md
-      - Calibration: guide/calibration.md
-      - Volatility Surfaces: guide/vol-surfaces.md
-      - Stochastic-Local Volatility: guide/slv.md
-      - Risk & Scenarios: guide/risk.md
-      - "PCA Curve Shocks (Rates)": guide/pca-rates.md
-      - Synthetic Market Data: guide/synthetic_market.md
-      - Reproducibility & Arbitrage Tests: guide/reproducibility_and_arbitrage_tests.md
+          - "Multi-Curve Short Rates: the Deterministic Tenor Basis": theory/multi-curve-short-rate.md
+  - Risk:
+      - Overview: risk-overview.md
+      - Risk Factors: risk-factors.md
+      - Scenarios & Shocks: risk-scenarios.md
+      - Sensitivity Ladders: risk-ladders.md
+      - "VaR & P&L": risk-var.md
+      - Risk Bucketing: risk-bucketing.md
+      - Backtesting & FRTB PLA: risk-backtesting.md
+      - PCA Curve Shocks (Rates): guide/pca-rates.md
+  - Examples:
+      - Tutorial — The Unified Pricing Contract: guide/tutorial-unified-pricing.md
+      - Tutorial — Rates End-to-End: guide/tutorial-rates.md
   - API Reference:
+      - Core — Market State & Pricing: api/core.md
       - Instruments: api/instruments.md
       - Pricing: api/pricing.md
       - Dates: api/dates.md

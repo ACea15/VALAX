@@ -36,6 +36,21 @@ through a pricing function that consumes a `MarketData` returns
 sensitivities to every spot, vol, dividend, and curve pillar
 simultaneously.
 
+!!! note "`MarketData` is being generalised into `MarketState`"
+    [`valax.core.MarketState`](core.md#marketstate) subsumes this
+    container: a keyed `CurveGraph` instead of one curve, full vol
+    surfaces instead of a scalar per asset, plus credit / inflation / FX.
+    `MarketData` stays for one minor release as a two-way view
+    (`MarketState.from_market_data` / `.to_market_data`).
+
+    The repricing loop **has** moved: `valax.risk.state_var` reprices a
+    `MarketState` under a `KeyedScenario` through `price(...)`, and
+    `wrap_equity_pricing_fn` is deprecated alongside this container. What
+    still consumes the legacy view is the rest of `valax.risk.var`
+    (`reprice_under_scenario`, `portfolio_pnl`, `parametric_var`,
+    `pnl_attribution`), the sensitivity ladders, and the scenario
+    generators — all frozen at current behaviour until `MarketData` goes.
+
 ::: valax.market.MarketData
 
 ::: valax.market.MarketScenario
@@ -45,6 +60,27 @@ simultaneously.
 ::: valax.market.zero_scenario
 
 ::: valax.market.stack_scenarios
+
+### Keyed scenarios (for `MarketState`)
+
+`MarketScenario` above is positional: four flat vectors laid out over a
+`MarketData`. `KeyedScenario` is the same idea addressed **by
+identifier** — curve id, surface id, asset id — which is what
+[`MarketState`](core.md#marketstate) needs, since it holds a whole
+`CurveGraph` (so "rates" is not one block) and stores vols as surface
+objects (so a vol shock is not one scalar per asset). Absent key = no
+shock; unknown key = error. Apply one with
+[`valax.risk.shock`](risk.md#keyed-shocks-on-a-marketstate); the
+narrative and the design fork behind the vol leg are in
+[Scenarios & Shocks § Keyed scenarios](../risk-scenarios.md#keyed-scenarios-on-a-marketstate).
+
+::: valax.market.KeyedScenario
+
+::: valax.market.zero_keyed_scenario
+
+::: valax.market.keyed_from_market_scenario
+
+::: valax.market.stack_keyed_scenarios
 
 ## Synthetic data — configuration & seeds
 
@@ -278,6 +314,31 @@ These are intentionally *not* provided by the current synthetic layer:
 - **Active arbitrage detection.** The injectors and exception types
   are in place; the corresponding library-side checkers are tracked
   as `xfail` items in the test suite.
+
+## Snapshot provenance
+
+A quote vector on its own is anonymous: `q_bar[7] = -41.3` is not a risk
+report until something says entry 7 was a 5Y OIS par rate in decimal, from a
+named source, at a named time, under a named snapshot.
+
+`SnapshotProvenance` is kept **alongside** `MarketState`, not inside it. Every
+field is a string or an integer, so it is never a differentiated leaf; it
+could be carried as static fields on the market without being differentiated,
+but static fields participate in JIT cache keys, and provenance changes on
+every snapshot by definition — so that would recompile every jitted pricer
+each time a timestamp moved.
+
+[`from_instruments`](#valax.market.SnapshotProvenance.from_instruments)
+derives each quote's type and units from the bootstrap instrument itself, in
+solver order, which is what makes
+[`label`](#valax.market.SnapshotProvenance.label) safe: both the sensitivity
+vector and the names come from the same sequence, so a reordered quote list
+cannot silently mislabel a report. A length mismatch raises rather than
+zipping short.
+
+::: valax.market.QuoteProvenance
+
+::: valax.market.SnapshotProvenance
 
 ## See also
 

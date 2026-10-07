@@ -28,7 +28,8 @@ import jax.numpy as jnp
 import pytest
 
 from valax.curves.discount import DiscountCurve
-from valax.dates.daycounts import ymd_to_ordinal
+from valax.dates.accrual import accrual_periods
+from valax.dates.daycounts import year_fraction, ymd_to_ordinal
 from valax.instruments.bonds import FixedRateBond
 from valax.instruments.rates import BermudanSwaption, Swaption
 from valax.models.g2pp import G2PPModel
@@ -203,8 +204,17 @@ class TestEuropeanVsAnalytic:
 
 class TestFixedRateBondExactFit:
     def _analytic_bond(self, curve, fixed, coupon):
+        """Reference PV, sized with the same day-count accrual as the pricer.
+
+        This helper used to treat ``coupon`` as the cash amount of every
+        period, i.e. assume each accrual period is exactly one year. Under
+        Act/365 a year containing a leap day is 366/365, so the reference
+        itself was wrong wherever the schedule crossed a leap year.
+        """
+        starts, _ = accrual_periods(fixed, None, 1)
+        taus = year_fraction(starts, fixed, _ACT365)
         dfs = curve(fixed)
-        return float(coupon * dfs.sum() + dfs[-1])
+        return float(jnp.sum(coupon * taus * dfs) + dfs[-1])
 
     def test_reprices_curve_flat(self, flat_curve, model):
         fixed = _fixed_dates(2026, 8)

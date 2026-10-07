@@ -26,6 +26,13 @@ The two historical non-blockers are now resolved:
    single VALAX convenience (used by ``shared_caplet_surface`` below).
 2. The QuantLib ``OptionletStripper1`` fixture lives in ``_ql_adapters`` and is
    exercised by :class:`TestOptionletStripper1Fixture`.
+
+:class:`TestVALAXStripRepricesQuotesInQL` closes the loop in the other
+direction: VALAX's own cap→caplet stripper
+(:func:`valax.surfaces.strip_caplet_vols`, the counterpart of
+``ql.OptionletStripper1``) does the bootstrap, and QuantLib's
+``BlackCapFloorEngine`` is the independent judge of the invariant that
+defines it — a stripped surface must reprice the quotes it came from.
 """
 
 import jax.numpy as jnp
@@ -39,6 +46,8 @@ from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol
 from valax.pricing.analytic.rates_smile import cap_price
 from valax.surfaces.optionlet_surface import build_sabr_caplet_surface
+
+from valax.surfaces.caplet_stripping import strip_caplet_vols
 
 from tests.test_quantlib_comparison._ql_adapters import (
     DEFAULT_QL_DATE,
@@ -210,3 +219,157 @@ class TestOptionletStripper1Fixture:
         assert rel < 1e-5, (
             f"n={n}y: flat={flat_price:.4f}  stripped={stripped_price:.4f}  rel={rel:.2e}"
         )
+
+
+# ── VALAX cap→caplet stripping vs QuantLib ───────────────────────────
+#
+# The VALAX counterpart of ``ql.OptionletStripper1`` is
+# ``valax.surfaces.strip_caplet_vols``.  Comparing *stripped vols* head to
+# head would compare cap-construction conventions (QL reads its term-vol
+# surface at its own interpolated tenors and builds its own caps), not the
+# bootstrap.  The convention-free statement is the bootstrap's defining
+# invariant — **a stripped surface reprices the quotes it came from** — so
+# that is what is asserted here, with QuantLib supplying the independent
+# pricer: VALAX strips, QL adopts the stripped vols, and QL's
+# ``BlackCapFloorEngine`` must return the same premium it gets from the flat
+# quoted vol.
+
+#: Annual calendar dates (2026-01-01 .. 2031-01-01) shared by both engines.
+#: Real dates, not 365-day offsets, so QL's Act/365 times (which carry the
+#: 2028 leap day) and VALAX's ordinals agree exactly.
+_ANNUAL_ORDINALS = [int(ymd_to_ordinal(y, 1, 1)) for y in range(2026, 2032)]
+
+#: Flat quoted cap vols for the caps maturing 2y, 3y, 4y, 5y.  The 1y cap is
+#: omitted: with an annual index its only caplet fixes today, so it has no
+#: volatility to strip (QL's stripper drops it too).
+_TERM_VOLS = [0.21, 0.22, 0.225, 0.23]
+
+_STRIP_STRIKE = 0.03
+
+
+def _annual_curve() -> DiscountCurve:
+    """Flat 3% Act/365 curve pillared on the shared annual date grid."""
+    pillars = jnp.array(_ANNUAL_ORDINALS, dtype=jnp.int32)
+    times = (pillars - _ANNUAL_ORDINALS[0]).astype(jnp.float64) / 365.0
+    return DiscountCurve(
+        pillar_dates=pillars,
+        discount_factors=jnp.exp(-_RATE * times),
+        reference_date=jnp.int32(_ANNUAL_ORDINALS[0]),
+        day_count="act_365",
+    )
+
+
+def _annual_cap(n_optionlets: int, strike: float) -> Cap:
+    """Cap with ``n_optionlets`` annual caplets fixing at 1y, 2y, ..."""
+    grid = jnp.array(_ANNUAL_ORDINALS, dtype=jnp.int32)
+    return Cap(
+        fixing_dates=grid[1:n_optionlets + 1],
+        start_dates=grid[1:n_optionlets + 1],
+        end_dates=grid[2:n_optionlets + 2],
+        strike=jnp.array(strike),
+        notional=jnp.array(1_000_000.0),
+        is_cap=True,
+        day_count="act_365",
+    )
+
+
+class TestVALAXStripRepricesQuotesInQL:
+    """VALAX-stripped optionlet vols, priced back by QuantLib."""
+
+    @pytest.fixture(scope="class")
+    def stripped_in_ql(self):
+        reset_evaluation_date()
+        curve = _annual_curve()
+        caps = [_annual_cap(n, _STRIP_STRIKE) for n in (1, 2, 3, 4)]
+        strip = strip_caplet_vols(
+            caps, curve, cap_vols=jnp.array(_TERM_VOLS),
+        )
+        strikes = [0.02, _STRIP_STRIKE, 0.04]
+        # Adopt the stripped term structure into a QL optionlet structure.
+        # The strip is flat across strikes here (one strike column), which is
+        # all the single-strike cap below reads.
+        grid = [[float(v)] * len(strikes) for v in strip.vols]
+        ql_fix = ql_optionlet_vol_surface(
+            [float(t) for t in strip.expiries], strikes, grid, _RATE,
+        )
+        return {"strip": strip, "ql": ql_fix}
+
+    def test_optionlet_expiries_match_ql_stripper(self):
+        """VALAX's optionlet grid is the one QL's stripper also produces."""
+        reset_evaluation_date()
+        grid = [[0.20] * 4 for _ in range(5)]
+        ql_stripper = ql_stripped_optionlet_surface(
+            [1, 2, 3, 4, 5], [0.02, 0.03, 0.030455, 0.04], grid, _RATE,
+            switch_strike=0.030455,
+        )["stripper"]
+        ql_times = list(ql_stripper.optionletFixingTimes())
+
+        curve = _annual_curve()
+        strip = strip_caplet_vols(
+            [_annual_cap(n, _STRIP_STRIKE) for n in (1, 2, 3, 4)],
+            curve, cap_vols=jnp.array(_TERM_VOLS),
+        )
+        assert len(ql_times) == int(strip.expiries.shape[0])
+        for t_ql, t_valax in zip(ql_times, strip.expiries):
+            assert float(t_valax) == pytest.approx(t_ql, abs=1e-12)
+
+    @pytest.mark.parametrize("n", [1, 2, 3, 4])
+    def test_ql_reprices_the_quoted_cap_off_the_valax_strip(
+        self, stripped_in_ql, n,
+    ):
+        """QL cap priced off VALAX's stripped vols == flat-quoted-vol price.
+
+        The bootstrap's defining invariant, checked by an engine that had no
+        part in producing the strip.
+        """
+        ql_fix = stripped_in_ql["ql"]
+        today = DEFAULT_QL_DATE
+        dates = [
+            today + ql.Period(int(o - _ANNUAL_ORDINALS[0]), ql.Days)
+            for o in _ANNUAL_ORDINALS
+        ]
+        leg = ql.IborLeg(
+            [1_000_000.0], ql.Schedule(dates[1:n + 2]), ql_fix["index"],
+            ql.Actual365Fixed(), ql.Unadjusted,
+        )
+        cap = ql.Cap(leg, [_STRIP_STRIKE])
+
+        cap.setPricingEngine(ql.BlackCapFloorEngine(
+            ql_fix["discount"],
+            ql.QuoteHandle(ql.SimpleQuote(_TERM_VOLS[n - 1])),
+        ))
+        flat_price = cap.NPV()
+
+        cap.setPricingEngine(ql.BlackCapFloorEngine(
+            ql_fix["discount"], ql_fix["handle"],
+        ))
+        stripped_price = cap.NPV()
+
+        rel = abs(flat_price - stripped_price) / max(abs(flat_price), 1.0)
+        assert rel < 1e-10, (
+            f"{n} optionlet(s): flat={flat_price:.6f} "
+            f"stripped={stripped_price:.6f} rel={rel:.2e}"
+        )
+
+    def test_flat_quotes_agree_with_ql_stripper(self):
+        """On a flat cap-vol surface both strippers must return that vol.
+
+        The one case where no convention difference can hide: a flat term-vol
+        surface strips to a flat optionlet surface, so VALAX and
+        ``ql.OptionletStripper1`` are directly comparable.
+        """
+        flat = 0.20
+        reset_evaluation_date()
+        ql_stripper = ql_stripped_optionlet_surface(
+            [1, 2, 3, 4, 5], [0.02, 0.03, 0.030455, 0.04],
+            [[flat] * 4 for _ in range(5)], _RATE, switch_strike=0.030455,
+        )["stripper"]
+        ql_vols = list(ql_stripper.optionletVolatilities(1))
+
+        strip = strip_caplet_vols(
+            [_annual_cap(n, _STRIP_STRIKE) for n in (1, 2, 3, 4)],
+            _annual_curve(), cap_vols=jnp.full((4,), flat),
+        )
+        assert jnp.allclose(strip.vols, flat, atol=1e-10)
+        for v in ql_vols:
+            assert v == pytest.approx(flat, abs=5e-4)

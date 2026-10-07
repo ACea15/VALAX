@@ -147,12 +147,15 @@ deposit_dates = [
 ]
 
 # Build the semi-annual fixed-leg schedule for each swap.
+# A swap's fixed leg needs only the payment dates, so we take that leg of
+# the returned schedule; see the Dates and Conventions guide for the
+# accrual arrays.
 swap_schedules = [
     generate_schedule(
         ref_y, ref_m, ref_d,
         ref_y + n, ref_m, ref_d,
         frequency=2,
-    )
+    ).payment_dates
     for n in swap_tenors_years
 ]
 ```
@@ -295,7 +298,7 @@ for years in (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0):
 - **Square system.** `bootstrap_simultaneous` requires exactly one
   instrument per pillar. With over-determined quote sets you must either
   drop instruments or move to a least-squares fit (roadmap; see
-  [MC-Curves-2](../architecture/mc-curves-2.md)).
+  [Multi-Curve Framework § Curve build](../roadmap.md#6-curve-build-absorbed-from-the-retired-mc-curves-3-notes)).
 - **Log-linear interpolation between pillars** (built into `DiscountCurve`).
   The Newton solve happens in **log-DF space**, guaranteeing positive DFs
   at every iterate. Forward rates between pillars are constant; if your
@@ -395,7 +398,7 @@ print(f"  sign check         : payer of an above-par coupon is "
 expiry = jnp.asarray(ymd_to_ordinal(ref_y + 1, ref_m, ref_d), dtype=jnp.int32)
 und_schedule = generate_schedule(
     ref_y + 1, ref_m, ref_d, ref_y + 6, ref_m, ref_d, frequency=2,
-).astype(jnp.int32)
+).payment_dates.astype(jnp.int32)
 
 # Forward 1Y×5Y par swap rate, via the same primitive the pricer uses.
 fwd_template = InterestRateSwap(
@@ -537,7 +540,7 @@ system this would cost you *N* bootstrap re-runs plus *N* re-pricings.
 | Multi-curve (OIS discount + tenor projection) | [Curves §5](curves.md#5-multi-curve-bootstrap) |
 | Non-NSS curve shapes, monotone-convex interpolation | [Theory §3](../theory/curves.md#3-curve-framework) |
 | Calibrating the swaption *cube* (SABR per slice) | [Volatility Surfaces](vol-surfaces.md), [Calibration §3](calibration.md#3-sabr-smile-calibration) |
-| Hull-White $(a, \sigma)$ from swaptions (Jamshidian) | [Short-Rate Models](short-rate.md) |
+| Hull-White $(a, \sigma)$ from swaptions (Jamshidian) | [Calibration](calibration.md) |
 | Pricing exotics — callable bonds, CMS, range accruals | [Callable Bonds](callable-bonds.md), [Interest Rate Exotics](rates-exotics.md) |
 | Reproducibility contract, arbitrage stress tests | [Reproducibility & Arbitrage Tests](reproducibility_and_arbitrage_tests.md) |
 | The full six-stage synthetic pipeline | [Synthetic Market Data](synthetic_market.md), `examples/08_end_to_end_workflow.py` |

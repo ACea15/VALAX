@@ -116,6 +116,328 @@ SVI interpolates **total variance** (not implied vol) across expiries. This pres
 
 **When to use:** Equity options desks. SVI fits market smiles well with only 5 parameters, extrapolates cleanly, and can be constrained for arbitrage-freeness. The linear wings match the Roger Lee moment formula for extreme strikes.
 
+## Cap → caplet (optionlet) stripping (rates)
+
+Rates vol arrives in a form no pricer can use. A cap is quoted with **one flat volatility per maturity** — the single number that, applied to every optionlet in the strip, reproduces the market premium. A 6M optionlet and a 9Y optionlet do not share a volatility, so the first step of any rates-vol pipeline is to *strip* the quotes into a per-expiry term structure.
+
+This is also **the canonical dual-curve operation**. A cap has two curve dependencies that move independently:
+
+- each period's forward rate $F_i$ is **projected** off the tenor (IBOR / term) curve, and
+- the payoff at $T_i$ is **discounted** off the OIS / collateral curve.
+
+So the stripped vols are a function of *both* curves: the same quotes strip to different optionlet vols under a different tenor basis. Every entry point takes `curve` (discounting) plus an optional `forward_curve` (projection), matching the convention of the cap/caplet pricers.
+
+### The bootstrap
+
+Caps on a common schedule are **nested** — the 2Y cap's optionlets are the 1Y cap's plus the incremental ones — so the strip is solved forward in maturity, one scalar unknown at a time:
+
+$$
+\text{Cap}^{\text{mkt}}_i
+  = \underbrace{\sum_{j \in \mathcal{C}_{i-1}} \text{Optionlet}_j(\sigma_j)}_{\text{already stripped}}
+  + \sum_{j \in \mathcal{C}_i \setminus \mathcal{C}_{i-1}} \text{Optionlet}_j(\sigma_i),
+$$
+
+where $\mathcal{C}_i$ is the $i$-th quoted cap's optionlet index set and $\sigma_i$ — the vol shared by the incremental bucket — is the only unknown. Each step is an `optimistix.Newton` root-find, so the whole strip is differentiable by **implicit differentiation**: `jax.grad` of a stripped vol with respect to a quoted cap vol, a discount pillar, or a projection pillar works without unrolling the solver.
+
+```python
+import jax.numpy as jnp
+import equinox as eqx
+from valax.surfaces import strip_caplet_vols, cap_price_from_strip
+
+# caps: nested quarterly cap strip (1Y / 2Y / 3Y / 4Y), same strike;
+# ois: discount curve;  sofr3m: projection curve.
+quotes = jnp.array([0.30, 0.34, 0.36, 0.37])   # flat quoted cap vols
+
+strip = strip_caplet_vols(
+    caps, ois,
+    cap_vols=quotes,          # or cap_premiums=... if the desk quotes price
+    forward_curve=sofr3m,     # omit for the single-curve strip
+)
+
+strip.vols        # one vol per optionlet, constant within each quoted bucket
+strip.expiries    # optionlet expiries (year fractions)
+strip.forwards    # projected forwards, read off sofr3m
+strip(jnp.array(2.5))          # vol lookup at any expiry
+
+# The defining property: every quoted cap is repriced exactly.
+cap_price_from_strip(caps[2], strip, ois, sofr3m)
+```
+
+`strip_caplet_vols` is JIT-safe (`eqx.filter_jit` over the quotes) and reprices each quoted cap to ~1e-10 relative — including when the repricing is done by QuantLib's `BlackCapFloorEngine` off the adopted strip, which is how the routine is validated against `ql.OptionletStripper1` ([validation pyramid § 5.2](../architecture/quantlib-validation-pyramid.md#52-files)). Pass `is_normal=True` to strip Bachelier-quoted vols, which is the branch to use at or below zero rates. An optionlet that has already fixed has zero vega and nothing to strip — drop it from the quoted strip, as the market does, or the call raises.
+
+### From a strip to a surface
+
+`strip_caplet_vols` gives one *column*: the term structure at a single strike. `strip_optionlet_surface` does the whole quotes → surface leg — strip each strike column, transpose into one smile per optionlet expiry, read the ATM anchor (the projected forwards) off the curves, and fit one SABR model per expiry:
+
+```python
+from valax.surfaces import strip_optionlet_surface
+
+strikes = jnp.array([0.020, 0.028, 0.035, 0.045, 0.060])
+cap_vol_matrix = ...   # shape (n_strikes, n_caps): flat quoted vols
+
+surface = strip_optionlet_surface(
+    caps, strikes, cap_vol_matrix, ois,
+    forward_curve=sofr3m,
+)
+
+surface(jnp.array(0.035), jnp.array(2.5))   # smile-consistent optionlet vol
+```
+
+The result is an [`OptionletVolSurface`](../api/surfaces.md#optionlet-surface-rates) ready for the caplet / cap / rates-exotics pricers — see [Interest Rate Exotics](rates-exotics.md) for the instruments that consume it.
+
+Two points worth knowing:
+
+- **The forwards are curve-derived.** `build_sabr_caplet_surface` takes a caller-supplied `forwards` array; `strip_optionlet_surface` reads them off the projection curve with `optionlet_forwards`, so the smile is anchored on the same forwards the pricer will use. That is what puts the quotes → surface leg inside the framework rather than in the caller's spreadsheet.
+- **Beta is fixed by default** (`fixed_beta=0.5`). Alpha and beta share the ATM backbone $\sigma_{ATM} \approx \alpha F^{\beta - 1}$ and are not jointly identifiable from a single cap smile — a free-beta Levenberg-Marquardt fit stalls rather than converging (see [Calibration § Solvers](calibration.md#solvers)). Rates desks fix beta by convention; pass `fixed_beta=None` to free it anyway.
+
+**When to use:** any rates workflow that starts from broker cap/floor quotes — pricing caps and floors off a smile rather than a flat vol, feeding an optionlet surface to the rates exotics, or building the vol input for LMM calibration.
+
+## Smile dynamics: what moves when the curve moves
+
+A fitted smile is anchored on a forward. When the curve moves, the forward
+moves — and the convention you choose for what happens to the *vol* is a
+modelling decision, not an implementation detail. It determines the delta of
+every option priced off the surface, so it has to match the desk's risk policy
+and it has to be stated.
+
+Write $F_0$ for the forward the node was calibrated at, $F$ for the forward the
+curve implies now, $K$ for the absolute strike and $\delta = K - F_0$ for the
+quoted offset. The three standard conventions differ in exactly one place —
+which forward enters the Hagan evaluation:
+
+| Convention | Vol read | Forward used | Needs $F_0$? |
+|---|---|---|---|
+| **Sticky absolute strike** | $\sigma_{SABR}(K;\, F_0, \alpha, \rho, \nu, \beta)$ | $F_0$ — the stored, calibration-time forward | yes |
+| **Sticky moneyness** | $\sigma_{SABR}(K - (F - F_0);\, F_0, \ldots)$ | both $F_0$ and $F$ | yes |
+| **SABR backbone** | $\sigma_{SABR}(K;\, F, \alpha, \rho, \nu, \beta)$ | $F$ only — **computed, never interpolated** | no |
+
+Under the backbone convention the parameters are held fixed and the smile is
+re-evaluated at the new forward, with $\beta$ setting the backbone slope
+($\beta \to 0$ a normal/flat backbone, $\beta \to 1$ lognormal). It is the one
+convention that consults no stored forward at query time; the forward should be
+the exact par rate for the traded schedule, since interpolating a forward is
+strictly worse than computing one.
+
+### Declaring the convention
+
+The convention is a **static field**, so it is a declared choice rather than a
+property of how the code happens to be wired:
+
+```python
+from valax.surfaces import SwaptionCube, SMILE_DYNAMICS, QUOTE_FORMS
+
+SMILE_DYNAMICS   # ('sticky_strike', 'sticky_moneyness', 'sabr_backbone')
+QUOTE_FORMS      # ('absolute_strike', 'atm_offset')
+
+cube = SwaptionCube(..., dynamics="sabr_backbone", quote_form="absolute_strike")
+```
+
+- **`dynamics`** selects the row of the table above, on both `SwaptionCube` and
+  `OptionletVolSurface`. It **defaults to `"sticky_strike"`**, which is what
+  VALAX has always done, so no existing number changes.
+- **`quote_form`** records how the calibrating quote's strike was expressed.
+  `__call__` always takes an *absolute* strike; `quote_form` carries no
+  query-time behaviour of its own.
+
+The pair is **validated at construction**, because the dynamics is a
+*consequence* of what the quote holds fixed: an offset-to-ATM quote moves with
+the forward (sticky moneyness), an absolute-strike quote does not (sticky
+strike), and `"sabr_backbone"` holds the *parameters* fixed so it contradicts
+neither.
+
+| `quote_form` | admissible `dynamics` |
+|---|---|
+| `"absolute_strike"` | `"sticky_strike"`, `"sabr_backbone"` |
+| `"atm_offset"` | `"sticky_moneyness"`, `"sabr_backbone"` |
+
+Anything else raises. The live forward is supplied by the pricers at query
+time — `src(strike, expiry[, tenor], forward=F)` — and the two
+forward-dependent conventions **raise rather than silently fall back** if they
+are queried without one. `forwards` is retained on the objects but means
+exactly "the forward this node was fitted at", $F_0$; `forward_at` returns that,
+not the live rate.
+
+The practical consequence, which is worth stating because it is what a risk
+report shows: under the default `"sticky_strike"`, $\partial\sigma/\partial
+\theta_c$ is **exactly zero** and the SABR backbone contributes nothing to
+delta. Under `"sabr_backbone"` it does. Both are asserted in
+`tests/test_surfaces/test_smile_dynamics.py`.
+
+### What the convention does to delta
+
+The choice is **invisible in the price**. Evaluated at the fitted forward
+$F = F_0$, all three conventions return the same volatility — they differ only
+in how it *responds* to a forward move. So no repricing test can detect a wrong
+convention, and delta is the first quantity that can see it:
+
+$$
+\frac{dV}{dF} = \underbrace{\frac{\partial V}{\partial F}}_{\text{frozen vol}}
+  + \underbrace{\frac{\partial V}{\partial\sigma}}_{\text{vega}}\cdot\frac{d\sigma}{dF}.
+$$
+
+| Convention | $d\sigma/dF$ at $F = F_0$ | Delta on the OTM payer below |
+|---|---|---|
+| **Sticky absolute strike** | $0$ exactly | 1,556,635 |
+| **Sticky moneyness** | $-\,\partial\sigma/\partial K$ | 1,692,384 (+8.7%) |
+| **SABR backbone** | $\partial\sigma/\partial F$ | 1,475,398 (−5.2%) |
+
+Measured on a 1y×5y payer struck at 3.5% against a 3.0% forward, $\beta = 0.5$,
+$\rho = -0.25$, $\nu = 0.4$, unit annuity 4.5, notional 1e6 — the fixture of
+the T-12 gate. The ordering is not an accident of that fixture: with
+$\rho < 0$ the smile falls in the strike, so sticky moneyness picks up
+$-\partial\sigma/\partial K > 0$ and reports the **largest** delta, while the
+backbone derivative is negative at this strike and reports the smallest. A
+desk choosing between them is choosing a hedge ratio that differs by some 14%
+across the two extremes, on an identically-priced trade.
+
+Two things follow. First, this is why V-5 is a *documentation* requirement:
+there is no correct answer to test against, only consistency with a stated
+policy, so the gate checks the code against this page rather than against
+economics. Second, the distinction vanishes on a flat smile — with $\nu = 0$,
+$\beta = 1$, $\rho = 0$ the expansion is constant in both strike and forward
+and every convention gives $d\sigma/dF = 0$. Any check of this behaviour has
+to be run on a skewed, convex smile at an off-ATM strike, or it passes while
+testing nothing.
+
+Two caveats come with the non-default conventions:
+
+- **Off-node queries are mixed-order.** At an intermediate (expiry, tenor) the
+  cube bilinearly interpolates $\alpha, \rho, \nu, \beta$ but receives an
+  *exact* forward. Since $\alpha$ is the volatility of $F^\beta$, interpolating
+  it across nodes with differing forwards and then evaluating at an exact
+  forward is not the same as interpolating the ATM vols. A second-order effect,
+  but a real one: an off-node ATM query under the backbone convention will not
+  equal the bilinear interpolation of neighbouring ATM vols.
+- **`sabr_backbone` has a prerequisite.** It reproduces the calibrated market
+  vol at a node only if $F = F_0$ there, which holds only when the cube was
+  calibrated with forwards derived from the *same* curve and schedule
+  conventions the pricer uses. That is what the curve-aware calibration route
+  below guarantees — and why `sabr_backbone` is never selected implicitly, even
+  when the quote form would admit it. See the
+  [audit conformance map](../architecture/aad-audit-conformance.md) for how this
+  scores against requirement V-5.
+
+## Swaption cube: curve-aware calibration
+
+A swaption cube's at-the-money anchor is the forward **par swap rate**, and the
+premium it is quoted against is the **annuity** — both functions of the curves.
+`calibrate_swaption_cube` takes a caller-supplied `forwards` array, and that is
+precisely where the dual-curve chain breaks: a forward handed in from outside is
+a constant as far as the fit is concerned, so $\partial\theta_v/\partial\theta_c
+= 0$ and no curve risk can ever reach the volatility layer.
+
+`calibrate_swaption_cube_from_curves` closes it. Give it the **schedules** —
+one representative `Swaption` per node — and the curves, and it derives the grid
+axes and the per-node $(S_x, A_d)$ itself, through the same
+`swaption_forward_and_annuity` the pricer uses:
+
+```python
+import jax.numpy as jnp
+from valax.dates.schedule import generate_schedule
+from valax.dates.daycounts import ymd_to_ordinal
+from valax.instruments.rates import Swaption
+from valax.surfaces import calibrate_swaption_cube_from_curves
+
+# One representative swaption per (expiry, tenor) node. Only the schedule and
+# day count are read — the `strike` field is ignored, since a node spans a
+# whole smile.
+def node(expiry_year, tenor):
+    return Swaption(
+        expiry_date=ymd_to_ordinal(expiry_year, 1, 1),
+        fixed_dates=generate_schedule(
+            expiry_year, 1, 1, expiry_year + tenor, 1, 1, frequency=1,
+        ).payment_dates,
+        strike=jnp.array(0.03), notional=jnp.array(1e6), is_payer=True,
+    )
+
+nodes = [[node(2026, 5), node(2026, 10)],      # 1y x {5y, 10y}
+         [node(2027, 5), node(2027, 10)]]      # 2y x {5y, 10y}
+
+offsets = jnp.array([-0.010, -0.005, 0.0, 0.005, 0.010])   # ATM offsets
+vols = ...   # [i][j] array of quoted vols at those offsets
+
+cube = calibrate_swaption_cube_from_curves(
+    nodes,
+    [[offsets] * 2] * 2,
+    vols,
+    ois,                      # discounting
+    sofr3m,                   # projection (omit for single-curve)
+    quote_form="atm_offset",  # strikes are offsets to each node's own forward
+    fixed_beta=jnp.array(0.5),
+)
+
+cube.forwards     # curve-derived F_0 per node, not caller-supplied
+cube.expiries     # year fractions, exactly what the pricer will query at
+cube.dynamics     # 'sticky_moneyness' — implied by the atm_offset quote form
+```
+
+Three things this buys:
+
+- **Quote form is representable.** Pass `quote_form="atm_offset"` and the
+  offsets are converted to absolute strikes per node using that node's derived
+  $F_0$ (spec Q-3). `dynamics` then defaults to the convention that quote form
+  implies, so the pair is consistent by construction.
+- **The grid coordinate is the pricer's coordinate.** Expiries and tenors come
+  from `swaption_node_coordinates`, which computes
+  `year_fraction(reference_date, expiry_date)` and
+  `year_fraction(expiry_date, fixed_dates[-1])` — the very expressions
+  `swaption_price` evaluates. A node therefore reprices *exactly*, rather than
+  a hair off its own grid point.
+- **Curve risk reaches the vols.** `jax.grad` of a fitted parameter with respect
+  to a discount or projection pillar is non-zero, because the forward really is
+  an input to the least squares. It is identically zero on the
+  caller-supplied-forward route — both are asserted in
+  `tests/test_greeks/test_vol_adjoint.py`.
+
+Use `calibrate_swaption_cube_from_graph(..., graph, discount_id, forward_id)` to
+resolve the curves off a bootstrapped
+[`CurveGraph`](curves.md) instead. The original
+`calibrate_swaption_cube` remains as the explicit opt-out for when the forwards
+genuinely are exogenous.
+
+### Premium quotes
+
+When the matrix is quoted in **premium** rather than vol, the conversion is also
+curve-dependent: the premium is quoted against a numeraire, and that numeraire
+is $A_d(\theta_c)$ (physical settlement) or $P_d(0,T^p)\,A_{\text{cash}}(S_x)$
+(cash settlement). `swaption_implied_normal_vol` solves
+
+$$
+R(\sigma_N;\, \theta_c, q)
+  = N \cdot \mathcal{N}(\theta_c)\,
+    \mathrm{Bachelier}\!\left(S_x(\theta_c), K, \sigma_N, T\right) - q = 0
+$$
+
+with a scalar `optimistix.Newton`, implicitly differentiated — so the *implied
+vol* carries curve risk, which it cannot if the numeraire is frozen:
+
+```python
+from valax.surfaces import swaption_implied_normal_vol
+
+sigma_n = swaption_implied_normal_vol(
+    swaption, premium, ois, sofr3m,
+    settlement="physical",     # or "cash"
+)
+```
+
+The two settlement conventions are not interchangeable and imply different
+vols from the same premium. The cash branch is the street-standard
+*approximation* — the flat-yield annuity is evaluated at the forward rather than
+inside the expectation, so the cash-settled convexity correction is not applied;
+that deviation is recorded in the
+[audit conformance map](../architecture/aad-audit-conformance.md). Under
+`eqx.filter_jit` the cash branch needs an explicit `freq=`, since the fixed-leg
+frequency is a convention inferred from the schedule and is never guessed from a
+tracer.
+
+### Vega in quote space
+
+Once a cube is fitted, the vega a desk hedges with is the sensitivity to the
+**quoted vols**, not to $(\alpha, \rho, \nu)$. That is one more application of
+the same implicit-function-theorem step the curve layer uses; the mechanism and
+the API live in
+[Greeks § Quote-space (hedge-space) risk](../api/greeks.md#quote-space-hedge-space-risk).
+
 ## Common Patterns
 
 ### Pricing with a surface

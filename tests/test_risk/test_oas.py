@@ -1,7 +1,8 @@
 """Tests for option-adjusted spread / Z-spread (:mod:`valax.risk.oas`).
 
-The suite follows the ladder in ``RATES_SESSION_GUIDE.md`` §3b, each test acting
-as an oracle for the next:
+The suite is a ladder, each test acting as an oracle for the next (the
+modelling background is ``docs/theory/risk-measures.md`` §7.4 and the recipe is
+``docs/guide/callable-bonds.md``):
 
 1. **``hw_alpha`` shift identity** — a parallel curve shift ``s`` moves the
    exact-fit shift ``alpha(t)`` by exactly ``s``; free, exact, and it proves the
@@ -82,7 +83,7 @@ def model(flat_curve):
 
 @pytest.fixture
 def schedule():
-    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2)
+    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates
 
 
 @pytest.fixture
@@ -133,7 +134,7 @@ def conv_model(flat_curve):
 
 @pytest.fixture
 def long_schedule():
-    return generate_schedule(2025, 1, 1, 2035, 1, 1, frequency=2)
+    return generate_schedule(2025, 1, 1, 2035, 1, 1, frequency=2).payment_dates
 
 
 # ── 1. hw_alpha shift identity ───────────────────────────────────────

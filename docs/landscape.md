@@ -112,9 +112,9 @@ VALAX's architecture is a bet on three workflows being the highest-leverage ones
 
 ### 4.4 XVA and counterparty risk — nested Monte Carlo at GPU speed
 
-**What's needed.** Exposure simulation = outer-loop market paths × inner-loop full-portfolio repricing at each timestep. A bank CVA engine today is a multi-million-dollar overnight grid job.
+**What's needed.** Exposure simulation = outer-loop market paths × inner-loop full-portfolio repricing at each timestep — today a bank CVA engine is a multi-million-dollar overnight grid job.
 
-**What VALAX provides.** The inner loop is the same JIT'd pricing function used by the front office. The outer loop is `vmap` across scenarios. CVA Greeks come from `jax.grad`, not a separate finite-difference engine, so the XVA desk hedges with the *same numbers used to mark*. This is the **strategic crown jewel** on the roadmap (P3.1).
+**What it stresses.** The inner loop is the same JIT'd pricing function the front office calls; the outer loop is `vmap` across scenarios; CVA Greeks come from `jax.grad`, not a separate finite-difference engine. This is the roadmap's **strategic crown jewel** (P3.1) — see [Vision § XVA and counterparty risk](vision.md#xva-and-counterparty-risk) for the full treatment of why the JAX architecture is the moat here.
 
 ### 4.5 Research and what-if
 
@@ -229,7 +229,7 @@ VALAX is not a finished competitor to the systems in §6. Today it is:
 
 - **Operationally**, a pricing kernel and risk-ladder library that already covers standard equity options, vanilla rates, FX vanillas/forwards, inflation, credit-curve scaffolding, and four pricing methods (analytical / MC / PDE / lattice) with autodiff Greeks throughout — roughly the inner box of [Vision § "The shape of the mature engine"](vision.md).
 - **Structurally**, the only stack the authors are aware of in this slot that is JAX-native, pure-functional, GPU-first, and differentiable end-to-end.
-- **Strategically**, on a roadmap whose next two priorities (`MarketState` + multi-curve graph; XVA + FRTB) move VALAX from "library" to "deployable third-ring component" — see [Roadmap §"Production Priority Roadmap"](roadmap.md#production-priority-roadmap-snapshot-june-2025).
+- **Strategically**, on a roadmap whose next two priorities (`MarketState` + multi-curve graph; XVA + FRTB) move VALAX from "library" to "deployable third-ring component" — see [Roadmap §"Production Priority Roadmap"](roadmap.md#production-priority-roadmap-snapshot-reconciled-against-the-codebase).
 
 The deliberate non-goals stay constant: we do not become an OMS, an alpha library, a tick store, or a microsecond execution path. The whole bet is that there is exactly one shape of system that the next generation of trading desks and risk teams need in the third ring, and that doing only that shape — well, and with the JAX ecosystem behind it — is more valuable than any one of the adjacent boxes we could try to absorb.
 

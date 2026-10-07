@@ -74,10 +74,41 @@ A EUR/USD desk carries at least four, plus FX links:
 This collection of curves plus the identifier-keyed lookup is what
 [`CurveGraph`](../api/curves.md#valax.curves.CurveGraph) represents.
 
+## What this means for risk
+
+Multiple curves are not just a pricing nicety — each is an independent
+**risk factor**, and that changes how a book is measured and hedged:
+
+- **Independent shocks per curve.** A steepener on the OIS curve can
+  coincide with a flattener on the SOFR curve. Single-curve VaR cannot
+  represent that joint move; a `CurveGraph` with per-curve rate shocks
+  can.
+- **Basis is its own risk.** The spread between two curves (3M vs 6M,
+  SOFR vs OIS, or a cross-currency basis) is a hedgeable factor in its
+  own right. Hedging a SOFR swap with OIS instruments leaves residual
+  basis risk that a one-curve model reports as zero.
+- **Distinct hedge ratios.** Differentiating price w.r.t. OIS pillar
+  rates gives the OIS DV01; differentiating w.r.t. SOFR pillar rates
+  gives the SOFR DV01. These are different numbers, and you need both to
+  build the right hedge — exactly the quote-space Jacobian that
+  [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian)
+  delivers in one implicit-adjoint solve.
+
+On the risk side, `MarketData` already carries an optional
+[`curve_graph`](../api/curves.md#valax.curves.CurveGraph) and the
+`CurveGraph`-aware `bump_*` primitives (`bump_graph_curve`,
+`parallel_graph_shift`, `key_rate_graph_bump`) shock any named curve;
+routing these through `apply_scenario` / `MarketScenario` for full
+per-curve scenario sets is the remaining step (see the
+[Risk Factors roadmap](../risk-factors.md#4-roadmap)). The scenario and
+shock mechanics themselves live in
+[Scenarios & Shocks](../risk-scenarios.md).
+
 ## Why sequential bootstrap breaks down
 
-The pre-MC-Curves-2 code (`bootstrap_multi_curve`, now deprecated)
-proceeds in a fixed order:
+The pre-MC-Curves-2 code (`bootstrap_multi_curve`, now deprecated and,
+since MC-Curves-2b, re-implemented over the joint solver) proceeded in a
+fixed order:
 
 ```
 Step 1: Bootstrap OIS from OIS instruments               (one-curve solve)
@@ -219,8 +250,10 @@ tenor-basis and every cross-currency trade a desk carries.
   quote-sensitivity matrix in three parametrisations
   (`log_df` / `df` / `zero_rate`).
 - `bootstrap_multi_curve` retained one deprecation cycle with a
-  `DeprecationWarning`; `bootstrap_simultaneous` migrated to a thin
-  wrapper over the joint solver.
+  `DeprecationWarning`; both it (MC-Curves-2b) and
+  `bootstrap_simultaneous` are now thin wrappers over the joint
+  solver, and `MultiCurveSet` is a view over `CurveGraph`
+  (`from_graph` / `to_graph`).
 - Curve-identifier alphabet frozen as
   `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]` (see
   [`production.md` §11.3](../architecture/production.md#113-curve-graph-data-model)).
@@ -237,6 +270,7 @@ tenor-basis and every cross-currency trade a desk carries.
   formalises the joint system.
 - **Design** — [`production.md` §11](../architecture/production.md#11-multi-curve-framework)
   documents the data model, joint-solver interface, and phased delivery.
-- **Roadmap** — [`roadmap.md` §1.1](../roadmap.md#11-multi-curve-bootstrapping)
-  tracks what's shipped and what's next (MC-Curves-3: extended diagnostics,
-  monotone-convex interpolation, HW convexity, CSA).
+- **Roadmap** — [Multi-Curve Framework — What Ships, What's Left](../roadmap.md#multi-curve-framework-what-ships-whats-left)
+  is the canonical status page: the end-to-end picture plus every
+  remaining gap (risk, calibration, vol surfaces, curve build). Tier 1.1
+  covers the build side only.

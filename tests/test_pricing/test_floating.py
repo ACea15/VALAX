@@ -61,7 +61,7 @@ def steep_curve(ref_date):
 @pytest.fixture
 def quarterly_schedule():
     """5-year quarterly payment schedule."""
-    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=4)
+    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=4).payment_dates
 
 
 @pytest.fixture

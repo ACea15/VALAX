@@ -45,7 +45,7 @@ def flat_curve(ref_date):
 @pytest.fixture
 def swap_5y(ref_date):
     """5-year annual fixed-for-float payer swap, notional=1M."""
-    fixed_dates = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1)
+    fixed_dates = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1).payment_dates
     return InterestRateSwap(
         start_date=ref_date,
         fixed_dates=fixed_dates,
@@ -59,7 +59,7 @@ def swap_5y(ref_date):
 def payer_swaption(ref_date):
     """1y x 5y payer swaption: expiry in 1 year, 5-year underlying."""
     expiry = ymd_to_ordinal(2026, 1, 1)
-    fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1)
+    fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1).payment_dates
     return Swaption(
         expiry_date=expiry,
         fixed_dates=fixed_dates,
@@ -73,7 +73,7 @@ def payer_swaption(ref_date):
 def receiver_swaption(ref_date):
     """1y x 5y receiver swaption: same terms, opposite direction."""
     expiry = ymd_to_ordinal(2026, 1, 1)
-    fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1)
+    fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1).payment_dates
     return Swaption(
         expiry_date=expiry,
         fixed_dates=fixed_dates,
@@ -99,7 +99,7 @@ class TestSwap:
 
     def test_at_par_rate_swap_npv_zero(self, flat_curve, ref_date):
         """Swap at the par rate should have NPV = 0."""
-        fixed_dates = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1)
+        fixed_dates = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1).payment_dates
         # Compute par rate first
         dummy_swap = InterestRateSwap(
             start_date=ref_date,
@@ -122,7 +122,7 @@ class TestSwap:
 
     def test_payer_receiver_sign_opposite(self, flat_curve, ref_date):
         """Payer and receiver swaps at same rate should have opposite NPVs."""
-        fixed_dates = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1)
+        fixed_dates = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1).payment_dates
         payer = InterestRateSwap(
             start_date=ref_date, fixed_dates=fixed_dates,
             fixed_rate=jnp.array(0.04), notional=jnp.array(1_000_000.0),
@@ -139,7 +139,7 @@ class TestSwap:
 
     def test_higher_fixed_rate_worse_for_payer(self, flat_curve, ref_date):
         """Payer pays fixed: higher fixed rate => lower NPV."""
-        fixed_dates = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1)
+        fixed_dates = generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1).payment_dates
         swap_low = InterestRateSwap(
             start_date=ref_date, fixed_dates=fixed_dates,
             fixed_rate=jnp.array(0.03), notional=jnp.array(1_000_000.0),
@@ -197,7 +197,7 @@ class TestSwaptionBlack76:
     def test_atm_payer_approx_equal_receiver(self, flat_curve, ref_date):
         """ATM swaption (K = S): payer ≈ receiver."""
         expiry = ymd_to_ordinal(2026, 1, 1)
-        fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1)
+        fixed_dates = generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1).payment_dates
 
         # Compute par swap rate
         dummy = Swaption(

@@ -13,3 +13,4 @@ from valax.pricing.pde.dispatch import (
 from valax.pricing.pde import recipes  # noqa: F401,E402
 from valax.pricing.pde import hull_white  # noqa: F401,E402
 from valax.pricing.pde import g2pp  # noqa: F401,E402
+from valax.pricing.pde import cheyette  # noqa: F401,E402

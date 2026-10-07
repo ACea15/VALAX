@@ -103,7 +103,7 @@ fra_6x9 = FRA(
 # Long end: par swap rate.
 swap_5y = SwapRate(
     start_date=ref,
-    fixed_dates=generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2),
+    fixed_dates=generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2).payment_dates,
     rate=jnp.array(0.0385),      # 3.85% par
     day_count="act_360",
 )
@@ -115,7 +115,249 @@ Each one encodes a single no-arbitrage equation on the curve:
 |------------|----------|
 | `DepositRate` | $DF(\text{end}) = DF(\text{start}) / (1 + r \tau)$ |
 | `FRA` | $DF(\text{end}) = DF(\text{start}) / (1 + r \tau)$ (with $\text{start} > t_0$) |
-| `SwapRate` | $r \sum_i \tau_i\,DF(T_i) = DF(\text{start}) - DF(T_n)$ |
+| `SwapRate` | $r \sum_i \tau_i\,DF(T_i^p) = \sum_i DF(T_i^p)\left(DF(T_i^s)/DF(T_i^e) - 1\right)$ |
+
+### Payment lag: accrual end vs payment date
+
+Overnight-index swaps do not pay on the day the accrual period ends.  USD SOFR
+OIS pays two business days later, EUR €STR and GBP SONIA one.  So each coupon
+has *two* dates that matter — the accrual end $T^e_i$, which determines what
+the coupon is worth, and the payment date $T^p_i$, which determines when you
+receive it and therefore how it is discounted.
+
+Every swap quote type keeps these in separate roles.  Projection and the
+accrual fraction $\tau_i$ come from the accrual schedule; discounting comes
+from the payment schedule:
+
+$$
+S^{\mathrm{OIS}}(\theta_d)
+= \frac{\sum_i P_d(0,T_i^p)\left(\dfrac{P_d(0,T_i^s)}{P_d(0,T_i^e)} - 1\right)}
+       {\sum_j \tau_j\, P_d(0,T_j^p)}
+$$
+
+There are two ways to say where the payments fall, and supplying both raises:
+
+```python
+from valax.curves.instruments import OISSwapRate
+from valax.dates import generate_schedule, ymd_to_ordinal
+import jax.numpy as jnp
+
+ref = ymd_to_ordinal(2025, 1, 1)
+accruals = generate_schedule(
+    2025, 1, 1, 2030, 1, 1, frequency=1
+).payment_dates
+
+# (a) A uniform lag in *calendar* days — convenient, approximate.
+ois_lagged = OISSwapRate(
+    start_date=ref,
+    fixed_dates=accruals,          # accrual ends
+    rate=jnp.array(0.0385),
+    day_count="act_360",
+    payment_lag=2,
+)
+
+# (b) An explicit payment schedule you have already rolled over a
+#     holiday calendar — the production route.
+ois_exact = OISSwapRate(
+    start_date=ref,
+    fixed_dates=accruals,
+    rate=jnp.array(0.0385),
+    day_count="act_360",
+    payment_dates=accruals + 2,    # substitute your own adjusted dates
+)
+```
+
+`payment_lag` shifts by calendar days, which is only an approximation to a
+business-day roll; VALAX has no holiday calendars (see
+[§8](#8-what-is-not-yet-implemented)).  When the distinction matters, compute
+the adjusted dates yourself and pass `payment_dates`.  Legs are resolved
+independently, so `IborSwapRate` takes `fixed_payment_dates` and
+`float_payment_dates`, `TenorBasisSwap` takes `leg_a_payment_dates` /
+`leg_b_payment_dates`, and `CrossCurrencyBasisSwap` takes
+`dom_payment_dates` / `for_payment_dates`.  Under the constant-notional
+cross-currency variant the final notional re-exchange travels with the last
+coupon, so it is discounted at the last *payment* date.
+
+!!! note "Defaults are unchanged, and the telescope survives as a fast path"
+    With neither field set, $T^p = T^e$ and the OIS floating leg collapses to
+    $DF(T_0) - DF(T_n)$ by the telescoping identity.  That closed form is kept
+    as an explicit branch, so every pre-existing curve reproduces bit for bit.
+    The identity holds *only* at zero lag — which is the point of the
+    conformance gate in
+    `tests/test_curves/test_instrument_residuals.py::TestPaymentLagTelescoping`.
+
+    A uniform lag always *lowers* the par rate, whatever the shape of the
+    curve, and by exactly nothing on a flat one.  The weights in the par-rate
+    average pick up a factor $P(0,T^p_i)/P(0,T^e_i) \approx e^{-f_i \ell}$,
+    which is a decreasing function of that period's own forward, so lagging
+    payment shifts weight away from the high-forward periods.  The size of the
+    effect is driven by the *dispersion* of the forwards, not their level.
+
+    What is **not** modelled is the timing convexity: the compounded rate is
+    no longer a martingale under the $T^p$-forward measure, and no drift
+    correction is applied.  This is the standard simplification, recorded in
+    the [conformance map](../architecture/aad-audit-conformance.md#documented-choices)
+    under C-7.
+
+### Compounded vs averaged futures
+
+Three-month RFR futures settle on the *compounded* overnight index.
+One-month RFR futures settle on the *arithmetic average* of the daily index
+values.  Writing $\rho_j = DF(t_j)/DF(t_{j+1})$ for the daily discount-factor
+ratios, the two are a product and a sum of the same quantities:
+
+$$
+F = \frac{1}{\tau}\Big(\underbrace{\textstyle\prod_j \rho_j}_{\text{compounded}} - 1\Big),
+\qquad
+\bar{F} = \frac{1}{\tau}\sum_j \big(\rho_j - 1\big).
+$$
+
+Select the convention with the static `averaging` field, which defaults to
+`"compounded"`:
+
+```python
+from valax.curves.instruments import MoneyMarketFuture
+from valax.dates import ymd_to_ordinal
+import jax.numpy as jnp
+
+sofr_1m = MoneyMarketFuture(
+    start_date=ymd_to_ordinal(2025, 3, 1),
+    end_date=ymd_to_ordinal(2025, 4, 1),
+    futures_rate=jnp.array(0.0432),
+    day_count="act_360",
+    averaging="arithmetic",      # 1M SOFR settles on the average
+)
+```
+
+Two consequences worth internalising:
+
+**The difference does not vanish on a flat curve.** The gap between a product
+and a sum of the same ratios is the cross terms — the interest-on-interest
+that averaging discards — of order $r^2\tau/2$. On a one-month contract at 4%
+that is about 0.6 bp, and it is there even when every daily forward is
+identical. This is a *compounding* effect, not a curve-shape effect, so
+calibrating a 1M contract as though it were compounded mis-places the short
+end by a real amount rather than by something that averages out.
+
+**Only the averaged contract has exposure inside its own period.** The
+compounded forward is a telescoping product, so it is sensitive to exactly two
+discount factors — the endpoints — and interior pillars cancel identically.
+The averaged forward is a sum, which does not telescope, so it picks up
+genuine sensitivity to the *shape* of the curve between its start and end
+dates.  (That shape exposure vanishes on a flat curve, where adjacent $\rho_j$
+are equal and cancel pairwise.)  Both facts are gated in
+`tests/test_curves/test_instrument_residuals.py::TestAveragedFutures`.
+
+!!! note "Calendars are not needed here, but a concrete day span is"
+    The market convention carries the preceding business day's rate across
+    weekends and holidays *weighted by calendar days*, which is exactly what a
+    calendar-daily subdivision of a smooth curve reproduces — so the absence
+    of holiday calendars costs nothing in this particular calculation.
+
+    What the averaged branch does need is a concrete number of days over
+    `[start_date, end_date]`, since it reads one discount factor per day.  The
+    span is read pre-trace; building the instrument inside a `jit` whose
+    arguments include its dates raises a `ValueError` naming the way out
+    rather than silently averaging over the wrong number of days.  Closing
+    over the instrument and tracing only the curve — the normal pattern, since
+    quotes are Python data — works fine.
+
+    The convexity adjustment is a separate, orthogonal choice: an averaged
+    contract has its own, different from the compounded one.
+    `convexity_adj_fn` is the plug-in point, and the default for both is
+    explicitly none.
+
+### Partly-accrued periods
+
+A coupon whose fixing date has passed uses the stored fixing rather than the
+curve — that much is just a lookup, and `FixingHistory` has always done it.
+But an *overnight-compounded* coupon whose period has begun and not yet ended
+is neither realised nor forward-looking. Part of its compounding has happened
+and the rest has not, and the two have to be combined:
+
+$$
+1 + \tau_j F_j \;=\; \underbrace{A}_{\text{realised}} \cdot
+\underbrace{\frac{P_x(0,t_0)}{P_x(0,T_j^e)}}_{\text{projected remainder}}
+$$
+
+where $A = \prod_j (1 + \hat{r}_j \delta_j)$ is the realised compounding factor
+over the elapsed part. This is exact rather than an approximation: the
+compounding factor over the whole period *is* the product of the factor over
+the realised part and the factor over the remainder.
+
+Build $A$ from the recorded history and hand it to the leg:
+
+```python
+from valax.curves.fixings import FixingHistory, FixingSeries
+from valax.curves.instruments import IborSwapRate
+from valax.dates import ymd_to_ordinal
+import jax.numpy as jnp
+
+t0 = ymd_to_ordinal(2025, 6, 15)          # valuation date
+accrual_start = ymd_to_ordinal(2025, 5, 1)  # period began six weeks ago
+
+sofr = FixingSeries(
+    fixing_dates=jnp.arange(accrual_start, t0),
+    fixings=jnp.full(t0 - accrual_start, 0.0433),
+)
+
+realised = sofr.compounded_factor(accrual_start, t0, "act_360")
+
+swap = IborSwapRate(
+    start_date=accrual_start,
+    fixed_dates=jnp.array([ymd_to_ordinal(2026, 5, 1)]),
+    float_dates=jnp.array([ymd_to_ordinal(2025, 8, 1),
+                           ymd_to_ordinal(2025, 11, 1),
+                           ymd_to_ordinal(2026, 2, 1),
+                           ymd_to_ordinal(2026, 5, 1)]),
+    fixing_dates=jnp.array([accrual_start,
+                            ymd_to_ordinal(2025, 8, 1),
+                            ymd_to_ordinal(2025, 11, 1),
+                            ymd_to_ordinal(2026, 2, 1)]),
+    rate=jnp.array(0.0385),
+    index_id="USD.SOFR.3M",
+    accrued_compounding=realised,      # ← the blend
+)
+```
+
+`TenorBasisSwap` takes `leg_a_accrued_compounding` /
+`leg_b_accrued_compounding` and `CrossCurrencyBasisSwap` takes
+`dom_accrued_compounding` / `for_accrued_compounding`, each resolved
+independently per leg.
+
+**Precedence.** Three sources, strictly ordered: a recorded fixing for the
+coupon wins, then the blend for the straddling period, then curve projection.
+A recorded value outranks a partial accrual because it is strictly more
+information — for a tenor index such as `USD.SOFR.3M` the recorded value *is*
+the compounded coupon rate for the whole period.
+
+**Which period straddles.** The test is half-open, $T^s_j \le t_0 < T^e_j$,
+which makes the straddling period unique. Closing both ends would match two
+periods whenever $t_0$ lands exactly on an accrual boundary — the one ending
+there and the one starting there — and they cannot share one realised factor.
+A consequence worth knowing: a period that has *fully* ended is deliberately
+outside the blend's scope, because its rate is entirely known. If a payment
+lag leaves such a period ended but unpaid, record its compounded coupon rate
+under `index_id` rather than reaching for `accrued_compounding`.
+
+!!! note "Two degeneracies and one consistency check"
+    The formula is pinned at both ends and in the middle, in
+    `tests/test_curves/test_instrument_residuals.py::TestPartlyAccruedFixings`:
+
+    - At $t_0 = T^s$ nothing has accrued, $A = 1$, and the blend reduces to
+      the fully projected forward — **exactly**, to the last bit.
+    - As $t_0 \to T^e$ the projected remainder shrinks and the coupon tends to
+      the purely realised $(A-1)/\tau$.
+    - If the realised rates happen to be exactly what the curve had projected
+      for the elapsed part — $A = P_x(T^s)/P_x(t_0)$ — then substituting
+      realised data for projected data cannot change the answer, and it
+      doesn't, again exactly. This is the property that would break first if
+      the blend read the curve at the wrong date.
+
+    Because $A$ is computed from recorded values only, with no curve input, a
+    realised coupon carries **identically zero** projection-curve sensitivity
+    while still being discounted. That is the
+    [T-11 gate](../architecture/aad-audit-conformance.md#t-verification-tests).
 
 ## 3. Sequential bootstrap
 
@@ -208,7 +450,7 @@ def curve_dfs_from_quotes(depo_rate_1, depo_rate_2, fra_rate, swap_rate):
     d1 = DepositRate(ref, ymd_to_ordinal(2025, 4, 1), depo_rate_1, "act_360")
     d2 = DepositRate(ref, ymd_to_ordinal(2025, 7, 1), depo_rate_2, "act_360")
     f = FRA(ymd_to_ordinal(2025, 7, 1), ymd_to_ordinal(2025, 10, 1), fra_rate, "act_360")
-    s = SwapRate(ref, generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2),
+    s = SwapRate(ref, generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2).payment_dates,
                  swap_rate, "act_360")
     curve = bootstrap_simultaneous(ref, pillar_dates, [d1, d2, f, s], "act_365")
     return curve.discount_factors
@@ -536,10 +778,39 @@ for a working four-curve example.
 `bootstrap_multi_curve` (and its return type `MultiCurveSet`) is retained for
 one deprecation cycle so existing user code continues to work.  It emits a
 `DeprecationWarning` on every call.  New code should call
-`bootstrap_curve_graph` directly.  The forthcoming MC-Curves-2b workstream
-will rewrite `bootstrap_multi_curve` internals over `bootstrap_curve_graph`
-so `MultiCurveSet` becomes a thin view over `CurveGraph`; both APIs are
-expected to coexist long-term.
+`bootstrap_curve_graph` directly.
+
+**Since MC-Curves-2b the deprecated path is no longer a separate solver.**
+`bootstrap_multi_curve` translates its two-tier input into `CurveSpec`s plus
+graph instruments and makes a single `bootstrap_curve_graph` call; the old
+sequential OIS-then-tenor pipeline (and its packed-swap residual machinery)
+has been deleted.  Three consequences for callers:
+
+- **Same numbers, one solve.** The calibration target is unchanged — discount
+  quotes price on the OIS curve alone; forward-leg deposits/FRAs keep their
+  single-curve DF relationship; forward-leg `SwapRate` quotes are reinterpreted
+  as `IborSwapRate` (floating schedule = fixed schedule, OIS discounting),
+  which is exactly the dual-curve par condition the sequential code solved.
+  Curves agree with an explicit joint-solver build to ≤ 1e-12.
+- **Gradients now flow.** Because the solve is one `optimistix.root_find` under
+  `ImplicitAdjoint`, `jax.grad` of a calibrated DF w.r.t. any input quote —
+  including the swap legs — is finite and cheap.
+- **`MultiCurveSet` is a view, not a copy.** `MultiCurveSet.to_graph()` and
+  `MultiCurveSet.from_graph(graph, discount_id, forward_ids)` convert between
+  the two-tier container and a `CurveGraph` while sharing the same
+  `DiscountCurve` objects:
+
+```python
+graph = mcs.to_graph(discount_id="USD.SOFR.OIS",
+                     forward_ids={"3M": "USD.SOFR.3M"})
+# ... use the graph-aware pricers / CurveGraph shocks ...
+mcs_again = MultiCurveSet.from_graph(
+    graph, "USD.SOFR.OIS", {"3M": "USD.SOFR.3M"},
+)
+```
+
+Both APIs are expected to coexist long-term: `CurveGraph` is the engine,
+`MultiCurveSet` the two-tier pedagogical lens on it.
 
 #### 5.4a Migrating from `bootstrap_multi_curve`
 
@@ -692,11 +963,11 @@ from valax.pricing.analytic.bonds import fixed_rate_bond_price
 def bond_price_from_quotes(depo_rate, swap_rate):
     """Build a curve from two quotes, then price a bond."""
     d = DepositRate(ref, ymd_to_ordinal(2025, 4, 1), depo_rate, "act_360")
-    s = SwapRate(ref, generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2),
+    s = SwapRate(ref, generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2).payment_dates,
                  swap_rate, "act_360")
     curve = bootstrap_sequential(ref, [d, s], "act_365")
     bond = FixedRateBond(
-        payment_dates=generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2),
+        payment_dates=generate_schedule(2025, 7, 1, 2030, 1, 1, frequency=2).payment_dates,
         settlement_date=ref,
         coupon_rate=jnp.array(0.04),
         face_value=jnp.array(100.0),
@@ -734,6 +1005,16 @@ krds = jax.grad(price_from_dfs)(curve.discount_factors)
 Inflation uses a parallel type, `InflationCurve` (`valax/curves/inflation.py`),
 storing **forward CPI levels** interpolated in log-CPI space. The API mirrors
 `DiscountCurve`:
+
+!!! warning "`from_zc_rates` is algebraic, not a bootstrap"
+
+    Unlike the rates curves above, `from_zc_rates` applies the closed-form
+    identity $\mathrm{CPI}(T) = \mathrm{CPI}_0 (1 + z_T)^{\tau_T}$ directly to
+    the quoted zero-coupon rates. There is no residual, no root-find and no
+    `BootstrapInstrument`, so inflation quotes do not participate in
+    `bootstrap_curve_graph` and carry no `quote_jacobian` row. Routing ZCIS /
+    YYIS quotes through the joint solver is on the
+    [roadmap](../roadmap.md).
 
 ```python
 from valax.curves.inflation import from_zc_rates, forward_cpi, yoy_forward_rate
@@ -809,9 +1090,11 @@ shipped the joint multi-curve Newton solver
 [`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph), the
 declarative curve descriptor `CurveSpec`, the implicit-adjoint quote-Jacobian
 helper [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian), and the
-`CurveBuildDiagnostics` container.  The pre-MC-Curves-2 sequential
-`bootstrap_multi_curve` is retained for one deprecation cycle and emits a
-`DeprecationWarning` on every call.
+`CurveBuildDiagnostics` container.  The two-tier `bootstrap_multi_curve`
+entry point is retained for one deprecation cycle and emits a
+`DeprecationWarning` on every call; since MC-Curves-2b its sequential
+internals are gone and it solves through the joint solver (see
+[§5.4](#54-deprecated-path-bootstrap_multi_curve)).
 
 The extended `CurveBuildDiagnostics` (MC-Curves-3) now ships production-grade
 convergence and well-posedness diagnostics: `residuals`, `max_abs_residual`,
@@ -824,24 +1107,14 @@ and the residual-Jacobian condition number (`jacobian_condition_number`).  See
 (`MoneyMarketFuture`), `.quoted_forward` (`FXForward`), `.far_rate`
 (`FXSwap`), and `.jump_size` (`TurnInstrument`).
 
-From the [roadmap (Tier 1.1)](../roadmap.md#11-multi-curve-bootstrapping)
-and the production design, items still pending (MC-Curves-3+):
-
-- **Alternative interpolation methods**: linear on zero rates, cubic splines
-  on log-DF, monotone-convex (Hagan-West), tension splines.  The log-linear
-  baseline is stable and monotone but produces discontinuous forward rates at
-  pillars; `CurveSpec.interp` is already the dispatch site.
-- **Hull-White-derived futures convexity adjustment** — gated on the
-  short-rate-model integration with the curve build.  The plug-in framework
-  is in place ([`valax/curves/convexity.py`](../api/curves.md#convexity-adjustment-plug-ins));
-  only the closed-form factory is missing.
-- **CSA / collateralised discounting** — currency-of-collateral selection and
-  FX-implied foreign-currency-collateralised discount curves.  Design note
-  still to be written.
-- **Business-day calendars, holidays, roll conventions** — schedules today
-  ignore holidays entirely.
-- **Constrained curves** (forward-rate positivity, calendar-spread
-  no-arbitrage for inflation curves).
+What is still pending on the **build** side — alternative interpolation
+modes on `CurveSpec.interp`, turn-of-year step interpolation,
+Hull-White-derived futures convexity, CSA / collateralised discounting,
+business-day calendars, an over-determined least-squares variant, fixings
+seasoning, and constrained curves — is enumerated once in
+[Roadmap → Multi-Curve Framework § Curve build](../roadmap.md#6-curve-build-absorbed-from-the-retired-mc-curves-3-notes),
+which is also the single owner of the *downstream* gaps (risk,
+calibration, vol surfaces, portfolio).
 
 Contributions welcome — see `CONTRIBUTING.md` at the repository root.
 
@@ -849,8 +1122,8 @@ Contributions welcome — see `CONTRIBUTING.md` at the repository root.
 
 Each `BootstrapInstrument` exposes a `residual(graph, fixings, ref_date)`
 method that returns zero when the curve graph correctly reprices the quote.
-The forthcoming joint solver
-([MC-Curves-2](../architecture/production.md#114-joint-global-solver))
+The joint solver
+([`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph))
 collects these residuals from a list of instruments and finds the curve graph
 that zeroes them out simultaneously.
 
@@ -975,4 +1248,4 @@ residual equations, see [API: Bootstrap Instruments](../api/curves.md#bootstrap-
 - [Fixed Income guide](fixed-income.md) — using a curve to price bonds, extract YTM, duration, KRDs.
 - [Interest Rate Exotics guide](rates-exotics.md) — OIS swaps, XCCY, CMS, range accrual against a multi-curve set.
 - [Inflation Derivatives guide](inflation.md) — ZCIS, YYIS, inflation caps against an `InflationCurve`.
-- [Short-Rate Models guide](short-rate.md) — Hull-White workflow, which consumes a `DiscountCurve` for exact-fit $\theta(t)$.
+- [Lattice Methods](lattice.md#hull-white-trinomial-tree) — the Hull-White tree, which consumes a `DiscountCurve` for exact-fit $\theta(t)$.

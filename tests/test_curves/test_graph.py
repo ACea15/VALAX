@@ -5,8 +5,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from valax.curves.discount import DiscountCurve
-from valax.curves.graph import CurveGraph
+from valax.curves.discount import DISCOUNT_CURVE_INTERP, DiscountCurve
+from valax.curves.graph import CurveGraph, CurveSpec, _SUPPORTED_INTERP
 from valax.dates.daycounts import ymd_to_ordinal
 
 
@@ -152,3 +152,79 @@ class TestCurveGraphPytree:
         # Other curve has zero gradient on its DFs.
         m3_grad = grads.curves["USD.SOFR.3M"].discount_factors
         assert jnp.all(m3_grad == 0.0)
+
+
+class TestCurveSpecInterp:
+    """``CurveSpec.interp`` is declared and checked but not forwarded.
+
+    ``DiscountCurve`` has no ``interp`` field — log-linear-in-DF is
+    hard-coded — so there is nowhere to forward a declared mode to.  That
+    is not currently a defect, because the only admissible value is
+    precisely what the curve implements.  It is a *latent* one: the day a
+    second mode joins ``_SUPPORTED_INTERP``, the field becomes silently
+    ignored and every curve quietly keeps interpolating log-linearly.
+
+    These tests are the tripwire.  They are deliberately written to fail
+    when someone widens the supported set, so the plumbing has to land in
+    the same change as the new mode.
+    """
+
+    def test_declarable_modes_match_what_the_curve_implements(self):
+        """The guard that matters.
+
+        If this fails because ``_SUPPORTED_INTERP`` grew, do not relax
+        it: give ``DiscountCurve`` a static ``interp`` field, dispatch on
+        it in ``__call__``, and forward ``spec.interp`` in
+        ``bootstrap_graph._build_graph_from_log_dfs``.  Then this can
+        become a check that every declarable mode is dispatchable.
+        """
+        assert _SUPPORTED_INTERP == (DISCOUNT_CURVE_INTERP,), (
+            "CurveSpec can declare an interpolation mode DiscountCurve "
+            "cannot deliver; see the class docstring."
+        )
+
+    def test_the_default_is_the_implemented_mode(self):
+        spec = CurveSpec(
+            curve_id="USD.SOFR.OIS",
+            currency="USD",
+            pillar_dates=jnp.asarray([int(ymd_to_ordinal(2026, 1, 1))]),
+        )
+        assert spec.interp == DISCOUNT_CURVE_INTERP
+
+    def test_an_unsupported_mode_is_rejected_at_construction(self):
+        with pytest.raises(ValueError, match="not supported"):
+            CurveSpec(
+                curve_id="USD.SOFR.OIS",
+                currency="USD",
+                pillar_dates=jnp.asarray(
+                    [int(ymd_to_ordinal(2026, 1, 1))]
+                ),
+                interp="monotone_convex",
+            )
+
+    def test_the_build_refuses_a_mode_it_cannot_honour(self):
+        """The second half of the tripwire, at the point where the field
+        would have to be forwarded.
+
+        Exercised with a stand-in rather than a real ``CurveSpec``,
+        because ``__check_init__`` makes the bad spec unconstructible —
+        which is the point.  If the construction-time check is ever
+        loosened, this one still fires.
+        """
+        from valax.curves.bootstrap_graph import _build_graph_from_log_dfs
+
+        class _Spec:
+            curve_id = "USD.SOFR.OIS"
+            day_count = "act_365"
+            interp = "monotone_convex"
+            pillar_dates = jnp.asarray(
+                [int(ymd_to_ordinal(2026, 1, 1))], dtype=jnp.int32
+            )
+
+        with pytest.raises(NotImplementedError, match="only implements"):
+            _build_graph_from_log_dfs(
+                jnp.asarray([-0.04]),
+                [_Spec()],
+                (0, 1),
+                jnp.asarray(int(ymd_to_ordinal(2025, 1, 1))),
+            )

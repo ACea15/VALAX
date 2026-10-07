@@ -69,7 +69,7 @@ def disc_curve(ref_date):
 
 @pytest.fixture
 def annual_schedule():
-    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1)
+    return generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=1).payment_dates
 
 
 # ── InflationCurve ───────────────────────────────────────────────────
@@ -170,9 +170,19 @@ class TestZCIS:
         assert float(recv) == pytest.approx(-float(pay), abs=1e-10)
 
     def test_jit_compatible(self, zcis, flat_infl_curve, disc_curve):
+        """JIT must not change the price.
+
+        An absolute floor is required as well as a relative tolerance: this
+        fixture is an at-par swap whose NPV is ~1e-10, so a purely relative
+        comparison demands agreement to ~1e-20 and measures XLA's fusion
+        order rather than the pricer. The floor is still far below any
+        economically meaningful amount on the swap's notional.
+        """
         eager = zcis_price(zcis, flat_infl_curve, disc_curve)
         jitted = jax.jit(zcis_price)(zcis, flat_infl_curve, disc_curve)
-        assert float(jitted) == pytest.approx(float(eager), rel=1e-10)
+        assert float(jitted) == pytest.approx(
+            float(eager), rel=1e-10, abs=1e-8
+        )
 
     def test_grad_wrt_fixed_rate(self, zcis, flat_infl_curve, disc_curve, ref_date):
         """dNPV/dK < 0 for inflation receiver (higher fixed rate = worse)."""

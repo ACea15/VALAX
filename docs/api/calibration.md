@@ -67,6 +67,25 @@ better-posed problem. See
 
 ::: valax.calibration.g2pp_swaption_prices
 
+## Cheyette (quasi-Gaussian)
+
+Calibrated *through the finite-difference pricer* rather than an
+approximate-analytic formula, so the full instrument set — caps, European and
+Bermudan swaptions, callables — is fitted on one consistent engine. The PDE is
+cleanly reverse-mode differentiable, so the least-squares Jacobian is exact
+autodiff through the backward sweep (no finite-difference Greeks). One factor
+$(\kappa, \sigma, \beta)$ fixes $\kappa$ and fits the level $\sigma$ and skew
+$\beta$ against a **strike slice**; two factors add $\rho$ for decorrelation.
+`calibrate_cheyette` selects the frozen-$y$ (fast) or exact-$y$ (bias-free)
+engine; `calibrate_cheyette_2f` is always frozen-$y$. See the theory note
+[Cheyette §9 Calibration](../theory/cheyette.md#9-calibration).
+
+::: valax.calibration.calibrate_cheyette
+
+::: valax.calibration.calibrate_cheyette_2f
+
+::: valax.calibration.cheyette_pde_prices
+
 ## Transforms
 
 Reparametrization utilities that map constrained parameters

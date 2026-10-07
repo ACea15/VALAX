@@ -234,7 +234,7 @@ encodes the risk-neutral measure through `model.rate`. The correlated Gaussian d
 
 #### Why this matters: three concrete consequences
 
-**1. Pricing uses $\mathbb{Q}$-drift, never $\mathbb{P}$-drift.** The entire VALAX codebase specifies SDEs under $\mathbb{Q}$. The `BlackScholesModel` stores `rate` (the risk-free rate) and `dividend`, not the real-world expected return. This is not a modeling choice — it is forced by no-arbitrage. The price of a derivative is $e^{-rT}\mathbb{E}^{\mathbb{Q}}[V_T]$, and $\mathbb{Q}$ is the measure under which the drift is $r - q$.
+**1. Pricing uses $\mathbb{Q}$-drift, never $\mathbb{P}$-drift.** The entire VALAX codebase specifies SDEs under $\mathbb{Q}$. The `BlackScholesModel` carries `rate` (the risk-free rate) and `dividend`, not the real-world expected return — and when those fields are left `None` and [sourced from the market](../api/core.md#model-binding-constants-or-market-sourced) instead, what is read is still the risk-free zero rate off the discount curve, never a historical drift. This is not a modeling choice — it is forced by no-arbitrage. The price of a derivative is $e^{-rT}\mathbb{E}^{\mathbb{Q}}[V_T]$, and $\mathbb{Q}$ is the measure under which the drift is $r - q$.
 
 **2. Volatility is the same under both measures.** When a trader quotes "30% implied vol," that number is the same whether you're thinking under $\mathbb{P}$ or $\mathbb{Q}$. Girsanov only shifts drift — the diffusion coefficient (and hence the quadratic variation of the process) is invariant. This is why calibrating model volatilities to option prices (a $\mathbb{Q}$-world activity) gives parameters that are also meaningful for risk management (a $\mathbb{P}$-world activity, at least for the vol component).
 

@@ -24,7 +24,7 @@ from jaxtyping import Float, Int
 from jax import Array
 
 from valax.curves.discount import DiscountCurve
-from valax.curves.graph import CurveGraph
+from valax.curves.graph import CurveGraph, _DEFAULT_CURVE_ID
 from valax.curves.multi_curve import MultiCurveSet
 from valax.curves.survival import SurvivalCurve
 from valax.dates.daycounts import year_fraction
@@ -135,6 +135,24 @@ def apply_scenario(
     Spot shocks are multiplicative when ``scenario.multiplicative`` is True
     (``new = old * (1 + shock)``), otherwise additive (``new = old + shock``).
     Vol, dividend, and rate shocks are always additive.
+
+    ``rate_shocks`` is a single unkeyed pillar vector, so it can only move
+    *one* curve: ``discount_curve`` and, when the optional ``curve_graph``
+    files a curve under the ``"_default_"`` sentinel, that entry too — the
+    two are the same curve seen through the legacy and the graph view, and
+    shocking only one of them would reprice a book against a half-shocked
+    market.  Named (projection / basis) curves on the graph are carried
+    through **unshocked**: an unkeyed vector cannot say which curve it
+    means.  Use :func:`valax.risk.state_shocks.shock` with a
+    :class:`~valax.market.keyed_scenario.KeyedScenario` (or
+    :func:`bump_graph_curve` directly) for per-curve moves.
+
+    Args:
+        base: Base market state.
+        scenario: Additive (or multiplicative-spot) factor deltas.
+
+    Returns:
+        A new shocked :class:`~valax.market.data.MarketData`.
     """
     if scenario.multiplicative:
         new_spots = base.spots * (1.0 + scenario.spot_shocks)
@@ -145,14 +163,18 @@ def apply_scenario(
     new_dividends = base.dividends + scenario.dividend_shocks
     new_curve = bump_curve_zero_rates(base.discount_curve, scenario.rate_shocks)
 
+    new_graph = base.curve_graph
+    if new_graph is not None and _DEFAULT_CURVE_ID in new_graph:
+        new_graph = bump_graph_curve(
+            new_graph, _DEFAULT_CURVE_ID, scenario.rate_shocks,
+        )
+
     return MarketData(
         spots=new_spots,
         vols=new_vols,
         dividends=new_dividends,
         discount_curve=new_curve,
-        # Carried through unshocked; use bump_graph_curve for targeted
-        # graph moves.
-        curve_graph=base.curve_graph,
+        curve_graph=new_graph,
     )
 
 

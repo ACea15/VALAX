@@ -188,6 +188,7 @@ assert valax_price == pytest.approx(ql_price, ...)
 | `test_exotics_on_sabr_surface_ql.py` | smile quotes → SABR fit → digital + European prices reading vol from surface | QL calibrates; VALAX adopts | `rel < 1e-8` |
 | `test_exotic_on_heston_surface_ql.py` | smile prices → Heston fit → Asian option via VALAX MC + ql.MCEuropeanHestonEngine | QL calibrates Heston; VALAX MC reprices | `abs < 3·combined_stderr` |
 | `test_cap_strip_on_caplet_vols_ql.py` | caplet vol quotes → per-expiry SABR → cap strip pricing via Black-76 reading vol from surface | per-expiry SABR fit by QL | `rel < 1e-6` |
+| `test_cap_strip_on_caplet_vols_ql.py::TestVALAXStripRepricesQuotesInQL` | flat cap quotes → **VALAX `strip_caplet_vols`** → QL adopts the stripped optionlet vols → `ql.BlackCapFloorEngine` must return the flat-quote premium | VALAX strips; QL prices | `rel < 1e-10` |
 
 ### 5.3 Acceptance criteria
 

@@ -699,6 +699,7 @@ class TestExtendedDiagnostics:
         assert float(diag.quoted_values[0]) == pytest.approx(0.045)
         assert float(diag.quoted_values[1]) == pytest.approx(0.048)
 
+    @pytest.mark.audit
     def test_fitted_quotes_near_quoted_at_convergence(self):
         specs, insts = self._mixed_single_curve_build()
         _, diag = bootstrap_curve_graph(REF, specs, insts)
