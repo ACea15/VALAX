@@ -12,6 +12,122 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — business-day calendars, date adjustment and Bus/252 (Tier 1.3, N-6)
+
+`valax/dates/` was holiday-agnostic: a period end could land on a Sunday and
+stay there. `ScheduleConventions` had carried `calendar` and
+`business_day_convention` slots since stubs landed, validated and then
+*rejected* with `NotImplementedError`, on the grounds that accepting a
+convention and ignoring it is worse than refusing it. Those slots are now
+honoured.
+
+New `valax.dates.calendars`:
+
+- **`HolidayCalendar`** — an `eqx.Module` holding one sorted `jnp.int32` array
+  of holiday day ordinals. Weekends are not stored: ordinal 0 is a Thursday, so
+  `(ordinal + 3) % 7 >= 5` is the weekend test, and storing weekend closures
+  would double the tables to say nothing.
+- **Six markets**, cached: `target_calendar`, `sofr_calendar`, `nyse_calendar`,
+  `london_calendar`, `tokyo_calendar`, `brazil_calendar`. NYSE and SOFR are
+  deliberately separate and neither contains the other — the exchange closes
+  on Good Friday, the bond market on Columbus Day and Veterans Day.
+- **`adjust`** for following, modified-following, preceding and
+  modified-preceding, plus `last_business_day_of_month` for the end-of-month
+  rule. The `modified_` pair reverses direction rather than crossing a month
+  boundary.
+- **`union` / `intersection`** for cross-currency, narrowing the covered year
+  range to the overlap, because outside it one side has no data.
+- **`bus_252`** in a second day-count registry, `CALENDAR_DAY_COUNT_FNS`,
+  reached via `year_fraction(..., calendar=...)`.
+
+Four design decisions worth recording:
+
+- **The data is a generated artifact, not a runtime lookup.**
+  `valax/dates/_holiday_data.py` carries `CALENDAR_DATA_VERSION` and per-market
+  `PROVENANCE`; `scripts/generate_holiday_tables.py` consults `holidays` and
+  `pandas_market_calendars` *offline* under a new `calendars-data` extra.
+  Runtime dependencies are unchanged at seven packages. Deriving holidays at
+  runtime would make the dates a trade pays on a function of which upstream
+  version was installed — a `pip install -U` could move a swap's cashflows with
+  nothing in the diff.
+- **Every table had to survive a cross-check across its whole declared range,
+  not a sampled window.** NYSE and London match a second independent source
+  exactly (1211 and 984 dates); Tokyo and Brazil are supersets whose surplus
+  must be explainable (bank holidays; Carnival, Corpus Christi, 24/31 Dec);
+  TARGET is checked against its own published six-day rule, which it satisfies
+  on all 490 closures bar two documented one-offs (31 Dec 1999 and 2001, the
+  Y2K and euro-changeover closures). SIFMA could not be checked as a superset
+  of the federal calendar — they differ in both directions — so the invariant
+  is that every federal-only date is a Friday whose Saturday is a federal
+  holiday.
+- **Year ranges are per-calendar and bounded by a documented fact**, and a
+  query outside one **raises** rather than reporting an unknown year as
+  holiday-free. TARGET starts in 1999 because it opened with the euro; NYSE in
+  1971 (the sources disagree on the last pre-Uniform-Monday-Act Memorial Day);
+  SOFR and London in 1978 (Veterans Day returned to 11 November, and May Day
+  became an English bank holiday, that year); Tokyo stops at 2098 because the
+  equinox holidays are astronomical and fixed by cabinet order about a year
+  ahead. No table runs to 2100: the cross-check upstream's own horizon ends
+  there, so its final year cannot be validated.
+- **The roll bound is measured, not guessed.** `max_closure_run` is computed by
+  scanning each covered range for the longest stretch of consecutive
+  non-business days, which bounds an unrolled `where` chain and keeps
+  adjustment a fixed-cost, vectorisable operation. Tokyo's is **10** — New Year
+  plus Golden Week — so a plausible hard-coded 7 would have silently
+  under-rolled it.
+
+Three things had to be checked rather than assumed:
+
+- `pandas_market_calendars`' `SIFMA_UK` and `SIFMA_JP` are **unions with the US
+  calendar** — `SIFMA_UK` contains 4 July and MLK Day — so they are not London
+  and Tokyo calendars. London comes from `LSE`, Tokyo from `JPX`.
+- Deriving closures from a trading calendar picks up **unscheduled outages**.
+  1 October 2020 was a Tokyo Stock Exchange system failure, not a settlement
+  holiday — banks settled normally, so a payment must not roll off it. The
+  generator carries an explicit, reasoned exclusion list and fails if an entry
+  disappears upstream.
+- `__check_init__` runs on pytree **unflattening**, where the holiday array is a
+  tracer, so a sortedness check there forces concretisation and fails under
+  `jit`. Value checks live in the eager `build`; `__check_init__` inspects only
+  structure. Relatedly, `jnp.array(python_int)` returns a *tracer* inside a
+  trace, so range bounds derived from `ymd_to_ordinal` are resolved eagerly and
+  stored as static fields.
+
+**The default has not moved.** `business_day_convention` still defaults to
+`"unadjusted"`, and that branch is the pre-existing code reached by a static
+Python test, so every schedule built with default conventions is bit for bit
+what it was — which matters because roughly two dozen test modules build one
+and then assert prices. `tests/test_dates/test_schedule.py::TestUnadjustedPathIsUnchanged`
+pins three grids against literal ordinals computed from `datetime` subtraction
+(not from `ymd_to_ordinal`, which would check VALAX's Hinnant conversion with
+VALAX's Hinnant conversion) and asserts that adjustment *does* change the
+answer when asked to.
+
+The acceptance gate is `tests/test_quantlib_comparison/test_dates_ql.py`, which
+pinned both sides to `ql.NullCalendar()` / `ql.Unadjusted` precisely so that a
+missing feature would not masquerade as a schedule defect. Rather than flip the
+pin, every schedule case now runs under **both** pairings — the unadjusted one
+kept as a regression, and `ql.TARGET()` / `ql.ModifiedFollowing` as the new
+gate — with dates compared by exact integer equality and an anti-vacuity test
+that the two pairings actually differ. 58 tests became **84**. `valax_boundaries`
+no longer discards the payment leg silently; it is asserted equal instead.
+
+`tests/test_dates/test_calendars.py` (132 tests) layers three kinds of
+reference in descending strength: statutory rules recomputed with `datetime`
+and `calendar` ("Memorial Day is the last Monday in May", Japan's
+substitute-holiday rule), hand-transcribed 2025 closure lists per market, and
+last a regeneration check — weakest because it shares an upstream with the data.
+Every adjustment test uses dates that genuinely land on non-business days and
+asserts the adjusted result differs from the unadjusted one.
+
+**Not closed.** Payment *lag* is still a calendar-day shift on the curve-build
+quote types: `HolidayCalendar.add_business_days` exists but nothing in
+`valax/curves/` consults a calendar, so a business-day lag must still be
+pre-rolled and passed as `payment_dates`. There is no index registry, so
+conventions remain per-instrument static strings — which is why **N-6 is 🟡 and
+not ✅**: the requirement asks for calendars *and* conventions from versioned
+reference data, and only the first clause is closed.
+
 ### Changed — audit conformance map reconciled against the code
 
 The T-suite is complete (**15/15**) and the conformance map now matches the

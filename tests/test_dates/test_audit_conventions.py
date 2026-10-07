@@ -408,12 +408,20 @@ class TestScheduleReferenceData:
         """N-5 as the schedule currently stands.
 
         :class:`~valax.dates.schedule.Schedule` has a distinct
-        ``payment_dates`` array but no business-day roll to populate it
-        differently, so it equals ``accrual_end`` exactly.  The gate pins
-        that equality so the day a calendar lands, this test is what
-        tells you the payment leg now needs its own reference data.
-        Instrument-level payment lag is a separate axis and is gated by
-        T-5 in ``tests/test_curves/test_instrument_residuals.py``.
+        ``payment_dates`` array that equals ``accrual_end`` exactly.  This
+        docstring used to say "no business-day roll to populate it
+        differently" and predicted that the day a calendar landed, this
+        test would be what told you the payment leg needed its own
+        reference data.  A calendar has landed, and the answer turned out
+        to be *no*: a business-day convention moves an accrual end and its
+        payment to the same day, so the two legs separate only under a
+        payment **lag**.  Every case here is unadjusted, which is why the
+        equality is unchanged.
+
+        Adjustment's own reference data lives in
+        ``tests/test_dates/test_calendars.py``; instrument-level payment
+        lag is a separate axis, gated by T-5 in
+        ``tests/test_curves/test_instrument_residuals.py``.
         """
         schedule = generate_schedule(*args, **kwargs)
         assert [to_ymd(x) for x in schedule.payment_dates] == expected_ends

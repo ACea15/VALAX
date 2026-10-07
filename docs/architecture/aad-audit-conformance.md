@@ -65,19 +65,25 @@ curves) and the `λ_m` level itself remain. See **M-3** and **A-3** below.
 | Gate | State |
 |---|---|
 | T-suite (T-1 … T-15) | **15 / 15** implemented and `audit`-marked |
-| `pytest -m audit` | 317 passed |
-| Full `pytest` | 4344 passed, 1 skipped, 6 xfailed |
-| Requirement rows (N/Q/R/C/V/M/A) | 50 total — **29 ✅ · 17 🟡 · 3 ❌ · 1 n-a** |
+| `pytest -m audit` | 324 passed |
+| Full `pytest` | 4516 passed, 1 skipped, 6 xfailed |
+| Requirement rows (N/Q/R/C/V/M/A) | 50 total — **29 ✅ · 18 🟡 · 2 ❌ · 1 n-a** |
 
-Every 🟡 states its gap in its own row. The three remaining ❌ are whole
+Every 🟡 states its gap in its own row. The two remaining ❌ are whole
 features rather than partial ones, which is why they are not 🟡:
 
-- **N-6** — business-day calendars and versioned reference data. VALAX has no
-  holiday calendar at all; `ScheduleConventions` raises `NotImplementedError`
-  rather than silently ignoring one.
 - **V-4** — RFR optionlets priced on accrual-period variance instead of
   variance to the period start.
 - **V-7** — butterfly and calendar arbitrage checked after each vol fit.
+
+**N-6** left the ❌ set with Tier 1.3: `valax.dates.calendars` supplies
+business-day calendars for six markets from a version-stamped, cross-checked
+artifact. It is **🟡 rather than ✅ on purpose.** The requirement has two
+clauses — calendars *and* conventions from versioned reference data — and
+only the first is closed. Conventions are still per-instrument static
+strings, with no index definition to resolve them from, and no curve-build
+code consults a calendar. Marking the row ✅ would claim the registry half
+that N-5 is still waiting on.
 
 The 🟡 set is dominated by the genuinely deferred workstreams — curve
 interpolation modes (C-4, C-8), full CSA discounting (C-2) and the `λ_m`
@@ -95,8 +101,8 @@ parameter to freeze.
 | N-2 | Every rate annualised and paired with its own day count | MUST | Per-leg `fixed_day_count` / `float_day_count` on `IborSwapRate`, `TenorBasisSwap`, `CrossCurrencyBasisSwap` | ✅ | — |
 | N-3 | Discount cash flows at the payment date, not accrual end, where a payment lag exists | MUST | `payment_dates` / `payment_lag` on `SwapRate`, `OISSwapRate`, `IborSwapRate` (per leg), `TenorBasisSwap` (per leg), `CrossCurrencyBasisSwap` (per leg); `_floating_leg_pv(accrual_end_dates=…, payment_dates=…)`; `_compounded_float_leg_pv` | ✅ | Accrual and payment are now separate roles: projection and `τ` come from the accrual schedule, discounting from the payment schedule. Either an explicit business-day-adjusted payment array or a uniform calendar-day `payment_lag`; supplying both raises. Default is `T^p = T^e`, which preserves every pre-existing number bit for bit. Gated by `tests/test_curves/test_instrument_residuals.py::TestPaymentLagTelescoping` (T-5) and `…::TestPaymentLagPerLeg` |
 | N-4 | Projection (pseudo-discount) factors never discount | MUST | `_floating_leg_pv` discounts on `curves_touched[0]` and projects on `curves_touched[1]` | ✅ | — |
-| N-5 | The index period is generated from the index definition, not assumed equal to the coupon accrual period; stubs explicit | MUST | `IborSwapRate.fixing_dates` (explicit per-coupon fixing dates); `valax.dates.generate_schedule` (stubs, EOM rolls) | 🟡 | Fixing dates are supplied by the caller rather than derived from a versioned index definition; there is no index registry |
-| N-6 | Schedules, calendars and conventions from versioned reference data | SHOULD | — | ❌ | No business-day calendars at all; conventions are per-instrument static fields |
+| N-5 | The index period is generated from the index definition, not assumed equal to the coupon accrual period; stubs explicit | MUST | `IborSwapRate.fixing_dates` (explicit per-coupon fixing dates); `valax.dates.generate_schedule` (stubs, EOM rolls, business-day adjustment) | 🟡 | Fixing dates are supplied by the caller rather than derived from a versioned index definition; there is no index registry. Tier 1.3 supplied the missing *mechanism* — a schedule can now be rolled on a named market calendar — but not the registry that would pick the calendar and conventions from an index name, which is what this row asks for |
+| N-6 | Schedules, calendars and conventions from versioned reference data | SHOULD | `valax.dates.calendars` (`HolidayCalendar`, six market factories, `adjust`, `union`/`intersection`, `bus_252`); `valax.dates._holiday_data` (generated artifact carrying `CALENDAR_DATA_VERSION` and per-market `PROVENANCE`) | 🟡 | Calendars now exist and come from version-stamped reference data, cross-checked against a second independent source across each table's whole range. The row stays 🟡 because its second clause is unchanged: *conventions* are still per-instrument static fields, not reference data — nothing resolves `day_count`/`business_day_convention` from an index definition, and nothing in `valax/curves/` consults a calendar (see N-5) |
 
 ## Q — Market instruments and quotes
 
@@ -297,4 +303,4 @@ stays honest rather than aspirational.
 | Full CSA / collateralised discounting | C-2 | Requires a collateral-agreement model on the instrument, not just a curve identifier. The discount/projection split that C-2 mainly guards is already enforced |
 | RFR in-arrears optionlet variance | V-4 | Needs a compounded-in-arrears optionlet pricer; the current optionlets are term-rate by construction |
 | Dual-curve Cheyette calibration | M-2 | `calibrate_cheyette` raises rather than silently single-curving, which is the safe failure mode. Hull-White and G2++ cover the dual-curve route |
-| Business-day calendars and versioned reference data | N-6, N-5, T-10 | Large, orthogonal, and already tracked on the roadmap |
+| Versioned **index registry** (conventions resolved from an index definition) | N-5, N-6 | The calendar half shipped with Tier 1.3 — `valax.dates.calendars`, cross-checked and version-stamped — so what is deferred is narrower than it was: a registry mapping an index name (`USD.SOFR`, `EUR.EURIBOR.6M`) to its calendar, day count, roll and lag, plus the curve-build wiring to consult one. Day-count and schedule reference data are already gated by T-10, and adjustment by `test_dates_ql.py` |

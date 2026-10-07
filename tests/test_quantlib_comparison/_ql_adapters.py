@@ -15,9 +15,15 @@ Design rules
    returns an ``effective_market`` dict with the snapped expiry, so
    both engines use bit-identical inputs.  Tests must consume the
    ``effective_market``, not the raw input.
-2. **No business calendars.**  VALAX uses ordinal dates with no
-   business-day logic; the adapter uses ``ql.NullCalendar`` everywhere
-   to match.
+2. **No business calendars, by choice.**  VALAX does have business-day
+   calendars and adjustment (:mod:`valax.dates.calendars`), but these
+   adapters compare *vol surface and option* engines, where a holiday
+   calendar would only perturb the expiry alignment rule above without
+   exercising anything in the engine under test.  Both sides therefore
+   use ``ql.NullCalendar`` so the calendar cannot be a source of
+   disagreement.  Schedule and adjustment conformance is gated
+   separately, against ``ql.TARGET()`` and ``ql.ModifiedFollowing``, in
+   ``test_dates_ql.py``.
 3. **Act/365 throughout.**  Both sides use ``ql.Actual365Fixed()`` so
    day-count conventions cannot be a source of disagreement.
 4. **Stable evaluation date.**  ``ql.Settings.instance().evaluationDate``

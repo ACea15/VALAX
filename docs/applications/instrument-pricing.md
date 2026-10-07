@@ -105,10 +105,13 @@ Vanilla contracts are documented on the pricing-method pages:
     181/184-day alternation of any semiannual actual/N bond) pay unequal
     amounts. Every pricer returns a **dirty** price; call and put prices are
     quoted **clean**. Schedules support day-of-month preservation,
-    end-of-month rolls and short/long front/back stubs, but are still
-    **holiday-agnostic** — business-day adjustment is
-    [Tier 1.3](../roadmap.md#13-business-calendars-and-holiday-schedules).
-    See [Dates and Conventions](../guide/dates-and-conventions.md).
+    end-of-month rolls, short/long front/back stubs and **business-day
+    adjustment** against a holiday calendar (TARGET, SOFR/SIFMA, NYSE,
+    London, Tokyo, Brazil) under following, modified-following, preceding or
+    modified-preceding. Adjustment is **opt-in**: the default convention is
+    `"unadjusted"`, so every row above is priced on an unadjusted grid unless
+    a calendar is configured. See
+    [Dates and Conventions](../guide/dates-and-conventions.md).
 
 ### FX derivatives
 

@@ -157,7 +157,7 @@ ois_lagged = OISSwapRate(
 )
 
 # (b) An explicit payment schedule you have already rolled over a
-#     holiday calendar — the production route.
+#     holiday calendar (see valax.dates.calendars) — the production route.
 ois_exact = OISSwapRate(
     start_date=ref,
     fixed_dates=accruals,
@@ -168,9 +168,12 @@ ois_exact = OISSwapRate(
 ```
 
 `payment_lag` shifts by calendar days, which is only an approximation to a
-business-day roll; VALAX has no holiday calendars (see
-[§8](#8-what-is-not-yet-implemented)).  When the distinction matters, compute
-the adjusted dates yourself and pass `payment_dates`.  Legs are resolved
+business-day roll.  VALAX does have holiday calendars
+([`valax.dates.calendars`](dates-and-conventions.md#business-day-calendars-and-adjustment)),
+but no curve-build quote type consults one yet (see
+[§8](#8-what-is-not-yet-implemented)), so when the distinction matters roll
+the dates yourself — `HolidayCalendar.add_business_days` does it — and pass
+`payment_dates`.  Legs are resolved
 independently, so `IborSwapRate` takes `fixed_payment_dates` and
 `float_payment_dates`, `TenorBasisSwap` takes `leg_a_payment_dates` /
 `leg_b_payment_dates`, and `CrossCurrencyBasisSwap` takes
@@ -251,8 +254,9 @@ are equal and cancel pairwise.)  Both facts are gated in
 !!! note "Calendars are not needed here, but a concrete day span is"
     The market convention carries the preceding business day's rate across
     weekends and holidays *weighted by calendar days*, which is exactly what a
-    calendar-daily subdivision of a smooth curve reproduces — so the absence
-    of holiday calendars costs nothing in this particular calculation.
+    calendar-daily subdivision of a smooth curve reproduces — so not
+    consulting a holiday calendar costs nothing in this particular
+    calculation, even though one is now available.
 
     What the averaged branch does need is a concrete number of days over
     `[start_date, end_date]`, since it reads one discount factor per day.  The
@@ -1110,8 +1114,11 @@ and the residual-Jacobian condition number (`jacobian_condition_number`).  See
 What is still pending on the **build** side — alternative interpolation
 modes on `CurveSpec.interp`, turn-of-year step interpolation,
 Hull-White-derived futures convexity, CSA / collateralised discounting,
-business-day calendars, an over-determined least-squares variant, fixings
-seasoning, and constrained curves — is enumerated once in
+**consulting a business-day calendar** (the calendars themselves exist in
+[`valax.dates.calendars`](dates-and-conventions.md#business-day-calendars-and-adjustment);
+what is missing is the curve build reading one, so pillars and payment lags
+are still caller-supplied dates), an over-determined least-squares variant,
+fixings seasoning, and constrained curves — is enumerated once in
 [Roadmap → Multi-Curve Framework § Curve build](../roadmap.md#6-curve-build-absorbed-from-the-retired-mc-curves-3-notes),
 which is also the single owner of the *downstream* gaps (risk,
 calibration, vol surfaces, portfolio).

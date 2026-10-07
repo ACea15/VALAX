@@ -17,7 +17,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | **Pricing** | Black-Scholes, Black-76, Bachelier, SABR analytic; **Heston Fang-Oosterlee COS**; **Dupire local vol (Gatheral IV-space)**; Monte Carlo (GBM, Heston, SABR, Local Vol, **SLV**, **multi-asset GBM**, LMM, **Hull-White**, **G2++**, **Cheyette**); Crank-Nicolson 1-D PDE; **2-D ADI PDE (Heston)**; **short-rate PDE (Hull-White, G2++, Cheyette)**; CRR binomial tree; Hull-White trinomial tree |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
 | **Curves** | `DiscountCurve` with log-linear interpolation, flat extrapolation (the only interpolation mode shipped). Keyed multi-curve container `CurveGraph` / `CurveSpec`; joint multi-curve Newton bootstrap `bootstrap_curve_graph` over 11 quote types with `CurveBuildDiagnostics` (repricing residuals, fitted quotes, Jacobian condition number); market-quote sensitivity `quote_jacobian` via implicit differentiation; `SurvivalCurve`, `InflationCurve`, `FixingHistory`, pluggable futures-convexity hooks |
-| **Dates** | Act/360, Act/365, **Act/Act (ISDA, exact)**, 30/360; ordinal-based date arithmetic; schedule generation with day-of-month preservation, end-of-month rolls and short/long front/back **stubs**, returning `(accrual_start, accrual_end, payment_dates)`; **accrued interest and clean/dirty prices**. Still **holiday-agnostic** — no calendars or business-day adjustment ([Tier 1.3](#13-business-calendars-and-holiday-schedules)) |
+| **Dates** | Act/360, Act/365, **Act/Act (ISDA, exact)**, 30/360, **Bus/252**; ordinal-based date arithmetic; schedule generation with day-of-month preservation, end-of-month rolls and short/long front/back **stubs**, returning `(accrual_start, accrual_end, payment_dates)`; **accrued interest and clean/dirty prices**; **business-day calendars and adjustment** for TARGET, SOFR/SIFMA, NYSE, London, Tokyo and Brazil, with union/intersection for cross-currency ([Tier 1.3](#13-business-calendars-and-holiday-schedules)). Adjustment is opt-in — the default convention remains `"unadjusted"` |
 | **Calibration** | SABR, Heston, **Hull-White, G2++, Cheyette (1F/2F)**, and **SLV leverage** calibration with LM / BFGS / Optax solvers; parameter constraint transforms. Curve bootstrap (sequential, simultaneous, joint `CurveGraph`) with implicit-diff quote Jacobian; survival curves from CDS spreads via the closed-form credit-triangle approximation (*not* a repricing bootstrap — see [3.4](#34-credit-derivatives)); SABR / SVI vol surfaces, **swaption cube, optionlet surface** |
 | **Portfolio** | `batch_price()` and `batch_greeks()` via vmap |
 | **Market Data** | `MarketData` container, `MarketScenario` / `ScenarioSet` for risk factor shocks; full synthetic-data subpackage (`valax.market.synthetic`) covering Stages 1–6 of the workflow — `SyntheticMarketConfig`, `SeedRegistry`, NSS / flat curve samplers, random PSD correlation matrices, ground-truth model parameters, noisy observation layer, option / swap portfolio samplers, correlated-GBM market tapes, scenario sets, and deliberate arbitrage injectors |
@@ -665,11 +665,14 @@ the forwards genuinely are exogenous.
   selection and FX-implied foreign-collateralised discount curves. No
   machinery and no design note exist; `CurveSpec.currency` is declared but
   consumed by nothing
-- [ ] **Business-day calendars and roll conventions** — see
-  [Tier 1.3](#13-business-calendars-and-holiday-schedules); `valax/dates/`
-  is holiday-agnostic, so every bootstrap pillar is an unadjusted date.
-  `ScheduleConventions` already carries the `calendar` and
-  `business_day_convention` slots for this work to drop into
+- [ ] **Business-day calendars and roll conventions in the curve build** —
+  the calendars themselves shipped with
+  [Tier 1.3](#13-business-calendars-and-holiday-schedules)
+  (`valax.dates.calendars`), and `ScheduleConventions` now applies them, but
+  nothing in `valax/curves/` consults one: `CurveSpec` carries no calendar,
+  so every bootstrap pillar is still whatever date the caller supplies, and
+  `payment_lag` remains a calendar-day shift. What is left here is wiring,
+  not machinery
 - [ ] **Over-determined bootstrap** — an `optimistix.least_squares` variant
   of `bootstrap_curve_graph` with per-quote weights
 - [ ] **Fixings seasoning** — `OISSwapRate` and the futures residual do
@@ -779,7 +782,7 @@ These items are hard prerequisites. Every downstream feature, product, and integ
 
 | # | Task | Why It's Critical | Tier Ref |
 |---|------|-------------------|----------|
-| **P1.1** | **Business Calendars & Date Adjustment** | Every trade in a bank settles on business days. Wrong dates = wrong cashflows = wrong P&L. Precomputed holiday arrays (TARGET, NYSE, SOFR/Fed, London, Tokyo) with modified-following/preceding and end-of-month conventions. | 1.3 |
+| **P1.1** | ~~**Business Calendars & Date Adjustment**~~ — **done**, [Tier 1.3](#13-business-calendars-and-holiday-schedules) | Every trade in a bank settles on business days. Wrong dates = wrong cashflows = wrong P&L. Shipped: `valax.dates.calendars` with holiday ordinal arrays for TARGET, NYSE, SOFR/SIFMA, London, Tokyo and Brazil, following/modified-following/preceding/modified-preceding and the end-of-month rule, union/intersection, and Bus/252. Remaining in this area is *wiring*, not machinery: the curve build and payment lags do not yet consult a calendar. | 1.3 |
 | **P1.2** | **Cashflow Engine (Legs, Compounding)** — *stubs and accrued interest done* | Real swaps have compounding-in-arrears, amortizing notionals and fixing histories. Stub schedules and accrued interest have landed (`generate_schedule`, `valax.dates.accrual`); what remains is `FixedLeg` / `FloatingLeg` pytrees with compounding, amortisation and realized fixings. | 1.4 |
 | **P1.3** | **CI/CD Pipeline** | No bank adopts a library without automated testing. GitHub Actions with: lint, type-check, full test suite, QuantLib comparison, coverage reporting. A gate before anything else ships. | — |
 | **P1.4** | ~~**Short-Rate Models (Hull-White, G2++, Cheyette)**~~ ✅ **Done** | One-factor Hull-White, two-factor G2++, and quasi-Gaussian Cheyette (1F/2F) — analytic/tree/MC/PDE pricing, exact curve fit, and swaption-surface calibration (`calibrate_hull_white` / `calibrate_g2pp` / `calibrate_cheyette`). | 2.1 |
@@ -830,7 +833,7 @@ These are the features that make VALAX not just *another* pricing library but a 
 
 ```
 Q1 (Foundation):
-  ├─ [P1.1] Business Calendars ──→ [P1.2] Cashflow Engine
+  ├─ [P1.1] Business Calendars (done) ──→ [P1.2] Cashflow Engine
   ├─ [P1.3] CI/CD Pipeline
   └─ [P1.4] Short-Rate Models (Hull-White)
 
@@ -861,7 +864,7 @@ Ongoing (Differentiators):
 
 VALAX has excellent bones. The pure-functional JAX architecture is genuinely superior to what most banks run internally (mutable C++ object graphs built 20+ years ago). Autodiff Greeks, `vmap` batching, and GPU portability are structural advantages that compound with every new feature added.
 
-The most urgent gap is **foundational infrastructure** (P1: calendars, cashflows, CI/CD) — not because it's glamorous, but because every downstream feature depends on it. A bank quant evaluating VALAX will immediately ask: *"Can it handle modified-following date adjustment on a 10Y EUR swap with short front stub and compounding-in-arrears on the floating leg?"* — and today the answer is *partly*: the **short front stub** is supported and accrual is measured on a real day-count basis, but **modified-following adjustment** (Tier 1.3) and **compounding-in-arrears** (Tier 1.4) are not.
+The most urgent gap is **foundational infrastructure** (P1: calendars, cashflows, CI/CD) — not because it's glamorous, but because every downstream feature depends on it. A bank quant evaluating VALAX will immediately ask: *"Can it handle modified-following date adjustment on a 10Y EUR swap with short front stub and compounding-in-arrears on the floating leg?"* — and today the answer is *mostly*: the **short front stub** is supported, accrual is measured on a real day-count basis, and **modified-following adjustment against a TARGET calendar** now works and is conformance-tested against QuantLib (Tier 1.3). **Compounding-in-arrears as a leg abstraction** (Tier 1.4) is still missing — the OIS compounding that exists lives on the curve-build quote types, not on a reusable `FloatingLeg`.
 
 The **highest-ROI parallel investment** is **short-rate models + Heston COS** alongside calendars/cashflows, because they unlock the most actively traded products (callable bonds, fast equity vol calibration) while the plumbing is being built.
 
@@ -880,7 +883,7 @@ These are foundational pieces that block almost everything else. They should be 
 - [x] **Basis curve** support (e.g., 1M vs 3M SOFR basis) — via `TenorBasisSwap` inside the joint solver
 - [x] **Cross-currency graph** — `CrossCurrencyBasisSwap` + `FXForward` inside the joint solver (EUR-USD four-curve build verified)
 - [x] **Jacobian of discount factors w.r.t. input rates** via autodiff (free with JAX, verified in tests)
-- [x] **Payment lag** — accrual end $T^e$ and payment date $T^p$ are separate roles on every swap quote type (`payment_dates` / `payment_lag` on `SwapRate`, `OISSwapRate`, and per leg on `IborSwapRate`, `TenorBasisSwap`, `CrossCurrencyBasisSwap`), discounting at $T^p$ via `_floating_leg_pv(payment_dates=…)`. The OIS floating leg is now the per-period sum `_compounded_float_leg_pv`, with the telescoping identity retained as a zero-lag fast path (spec N-3; gated by `tests/test_curves/test_instrument_residuals.py::TestPaymentLagTelescoping`). Calendar-day lags only — business-day rolling still needs [Tier 1.3](#13-business-calendars-and-holiday-schedules), so an exact schedule must be supplied as `payment_dates`
+- [x] **Payment lag** — accrual end $T^e$ and payment date $T^p$ are separate roles on every swap quote type (`payment_dates` / `payment_lag` on `SwapRate`, `OISSwapRate`, and per leg on `IborSwapRate`, `TenorBasisSwap`, `CrossCurrencyBasisSwap`), discounting at $T^p$ via `_floating_leg_pv(payment_dates=…)`. The OIS floating leg is now the per-period sum `_compounded_float_leg_pv`, with the telescoping identity retained as a zero-lag fast path (spec N-3; gated by `tests/test_curves/test_instrument_residuals.py::TestPaymentLagTelescoping`). Calendar-day lags only. The calendars needed to roll a lag properly now exist ([Tier 1.3](#13-business-calendars-and-holiday-schedules): `HolidayCalendar.add_business_days`), but no quote type consults one, so a business-day lag must still be pre-rolled by the caller and supplied as `payment_dates`. Wiring it in belongs with the leg descriptors in [Tier 1.4](#14-trade-representation-and-cashflow-engine)
 - [x] **Averaged vs compounded futures** — `MoneyMarketFuture.averaging` ∈ `{"compounded", "arithmetic"}` (1M RFR contracts settle on the arithmetic average of the daily index, not the compounded one), via `_arithmetic_average_forward`. The gap is the interest-on-interest averaging discards, of order $r^2\tau/2$, and survives on a flat curve (spec § 4.2; gated by `tests/test_curves/test_instrument_residuals.py::TestAveragedFutures`)
 - [x] **Partly-accrued RFR coupons** — `FixingSeries.compounded_factor` reduces a daily history to the realised compounding factor $A$, and `accrued_compounding` on `IborSwapRate` / `TenorBasisSwap` / `CrossCurrencyBasisSwap` blends it with the curve forward for the remainder via $1 + \tau_j F_j = A \cdot P_x(0,t_0)/P_x(0,T_j^e)$ (spec C-3; T-11 gate in `tests/test_curves/test_instrument_residuals.py::TestPartlyAccruedFixings`)
 - [ ] **Turn-of-year effects** and stub handling (`TurnInstrument` quote type shipped; genuine step-function interpolation deferred to MC-Curves-3)
@@ -925,19 +928,21 @@ These are foundational pieces that block almost everything else. They should be 
 
 ### 1.3 Business Calendars and Holiday Schedules
 
-- [ ] **Holiday calendar objects** for major markets: TARGET, NYSE, SOFR (Fed), London, Tokyo
-- [ ] **Date adjustment conventions**: modified following, modified preceding, end-of-month
-- [ ] **Business day counting** (e.g., Bus/252 for Brazil)
-- [ ] **Calendar combination** (union/intersection for cross-currency)
+- [x] **Holiday calendar objects** for major markets: TARGET, NYSE, SOFR (SIFMA), London, Tokyo, Brazil — `valax.dates.calendars.HolidayCalendar` plus cached per-market factories (`target_calendar`, `sofr_calendar`, `nyse_calendar`, `london_calendar`, `tokyo_calendar`, `brazil_calendar`); tables are a generated, version-stamped artifact in `valax.dates._holiday_data`
+- [x] **Date adjustment conventions**: following, modified following, preceding, modified preceding and the end-of-month rule — `HolidayCalendar.adjust` / `last_business_day_of_month`, applied by `valax.dates.schedule.generate_schedule` and validated as a calendar/convention *pair* in `valax.dates.conventions.ScheduleConventions`
+- [x] **Business day counting** (Bus/252 for Brazil) — `valax.dates.daycounts.bus_252`, registered in `CALENDAR_DAY_COUNT_FNS` and reachable through `year_fraction(..., calendar=...)`
+- [x] **Calendar combination** (union/intersection for cross-currency) — `HolidayCalendar.union` / `HolidayCalendar.intersection`, narrowing the covered range to the overlap
 
 **Why:** Every real trade settles on business days. Wrong dates = wrong cashflows = wrong prices.
 
 **Approach:** Precomputed boolean arrays of holidays (JIT-compatible, no runtime lookups). Calendar as a pytree with a `jnp.array` of holiday ordinals. Adjustment functions operate on integer ordinals.
 
+**Status:** Implemented in `valax/dates/calendars.py`. Holidays are a sorted `jnp.int32` array of day ordinals and every lookup is a `searchsorted`, so adjustment vectorises and Bus/252 can be counted *inside* traced pricer code. Adjustment is **opt-in**: `business_day_convention` still defaults to `"unadjusted"`, and that branch is the pre-existing code reached by a static Python test, so every default schedule in the suite is bit-for-bit unchanged (gated by `tests/test_dates/test_schedule.py::TestUnadjustedPathIsUnchanged`). Conformance is `tests/test_quantlib_comparison/test_dates_ql.py`, which now runs every schedule case under both `NullCalendar`/`Unadjusted` and `ql.TARGET()`/`ql.ModifiedFollowing` and compares dates by exact integer equality. Each calendar declares the year range its data covers and **raises** outside it, rather than reporting an unknown year as holiday-free. Still open: payment lag is a business-day roll at the instrument level only (Tier 1.4), and there is no versioned index registry (see the [audit conformance map](architecture/aad-audit-conformance.md), rows N-5 and N-6). See the [Dates and Conventions guide](guide/dates-and-conventions.md#business-day-calendars-and-adjustment).
+
 ### 1.4 Trade Representation and Cashflow Engine
 
 - [ ] **Leg abstraction** — fixed leg, floating leg with compounding conventions (in arrears, in advance, compounded, averaged)
-- [x] **Cashflow schedule generation** with **stub periods (short/long front/back stubs)**, day-of-month preservation and end-of-month rolls — `valax.dates.schedule.generate_schedule` returns a `Schedule` of `(accrual_start, accrual_end, payment_dates)`; conventions in `valax.dates.conventions.ScheduleConventions`. *Date adjustment remains open and is owned by [Tier 1.3](#13-business-calendars-and-holiday-schedules)*: the `calendar` and `business_day_convention` slots exist and are validated, but raise `NotImplementedError` rather than silently returning unadjusted dates
+- [x] **Cashflow schedule generation** with **stub periods (short/long front/back stubs)**, day-of-month preservation and end-of-month rolls — `valax.dates.schedule.generate_schedule` returns a `Schedule` of `(accrual_start, accrual_end, payment_dates)`; conventions in `valax.dates.conventions.ScheduleConventions`. **Business-day adjustment landed with [Tier 1.3](#13-business-calendars-and-holiday-schedules)**: `calendar` and `business_day_convention` are now applied, validated as a pair, and conformance-tested against `ql.TARGET()` / `ql.ModifiedFollowing`. What remains open here is the payment **lag** — `generate_schedule` takes none, so `payment_dates` still equals `accrual_end`
 - [ ] **Fixing histories** — realized fixings for partially-settled floating legs
 - [ ] **Amortization schedules** — notional step-down for amortizing swaps
 - [x] **Accrued interest** calculation and the **clean/dirty distinction** — `valax.dates.accrual` (`accrued_interest`, `bond_accrued_interest`, `clean_from_dirty`, `dirty_from_clean`); coupon sizing via `fixed_coupon_amounts` (day-count year fraction per accrual period, replacing `coupon_rate / frequency` across the analytic, lattice, PDE and MC pricers); `price_type="clean"|"dirty"` on `valax.risk.oas.callable_bond_oas` / `bond_z_spread`; callable/puttable exercise now compares a clean call price against a clean continuation value in both `valax.pricing.lattice.hull_white_tree` and `valax.pricing.pde.rates_payoffs`

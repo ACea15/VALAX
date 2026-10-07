@@ -62,8 +62,16 @@ class TestReturnContract:
         _, ends, _ = generate_schedule(2025, 1, 15, 2027, 1, 15)
         assert ymd(ends[-1]) == (2027, 1, 15)
 
-    def test_payment_dates_equal_accrual_end_until_tier_1_3(self):
-        """The adjustment slot exists but is not yet applied."""
+    def test_payment_dates_equal_accrual_end(self):
+        """Adjustment moves both legs together; only a *lag* separates them.
+
+        This test used to be named for Tier 1.3 and read as "adjustment is
+        not applied yet".  Adjustment has landed and the equality still
+        holds, because a business-day convention moves the accrual end and
+        its payment to the same day.  What separates the two legs is a
+        payment *lag*, which is Tier 1.4's and the instruments' job --
+        ``generate_schedule`` takes no lag argument.
+        """
         _, ends, pays = generate_schedule(2025, 1, 15, 2027, 1, 15)
         assert jnp.all(pays == ends)
 
@@ -367,3 +375,114 @@ class TestInvariants:
         total = float(jnp.sum(year_fraction(starts, ends, convention)))
         whole = float(year_fraction(starts[0], ends[-1], convention))
         assert total == pytest.approx(whole, rel=1e-12, abs=1e-12)
+
+
+class TestUnadjustedPathIsUnchanged:
+    """The default path must be bit for bit what it was before calendars.
+
+    Business-day adjustment is reached only when a convention is
+    configured; the unadjusted branch is the pre-existing code, taken via
+    a static Python test on ``conventions.business_day_convention`` so it
+    costs nothing and cannot drift.  Roughly two dozen test modules build
+    schedules with default conventions and then assert prices, so a
+    one-day shift here would move golden numbers across the suite.
+
+    Same shape as ``TestPaymentLagTelescoping`` in
+    ``tests/test_curves/test_instrument_residuals.py``: an independent
+    reference, a bare ``==`` on the preserved path, and an anti-vacuity
+    test that the new feature does change the answer when asked to.
+
+    The expected ordinals are literals, computed from ``datetime``
+    subtraction against the 1970-01-01 epoch rather than from
+    ``ymd_to_ordinal`` -- checking VALAX's Hinnant conversion with VALAX's
+    Hinnant conversion would show only that it is used twice.
+    """
+
+    def test_semiannual_schedule_is_bit_for_bit(self):
+        starts, ends, pays = generate_schedule(
+            2025, 1, 31, 2027, 1, 31, frequency=2
+        )
+        boundaries = [20119, 20300, 20484, 20665, 20849]
+        assert starts.tolist() == boundaries[:-1]
+        assert ends.tolist() == boundaries[1:]
+        assert pays.tolist() == boundaries[1:]
+
+    def test_end_of_month_quarterly_is_bit_for_bit(self):
+        starts, ends, _ = generate_schedule(
+            2025,
+            2,
+            28,
+            2026,
+            2,
+            28,
+            frequency=4,
+            conventions=ScheduleConventions(end_of_month=True),
+        )
+        boundaries = [20147, 20239, 20331, 20422, 20512]
+        assert starts.tolist() == boundaries[:-1]
+        assert ends.tolist() == boundaries[1:]
+
+    def test_short_front_stub_is_bit_for_bit(self):
+        starts, ends, _ = generate_schedule(
+            2025,
+            4,
+            20,
+            2026,
+            10,
+            15,
+            frequency=2,
+            conventions=ScheduleConventions(stub="short_front"),
+        )
+        boundaries = [20198, 20376, 20558, 20741]
+        assert starts.tolist() == boundaries[:-1]
+        assert ends.tolist() == boundaries[1:]
+
+    def test_explicitly_unadjusted_equals_the_default(self):
+        """Naming the default convention cannot change the answer."""
+        default = generate_schedule(2025, 1, 31, 2027, 1, 31, frequency=2)
+        named = generate_schedule(
+            2025,
+            1,
+            31,
+            2027,
+            1,
+            31,
+            frequency=2,
+            conventions=ScheduleConventions(
+                business_day_convention="unadjusted"
+            ),
+        )
+        assert default.accrual_end.tolist() == named.accrual_end.tolist()
+        assert default.accrual_start.tolist() == named.accrual_start.tolist()
+
+    def test_adjustment_does_change_the_answer(self):
+        """Anti-vacuity: without this the tests above pass against a no-op.
+
+        31 January 2026 is a Saturday and 31 January 2027 a Sunday, so a
+        modified-following schedule on those anchors must differ.
+        """
+        from valax.dates.calendars import target_calendar
+
+        default = generate_schedule(2025, 1, 31, 2027, 1, 31, frequency=2)
+        adjusted = generate_schedule(
+            2025,
+            1,
+            31,
+            2027,
+            1,
+            31,
+            frequency=2,
+            conventions=ScheduleConventions(
+                business_day_convention="modified_following",
+                calendar=target_calendar(),
+            ),
+        )
+        assert default.accrual_end.tolist() != adjusted.accrual_end.tolist()
+        # Two of the four period ends move, and only backwards within month.
+        moved = [
+            (a, b)
+            for a, b in zip(default.accrual_end.tolist(), adjusted.accrual_end.tolist())
+            if a != b
+        ]
+        assert len(moved) == 2
+        assert all(b < a for a, b in moved)

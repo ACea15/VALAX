@@ -30,6 +30,16 @@ docs = [
     "mkdocs-material",
     "mkdocstrings[python]",
 ]
+# Holiday reference data, consulted *offline* by
+# scripts/generate_holiday_tables.py and by the regeneration test in
+# tests/test_dates/test_calendars.py.  Deliberately not a runtime
+# dependency: holiday dates are reference data, so the tables are
+# version-stamped and checked in rather than rebuilt from whichever
+# upstream version happens to be installed.  See valax/dates/_holiday_data.py.
+calendars-data = [
+    "holidays",
+    "pandas-market-calendars",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["valax"]

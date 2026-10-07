@@ -136,6 +136,12 @@ class TestBondPricing:
         the tolerance measure what it is supposed to: curve interpolation.
         """
         today = curve_setup["valax_curve"].reference_date
+        # Deliberately unadjusted on both sides, and left that way when
+        # business-day adjustment landed: this fixture measures curve
+        # interpolation against QuantLib, so the schedule is held fixed to
+        # keep it out of the tolerance. It also stands as the QuantLib-side
+        # regression that the unadjusted path has not moved. Adjustment
+        # conformance is gated in test_dates_ql.py.
         accrual_start, _, payment_dates = generate_schedule(
             2026, 1, 1, 2031, 1, 1, frequency=2,
             conventions=ScheduleConventions(

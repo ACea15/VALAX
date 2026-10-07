@@ -35,11 +35,13 @@ class Schedule(eqx.Module):
     accrues over ``[accrual_start[i], accrual_end[i])`` and pays on
     ``payment_dates[i]``.
 
-    ``payment_dates`` is currently always equal to ``accrual_end``: it is
-    a separate field because business-day adjustment (roadmap Tier 1.3)
-    moves the payment without moving the accrual, and every consumer that
-    discounts a cashflow should already be reading the payment leg so
-    that nothing downstream has to change when 1.3 lands.
+    ``payment_dates`` equals ``accrual_end`` — both adjusted, when a
+    business-day convention is configured.  It is a separate field because
+    a payment *lag* moves the payment without moving the accrual it pays
+    for, and every consumer that discounts a cashflow therefore reads the
+    payment leg.  Generating a lag is Tier 1.4's job, not this function's:
+    :class:`~valax.curves.instruments.SwapRate` and friends carry
+    ``payment_lag`` and ``payment_dates`` of their own.
 
     Unpacks as a 3-tuple::
 
@@ -129,21 +131,28 @@ def generate_schedule(
         end_day: Day of maturity (1-31).
         frequency: Coupons per year; one of
             :data:`~valax.dates.conventions.VALID_FREQUENCIES`.
-        conventions: Stub placement, end-of-month rule and roll-day
-            anchor. Defaults to a short front stub with day-of-month
-            preservation.
+        conventions: Stub placement, end-of-month rule, roll-day anchor,
+            holiday calendar and business-day convention. Defaults to a
+            short front stub with day-of-month preservation and **no**
+            adjustment.
 
     Returns:
         A :class:`Schedule` of ``n_periods`` accrual starts, accrual ends
         and payment dates, ascending and contiguous
         (``accrual_start[i + 1] == accrual_end[i]``).
 
+        With ``conventions.business_day_convention == "unadjusted"`` (the
+        default) the dates are the raw roll-day grid, bit for bit as they
+        were before adjustment existed. Otherwise every boundary is moved
+        onto a business day of ``conventions.calendar``.
+
     Raises:
         ValueError: If ``frequency`` is not a whole number of months, if
             the start date is not strictly before maturity, if either
-            date is not a valid calendar date, or if
+            date is not a valid calendar date, if
             ``conventions.stub == "none"`` but the tenor is not a whole
-            number of coupon periods.
+            number of coupon periods, or if any generated date falls
+            outside the calendar's covered year range.
 
     Example:
         >>> from valax.dates import generate_schedule
@@ -206,6 +215,35 @@ def generate_schedule(
             interior = interior[:-1]
 
     boundaries = [start_ordinal, *interior, end_ordinal]
+
+    if conventions.business_day_convention != "unadjusted":
+        # Adjustment is applied to the assembled boundary list, never during
+        # the roll: the roll-day, end-of-month and stub arithmetic above
+        # defines the *unadjusted* grid, and the convention then moves each
+        # boundary onto a working day.  Doing it in this order is what makes
+        # a 31-day roll day still mean "the 31st" on a calendar where the
+        # 31st is a Sunday, and it is also QuantLib's order.
+        #
+        # Both accrual legs are sliced from one adjusted list, so
+        # contiguity (accrual_start[i + 1] == accrual_end[i]) survives by
+        # construction rather than by a second pass.
+        calendar = conventions.calendar
+        calendar.require_covered(boundaries)
+        adjusted = calendar.adjust(
+            jnp.asarray(boundaries, dtype=jnp.int32),
+            conventions.business_day_convention,
+        )
+        if conventions.end_of_month:
+            # A month-end roll must stay month-end after adjusting: the
+            # last *business* day of the month, not merely a nearby one.
+            # Only the interior and final boundaries follow the roll; the
+            # first is the dated date the caller supplied.
+            eom_adjusted = calendar.last_business_day_of_month(adjusted)
+            adjusted = jnp.concatenate(
+                [adjusted[:1], eom_adjusted[1:]]
+            )
+        boundaries = [int(o) for o in adjusted]
+
     starts = jnp.asarray(boundaries[:-1], dtype=jnp.int32)
     ends = jnp.asarray(boundaries[1:], dtype=jnp.int32)
     return Schedule(accrual_start=starts, accrual_end=ends, payment_dates=ends)

@@ -25,11 +25,13 @@ Period `i` accrues over `[accrual_start[i], accrual_end[i])` and pays on
 `accrual_start[i + 1] == accrual_end[i]` — so accrual partitions the tenor
 exactly, with no gaps and no double-counting.
 
-`payment_dates` currently always equals `accrual_end`. It is a separate array
-because business-day adjustment moves a payment without moving the accrual it
-pays for. That is [Tier 1.3](../roadmap.md#13-business-calendars-and-holiday-schedules);
-keeping the two distinct now means nothing downstream has to change when it
-lands.
+`payment_dates` equals `accrual_end` — both of them adjusted, once a
+business-day convention is configured. The array is separate because a
+payment **lag** moves a payment without moving the accrual it pays for;
+business-day adjustment moves the two together. `generate_schedule` takes no
+lag, so the separation is exercised by the instruments
+(`SwapRate.payment_lag`, and [Tier 1.4](../roadmap.md#14-trade-representation-and-cashflow-engine)
+for legs), not here.
 
 The return value is a `Schedule` pytree, so `sched.payment_dates` works as
 well as tuple unpacking.
@@ -77,9 +79,10 @@ This has a visible consequence: the textbook par identity — a bond priced at a
 yield equal to its coupon trades at exactly 100 — holds only under 30/360.
 Under Act/365 the same 6% bond prices at 100.010, and under Act/360 at 100.366.
 
-## Conventions: stubs, rolls and the calendar slot
+## Conventions: stubs, rolls and calendars
 
-`ScheduleConventions` is a frozen pytree with all-static fields:
+`ScheduleConventions` is a frozen pytree. Every field is static except
+`calendar`, whose holiday ordinals are a JAX array and therefore a leaf:
 
 ```python
 from valax.dates import ScheduleConventions, generate_schedule
@@ -129,19 +132,176 @@ neighbour removed, so it produces one fewer period.
     `accrual_start` to the instrument's `accrual_start_dates` field whenever
     the schedule is irregular.
 
-### The Tier 1.3 slot
+## Business-day calendars and adjustment
 
-`calendar` and `business_day_convention` exist and are validated, but are not
-yet consumed. Supplying either raises `NotImplementedError`:
+A period end that lands on a Sunday is not paid on the Sunday. Which working
+day it moves to is a convention, and it changes the cashflow: a different
+payment date is a different discount factor, and a different accrual end is a
+different coupon.
+
+### Calendars
+
+A `HolidayCalendar` is a pytree holding one sorted array of **integer day
+ordinals** — the weekday closures of one market. Weekends are not stored;
+they are arithmetic. Six markets ship with the library, each cached:
+
+| Factory | Market | Covers |
+|---|---|---|
+| `target_calendar()` | EUR settlement (TARGET2) | 1999–2099 |
+| `sofr_calendar()` | USD rates (SIFMA government securities) | 1978–2099 |
+| `nyse_calendar()` | NYSE trading days | 1971–2099 |
+| `london_calendar()` | GBP settlement (England & Wales) | 1978–2099 |
+| `tokyo_calendar()` | JPY settlement (national + bank holidays) | 1989–2098 |
+| `brazil_calendar()` | BRL (B3 / ANBIMA), for Bus/252 | 1970–2099 |
+
+`nyse_calendar()` and `sofr_calendar()` are **not** interchangeable, and
+neither contains the other: the exchange closes on Good Friday, while the
+bond market closes on Columbus Day and Veterans Day. Use `sofr_calendar()`
+for USD rates.
+
+Each range is bounded by a documented fact rather than by convenience —
+TARGET opened with the euro in 1999; Tokyo stops at 2098 because the equinox
+holidays are astronomical and fixed by cabinet order only about a year
+ahead. **A date outside a calendar's range raises.** An uncovered year is
+unknown, not holiday-free.
+
+### Adjusting a schedule
+
+```python
+from valax.dates import ScheduleConventions, generate_schedule, target_calendar
+
+conv = ScheduleConventions(
+    day_count="act_360",
+    business_day_convention="modified_following",
+    calendar=target_calendar(),
+)
+
+plain = generate_schedule(2025, 1, 31, 2027, 1, 31, frequency=2)
+rolled = generate_schedule(2025, 1, 31, 2027, 1, 31, frequency=2, conventions=conv)
+
+print(plain.accrual_end.tolist())    # [20300, 20484, 20665, 20849]
+print(rolled.accrual_end.tolist())   # [20300, 20483, 20665, 20847]
+```
+
+Two of the four period ends move, because 31 January 2026 is a Saturday and
+31 January 2027 a Sunday:
+
+| Period end | Unadjusted | Adjusted |
+|---|---|---|
+| 1 | 2025-07-31 (Thu) | 2025-07-31 (Thu) |
+| 2 | 2026-01-31 (**Sat**) | 2026-01-30 (Fri) |
+| 3 | 2026-07-31 (Fri) | 2026-07-31 (Fri) |
+| 4 | 2027-01-31 (**Sun**) | 2027-01-29 (Fri) |
+
+Both moved backwards, not forwards, because `modified_following` may not
+cross a month boundary — the point of the `modified_` prefix:
+
+```python
+from valax.dates import target_calendar, ymd_to_ordinal
+
+cal = target_calendar()
+saturday = ymd_to_ordinal(2025, 5, 31)            # 31 May 2025 is a Saturday
+
+print(int(cal.adjust(saturday, "following")))           # 20241 -> 2 June
+print(int(cal.adjust(saturday, "modified_following")))  # 20238 -> 30 May
+```
+
+Adjustment is applied to the assembled boundary grid, never during the roll,
+which is also QuantLib's order: the roll-day, end-of-month and stub
+arithmetic define the *unadjusted* grid, and the convention then moves each
+boundary onto a working day. Both accrual legs are sliced from one adjusted
+list, so `accrual_start[i + 1] == accrual_end[i]` still holds.
+
+With `end_of_month=True` an adjusted month-end date stays month-end: the last
+*business* day of its own month.
+
+### The default has not moved
+
+`business_day_convention` defaults to `"unadjusted"`, and that path is the
+pre-adjustment code reached by a static branch — the dates it produces are
+bit for bit what they were before calendars existed. Adjustment is opt-in.
+
+### The pairing is validated
+
+A calendar and an adjustment rule are only meaningful together, so
+`ScheduleConventions` validates them as a pair. Each half alone is a
+convention that *looks* configured and is not:
 
 ```python
 ScheduleConventions(business_day_convention="modified_following")
-# NotImplementedError: ... not implemented yet (roadmap Tier 1.3)
+# ValueError: ... needs a calendar to adjust against, but calendar is None.
+
+ScheduleConventions(calendar=target_calendar())
+# ValueError: ... was supplied but nothing would consult it ...
 ```
 
-Accepting a calendar and ignoring it would reproduce exactly the failure this
-module exists to prevent — a convention that is configured but never applied —
-so it fails loudly instead.
+These guards predate adjustment, when they raised `NotImplementedError`.
+They did not go away when it landed; only their reason changed, from "not
+implemented" to "incoherent".
+
+### Bus/252
+
+Bus/252 counts **business** days rather than elapsed ones, so a calendar is
+part of the convention and not an optional refinement — two calendars give
+two different year fractions for the same dates. It therefore lives in a
+second registry, `CALENDAR_DAY_COUNT_FNS`, and requires its calendar
+explicitly:
+
+```python
+from valax.dates import brazil_calendar, year_fraction, ymd_to_ordinal
+
+brl = brazil_calendar()
+start, end = ymd_to_ordinal(2025, 1, 1), ymd_to_ordinal(2026, 1, 1)
+
+print(int(brl.business_days_between(start, end)))               # 250
+print(float(year_fraction(start, end, "bus_252", calendar=brl)))  # 0.9920634920634921
+print(float(year_fraction(start, end, "act_360")))                # 1.0138888888888888
+
+year_fraction(start, end, "bus_252")
+# ValueError: Day count 'bus_252' counts business days and so needs a calendar ...
+```
+
+The denominator is the market constant 252, not a count derived from the
+calendar, so a full year is only approximately 1.0.
+
+Unlike adjustment, Bus/252 runs **inside** traced code — `year_fraction` is
+called on JAX arrays by the accrual layer. The count is two binary searches
+over the sorted holiday array plus closed-form weekend arithmetic, so it is
+JIT-compatible and its cost does not grow with the span.
+
+### Cross-currency: union and intersection
+
+A cross-currency payment needs both centres open, so the joint calendar is
+the **union** of their closures. The covered range narrows to the overlap,
+because outside it one of the two has no data:
+
+```python
+from valax.dates import sofr_calendar, target_calendar
+
+joint = target_calendar().union(sofr_calendar())
+print(joint.name, joint.first_year, joint.last_year, int(joint.holidays.size))
+# TARGET+SOFR 1999 2099 1392
+```
+
+`intersection` gives the complement question — when both centres are shut at
+once.
+
+### Where the data comes from
+
+The tables are a **generated, version-stamped artifact**
+(`valax/dates/_holiday_data.py`), not a runtime lookup. Holiday dates are
+reference data, and deriving them at runtime from a third-party package would
+make the dates a trade pays on depend on which version of that package
+happened to be installed — a `pip install -U` could move a swap's cashflows
+with nothing to show in the diff.
+
+So the upstreams (`holidays`, `pandas_market_calendars`) are consulted
+*offline* by `scripts/generate_holiday_tables.py` and are **not runtime
+dependencies**. Each table had to pass a cross-check against a second,
+independently maintained source — or, for TARGET, against its own published
+six-day rule — across the whole of its declared range before being emitted;
+the generator exits non-zero on any disagreement. See `CONTRIBUTING.md` at
+the repository root for how to regenerate it.
 
 ## Accrued interest, clean and dirty
 

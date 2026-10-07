@@ -2,11 +2,25 @@
 
 All functions take integer ordinals (days since epoch) and return
 year fractions as JAX scalars. Pure functions, fully JIT-compatible.
+
+Most conventions measure *elapsed* days and need nothing but their two
+endpoints.  ``bus_252`` measures **business** days and therefore needs a
+calendar as well, so it lives in its own registry
+(:data:`CALENDAR_DAY_COUNT_FNS`) rather than being forced into the
+two-argument contract of :data:`DAY_COUNT_FNS`.
 """
+
+from typing import TYPE_CHECKING, Optional
 
 import jax.numpy as jnp
 from jaxtyping import Float, Int
 from jax import Array
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle avoidance
+    # ``calendars`` imports this module for the ordinal conversions, so the
+    # dependency can only run one way at runtime; the calendar arrives as an
+    # argument instead.
+    from valax.dates.calendars import HolidayCalendar
 
 
 # ── Ordinal ↔ calendar helpers ───────────────────────────────────────
@@ -161,6 +175,49 @@ def thirty_360(
     return (360 * (y2 - y1) + 30 * (m2 - m1) + (d2 - d1)).astype(jnp.float64) / 360.0
 
 
+def bus_252(
+    start: Int[Array, "..."],
+    end: Int[Array, "..."],
+    calendar: "HolidayCalendar",
+) -> Float[Array, "..."]:
+    """Business/252 day count: Brazilian BRL convention.
+
+    The numerator is the number of **business days** in ``[start, end)``,
+    not elapsed days, so a calendar is part of the convention rather than
+    an optional refinement — two different holiday calendars give two
+    different year fractions for the same pair of dates.  The denominator
+    is the fixed market constant 252, the conventional number of business
+    days in a Brazilian year; it is not derived from the calendar, so the
+    year fraction of a full year is only approximately one.
+
+    JIT-compatible: the count is two binary searches plus closed-form
+    weekend arithmetic, which is what allows this to be called from traced
+    pricer code through :func:`year_fraction`.
+
+    Args:
+        start: Ordinal(s) of the period start, included.
+        end: Ordinal(s) of the period end, excluded.
+        calendar: Calendar defining the business days; for BRL this is
+            :func:`~valax.dates.calendars.brazil_calendar`.
+
+    Returns:
+        Year fraction(s) under Bus/252.
+
+    Raises:
+        EquinoxRuntimeError: If either endpoint lies outside the
+            calendar's covered year range, since an uncovered year is
+            unknown rather than holiday-free.
+
+    References:
+        ANBIMA, *Caderno de Formulas* (Bus/252 accrual for BRL
+        instruments).
+    """
+    start = calendar.assert_covered(jnp.asarray(start))
+    end = calendar.assert_covered(jnp.asarray(end))
+    count = calendar.business_days_between(start, end)
+    return count.astype(jnp.float64) / 252.0
+
+
 # ── Registry ─────────────────────────────────────────────────────────
 
 DAY_COUNT_FNS = {
@@ -169,6 +226,23 @@ DAY_COUNT_FNS = {
     "act_act": act_act,
     "30_360": thirty_360,
 }
+
+#: Conventions that need a calendar as well as two dates.  Kept separate
+#: from :data:`DAY_COUNT_FNS` so that the two-argument contract every
+#: elapsed-day convention satisfies stays exactly that — adding a third
+#: parameter to all of them, or giving ``bus_252`` a default calendar,
+#: would be a worse trade.  A default calendar in particular would be the
+#: failure :mod:`valax.dates.conventions` exists to prevent: a convention
+#: silently applied against reference data the caller never chose.
+CALENDAR_DAY_COUNT_FNS = {
+    "bus_252": bus_252,
+}
+
+#: Every day-count name :func:`year_fraction` accepts, from both
+#: registries.
+ALL_DAY_COUNT_NAMES = tuple(
+    sorted((*DAY_COUNT_FNS, *CALENDAR_DAY_COUNT_FNS))
+)
 
 #: Denominators of the conventions that are *linear* in elapsed days.
 #: ``30_360`` is deliberately absent because it depends on the calendar
@@ -230,27 +304,40 @@ def year_fraction(
     start: Int[Array, "..."],
     end: Int[Array, "..."],
     convention: str = "act_365",
+    calendar: Optional["HolidayCalendar"] = None,
 ) -> Float[Array, "..."]:
     """Compute year fraction between two ordinal dates.
 
     Args:
         start: Ordinal(s) of the period start.
         end: Ordinal(s) of the period end.
-        convention: Day-count name; one of the keys of
-            :data:`DAY_COUNT_FNS`.
+        convention: Day-count name; one of :data:`ALL_DAY_COUNT_NAMES`.
+        calendar: Business-day calendar, required by the conventions in
+            :data:`CALENDAR_DAY_COUNT_FNS` (``bus_252``) and unused by the
+            elapsed-day conventions.
 
     Returns:
         Year fraction(s), broadcast over ``start`` and ``end``.
 
     Raises:
-        ValueError: If ``convention`` is not a known day count.
+        ValueError: If ``convention`` is not a known day count, or if it
+            needs a calendar and none was supplied.
     """
+    if convention in CALENDAR_DAY_COUNT_FNS:
+        if calendar is None:
+            raise ValueError(
+                f"Day count {convention!r} counts business days and so "
+                "needs a calendar, but none was supplied. Pass "
+                "calendar=valax.dates.brazil_calendar() (or the relevant "
+                "market) rather than leaving the convention to guess."
+            )
+        return CALENDAR_DAY_COUNT_FNS[convention](start, end, calendar)
     try:
         return DAY_COUNT_FNS[convention](start, end)
     except KeyError:
         raise ValueError(
             f"Unknown day count {convention!r}; expected one of "
-            f"{sorted(DAY_COUNT_FNS)}."
+            f"{list(ALL_DAY_COUNT_NAMES)}."
         ) from None
 
 

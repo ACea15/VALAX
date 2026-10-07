@@ -112,7 +112,10 @@ for years in (1.0, 5.0, 10.0, 30.0):
 - **No bid-offer, no holiday calendar, ACT/365 throughout.** Real
   instruments use ACT/360 for money-market legs, business-day-adjusted
   schedules, and a quoted bid-offer spread. We collapse those into the
-  zero-mean Gaussian noise we apply in Stage 2.
+  zero-mean Gaussian noise we apply in Stage 2. Calendars and adjustment do
+  exist — see
+  [Dates and Conventions](dates-and-conventions.md#business-day-calendars-and-adjustment)
+  — this tutorial simply does not switch them on, to keep the dates readable.
 
 ## 2. Observation Layer: Noisy Quotes a Desk Would See
 

@@ -65,6 +65,32 @@ core test suite. Install it separately if you want to run the comparison tests:
 pip install QuantLib
 ```
 
+### Holiday reference data
+
+The per-market holiday tables in `valax/dates/_holiday_data.py` are a
+**generated, checked-in artifact**, not a runtime lookup. Holiday dates are
+reference data: deriving them at runtime from a third-party package would make
+the dates a trade pays on depend on which version of that package happened to
+be installed, so a `pip install -U` could move a swap's cashflows with nothing
+to show in the diff. The upstreams are therefore consulted offline and are
+**not** runtime dependencies.
+
+Regenerate only when extending the year range, adding a market, or picking up
+an upstream correction — and review the resulting diff, since every changed
+line is a changed cashflow date:
+
+```bash
+pip install -e ".[calendars-data]"
+python scripts/generate_holiday_tables.py
+```
+
+The generator exits non-zero rather than emitting a questionable table. Each
+market is cross-checked against a second, independently maintained source — or,
+for TARGET, against its own published six-day rule — across the whole of its
+declared year range, and it refuses to proceed if the sources disagree, if a
+market is uncovered, or if a recorded exclusion has vanished upstream. Bump
+`CALENDAR_DATA_VERSION` in the script when the tables change.
+
 ---
 
 ## 2. Architectural rules
@@ -143,6 +169,14 @@ JAX cannot trace through `datetime` objects. Inside any function that may be
 `jit`/`grad`/`vmap`'d, dates must be integer ordinals (days since epoch) stored
 in JAX arrays. Use the helpers in `valax/dates/` for conversion at the user
 boundary.
+
+This applies to calendars too. A `HolidayCalendar` carries its holidays as a
+sorted `jnp.int32` array and every lookup is a `searchsorted`, so business-day
+counting works inside a trace; building the tables and generating schedules
+happen eagerly, at the boundary. Note that under a trace
+`jnp.array(python_int)` yields a *tracer*, so a value derived from
+`ymd_to_ordinal` cannot be read back with `int()` inside `jit` — resolve such
+bounds eagerly and store them as static fields.
 
 ### 2.6 No scipy inside JIT-traced code
 
