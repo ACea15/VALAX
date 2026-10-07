@@ -308,6 +308,7 @@ class TestCurveAwareCalibration:
                 assert float(annuities[i, j]) == float(A)
         assert float(jnp.min(annuities)) > 0.0
 
+    @pytest.mark.audit
     @pytest.mark.parametrize("quote_form", ["absolute_strike", "atm_offset"])
     def test_t1_every_fitted_quote_reprices(self, quote_form):
         ref = ymd_to_ordinal(2025, 1, 1)

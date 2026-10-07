@@ -12,6 +12,54 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — audit conformance map reconciled against the code
+
+The T-suite is complete (**15/15**) and the conformance map now matches the
+code rather than the code as it stood several phases ago. Reconciling it
+turned up five pieces of drift, three of them pre-existing and one an
+outright internal contradiction:
+
+- **A-5 read ❌** ("no least-squares level is differentiated yet") while
+  **R-5 read ✅** in the same table, naming `sabr_slice_level` as a
+  least-squares level whose residual *is* the SSE gradient and whose
+  `dR/dθ` is therefore the exact full Hessian. A-5 is ✅; its `Λ` clause is
+  vacuous rather than skipped, since VALAX carries no regulariser (R-3) and
+  so has no damping term that could be omitted.
+- **M-8 read ❌** ("no production-engine repricing report") although T-9 had
+  just implemented precisely that. Now ✅.
+- **T-1 read "vol objects: no gate"** while the tolerance table two sections
+  below named the cube gate and its 1e-8 tolerance. The gate existed; it was
+  neither `audit`-marked nor recorded. All four levels T-1 names — curves,
+  caps, swaption cube, basket — are now marked and listed, so
+  `pytest -m audit` collects the whole T-suite.
+- **The up-front "three calibration levels" table** still said the swaption
+  cube "is not" curve-coupled and that `dθ_v/dθ_c = 0` identically, which
+  the V-1 and A-3 rows below it had contradicted since Phase C. Layer 1b is
+  ✅; five of the six paths by which curves enter Layer 2 are now
+  differentiable end to end, and the remaining gap is the `λ_m` level.
+- **T-1's curve tolerance** conflated two different units. It is two numbers:
+  `max_abs_residual < 1e-10` in residual units, and
+  `max|fitted_quotes − quoted_values| < 1e-8` in native quote units — the
+  latter looser by construction, being the residual scaled by ~`1/(DF·τ)`.
+
+Four 🟡 notes were narrowed to state what now exists: A-1 (a model
+calibrator *is* now differentiated through, by T-14's recalibrated reading),
+V-6 (β and the shift are in `p` with adjoints; weights and wing settings are
+not, and wing settings have no VALAX parameter to freeze), M-6 and R-6 (T-8
+and T-9 exercise the frozen-grid and frozen-choice conditions, though neither
+*enforces* them and T-8's scan is at the curve layer rather than through the
+PDE).
+
+A verification scoreboard now heads the page. Its counts are measured, not
+asserted: 50 requirement rows at **29 ✅ · 17 🟡 · 3 ❌ · 1 n-a**, with the
+three ❌ named as whole missing features rather than left as a number —
+business-day calendars (N-6), RFR optionlet accrual-period variance (V-4) and
+post-fit arbitrage checks (V-7).
+
+`docs/roadmap.md`'s unified quote-space item was likewise stale in its "still
+missing" clause, which listed the volatility leg; that shipped in Phase C. It
+now names only the model leg and the FX/credit breadth.
+
 ### Added — fixed-input (`p`) adjoints and snapshot provenance (A-8, M-5, Q-1, Q-5, T-14)
 
 A calibration has two kinds of input: the quotes it solves against, and

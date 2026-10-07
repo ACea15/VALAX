@@ -108,7 +108,17 @@ QUOTES = jnp.array([0.30, 0.34, 0.36, 0.37])
 # ── Repricing: the defining property ─────────────────────────────────
 
 
+@pytest.mark.audit
 class TestExactRepricing:
+    """T-1 gate for the cap layer: every quoted cap reprices from the strip.
+
+    Stripping is a per-maturity root-find, so repricing is exact up to the
+    solver's tolerance by construction rather than by approximation —
+    hence the 1e-10 relative bar. Marked ``audit`` so ``pytest -m audit``
+    collects the cap half of T-1 along with the curve, swaption-cube and
+    basket halves.
+    """
+
     def test_reprices_every_quoted_cap_single_curve(self, caps, curve):
         strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
         for i, cap in enumerate(caps):
