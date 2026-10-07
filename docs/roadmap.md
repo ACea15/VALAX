@@ -167,6 +167,7 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
                    │ λ_c composed: curve_quote_deltas ✅ (IFT, FD-gated)
                    │ λ_v composed: vol_quote_vegas    ✅ (IFT on the fit's FOC)
                    │ λ_m           ❌ (model level not yet a CalibrationLevel)
+                   │ p̄  reported:  fixed_input_adjoints ✅ (no IFT step needed)
                    ▼
             greeks 🟡 ── risk 🟡 ── calibration 🟡 ── surfaces 🟡 ── portfolio ❌
                         (keyed scenarios ✅,   (HW/G2++ ✅,   (rates cubes +
