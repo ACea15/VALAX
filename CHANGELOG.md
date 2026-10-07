@@ -12,6 +12,40 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — smile-dynamics delta gate (T-12)
+
+`tests/test_surfaces/test_smile_dynamics.py::TestT12SmileDynamicsDelta` closes
+the last gate that was waiting on the `dynamics` field.
+
+The reason it is a *delta* gate and not a pricing one is the finding worth
+recording. Evaluated at the fitted forward $F_0$, all three conventions return
+the **same volatility**, so they price the swaption identically — 7709.22 on
+the gate's fixture, to the last digit, for all three. The convention is a
+statement about $d\sigma/dF$, nothing else, so no repricing or calibration
+check can ever detect a wrong one. Delta is the first quantity that can see
+it, and there the three differ by 14% across the extremes: sticky moneyness
++8.7% and the SABR backbone −5.2% against sticky strike.
+
+Each convention's $d\sigma/dF$ is checked against partials of
+`sabr_implied_vol` taken directly rather than against anything the cube
+produces, so the object under test does not get to define the right answer:
+`0` exactly for `sticky_strike` (the branch never consults the live forward,
+so the cotangent is structurally zero — asserted as exact equality, since a
+tolerance would mask it starting to read it), `−∂σ/∂K` for
+`sticky_moneyness`, `∂σ/∂F` for `sabr_backbone`. All three held to exactly
+zero relative error; the chain-rule decomposition to ~1e-16.
+
+Two anti-vacuity checks ship with it. The three deltas are required to differ
+by more than 2%, and a companion test pins that on a flat smile (ν=0, β=1,
+ρ=0) every convention gives `dσ/dF == 0` and the whole distinction
+disappears — so the skewed, convex, off-ATM fixture is load-bearing rather
+than incidental. That is the same degenerate-configuration failure this suite
+has now paid for four times.
+
+`docs/guide/vol-surfaces.md` § Smile dynamics, which owns the conventions,
+gains the measured delta table and the note that the choice is a hedge-ratio
+decision on an identically-priced trade.
+
 ### Added — rates option parity and Bachelier ATM gates (T-6, T-7)
 
 `tests/test_surfaces/test_audit_parities.py` gates the two option identities

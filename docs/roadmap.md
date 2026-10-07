@@ -218,6 +218,15 @@ space, so a curve move reaches the volatility layer. The equity surfaces and
   Hull-White (a, σ) ≈ 5.6e3 vs ≈ 1 for σ alone — so the diagnostic quantifies
   the standing advice to fix β and to fix mean reversion. Gated by
   `tests/test_greeks/test_level_conditioning.py` (T-13, `pytest -m audit`)
+- [x] **Smile-dynamics delta gated** —
+  `tests/test_surfaces/test_smile_dynamics.py::TestT12SmileDynamicsDelta`
+  (T-12). At the fitted forward all three conventions return the same vol and
+  therefore the same price, so the convention is observable *only* in delta:
+  the gate checks `dσ/dF` against partials of `sabr_implied_vol` taken
+  directly (0 exactly for `sticky_strike`, `−∂σ/∂K` for `sticky_moneyness`,
+  `∂σ/∂F` for `sabr_backbone`), and pins that a flat smile would collapse the
+  entire distinction. Measured spread: 14% of delta across the two extremes
+  on an identically-priced OTM payer
 - [x] **Rates option parities and the Bachelier ATM identity gated** —
   `tests/test_surfaces/test_audit_parities.py` (T-6, T-7). The naive form of
   T-6 is vacuous, because VALAX derives the floorlet and the receiver *by*

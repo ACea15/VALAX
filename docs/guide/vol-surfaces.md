@@ -263,6 +263,42 @@ report shows: under the default `"sticky_strike"`, $\partial\sigma/\partial
 delta. Under `"sabr_backbone"` it does. Both are asserted in
 `tests/test_surfaces/test_smile_dynamics.py`.
 
+### What the convention does to delta
+
+The choice is **invisible in the price**. Evaluated at the fitted forward
+$F = F_0$, all three conventions return the same volatility — they differ only
+in how it *responds* to a forward move. So no repricing test can detect a wrong
+convention, and delta is the first quantity that can see it:
+
+$$
+\frac{dV}{dF} = \underbrace{\frac{\partial V}{\partial F}}_{\text{frozen vol}}
+  + \underbrace{\frac{\partial V}{\partial\sigma}}_{\text{vega}}\cdot\frac{d\sigma}{dF}.
+$$
+
+| Convention | $d\sigma/dF$ at $F = F_0$ | Delta on the OTM payer below |
+|---|---|---|
+| **Sticky absolute strike** | $0$ exactly | 1,556,635 |
+| **Sticky moneyness** | $-\,\partial\sigma/\partial K$ | 1,692,384 (+8.7%) |
+| **SABR backbone** | $\partial\sigma/\partial F$ | 1,475,398 (−5.2%) |
+
+Measured on a 1y×5y payer struck at 3.5% against a 3.0% forward, $\beta = 0.5$,
+$\rho = -0.25$, $\nu = 0.4$, unit annuity 4.5, notional 1e6 — the fixture of
+the T-12 gate. The ordering is not an accident of that fixture: with
+$\rho < 0$ the smile falls in the strike, so sticky moneyness picks up
+$-\partial\sigma/\partial K > 0$ and reports the **largest** delta, while the
+backbone derivative is negative at this strike and reports the smallest. A
+desk choosing between them is choosing a hedge ratio that differs by some 14%
+across the two extremes, on an identically-priced trade.
+
+Two things follow. First, this is why V-5 is a *documentation* requirement:
+there is no correct answer to test against, only consistency with a stated
+policy, so the gate checks the code against this page rather than against
+economics. Second, the distinction vanishes on a flat smile — with $\nu = 0$,
+$\beta = 1$, $\rho = 0$ the expansion is constant in both strike and forward
+and every convention gives $d\sigma/dF = 0$. Any check of this behaviour has
+to be run on a skewed, convex smile at an off-ATM strike, or it passes while
+testing nothing.
+
 Two caveats come with the non-default conventions:
 
 - **Off-node queries are mixed-order.** At an intermediate (expiry, tenor) the
