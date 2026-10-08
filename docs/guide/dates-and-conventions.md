@@ -141,9 +141,9 @@ different coupon.
 
 ### Calendars
 
-A `HolidayCalendar` is a pytree holding one sorted array of **integer day
-ordinals** — the weekday closures of one market. Weekends are not stored;
-they are arithmetic. Six markets ship with the library, each cached:
+A `HolidayCalendar` is a pytree of **integer day ordinals** — the weekday
+closures of one market. Weekends are not stored; they are arithmetic. Six
+markets ship with the library, each cached:
 
 | Factory | Market | Covers |
 |---|---|---|
@@ -265,9 +265,39 @@ The denominator is the market constant 252, not a count derived from the
 calendar, so a full year is only approximately 1.0.
 
 Unlike adjustment, Bus/252 runs **inside** traced code — `year_fraction` is
-called on JAX arrays by the accrual layer. The count is two binary searches
-over the sorted holiday array plus closed-form weekend arithmetic, so it is
-JIT-compatible and its cost does not grow with the span.
+called on JAX arrays by the accrual layer, once per coupon. The count is a
+difference of two gathers, so it is JIT-compatible and its cost grows with
+neither the span nor the size of the holiday table.
+
+??? note "Why two tables, and why not a `frozenset`"
+    A calendar carries the same information twice, separated by role.
+
+    The **sparse** array of holiday ordinals is the canonical definition. It
+    is single-digit kilobytes, it is what `_holiday_data.py` stores, and it
+    is what `union`/`intersection` operate on. Keeping the stored form sparse
+    is what makes a data change reviewable — one line per changed cashflow
+    date in `git diff`.
+
+    The **dense** array is a prefix sum of business days, and it is what
+    every query actually reads. A Python `dict` or `frozenset` cannot be
+    consulted with a *traced* key at all, and comparing against a baked-in
+    set lowers to an `O(n)` compare-against-all — worse than a binary
+    search. The JAX-shaped equivalent of a hash table is a dense array
+    indexed by `ordinal - first_ordinal`, so that is what is used. One
+    prefix sum answers both questions: a difference of *adjacent* entries
+    says whether a day is a business day, and a difference of *distant*
+    entries counts the business days between two dates.
+
+    The trade is ~185 KB per calendar against ~6 KB, in exchange for a
+    measured **27.8×** reduction in marginal cost per cashflow (15.56 ns →
+    0.56 ns). On a single 80-coupon swap the end-to-end gain is small,
+    because ~24 µs of Python dispatch dominates a lone call; the figure that
+    matters is the marginal one, since inside a real pricing trace that
+    fixed cost is paid once for the whole function.
+
+    The two tables cannot silently diverge: `TestTheTwoRepresentationsAgree`
+    checks the dense form against the sparse one at *every* covered ordinal,
+    not a sample.
 
 ### Cross-currency: union and intersection
 

@@ -17,20 +17,22 @@ class TestPytreeShape:
         """Conventions are configuration, never differentiable leaves."""
         assert jax.tree_util.tree_leaves(ScheduleConventions()) == []
 
-    def test_a_calendar_contributes_exactly_one_leaf(self):
-        """The holiday ordinals are a leaf; everything else stays static.
+    def test_a_calendar_contributes_only_its_integer_tables(self):
+        """The calendar's two tables are leaves; everything else stays static.
 
         ``calendar`` is the one non-static field, because a ``jnp`` array
-        is unhashable and a static field must be hashable.  The leaf
-        carries integer ordinals and enters no gradient path.
+        is unhashable and a static field must be hashable.  Its leaves are
+        the sparse holiday ordinals and the dense business-day prefix sum,
+        both integer and both outside any gradient path.
         """
+        cal = target_calendar()
         conv = ScheduleConventions(
-            business_day_convention="modified_following",
-            calendar=target_calendar(),
+            business_day_convention="modified_following", calendar=cal
         )
         leaves = jax.tree_util.tree_leaves(conv)
-        assert len(leaves) == 1
-        assert leaves[0].shape == target_calendar().holidays.shape
+        assert len(leaves) == 2
+        shapes = {leaf.shape for leaf in leaves}
+        assert shapes == {cal.holidays.shape, cal.business_days_cumulative.shape}
 
     def test_is_frozen(self):
         conv = ScheduleConventions()

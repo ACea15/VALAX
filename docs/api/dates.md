@@ -39,10 +39,11 @@ never chose. Valid convention names are `"act_365"`, `"act_360"`,
 
 ## Business-day calendars and adjustment
 
-A calendar holds its market's weekday closures as a sorted array of integer
-ordinals; weekends are arithmetic rather than data. Lookups are
-`searchsorted`, so adjustment vectorises and
-[`bus_252`][valax.dates.daycounts.bus_252] is usable inside traced code.
+A calendar holds its market's weekday closures as integer ordinals; weekends
+are arithmetic rather than data. Queries are answered from a dense prefix sum
+of business days, so membership and counting are both constant-time gathers
+and [`bus_252`][valax.dates.daycounts.bus_252] is usable per-coupon inside
+traced code.
 Every calendar declares the year range its data covers and **raises**
 outside it — an uncovered year is unknown, not holiday-free. See the
 [Dates and Conventions guide](../guide/dates-and-conventions.md#business-day-calendars-and-adjustment).

@@ -562,6 +562,59 @@ class TestCoverageIsEnforced:
         assert tokyo_calendar().last_year == 2098
 
 
+class TestTheTwoRepresentationsAgree:
+    """The sparse table defines the calendar; the dense one answers queries.
+
+    Carrying the same information twice is only safe if a divergence is
+    caught, so these assert the dense prefix sum against the sparse
+    ordinals it was derived from — at *every* covered ordinal, not a
+    sample. Without this, a defect in `build` would make every lookup
+    quietly wrong while every spot-check still passed.
+    """
+
+    @pytest.mark.parametrize(
+        "factory", [target_calendar, tokyo_calendar, brazil_calendar]
+    )
+    def test_dense_membership_matches_the_sparse_table_everywhere(self, factory):
+        cal = factory()
+        listed = {int(o) for o in cal.holidays.tolist()}
+        days = jnp.arange(
+            cal.first_ordinal, cal.last_ordinal + 1, dtype=jnp.int32
+        )
+        got_business = cal.is_business_day(days).tolist()
+        got_holiday = cal.is_holiday(days).tolist()
+        for offset, (is_bd, is_hol) in enumerate(zip(got_business, got_holiday)):
+            value = cal.first_ordinal + offset
+            weekend = to_date(value).weekday() >= 5
+            assert is_hol == (value in listed)
+            assert is_bd == (not weekend and value not in listed)
+
+    @pytest.mark.parametrize(
+        "factory", [target_calendar, tokyo_calendar, brazil_calendar]
+    )
+    def test_prefix_sum_is_the_running_count_of_business_days(self, factory):
+        cal = factory()
+        days = jnp.arange(
+            cal.first_ordinal, cal.last_ordinal + 1, dtype=jnp.int32
+        )
+        flags = cal.is_business_day(days)
+        cumulative = cal.business_days_cumulative
+        assert int(cumulative[0]) == 0
+        assert int(cumulative[-1]) == int(jnp.sum(flags))
+        # Monotone, and advancing by exactly one on each business day.
+        steps = jnp.diff(cumulative)
+        assert steps.tolist() == flags.astype(cumulative.dtype).tolist()
+
+    def test_counting_agrees_with_summing_the_flags(self):
+        """The two things the single array is asked, cross-checked."""
+        cal = brazil_calendar()
+        lo, hi = ordinal(2025, 1, 1), ordinal(2027, 1, 1)
+        days = jnp.arange(lo, hi, dtype=jnp.int32)
+        assert int(cal.business_days_between(jnp.int32(lo), jnp.int32(hi))) == int(
+            jnp.sum(cal.is_business_day(days))
+        )
+
+
 class TestMaxClosureRunIsMeasured:
     def test_bound_is_large_enough_for_every_market(self):
         """Verify the measured bound against a brute-force scan."""
@@ -622,8 +675,12 @@ class TestUnionAndIntersection:
         assert joint.max_closure_run >= max(a.max_closure_run, b.max_closure_run)
 
     def test_non_overlapping_ranges_raise(self):
+        # Both anchors are weekdays on purpose: a weekend date is now
+        # rejected outright, since the weekend rule would double-count it.
         early = HolidayCalendar.build("EARLY", [ordinal(1975, 1, 1)], 1975, 1980)
-        late = HolidayCalendar.build("LATE", [ordinal(2050, 1, 1)], 2050, 2060)
+        late = HolidayCalendar.build("LATE", [ordinal(2050, 1, 3)], 2050, 2060)
+        assert dt.date(1975, 1, 1).weekday() < 5
+        assert dt.date(2050, 1, 3).weekday() < 5
         with pytest.raises(ValueError, match="do not overlap"):
             early.union(late)
 
@@ -757,13 +814,21 @@ class TestJitAndPytree:
         eager = float(year_fraction(lo, hi, "bus_252", calendar=cal))
         assert float(fraction(lo, hi, cal)) == pytest.approx(eager, rel=1e-15)
 
-    def test_holidays_are_the_only_leaf(self):
-        """Static config stays static; only the ordinal array is a leaf."""
+    def test_the_two_tables_are_the_only_leaves(self):
+        """Static config stays static; only the two integer tables are leaves.
+
+        The sparse ordinals are the canonical definition, the dense prefix
+        sum is what gets queried. Both are leaves rather than static fields
+        because a ``jnp`` array is unhashable.
+        """
         import jax
 
-        leaves = jax.tree_util.tree_leaves(target_calendar())
-        assert len(leaves) == 1
-        assert leaves[0].shape == target_calendar().holidays.shape
+        cal = target_calendar()
+        leaves = jax.tree_util.tree_leaves(cal)
+        assert len(leaves) == 2
+        shapes = {leaf.shape for leaf in leaves}
+        assert cal.holidays.shape in shapes
+        assert cal.business_days_cumulative.shape in shapes
 
     def test_survives_a_pytree_round_trip(self):
         import jax
@@ -800,6 +865,10 @@ class TestConstruction:
         with pytest.raises(ValueError, match="integer array"):
             HolidayCalendar(
                 holidays=jnp.asarray([1.0, 2.0]),
+                business_days_cumulative=jnp.zeros(
+                    ordinal(2030, 12, 31) - ordinal(2020, 1, 1) + 2,
+                    dtype=jnp.int32,
+                ),
                 name="X",
                 first_year=2020,
                 last_year=2030,
@@ -807,6 +876,31 @@ class TestConstruction:
                 last_ordinal=ordinal(2030, 12, 31),
                 max_closure_run=3,
             )
+
+    def test_rejects_a_mis_sized_dense_table(self):
+        """A length mismatch would offset every gather, so it is structural."""
+        with pytest.raises(ValueError, match="one entry per covered day"):
+            HolidayCalendar(
+                holidays=jnp.asarray([ordinal(2025, 1, 1)], dtype=jnp.int32),
+                business_days_cumulative=jnp.zeros(5, dtype=jnp.int32),
+                name="X",
+                first_year=2020,
+                last_year=2030,
+                first_ordinal=ordinal(2020, 1, 1),
+                last_ordinal=ordinal(2030, 12, 31),
+                max_closure_run=3,
+            )
+
+    def test_rejects_a_weekend_in_the_table(self):
+        """Weekends are arithmetic; listing one would double-count it."""
+        saturday = ordinal(2025, 5, 31)
+        assert dt.date(2025, 5, 31).weekday() == 5
+        with pytest.raises(ValueError, match="weekend date"):
+            HolidayCalendar.build("X", [saturday], 2025, 2025)
+
+    def test_rejects_holidays_outside_the_declared_range(self):
+        with pytest.raises(ValueError, match="not all inside the declared"):
+            HolidayCalendar.build("X", [ordinal(2019, 7, 4)], 2025, 2030)
 
     def test_unknown_market_raises(self):
         with pytest.raises(ValueError, match="Unknown market calendar"):

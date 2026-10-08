@@ -190,9 +190,10 @@ def bus_252(
     days in a Brazilian year; it is not derived from the calendar, so the
     year fraction of a full year is only approximately one.
 
-    JIT-compatible: the count is two binary searches plus closed-form
-    weekend arithmetic, which is what allows this to be called from traced
-    pricer code through :func:`year_fraction`.
+    JIT-compatible: the count is a difference of two gathers from the
+    calendar's prefix sum, so its cost is independent of both the span and
+    the size of the holiday table. That is what allows this to be called
+    per-coupon from traced pricer code through :func:`year_fraction`.
 
     Args:
         start: Ordinal(s) of the period start, included.
@@ -212,8 +213,8 @@ def bus_252(
         ANBIMA, *Caderno de Formulas* (Bus/252 accrual for BRL
         instruments).
     """
-    start = calendar.assert_covered(jnp.asarray(start))
-    end = calendar.assert_covered(jnp.asarray(end))
+    # ``business_days_between`` asserts coverage itself, so the guard is not
+    # repeated here.
     count = calendar.business_days_between(start, end)
     return count.astype(jnp.float64) / 252.0
 

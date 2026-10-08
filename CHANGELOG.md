@@ -12,6 +12,69 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — calendar lookups are constant-time gathers, not binary searches
+
+`HolidayCalendar` queried a sorted array of holiday ordinals with
+`jnp.searchsorted`, which is `O(log n)` per date. It now also carries a dense
+**prefix sum of business days** and answers every query from that, which is
+`O(1)`. One array serves both questions: a difference of adjacent entries says
+whether a day is a business day, and a difference of distant entries counts
+the business days between two dates.
+
+Measured marginal cost per cashflow — the slope between n=200 and n=20 000,
+which is the figure that applies inside a real pricing trace where Python
+dispatch is paid once for the whole function rather than per day-count call:
+
+| | old (`searchsorted`) | new (gather) |
+|---|---|---|
+| `business_days_between` | 15.56 ns/cashflow | **0.56 ns/cashflow** |
+
+**27.8×** at the margin. End-to-end on a single 80-coupon swap the gain is
+only ~1.08×, because a lone `jit` call carries a ~24 µs dispatch floor that
+dominates either implementation; that floor is why the marginal figure is the
+honest one to quote. The cost is ~185 KB per calendar against ~6 KB sparse,
+and a second pytree leaf.
+
+Why not a frozen dict baked into the traced function, which would also be
+`O(1)`: a Python `dict` or `frozenset` cannot be consulted with a *traced*
+key, and comparing against a baked-in set lowers to an `O(n)`
+compare-against-all — 1606 comparisons against Brazil's table, worse than the
+11 of a binary search. A dense array indexed by `ordinal - first_ordinal` is
+the JAX-shaped equivalent of a hash table, so that is what is used.
+
+The two representations are kept separate by role rather than one replacing
+the other. The sparse ordinals stay canonical: they are what
+`_holiday_data.py` stores and what `union`/`intersection` operate on, and
+keeping the stored form sparse is what makes a data change reviewable — one
+line per changed cashflow date in `git diff`. The dense form is derived in
+`build` and never stored.
+
+Carrying the same information twice is only safe if divergence is caught, so
+`TestTheTwoRepresentationsAgree` checks the dense table against the sparse one
+at **every** covered ordinal — all 47 482 days for Brazil — rather than at a
+sample. A defect in `build` would otherwise make every lookup quietly wrong
+while every spot-check still passed.
+
+Three incidental consequences:
+
+- **`build` no longer loops in Python.** The flags, the prefix sum and
+  `max_closure_run` now come from one vectorised eager pass, the roll bound
+  via a `lax.cummax` reset-counter trick instead of a 47 482-iteration loop
+  per calendar. All six markets reproduce their previous `max_closure_run`
+  exactly (TARGET 4, NYSE 6, SOFR 3, London 4, **Tokyo 10**, Brazil 4).
+- **`business_days_between` now checks coverage itself.** The dense form
+  *clamps* an out-of-range index, which would silently undercount, where the
+  sparse form at least kept counting weekends. The guard measured below noise
+  at every batch size tried, so there was nothing to trade against
+  correctness; `bus_252`'s duplicate check was dropped. `is_business_day`
+  still matches the old implementation exactly, including out of range, where
+  it falls back to the weekend rule.
+- **`build` rejects two things it used to accept**: a weekend date in the
+  holiday table (the weekend rule would count it twice) and a holiday outside
+  the declared year range. Both are latent-corruption guards that the dense
+  table made cheap to express; one existing test fixture was using
+  `2050-01-01`, a Saturday.
+
 ### Added — business-day calendars, date adjustment and Bus/252 (Tier 1.3, N-6)
 
 `valax/dates/` was holiday-agnostic: a period end could land on a Sunday and

@@ -170,10 +170,14 @@ JAX cannot trace through `datetime` objects. Inside any function that may be
 in JAX arrays. Use the helpers in `valax/dates/` for conversion at the user
 boundary.
 
-This applies to calendars too. A `HolidayCalendar` carries its holidays as a
-sorted `jnp.int32` array and every lookup is a `searchsorted`, so business-day
-counting works inside a trace; building the tables and generating schedules
-happen eagerly, at the boundary. Note that under a trace
+This applies to calendars too. A `HolidayCalendar` carries integer tables and
+answers every query with a gather, so business-day counting works inside a
+trace; building the tables and generating schedules happen eagerly, at the
+boundary. Note that a Python `dict` or `frozenset` is *not* an option for
+data consulted inside a trace — a dict needs a concrete hashable key, and
+comparing against a baked-in set lowers to an `O(n)` compare-against-all. The
+JAX-shaped equivalent of a hash table is a dense array indexed by an integer
+offset, which is why the calendar carries a prefix sum of its business days. Note that under a trace
 `jnp.array(python_int)` yields a *tracer*, so a value derived from
 `ymd_to_ordinal` cannot be read back with `int()` inside `jit` — resolve such
 bounds eagerly and store them as static fields.
