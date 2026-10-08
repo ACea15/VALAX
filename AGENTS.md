@@ -8,7 +8,7 @@ VALAX is a JAX-native quantitative finance valuation engine (Python ≥3.11). Se
 - Install: `pip install -e ".[dev]"` (optional: `pip install -e ".[docs]"`, `pip install QuantLib` for `tests/test_quantlib_comparison/`).
 - Full suite: `pytest`. Benchmarks only: `pytest --benchmark-only`. Marker filter: `pytest -m "golden and detects"` (markers: `arbitrage`, `golden`, `detects`).
 - Single file: `pytest tests/test_pricing/test_black_scholes.py`. Single test: `pytest tests/test_pricing/test_black_scholes.py::test_call_price -v`.
-- Docs (strict, must pass pre-PR): `mkdocs build --strict`. Serve: `mkdocs serve`.
+- Docs (strict, must pass pre-PR): `mkdocs build --strict`, then `python scripts/check_doc_anchors.py` (intra-page anchors; `--strict` checks only page-level links). Serve: `mkdocs serve`.
 - No configured linter/formatter; match surrounding style and keep `mkdocs build --strict` + `pytest` green.
 
 ## Code style
@@ -50,4 +50,4 @@ In the **same change** (not "later"), and stated with clear intent in the commit
 5. **Theory** — add/extend the maths page when introducing new modelling.
 6. **Verify** — both `pytest` and `mkdocs build --strict` must be green (strict catches broken doc links and orphaned/missing nav entries).
 
-When **removing or renaming**, grep the docs for inbound links to the old path/anchor and fix them before deleting; `mkdocs build --strict` guards page-level links but not intra-page anchors. The coverage matrix and roadmap are the two files you must never forget to touch.
+When **removing or renaming**, grep the docs for inbound links to the old path/anchor and fix them before deleting; `mkdocs build --strict` guards page-level links but not intra-page anchors — run `python scripts/check_doc_anchors.py` after the build for those. The coverage matrix and roadmap are the two files you must never forget to touch.

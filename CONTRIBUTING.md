@@ -427,6 +427,23 @@ mkdocs build --strict
 `--strict` fails on broken cross-references and missing files. Always run it
 before pushing.
 
+`--strict` validates links at *page* granularity only — it does not check the
+`#fragment`. A link to `../guide/dates-and-conventions/#a-renamed-heading`
+builds clean even after the heading is gone, so renaming a heading silently
+breaks every inbound deep link. Headings get renamed often here, because the
+coverage matrix and roadmap are edited by nearly every change. Close the gap
+with:
+
+```bash
+mkdocs build --strict
+python scripts/check_doc_anchors.py
+```
+
+The script walks the built `site/`, collects every `id="..."` per page, and
+asserts that each anchored `href` resolves to an anchor that exists. It prints
+one `BROKEN` line per dangling link and exits non-zero. Current baseline:
+**33,952 anchored links across 86 pages, 0 broken.**
+
 ### 5.3 Cite implementation paths
 
 In theory and guide pages, cite the actual VALAX module path so readers can
@@ -454,6 +471,8 @@ Before requesting review, confirm:
   duplication), with the **coverage matrix** (`docs/applications/instrument-pricing.md`)
   adjusted to match the code.
 - [ ] **`mkdocs build --strict`** passes locally.
+- [ ] **`python scripts/check_doc_anchors.py`** passes locally (intra-page
+  anchors, which `--strict` does not check — run it after the build).
 - [ ] **`pytest`** passes locally.
 - [ ] **`CHANGELOG.md`** updated under `[Unreleased]`.
 - [ ] **Coverage matrix and roadmap reflect reality** — 🟡 pytree-only vs ✅

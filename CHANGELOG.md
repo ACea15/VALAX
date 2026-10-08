@@ -12,6 +12,24 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — `scripts/check_doc_anchors.py`, an intra-page anchor checker
+
+`mkdocs build --strict` validates documentation links at *page* granularity
+but ignores the `#fragment`, so renaming a heading silently breaks every
+inbound deep link. Since the coverage matrix and roadmap are edited by nearly
+every change, headings move often and the gap is a live hazard.
+
+The script walks the built `site/`, collects every `id="..."` per page, and
+asserts each anchored `href` resolves to an anchor that exists — resolving
+`../` runs against the linking page's own directory. It prints one `BROKEN`
+line per dangling link and exits non-zero, so it drops into CI next to
+`pytest`. Page-level links are skipped deliberately; `--strict` already owns
+those, and re-checking them here would only produce double failures.
+
+Baseline: **33,952 anchored links across 86 pages, 0 broken.** Verified
+non-vacuous by renaming one heading id in the built site and confirming all
+eight inbound links were reported, across both same-page and `../` forms.
+
 ### Changed — calendar lookups are constant-time gathers, not binary searches
 
 `HolidayCalendar` queried a sorted array of holiday ordinals with
