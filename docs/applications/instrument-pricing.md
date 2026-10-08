@@ -84,6 +84,9 @@ Vanilla contracts are documented on the pricing-method pages:
 | [CMS cap / floor](#cms-cap-floor) | Analytic | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |
 | [Range accrual](#range-accrual) | Analytic | `OptionletVolSurface` / scalar | SABR | snapshot digital replication | ✅ |
 | [OIS swap](#ois-swap) | Analytic | n-a (curves) | curve bootstrap | compounded overnight leg | ✅ |
+| [Amortising swap](#amortising-swap) | Analytic | n-a (curves) | curve bootstrap | per-period notional factors | ✅ |
+| [Seasoned (part-accrued) swap](#seasoned-part-accrued-swap) | Analytic | n-a (curves + fixing history) | curve bootstrap | realised/projected cut-over at the valuation date | ✅ |
+| [Tenor basis swap](#tenor-basis-swap) | Analytic | n-a (curves) | curve bootstrap · `TenorBasisSwap` quote | one projection curve per leg | ✅ |
 | [Cross-currency swap](#cross-currency-swap) | Analytic | n-a (curves + FX spot) | joint curve bootstrap | telescoping under CIP | ✅ |
 | [Total return swap](#total-return-swap) | Analytic | n-a (curves) | curve bootstrap | self-financing asset | ✅ |
 | [Bermudan swaption](#bermudan-swaption) | MC · PDE | Hull-White · G2++ · Cheyette · LMM | HW→surface / LMM | early exercise | ✅ |
@@ -112,6 +115,12 @@ Vanilla contracts are documented on the pricing-method pages:
     `"unadjusted"`, so every row above is priced on an unadjusted grid unless
     a calendar is configured. See
     [Dates and Conventions](../guide/dates-and-conventions.md).
+
+    **Notional is flat** on the single-trade pytrees in
+    `valax.instruments.{rates,bonds}`, and those pricers hold no fixing
+    history. An **amortising**, **part-accrued** or **multi-index** trade is
+    expressed instead as a tuple of legs — see the three rows above and the
+    [leg engine](../guide/fixed-income.md#swap-legs-and-multi-leg-trades).
 
 ### FX derivatives
 
@@ -230,6 +239,15 @@ A note whose coupon accrues in proportion to the fraction of the period the refe
 
 ### OIS swap
 Fixed vs. daily-**compounded overnight** index. The market-standard discounting instrument post-LIBOR; valued off the OIS discount curve. See [Theory §3.2](../theory/curves.md#32-single-curve-vs-multi-curve-framework).
+
+### Amortising swap
+A swap whose notional steps down over its life. Represented as a `MultiLegSwap` of `FixedLeg` / `FloatingLeg` pytrees carrying `amortisation`, an array of **dimensionless outstanding-notional factors** against a scalar reference notional. Expressing the schedule as factors rather than absolute notionals keeps the notional outside the coupon summation, which is what makes a non-amortising leg reproduce the flat pricers bit for bit. Priced by `valax.pricing.analytic.legs` (`fixed_leg_pv`, `floating_leg_pv`, `swap_pv`). See the [leg engine guide](../guide/fixed-income.md#amortisation-is-a-factor-not-a-notional).
+
+### Seasoned (part-accrued) swap
+A trade valued mid-period, where part of the current coupon has already been earned. Realised fixings come from a `FixingHistory` supplied at pricing time (not stored on the instrument), and each period is settled, straddling or unborn according to a single **cut-over date** obtained by clipping the valuation date into the period — so the three cases are one expression rather than three branches. See the [leg engine guide](../guide/fixed-income.md#seasoning).
+
+### Tenor basis swap
+Two floating legs on the *same* currency but different index tenors (e.g. compounded SOFR vs 3M term rate), discounted on a third, OIS curve. The instrument that motivates **per-leg index descriptors**: each `FloatingLeg` names its own `forward_id`, so the trade reads three curves, which a singular `forward_id` on a trade pytree cannot express. The matching curve-build quote type is `valax.curves.instruments.TenorBasisSwap`. See the [leg engine guide](../guide/fixed-income.md#per-leg-index-descriptors).
 
 ### Cross-currency swap
 Exchange of floating legs in two currencies plus (optionally) notional exchange. Values by telescoping each currency's float leg and converting at spot under covered interest parity; the residual is the basis. See [Theory §3.7](../theory/curves.md#37-no-arbitrage-relations-across-curves).

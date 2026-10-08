@@ -12,7 +12,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 
 | Area | What We Have |
 |------|-------------|
-| **Instruments** | **Priced:** `EuropeanOption`, `AmericanOption`, `EquityBarrierOption`, `AsianOption`, `LookbackOption`, `VarianceSwap`, `DigitalOption`, `SpreadOption`, `WorstOfBasketOption`; `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `CallableBond`, `PuttableBond`; `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `BermudanSwaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSSpreadSwap`, `CMSCapFloor`, `RangeAccrual`; `ZeroCouponInflationSwap`, `YearOnYearInflationSwap`, `InflationCapFloor`; `FXForward`, `FXVanillaOption`. **Pytree defined, pricer on the roadmap:** `ConvertibleBond`, `CompoundOption`, `ChooserOption`, `Autocallable`, `Cliquet`, `FXBarrierOption`, `QuantoOption`, `TARF`, `FXSwap`, `CDS`, `CDOTranche` |
+| **Instruments** | **Priced:** `EuropeanOption`, `AmericanOption`, `EquityBarrierOption`, `AsianOption`, `LookbackOption`, `VarianceSwap`, `DigitalOption`, `SpreadOption`, `WorstOfBasketOption`; `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `CallableBond`, `PuttableBond`; `Caplet`, `Cap`, `InterestRateSwap`, `Swaption`, `BermudanSwaption`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `CMSSpreadSwap`, `CMSCapFloor`, `RangeAccrual`; `ZeroCouponInflationSwap`, `YearOnYearInflationSwap`, `InflationCapFloor`; `FXForward`, `FXVanillaOption`; `FixedLeg`, `FloatingLeg`, `MultiLegSwap` — the leg representation, carrying compounding conventions, an amortising notional and a curve descriptor **per leg** ([Tier 1.4](#14-trade-representation-and-cashflow-engine)). **Pytree defined, pricer on the roadmap:** `ConvertibleBond`, `CompoundOption`, `ChooserOption`, `Autocallable`, `Cliquet`, `FXBarrierOption`, `QuantoOption`, `TARF`, `FXSwap`, `CDS`, `CDOTranche` |
 | **Models** | Black-Scholes, **Heston (MC + Fang-Oosterlee COS semi-analytic)**, SABR (analytic + MC), LMM (MC with PCA factors), **Hull-White (analytic ZCB, trinomial tree, MC, PDE)**, **G2++ (two-factor Gaussian; MC + PDE)**, **Cheyette (quasi-Gaussian 1F/2F skew; MC + PDE)**, **Local Volatility (Dupire from SVI/SABR/Grid surfaces; MC + PDE)**, **SLV (Heston × leverage; MC)**, **Multi-asset GBM (correlated)** |
 | **Pricing** | Black-Scholes, Black-76, Bachelier, SABR analytic; **Heston Fang-Oosterlee COS**; **Dupire local vol (Gatheral IV-space)**; Monte Carlo (GBM, Heston, SABR, Local Vol, **SLV**, **multi-asset GBM**, LMM, **Hull-White**, **G2++**, **Cheyette**); Crank-Nicolson 1-D PDE; **2-D ADI PDE (Heston)**; **short-rate PDE (Hull-White, G2++, Cheyette)**; CRR binomial tree; Hull-White trinomial tree |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
@@ -617,15 +617,25 @@ the forwards genuinely are exogenous.
   takes two curves but its own docstring states *"single-curve-per-currency
   projection: each currency's floating leg is forecasted off its own
   discount curve"*. XCCY is the multi-curve instrument par excellence
-- [ ] **Per-leg index descriptors — the architectural ceiling on the
+- [x] **Per-leg index descriptors — the architectural ceiling on the
   current selectors.** A singular `forward_id` expresses the *single-index*
   case only. A single-currency tenor basis swap needs **three** curves (OIS
   discount + two projections), CMS-spread three, cross-currency four or
-  more. The fix is per-leg descriptors (`SwapLeg(index_id=...)` +
-  `legs: tuple[SwapLeg, ...]`), which is the same structure the cashflow
-  engine needs — build it once, with
-  [Tier 1.4](#14-trade-representation-and-cashflow-engine), not twice.
-  Background in `PRICING_ONTOLOGY.md` § 0.1 (repo root)
+  more. Built with [Tier 1.4](#14-trade-representation-and-cashflow-engine)
+  as one change, as this item required: `valax.instruments.legs` puts
+  `discount_id` / `forward_id` / `index_id` on **each leg** and the trade
+  is `MultiLegSwap(legs=tuple[...])`, with `curves_touched` /
+  `indices_touched` the de-duplicated union across legs (first-appearance
+  order, so it is deterministic rather than hash-dependent). Gated by
+  `tests/test_pricing/test_legs.py::TestPerLegIndexDescriptors`, which
+  prices a three-curve tenor basis swap and checks that bumping one
+  projection curve moves **exactly one** leg.
+  **Note the scope:** this lifts the ceiling for trades expressed as legs.
+  The *existing* single-trade pytrees in `valax.instruments.{rates,bonds}`
+  still carry the singular pair and are unchanged, so the other items in
+  this section — the FX / credit / inflation selectors above, and the
+  single-curve chokepoints below — are not retired by this. Background in
+  `PRICING_ONTOLOGY.md` § 0.1 (repo root)
 
 #### 5. Single-curve chokepoints
 
@@ -783,7 +793,7 @@ These items are hard prerequisites. Every downstream feature, product, and integ
 | # | Task | Why It's Critical | Tier Ref |
 |---|------|-------------------|----------|
 | **P1.1** | ~~**Business Calendars & Date Adjustment**~~ — **done**, [Tier 1.3](#13-business-calendars-and-holiday-schedules) | Every trade in a bank settles on business days. Wrong dates = wrong cashflows = wrong P&L. Shipped: `valax.dates.calendars` with holiday ordinal arrays for TARGET, NYSE, SOFR/SIFMA, London, Tokyo and Brazil, following/modified-following/preceding/modified-preceding and the end-of-month rule, union/intersection, and Bus/252. Remaining in this area is *wiring*, not machinery: the curve build and payment lags do not yet consult a calendar. | 1.3 |
-| **P1.2** | **Cashflow Engine (Legs, Compounding)** — *stubs and accrued interest done* | Real swaps have compounding-in-arrears, amortizing notionals and fixing histories. Stub schedules and accrued interest have landed (`generate_schedule`, `valax.dates.accrual`); what remains is `FixedLeg` / `FloatingLeg` pytrees with compounding, amortisation and realized fixings. | 1.4 |
+| **P1.2** | ~~**Cashflow Engine (Legs, Compounding)**~~ — **done**, [Tier 1.4](#14-trade-representation-and-cashflow-engine) | Real swaps have compounding-in-arrears, amortizing notionals and fixing histories. Shipped: stub schedules and accrued interest (`generate_schedule`, `valax.dates.accrual`), then `FixedLeg` / `FloatingLeg` / `MultiLegSwap` in `valax.instruments.legs` with simple/compounded/averaged compounding, amortisation factors, pricing-time fixing histories and a curve descriptor **per leg** — priced by `valax.pricing.analytic.legs`. Remaining in this area is *adoption*, not machinery: the curve-build quote types and the legacy single-trade pytrees still carry their own leg arithmetic, and payment lag is caller-supplied rather than rolled. | 1.4 |
 | **P1.3** | **CI/CD Pipeline** | No bank adopts a library without automated testing. GitHub Actions with: lint, type-check, full test suite, QuantLib comparison, coverage reporting. A gate before anything else ships. | — |
 | **P1.4** | ~~**Short-Rate Models (Hull-White, G2++, Cheyette)**~~ ✅ **Done** | One-factor Hull-White, two-factor G2++, and quasi-Gaussian Cheyette (1F/2F) — analytic/tree/MC/PDE pricing, exact curve fit, and swaption-surface calibration (`calibrate_hull_white` / `calibrate_g2pp` / `calibrate_cheyette`). | 2.1 |
 
@@ -864,7 +874,7 @@ Ongoing (Differentiators):
 
 VALAX has excellent bones. The pure-functional JAX architecture is genuinely superior to what most banks run internally (mutable C++ object graphs built 20+ years ago). Autodiff Greeks, `vmap` batching, and GPU portability are structural advantages that compound with every new feature added.
 
-The most urgent gap is **foundational infrastructure** (P1: calendars, cashflows, CI/CD) — not because it's glamorous, but because every downstream feature depends on it. A bank quant evaluating VALAX will immediately ask: *"Can it handle modified-following date adjustment on a 10Y EUR swap with short front stub and compounding-in-arrears on the floating leg?"* — and today the answer is *mostly*: the **short front stub** is supported, accrual is measured on a real day-count basis, and **modified-following adjustment against a TARGET calendar** now works and is conformance-tested against QuantLib (Tier 1.3). **Compounding-in-arrears as a leg abstraction** (Tier 1.4) is still missing — the OIS compounding that exists lives on the curve-build quote types, not on a reusable `FloatingLeg`.
+The most urgent gap is **foundational infrastructure** (P1: calendars, cashflows, CI/CD) — not because it's glamorous, but because every downstream feature depends on it. A bank quant evaluating VALAX will immediately ask: *"Can it handle modified-following date adjustment on a 10Y EUR swap with short front stub and compounding-in-arrears on the floating leg?"* — and today the answer is *mostly*: the **short front stub** is supported, accrual is measured on a real day-count basis, and **modified-following adjustment against a TARGET calendar** now works and is conformance-tested against QuantLib (Tier 1.3). **Compounding-in-arrears as a leg abstraction** now works too (Tier 1.4): `valax.instruments.FloatingLeg` carries the convention, an amortising notional and an index whose realised fixings season the leg, and `MultiLegSwap` gives every leg its own projection curve. The honest remaining caveat is *adoption* — the curve-build quote types and the legacy swap pytrees still carry their own leg arithmetic, so the answer to that quant's question is now *yes, if you express the trade as legs*.
 
 The **highest-ROI parallel investment** is **short-rate models + Heston COS** alongside calendars/cashflows, because they unlock the most actively traded products (callable bonds, fast equity vol calibration) while the plumbing is being built.
 
@@ -941,15 +951,21 @@ These are foundational pieces that block almost everything else. They should be 
 
 ### 1.4 Trade Representation and Cashflow Engine
 
-- [ ] **Leg abstraction** — fixed leg, floating leg with compounding conventions (in arrears, in advance, compounded, averaged)
+- [x] **Leg abstraction** — fixed leg, floating leg with compounding conventions — `valax.instruments.legs` (`FixedLeg`, `FloatingLeg`, `MultiLegSwap`, `COMPOUNDING_CONVENTIONS`) priced by `valax.pricing.analytic.legs` (`fixed_leg_pv`, `floating_leg_pv`, `leg_pv`, `swap_pv`, `swap_fair_rate`). `compounding` covers `"simple"` (one fixing per period), `"compounded"` (the RFR daily product, evaluated as a discount-factor ratio) and `"averaged"` (arithmetic, reusing `_arithmetic_average_forward`). In-advance vs in-arrears is carried by the `fixing_dates` array rather than a flag, deliberately: a switch that changed no behaviour would be another never-read `OISSwap.compounding`. **LIBOR-in-arrears is absent, not approximated** — it needs a convexity adjustment, so projecting it off the curve would be silently wrong
 - [x] **Cashflow schedule generation** with **stub periods (short/long front/back stubs)**, day-of-month preservation and end-of-month rolls — `valax.dates.schedule.generate_schedule` returns a `Schedule` of `(accrual_start, accrual_end, payment_dates)`; conventions in `valax.dates.conventions.ScheduleConventions`. **Business-day adjustment landed with [Tier 1.3](#13-business-calendars-and-holiday-schedules)**: `calendar` and `business_day_convention` are now applied, validated as a pair, and conformance-tested against `ql.TARGET()` / `ql.ModifiedFollowing`. What remains open here is the payment **lag** — `generate_schedule` takes none, so `payment_dates` still equals `accrual_end`
-- [ ] **Fixing histories** — realized fixings for partially-settled floating legs
-- [ ] **Amortization schedules** — notional step-down for amortizing swaps
+- [x] **Fixing histories** — realized fixings for partially-settled floating legs — `floating_leg_pv(leg, graph, fixings, ref_date)` consults a `valax.curves.fixings.FixingHistory` under the leg's `index_id`. Settled, straddling and unborn periods collapse into one expression by clipping the valuation date into each period (`c_i = min(max(t_0, T_i^s), T_i^e)`), so the realised compounding factor and the remaining projection share one cut-over and cannot double-count the valuation day. The history is a *pricing-time argument*, not an instrument field, so one leg revalues against successive histories
+- [x] **Amortization schedules** — notional step-down for amortizing swaps — `amortisation` on both leg types, an array of **dimensionless outstanding-notional factors** against a scalar reference `notional`. Factors rather than absolute notionals keep the notional outside the coupon sum, which is what lets a non-amortising leg reproduce the flat pricers bit for bit (`sum_i (N x_i)` and `N sum_i x_i` differ in the last bit for most inputs; multiplying by exactly `1.0` is exact)
 - [x] **Accrued interest** calculation and the **clean/dirty distinction** — `valax.dates.accrual` (`accrued_interest`, `bond_accrued_interest`, `clean_from_dirty`, `dirty_from_clean`); coupon sizing via `fixed_coupon_amounts` (day-count year fraction per accrual period, replacing `coupon_rate / frequency` across the analytic, lattice, PDE and MC pricers); `price_type="clean"|"dirty"` on `valax.risk.oas.callable_bond_oas` / `bond_z_spread`; callable/puttable exercise now compares a clean call price against a clean continuation value in both `valax.pricing.lattice.hull_white_tree` and `valax.pricing.pde.rates_payoffs`
 
-**Why:** Real swaps and bonds have complex cashflow structures. Accrual and stub handling are done; leg abstractions, fixing histories and amortisation are not, so a partially-settled or amortising trade still cannot be represented.
+**Why:** Real swaps and bonds have complex cashflow structures. A partially-settled, amortising or multi-index trade could not previously be represented at all.
 
-**Approach:** `FixedLeg` and `FloatingLeg` as `eqx.Module` pytrees. Schedule generation takes a calendar + conventions and produces arrays of (accrual_start, accrual_end, payment_date, notional) — the first three of those four now exist; `notional` arrives with amortisation. Cashflow projection is a pure function over these arrays.
+**Approach:** `FixedLeg` and `FloatingLeg` as `eqx.Module` pytrees. Schedule generation takes a calendar + conventions and produces arrays of (accrual_start, accrual_end, payment_date, notional) — all four now exist.
+
+**Status:** Implemented in `valax/instruments/legs.py` (data) and `valax/pricing/analytic/legs.py` (pricing), keeping instruments data-only. The leg abstraction and the **per-leg index descriptors** of the [multi-curve framework's §4](#4-fx-credit-inflation-carry-no-selectors) were built as *one* change, as that item required: each leg names its own `discount_id` / `forward_id` / `index_id`, and `MultiLegSwap.curves_touched` is the union across legs. A single-currency tenor basis swap therefore reads its three curves — the case a singular `forward_id` on a trade pytree structurally cannot express.
+
+The engine does not introduce new arithmetic so much as generalise three expressions that already shipped in narrower form, and each is reproduced **bit for bit** on its own path, asserted with bare `==`: `swaptions.annuity` (flat fixed leg), `_compounded_float_leg_pv` (compounded leg, zero lag) and `_floating_leg_pv` (dual-curve simple leg with realised fixings). Those functions are untouched — the change is additive, so no existing price moves. Independent authority comes from `tests/test_quantlib_comparison/test_legs_ql.py`: the amortising leg against `ql.FixedRateLeg` with a notional *vector* (rel. 1.6e-15), and the compounded leg against `ql.OvernightLeg`, which forms the daily product explicitly where VALAX evaluates a single discount-factor ratio — agreement there is **exact**.
+
+Still open: `MultiLegSwap` sums its legs directly, so every leg must discount in the same currency (no FX conversion, and no `currency` field rather than a field nothing reads); the `"averaged"` convention cannot be priced under `jit`, because the per-rate-day subdivision needs a trace-time shape that a leg's array-valued dates cannot supply; payment **lag** is still caller-supplied `payment_dates` rather than a business-day roll; a leg names no calendar, so `day_count="bus_252"` is refused at construction and Brazilian legs stay out of reach; and the legacy `valax.instruments.{rates,bonds}` pytrees are unchanged, so nothing is deprecated yet. See the [leg engine guide](guide/fixed-income.md#swap-legs-and-multi-leg-trades).
 
 ---
 

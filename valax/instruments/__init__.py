@@ -43,6 +43,15 @@ from valax.instruments.rates import (
     RangeAccrual,
 )
 
+# Legs and multi-leg trade representation
+from valax.instruments.legs import (
+    COMPOUNDING_CONVENTIONS,
+    FixedLeg,
+    FloatingLeg,
+    Leg,
+    MultiLegSwap,
+)
+
 # FX derivatives
 from valax.instruments.fx import (
     FXForward,

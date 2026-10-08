@@ -183,14 +183,16 @@ line in the same change (`AGENTS.md` definition of done).
   `risk/bucketing.pushforward_sensitivities` so reported risk lands in
   quote space, not pillar space. The `J_bucket` leg shipped; the
   `J_build` leg is still left to the caller. (§6.3)
-- [ ] **Per-leg index descriptors for genuinely multi-index products.** A
-  singular `forward_id` covers the single-index case only: a
-  single-currency tenor basis swap needs three curves (OIS + two
-  projections), CMS-spread three, cross-currency four or more. Build the
-  `SwapLeg(index_id=...)` + `legs: tuple[SwapLeg, ...]` design *together
-  with* the cashflow/leg engine of
+- [x] **Per-leg index descriptors for genuinely multi-index products.**
+  Shipped as `valax.instruments.legs` (`FixedLeg`, `FloatingLeg`,
+  `MultiLegSwap`) with pricing in `valax.pricing.analytic.legs`, built
+  together with the cashflow/leg engine of
   [roadmap Tier 1.4](docs/roadmap.md#14-trade-representation-and-cashflow-engine)
-  — one thing, not twice. (§14.2)
+  — one thing, not twice, as this item required. Each leg names its own
+  `discount_id` / `forward_id` / `index_id`; a three-curve tenor basis
+  swap is now expressible and tested. Details in §14.2. The legacy
+  single-trade pytrees keep the singular pair, so the FX / credit /
+  inflation selector item above is untouched by this.
 
 ### 0.2 Correctness / coverage gaps
 
@@ -1072,14 +1074,21 @@ explicit-argument kernels survive untouched — all of that is what shipped.
   portfolio aggregation above the group primitives. See
   [Roadmap → Multi-Curve Framework §1](docs/roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)
   and §0.1.
-- [ ] **Per-leg index descriptors for genuinely multi-index products.**
-  A singular `forward_id` covers the single-index case only. A
-  single-currency tenor basis swap needs **three** curves (OIS discount +
-  two projections), CMS-spread three, cross-currency four or more. The
-  note's `SwapLeg(index_id=...)` + `legs: tuple[SwapLeg, ...]` design is
-  the answer, and it converges with the P1.2 cashflow/leg engine
-  ([Roadmap Tier 1.4](docs/roadmap.md#14-trade-representation-and-cashflow-engine)) —
-  they should be built as one thing, not twice.
+- [x] **Per-leg index descriptors for genuinely multi-index products.**
+  Shipped as `valax.instruments.legs`, built as **one** change with the
+  P1.2 cashflow/leg engine
+  ([Roadmap Tier 1.4](docs/roadmap.md#14-trade-representation-and-cashflow-engine))
+  exactly as this item required. `FixedLeg` / `FloatingLeg` each carry
+  `discount_id` / `forward_id` / `index_id`, and the trade is
+  `MultiLegSwap(legs=tuple[...])` exposing `curves_touched` /
+  `indices_touched` as the de-duplicated union across legs. A
+  single-currency tenor basis swap now reads its three curves, gated by
+  `tests/test_pricing/test_legs.py::TestPerLegIndexDescriptors`
+  (bumping one projection curve must move exactly one leg).
+  **Scope:** this lifts the ceiling for trades expressed as legs. The
+  existing single-trade pytrees in `valax/instruments/{rates,bonds}.py`
+  keep the singular pair and are untouched, so §0.1's selector items for
+  FX / credit / inflation are unaffected.
 - [ ] **Static/dynamic pytree hygiene audit.** The note called this
   "non-negotiable for JIT": confirm no string id leaks into traced code
   across `MarketState`, `CurveGraph`, and the instrument selectors. The
@@ -1088,10 +1097,15 @@ explicit-argument kernels survive untouched — all of that is what shipped.
 - [ ] **Full curve de-embedding.** §6's endpoint — the model carries only
   `curve_id` and the exact-fit shift is computed at price time — remains
   unbuilt; see §14.3 for why it is now less urgent.
-- [ ] **Pricer-side fixings.** `FixingHistory` is consumed only by the
-  curve-bootstrap instruments; seasoned FRNs still use an unrelated
-  `fixing_rates` NaN array on the instrument pytree. Unifying those
-  belongs with the leg engine above.
+- [ ] **Pricer-side fixings.** Half closed by the leg engine
+  (`valax.pricing.analytic.legs`), which consumes a `FixingHistory`
+  pricer-side under each leg's `index_id` and derives the straddling
+  period's realised factor itself rather than taking a caller-supplied
+  `accrued_compounding`. What remains is the *other* representation:
+  `FloatingRateBond.fixing_rates` is still an unrelated NaN-sentinel
+  array on the instrument pytree, and `floating_rate_bond_price` still
+  reads it. Retiring that in favour of the history is a deprecation
+  decision, not a missing capability.
 
 ### 14.3 Where the shipped design diverged
 

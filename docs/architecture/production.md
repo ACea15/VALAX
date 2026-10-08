@@ -842,10 +842,15 @@ instruments and *topology* of the solve.
    between curves* — OIS first, then each tenor independently. That
    breaks the moment a single instrument touches two unknown curves
    (tenor basis swap, CCBS).
-3. **Conventions.** Single day count per swap, no business calendars,
-   no stubs, no compounding-in-arrears, no fixings. These are the
-   roadmap P1.1 / P1.2 prerequisites and they bite the bootstrap
-   directly.
+3. **Conventions.** Single day count per swap, and pillar dates are
+   taken as given rather than rolled. The underlying machinery now
+   exists — business-day calendars (P1.1) and a leg engine with
+   compounding, amortisation and fixing histories (P1.2) — but
+   **nothing in `valax/curves/` consults a calendar**, and the quote
+   types carry their own leg arithmetic rather than a `FloatingLeg`.
+   Compounding and realised fixings *are* handled for the quotes that
+   need them (`OISSwapRate`, `IborSwapRate`); what is missing is the
+   wiring, not the primitives.
 4. **Numerics.** One interpolation method (log-linear DF), no
    no-arbitrage constraints, no diagnostics returned to the caller, no
    turn-of-year handling.
@@ -1237,7 +1242,10 @@ of the roadmap and are not tackled in this section:
 - **Business calendars and date adjustment** — roadmap P1.1.
   Prerequisite: every quote refers to calendar-adjusted dates.
 - **Cashflow engine** (stubs, compounding, amortisation) — roadmap
-  P1.2. Prerequisite for accurately representing real swap legs.
+  P1.2, **landed** as `valax.instruments.legs` +
+  `valax.pricing.analytic.legs`. What remains here is adopting it in
+  the bootstrap's quote types, which still carry their own leg
+  arithmetic.
 - **Constrained curves** (forward positivity, calendar-spread
   no-arbitrage) — roadmap §1.1 backlog.
 - **MBS prepayment / OAS curves** — roadmap §3.8.

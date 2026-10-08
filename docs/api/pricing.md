@@ -190,6 +190,26 @@ floating leg off a distinct forecasting curve.
 
 ::: valax.pricing.analytic.ois_swap_rate
 
+### Swap legs
+
+The generalisation of the annuity and float-leg expressions above to
+amortising notionals, realised fixings and a projection curve per leg.
+Each function reproduces the narrower pricer it generalises bit for bit
+on its own path, which is asserted with bare `==` in
+`tests/test_pricing/test_legs.py`. Conventions and worked examples:
+[Fixed Income → Swap legs and multi-leg trades](
+../guide/fixed-income.md#swap-legs-and-multi-leg-trades).
+
+::: valax.pricing.analytic.fixed_leg_pv
+
+::: valax.pricing.analytic.floating_leg_pv
+
+::: valax.pricing.analytic.leg_pv
+
+::: valax.pricing.analytic.swap_pv
+
+::: valax.pricing.analytic.swap_fair_rate
+
 ### Rates exotics
 
 ::: valax.pricing.analytic.cross_currency_swap_price

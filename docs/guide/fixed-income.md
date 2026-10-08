@@ -346,10 +346,238 @@ par = ois_swap_rate(ois, curve)   # par rate makes NPV exactly zero
 `ois_swap_rate` is the companion par-rate solver: $K^\ast = \bigl(DF(T_0) - DF(T_n)\bigr) / A$. Structurally identical to `swap_rate` from the vanilla IRS pricer, but keyed off the `OISSwap` pytree so fixed and floating legs can carry distinct schedules (e.g. annual fixed vs. quarterly float).
 
 !!! note "Single-curve assumption"
-    Both `floating_rate_bond_price` and `ois_swap_price` assume the discount curve also forecasts the floating index. Separating a tenor-specific forecasting curve from the OIS discount curve (a **multi-curve** setup) is the right next step for basis-spread products such as cross-currency and Libor-OIS basis swaps — the `valax.curves.multi_curve` module has the primitives but is not yet wired into these pricers.
+    Both `floating_rate_bond_price` and `ois_swap_price` assume the discount curve also forecasts the floating index, and neither accepts an amortising notional or a fixing history. For a dual-curve, amortising or seasoned trade use the [leg engine](#swap-legs-and-multi-leg-trades) below, which takes a projection curve per leg.
 
 !!! tip "Autodiff Greeks come for free"
     Because these pricers are ordinary JAX functions of the curve pytree, `jax.grad` with respect to the curve's log-discount-factors gives the full **key-rate sensitivity vector** in a single backward pass — the same technique used for fixed-rate bonds above.
+
+## Swap legs and multi-leg trades
+
+The pricers above each hard-code a trade *shape*: `OISSwap` carries one
+`fixed_dates` array, one `float_dates` array and a single `forward_id`. That is
+enough for a vanilla swap and not enough for three common cases — an
+**amortising** notional, a **seasoned** leg whose current coupon is part-earned,
+and a trade whose legs project off **different indices**.
+
+`valax.instruments.legs` represents a trade as a tuple of legs instead, each
+naming its own curves:
+
+| Class | What it carries |
+|---|---|
+| `FixedLeg` | accrual + payment schedule, fixed rate, notional, amortisation, `discount_id` |
+| `FloatingLeg` | the same plus `compounding`, `index_id` and `forward_id` |
+| `MultiLegSwap` | `legs: tuple[...]`, and the union of the curves and indices they read |
+
+Pricing lives in `valax.pricing.analytic.legs` (`fixed_leg_pv`,
+`floating_leg_pv`, the type-dispatched `leg_pv`, `swap_pv`, `swap_fair_rate`),
+keeping instruments data-only.
+
+### Compounding conventions
+
+`FloatingLeg.compounding` selects how the daily index becomes a coupon:
+
+| Value | Coupon for period $i$ | Use |
+|---|---|---|
+| `"simple"` | $(r_i + s)\,\tau_i$ | one observed fixing per period (IBOR-style) |
+| `"compounded"` | $\prod_j (1 + r_j \delta_j) - 1 + s\,\tau_i$ | the post-LIBOR RFR standard |
+| `"averaged"` | $(\bar r_i + s)\,\tau_i$ | arithmetic average, discarding interest-on-interest |
+
+The compounded coupon is evaluated as the discount-factor ratio
+$P_f(0,T_i^s)/P_f(0,T_i^e) - 1$, since the daily product telescopes; the day
+count therefore cancels out of the index term and appears only on the spread.
+The averaged convention is genuinely different — a sum of daily ratios rather
+than a product — and is worth *less*. The two formulas, and why the gap
+survives even on a perfectly flat curve, are derived once under
+[Compounded vs averaged futures](curves.md#compounded-vs-averaged-futures);
+the leg engine reuses that module's implementation rather than restating it.
+
+!!! warning "Two limitations, stated rather than defaulted"
+    **`"averaged"` cannot be priced under `jit`.** The average is defined per
+    rate day, so the period must be subdivided into its actual days, and that
+    shape must be known at trace time. A leg's dates are array fields, hence
+    tracers under `filter_jit`, and cannot be made static because a `jnp` array
+    is unhashable. Price averaged legs eagerly.
+
+    **LIBOR-in-arrears is absent, not approximated.** A leg whose rate is
+    observed at $T_i$ for $[T_i, T_i+\text{tenor}]$ but applied to
+    $[T_{i-1}, T_i]$ is not worth its forward — it needs a convexity
+    adjustment. Rather than project it off the curve and be silently wrong,
+    there is no such convention. Fixing *timing* is otherwise carried by the
+    `fixing_dates` array, not by a flag: an in-advance simple leg sets them to
+    the accrual starts, while a compounded leg observes the index across its
+    accrual period and so rejects `fixing_dates` outright.
+
+### Amortisation is a factor, not a notional
+
+`notional` is a scalar reference notional and `amortisation` holds
+**dimensionless outstanding-notional factors**, one per period. A 100mm swap
+stepping down to 20mm carries `notional=1e8` and
+`amortisation=[1.0, 0.8, 0.6, 0.4, 0.2]`.
+
+This keeps the notional *outside* the summation, which is what makes a
+non-amortising leg reproduce the older pricers bit for bit:
+$\sum_i (N x_i)$ and $N \sum_i x_i$ differ in the last bit for most inputs, so
+absolute per-period notionals could not have matched exactly. Multiplying by
+exactly `1.0` is exact in IEEE-754, so the overlay is inert when absent.
+
+### Seasoning
+
+Realised fixings are supplied at pricing time from a
+[`FixingHistory`](curves.md) keyed by the leg's `index_id`, not stored on the
+leg, so one trade can be revalued against successive histories. Each period is
+settled, straddling or unborn according to where the valuation date falls, and
+all three collapse into one expression by clipping the valuation date into the
+period:
+
+$$c_i = \min\bigl(\max(t_0, T_i^s),\, T_i^e\bigr),$$
+
+making the coupon $A_i\,P_f(0,c_i)/P_f(0,T_i^e) - 1$ throughout, with $A_i$ the
+realised compounding factor over $[T_i^s, c_i)$. A future period has $A_i = 1$
+and is pure projection; a settled one has $c_i = T_i^e$, a projection ratio of
+exactly `1.0`, and pays the realised $A_i - 1$. The same cut-over drives both
+the realised factor and the projection, so the day $t_0$ itself is never
+double-counted.
+
+```python
+import equinox as eqx
+import jax.numpy as jnp
+
+from valax.curves.discount import DiscountCurve
+from valax.curves.fixings import FixingHistory, FixingSeries
+from valax.curves.graph import CurveGraph
+from valax.dates.daycounts import ymd_to_ordinal
+from valax.instruments.legs import FixedLeg, FloatingLeg, MultiLegSwap
+from valax.pricing.analytic.legs import leg_pv, swap_fair_rate, swap_pv
+
+ref = ymd_to_ordinal(2026, 1, 1)
+
+
+def curve(short, slope):
+    pillars = jnp.asarray(
+        [int(ref) - 365 + 365 * k for k in range(13)], dtype=jnp.int32
+    )
+    t = (pillars - (int(ref) - 365)).astype(jnp.float64) / 365.0
+    return DiscountCurve(
+        pillar_dates=pillars,
+        discount_factors=jnp.exp(-(short + slope * t) * t),
+        reference_date=jnp.asarray(int(ref) - 365, dtype=jnp.int32),
+        day_count="act_365",
+    )
+
+
+graph = CurveGraph(curves={
+    "USD.OIS": curve(0.030, 0.0040),
+    "USD.SOFR": curve(0.030, 0.0040),
+})
+
+# A 5-year annual grid that started 200 days ago, so the first period is
+# still accruing at the valuation date.
+start = int(ref) - 200
+ends = jnp.asarray([start + 365 * k for k in range(1, 6)], dtype=jnp.int32)
+starts = jnp.concatenate([jnp.asarray([start], dtype=jnp.int32), ends[:-1]])
+notional = jnp.asarray(1.0e8)
+steps = jnp.asarray([1.0, 0.8, 0.6, 0.4, 0.2])
+
+# Pay an amortising fixed leg, receive compounded SOFR on the same profile.
+fixed = FixedLeg(
+    accrual_start_dates=starts, accrual_end_dates=ends, payment_dates=ends,
+    fixed_rate=jnp.asarray(0.0325), notional=notional, amortisation=steps,
+    pay=True, day_count="act_360", discount_id="USD.OIS",
+)
+floating = FloatingLeg(
+    accrual_start_dates=starts, accrual_end_dates=ends, payment_dates=ends,
+    spread=jnp.asarray(0.0), notional=notional, amortisation=steps,
+    compounding="compounded", day_count="act_360",
+    index_id="USD.SOFR", discount_id="USD.OIS", forward_id="USD.SOFR",
+)
+swap = MultiLegSwap(legs=(fixed, floating))
+
+# Realised overnight fixings for the part of period 1 already accrued.
+days = jnp.arange(start, int(ref), dtype=jnp.int32)
+history = FixingHistory(indices={
+    "USD.SOFR": FixingSeries(
+        fixing_dates=days, fixings=jnp.full(days.shape, 0.0318)
+    )
+})
+
+print("curves touched :", swap.curves_touched)
+print(f"fixed leg PV   : {float(leg_pv(fixed, graph, history, ref)):>16,.2f}")
+print(f"floating leg PV: {float(leg_pv(floating, graph, history, ref)):>16,.2f}")
+print(f"swap PV        : {float(swap_pv(swap, graph, history, ref)):>16,.2f}")
+print(f"par fixed rate : {float(swap_fair_rate(swap, graph, history, ref)):>16.6%}")
+print(f"PV ignoring fixings: {float(swap_pv(swap, graph, None, ref)):>11,.2f}")
+
+
+# The whole trade is one jit-able, differentiable function.
+@eqx.filter_jit
+def priced(trade, g, h):
+    return swap_pv(trade, g, h, ref)
+
+
+print(f"under filter_jit   : {float(priced(swap, graph, history)):>11,.2f}")
+sens = eqx.filter_grad(lambda t: swap_pv(t, graph, history, ref))(swap)
+print(f"d(PV)/d(fixed rate): {float(sens.legs[0].fixed_rate):>11,.2f}")
+```
+
+```
+curves touched : ('USD.OIS', 'USD.SOFR')
+fixed leg PV   :    -8,772,264.01
+floating leg PV:    12,900,737.02
+swap PV        :     4,128,473.01
+par fixed rate :        4.779541%
+PV ignoring fixings:  2,405,767.00
+under filter_jit   :  4,128,473.01
+d(PV)/d(fixed rate): -269,915,815.82
+```
+
+Note the 1.72mm gap between the seasoned and unseasoned PVs: that is the part of
+the first coupon already earned at 3.18%, which a pricer with no fixing history
+has no way to represent.
+
+### Per-leg index descriptors
+
+The reason the index lives on the *leg* rather than the trade is that a singular
+`forward_id` can only express a single-index trade. A single-currency tenor
+basis swap needs **three** curves — OIS discounting plus two projections — and a
+CMS-spread leg structure three as well. With per-leg descriptors that is just
+two legs with different `forward_id`s:
+
+```python
+basis = MultiLegSwap(legs=(
+    FloatingLeg(
+        accrual_start_dates=starts, accrual_end_dates=ends, payment_dates=ends,
+        spread=jnp.asarray(0.0), notional=notional, compounding="compounded",
+        day_count="act_360", index_id="USD.SOFR",
+        discount_id="USD.OIS", forward_id="USD.SOFR",
+    ),
+    FloatingLeg(
+        accrual_start_dates=starts, accrual_end_dates=ends, payment_dates=ends,
+        spread=jnp.asarray(0.0), notional=notional, compounding="simple",
+        fixing_dates=starts, day_count="act_360", index_id="USD.LIBOR.3M",
+        discount_id="USD.OIS", forward_id="USD.LIBOR.3M", pay=True,
+    ),
+))
+print(basis.curves_touched)   # ('USD.OIS', 'USD.SOFR', 'USD.LIBOR.3M')
+print(basis.indices_touched)  # ('USD.SOFR', 'USD.LIBOR.3M')
+```
+
+`curves_touched` and `indices_touched` de-duplicate in order of first
+appearance, so they are deterministic rather than hash-dependent — which is what
+lets a caller assemble exactly the curves a trade needs before pricing it.
+
+!!! note "What the leg engine does not do yet"
+    `MultiLegSwap` adds its legs' present values directly, so **every leg must
+    discount in the same currency**. A cross-currency swap additionally needs an
+    FX rate and notional exchange; no `currency` field is carried rather than
+    carrying one nothing reads. Payment lags must also still be supplied as
+    explicit `payment_dates` — see
+    [Dates and Conventions](dates-and-conventions.md#business-day-calendars-and-adjustment)
+    for rolling a lag onto business days.
+
+    A leg carries **no calendar**, so `day_count="bus_252"` is refused at
+    construction rather than given a default calendar the caller never chose.
+    Brazilian Bus/252 legs therefore remain out of reach until a leg can name
+    a calendar.
 
 ## Rates & cross-currency exotics
 

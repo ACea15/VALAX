@@ -159,6 +159,25 @@ puttable price is bounded below.
 
 ::: valax.instruments.ConvertibleBond
 
+## Swap legs and multi-leg trades
+
+Legs are the reusable trade-representation unit: each names its own
+discount, projection and index identifiers, so a trade whose legs
+project off *different* indices is expressible — which a singular
+`forward_id` on the trade is not. Priced by
+[the leg engine](pricing.md#swap-legs). Conventions, the amortisation
+factor design and the seasoning cut-over are documented in
+[Fixed Income → Swap legs and multi-leg trades](
+../guide/fixed-income.md#swap-legs-and-multi-leg-trades).
+
+::: valax.instruments.legs.COMPOUNDING_CONVENTIONS
+
+::: valax.instruments.FixedLeg
+
+::: valax.instruments.FloatingLeg
+
+::: valax.instruments.MultiLegSwap
+
 ## Interest rate derivatives
 
 ### Caplet / cap

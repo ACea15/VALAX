@@ -12,6 +12,87 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — swap legs, amortisation, pricer-side fixings and per-leg curves
+
+Roadmap Tier 1.4. `valax.instruments.legs` represents a trade as a tuple of
+legs — `FixedLeg`, `FloatingLeg`, `MultiLegSwap` — priced by
+`valax.pricing.analytic.legs` (`fixed_leg_pv`, `floating_leg_pv`, the
+type-dispatched `leg_pv`, `swap_pv`, `swap_fair_rate`). Instruments stay
+data-only.
+
+This closes three gaps the older pytrees could not express at all: an
+**amortising** notional, a **seasoned** leg whose current coupon is
+part-earned, and a trade whose legs project off **different** indices.
+
+**Built as one change with the per-leg index descriptors**, which the roadmap
+and `PRICING_ONTOLOGY.md` § 14.2 both required be done together rather than
+twice. Each leg names its own `discount_id` / `forward_id` / `index_id`, and
+`MultiLegSwap.curves_touched` / `.indices_touched` are the de-duplicated union
+across legs, in first-appearance order so they are deterministic rather than
+hash-dependent. A single-currency tenor basis swap therefore reads its three
+curves — the case a singular `forward_id` on a trade structurally cannot
+express.
+
+**Amortisation is a dimensionless factor, not a notional.** `notional` stays a
+scalar and `amortisation` holds outstanding-notional factors, one per period.
+This is what makes a non-amortising leg reproduce the older pricers *exactly*:
+`sum_i (N x_i)` and `N sum_i x_i` differ in the last bit for most inputs
+(measured: 133 of 200 random schedules), so absolute per-period notionals could
+not have matched, whereas multiplying by exactly `1.0` is exact in IEEE-754
+(0 of 500 differ).
+
+**Seasoning uses one cut-over date, not three branches.** Clipping the
+valuation date into each period, `c_i = min(max(t_0, T_i^s), T_i^e)`, makes
+every compounded coupon `A_i * P_f(0,c_i)/P_f(0,T_i^e) - 1`. A future period
+has `A_i = 1` and is pure projection; a settled one has a projection ratio of
+exactly `1.0` and pays the realised `A_i - 1`. The same cut-over drives both
+the realised factor and the projection, so the valuation day itself cannot be
+double-counted. The fixing history is a pricing-time argument rather than an
+instrument field, so one leg revalues against successive histories.
+
+**Nothing existing moved.** The change is purely additive — `annuity`,
+`_compounded_float_leg_pv` and `_floating_leg_pv` are untouched — and each is
+reproduced **bit for bit** on its own path, asserted with bare `==` rather than
+`approx` so that summation order is pinned and not merely the value.
+
+QuantLib supplies the independent authority for the two features that had no
+prior VALAX implementation: the amortising leg against `ql.FixedRateLeg` built
+with a notional *vector* (rel. 1.6e-15), and the compounded leg against
+`ql.OvernightLeg`, which forms the daily product explicitly where VALAX
+evaluates a single discount-factor ratio — these agree **exactly**, which is
+real evidence rather than a tautology since the two computations are entirely
+different.
+
+Two limitations are stated rather than defaulted:
+
+- **`"averaged"` cannot be priced under `jit`.** The average is defined per
+  rate day, so the period must be subdivided into its actual days, and that
+  shape must be known at trace time. A leg's dates are array fields, hence
+  tracers under `filter_jit`, and cannot be made static because a `jnp` array
+  is unhashable. The diagnostic is pinned by a test so it cannot decay into a
+  bare `TracerArrayConversionError`.
+- **LIBOR-in-arrears is absent, not approximated.** A rate observed at `T_i`
+  for `[T_i, T_i + tenor]` but applied to `[T_{i-1}, T_i]` is not worth its
+  forward; it needs a convexity adjustment. There is therefore no such
+  convention, and no `in_advance`/`in_arrears` flag either — fixing timing is
+  carried by the `fixing_dates` array, and a switch that changed no behaviour
+  would be another never-read `OISSwap.compounding`.
+
+Also refuses, rather than guesses, to season an `"averaged"` leg: the realised
+part of an arithmetic average is a *sum* of recorded rates and `FixingSeries`
+only reduces them to a compounding *product*.
+
+### Fixed — `__check_init__` guidance named the wrong mechanism
+
+The Tier 1.3 note below claimed `__check_init__` runs on pytree
+*unflattening*. Measured against the pinned equinox 0.13.6, it does not:
+flattening and unflattening an already-built module does not re-run it at all,
+so passing a calendar or a leg through a `jit` boundary is safe. What does
+re-run it with tracer fields is an `__init__` **executed inside a trace**. The
+conclusion is unchanged and still load-bearing — value checks belong in the
+eager builder, `__check_init__` inspects only structure — but the rule is about
+where a module is *built*, not about pytree transport.
+
 ### Added — `scripts/check_doc_anchors.py`, an intra-page anchor checker
 
 `mkdocs build --strict` validates documentation links at *page* granularity
@@ -167,12 +248,18 @@ Three things had to be checked rather than assumed:
   holiday — banks settled normally, so a payment must not roll off it. The
   generator carries an explicit, reasoned exclusion list and fails if an entry
   disappears upstream.
-- `__check_init__` runs on pytree **unflattening**, where the holiday array is a
-  tracer, so a sortedness check there forces concretisation and fails under
-  `jit`. Value checks live in the eager `build`; `__check_init__` inspects only
-  structure. Relatedly, `jnp.array(python_int)` returns a *tracer* inside a
-  trace, so range bounds derived from `ymd_to_ordinal` are resolved eagerly and
-  stored as static fields.
+- `__check_init__` runs on **every `__init__`, including one executed inside a
+  trace**, where the holiday array is a tracer — so a sortedness check there
+  forces concretisation and dies with `TracerBoolConversionError`. Value checks
+  live in the eager `build`; `__check_init__` inspects only structure (`.ndim`,
+  `.shape`, static fields, `is None`). Measured against the pinned equinox
+  0.13.6: constructing a module inside `jax.jit` does re-run the check with
+  tracer fields, whereas *flattening and unflattening* an already-built module
+  does **not** re-run it at all, so merely passing a calendar through a `jit`
+  boundary is safe. The rule is about where the module is built, not about
+  pytree transport. Relatedly, `jnp.array(python_int)` returns a *tracer*
+  inside a trace, so range bounds derived from `ymd_to_ordinal` are resolved
+  eagerly and stored as static fields.
 
 **The default has not moved.** `business_day_convention` still defaults to
 `"unadjusted"`, and that branch is the pre-existing code reached by a static

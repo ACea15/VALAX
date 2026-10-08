@@ -67,6 +67,13 @@ from valax.pricing.analytic.floating import (
     ois_swap_price,
     ois_swap_rate,
 )
+from valax.pricing.analytic.legs import (
+    fixed_leg_pv,
+    floating_leg_pv,
+    leg_pv,
+    swap_fair_rate,
+    swap_pv,
+)
 from valax.pricing.analytic.rates_exotics import (
     cross_currency_swap_price,
     cross_currency_basis_spread,
