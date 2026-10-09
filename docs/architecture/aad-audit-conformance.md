@@ -66,7 +66,7 @@ curves) and the `λ_m` level itself remain. See **M-3** and **A-3** below.
 |---|---|
 | T-suite (T-1 … T-15) | **15 / 15** implemented and `audit`-marked |
 | `pytest -m audit` | 331 passed |
-| Full `pytest` | 4588 passed, 1 skipped, 6 xfailed |
+| Full `pytest` | 4601 passed, 1 skipped, 6 xfailed |
 | Requirement rows (N/Q/R/C/V/M/A) | 50 total — **29 ✅ · 18 🟡 · 2 ❌ · 1 n-a** |
 
 Every 🟡 states its gap in its own row. The two remaining ❌ are whole

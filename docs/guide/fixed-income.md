@@ -392,11 +392,26 @@ survives even on a perfectly flat curve, are derived once under
 the leg engine reuses that module's implementation rather than restating it.
 
 !!! warning "Two limitations, stated rather than defaulted"
-    **`"averaged"` cannot be priced under `jit`.** The average is defined per
-    rate day, so the period must be subdivided into its actual days, and that
-    shape must be known at trace time. A leg's dates are array fields, hence
-    tracers under `filter_jit`, and cannot be made static because a `jnp` array
-    is unhashable. Price averaged legs eagerly.
+    **`"averaged"` needs a shape at trace time.** The average is defined per
+    rate day, so a period must be subdivided into its actual days, and that
+    array's length depends on the dates' *values*. An averaged leg therefore
+    prices eagerly, or closed over a traced function, or — as a traced
+    argument and hence under `vmap` — with `max_days`, a static bound on the
+    subdivision that you derive with
+    `valax.instruments.legs.max_period_days`:
+
+    ```python
+    from valax.instruments.legs import max_period_days
+
+    leg = FloatingLeg(..., compounding="averaged",
+                      max_days=max_period_days(starts, ends))
+    ```
+
+    Only the *bound* is static — the dates stay dynamic, which is what keeps
+    one compilation serving every schedule and keeps a book of legs stackable.
+    A bound that is too small raises rather than silently truncating the
+    average. Background:
+    [JAX Patterns § 2.5](../architecture/jax-patterns.md#25-when-you-genuinely-need-a-value-at-trace-time-data-dependent-shapes).
 
     **LIBOR-in-arrears is absent, not approximated.** A leg whose rate is
     observed at $T_i$ for $[T_i, T_i+\text{tenor}]$ but applied to

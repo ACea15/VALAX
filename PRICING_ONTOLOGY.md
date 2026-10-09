@@ -1093,7 +1093,13 @@ explicit-argument kernels survive untouched — all of that is what shipped.
   "non-negotiable for JIT": confirm no string id leaks into traced code
   across `MarketState`, `CurveGraph`, and the instrument selectors. The
   convention has been followed by hand throughout, but the audit itself
-  was never run, and nothing enforces it.
+  was never run, and nothing enforces it. The *convention* is now at
+  least written down — "static is for shapes, dynamic is for values",
+  with the four date representations measured against each other and the
+  three sanctioned escape hatches, in
+  [JAX Patterns § 2.5](docs/architecture/jax-patterns.md) — which is the
+  specification such an audit would check against. Writing it down is
+  not running it; this item stays open.
 - [ ] **Full curve de-embedding.** §6's endpoint — the model carries only
   `curve_id` and the exact-fit shift is computed at price time — remains
   unbuilt; see §14.3 for why it is now less urgent.

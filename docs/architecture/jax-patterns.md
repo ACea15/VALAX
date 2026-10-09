@@ -196,6 +196,105 @@ branch in the graph) < `lax.cond` (both branches in the graph, runtime select)
 < `jnp.where` (both expressions computed everywhere, masked) ≈ `lax.switch`.
 Prefer Python `if` whenever the condition resolves at trace time.
 
+### 2.5 When you genuinely need a *value* at trace time (data-dependent shapes)
+
+§2.4 is about control flow. This is its shape-shaped twin, and the harder of
+the two: some computation needs an array whose **length depends on the value**
+of your data. XLA requires every shape at trace time, so this is not a style
+question — it is the one thing that genuinely cannot be traced.
+
+The canonical case in VALAX is the arithmetic average of an overnight index.
+It is defined *per rate day*, so the accrual period must be subdivided into
+its actual days, and the grid's length is `end - start`:
+
+```python
+# valax/curves/instruments.py — _daily_boundaries
+n_days = int(np.asarray(end_date) - np.asarray(start_date))   # needs a value
+return jnp.asarray(start_date) + jnp.arange(n_days + 1)       # shape n_days + 1
+```
+
+**The rule, and the thing to internalise:**
+
+> **Static is for shapes. Dynamic is for values.**
+
+The temptation is to reach for the data's *representation* — "make the dates
+NumPy, or static, so they're not traced." Measured, on the pinned
+`equinox 0.13.6` / `jax 0.9.2`:
+
+| Dates represented as | Value readable at trace time? | Compilations over 4 distinct schedules | Stack + `vmap` across trades? |
+|---|---|---|---|
+| `jnp` array, normal field | ✗ | **1** | ✓ |
+| `np` array, normal field | ✗ — `eqx.is_array(np.ndarray)` is `True`, so `filter_jit` traces it identically | 1 | ✓ |
+| `np` array, `static=True` | ✓ | per schedule | ✗ |
+| `tuple[int, ...]`, `static=True` | ✓ | **3** | ✗ |
+
+Three things to take from it:
+
+1. **NumPy is not an escape hatch.** `eqx.filter_jit` partitions on
+   `eqx.is_array`, which is true for `np.ndarray`. Inside the trace the field
+   is a `DynamicJaxprTracer` either way.
+2. **A static `np.ndarray` makes equinox itself complain** —
+   *"A JAX array is being set as static! This can result in unexpected
+   behavior and is usually a mistake to do."* Treedefs are compared with `==`,
+   which is elementwise for arrays. Only hashable Python data (a `tuple` of
+   `int`) is a sound static field.
+3. **Static dates cost far more than they buy.** They recompile per distinct
+   schedule, and — decisively — make legs *unstackable*:
+   `tree_map(stack, …)` fails with `Mismatch custom node data`. That collides
+   with the portfolio grouping key in `PRICING_ONTOLOGY.md` § 0.1, where
+   differing statics already mean instruments "cannot be stacked at all":
+   static dates would put **every distinct schedule in its own portfolio
+   group**.
+
+So do not promote the data. Promote the **minimum shape-determining scalar**
+and leave the data dynamic. VALAX has exactly three sanctioned ways out:
+
+| Escape hatch | Shipped example |
+|---|---|
+| **1. Precompute eagerly in Python.** Keep the value-dependent work entirely outside any trace. | `valax.dates.schedule.generate_schedule` — roll, stub and EOM logic never enter a trace; the trace sees only the finished date arrays |
+| **2. Promote a static *bound*, then clip or mask.** One hashable integer fixes the shape; the data stays dynamic. | `HolidayCalendar.max_closure_run` bounding the unrolled roll in `adjust`; `FloatingLeg.max_days` bounding the daily subdivision of an averaged leg |
+| **3. Read concretely *before* indexing.** Only works when the array is a compile-time constant (closed over, not passed in). | `valax.pricing.analytic.legs.floating_leg_pv`, averaged branch |
+
+Hatch 2 is the general one, and clipping is what makes it exact rather than
+approximate. Padding each period's grid to a common length and clipping at the
+period's own end makes the surplus boundaries contribute
+`P(T_e)/P(T_e) - 1`, which is **exactly** zero in IEEE-754 — a float divided
+by itself is exactly `1.0`. No mask, no bias, and one bound serves a schedule
+of ragged periods.
+
+Its hazard is the mirror image: a bound that is too *small* does not error, it
+silently truncates. A 200-day bound on annual periods returned roughly half
+the correct average. Any static bound therefore needs a runtime check, and
+`eqx.error_if` is the right tool because it fires eagerly, under `jit` **and**
+under `vmap`.
+
+Hatch 3 has a trap worth stating explicitly, because the two orderings look
+interchangeable and are not:
+
+```python
+np.asarray(dates)[i]   # ✓ concrete — NumPy read first, then NumPy index
+np.asarray(dates[i])   # ✗ tracer   — jnp index is itself a traced operation
+```
+
+Even when `dates` is a compile-time constant, `dates[i]` *inside* a trace is a
+tracer, because JAX records the indexing rather than folding it. This is why
+`MoneyMarketFuture`, whose dates are **scalar** fields and never indexed, has
+always priced fine when closed over, while an array-dated leg did not until
+the read was hoisted.
+
+!!! warning "`__check_init__` cannot do this validation"
+    A static bound must be checked against the data, and `__check_init__` is
+    the wrong place: it re-runs on **any `__init__` executed inside a trace**,
+    where the array fields are tracers and reading a value raises
+    `TracerBoolConversionError`. (Measured on equinox 0.13.6: flattening and
+    unflattening an already-built module does *not* re-run it, so passing a
+    module through a `jit` boundary is safe — the rule is about where a module
+    is **built**, not about pytree transport.) Keep `__check_init__` to
+    structure — `.ndim`, `.shape`, static fields, `is None` — and put value
+    checks in an eager builder (`HolidayCalendar.build`,
+    `valax.instruments.legs.max_period_days`) or in `eqx.error_if` at the
+    point of use.
+
 ---
 
 ## §3 — The "double where" autodiff-safety pattern

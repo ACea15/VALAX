@@ -173,6 +173,7 @@ AVERAGING_CONVENTIONS = ("compounded", "arithmetic")
 def _daily_boundaries(
     start_date: Int[Array, ""],
     end_date: Int[Array, ""],
+    n_days: int | None = None,
 ) -> Int[Array, " n_days_plus_1"]:
     """Daily date boundaries spanning ``[start_date, end_date]``.
 
@@ -186,29 +187,37 @@ def _daily_boundaries(
 
     Only the *span* must be concrete; the dates themselves may still be
     traced, since the boundaries are built as ``start_date + arange(n)``.
+    That is the whole static/dynamic split described in
+    [JAX Patterns § 2.5](../architecture/jax-patterns.md), and ``n_days``
+    exists so a caller who already knows the span statically can supply
+    it instead of having it read off the dates.
 
     Args:
         start_date: Period start :math:`T_0` (ordinal).
         end_date: Period end :math:`T_1` (ordinal).
+        n_days: Span in days, when the caller knows it at trace time.
+            ``None`` reads it off the dates with NumPy, which requires
+            them to be concrete.
 
     Returns:
         Ordinals :math:`T_0, T_0+1, \\ldots, T_1`, of length
-        ``int(T_1 - T_0) + 1``.
+        ``n_days + 1``.
 
     Raises:
         ValueError: If the span cannot be read at trace time, or is not
             at least one day.
     """
-    try:
-        n_days = int(np.asarray(end_date) - np.asarray(start_date))
-    except Exception as exc:  # pragma: no cover - traced dates
-        raise ValueError(
-            "An arithmetic-average future needs a concrete day count "
-            "over [start_date, end_date], but the dates are traced. "
-            "Build the instrument outside the jit boundary, or use "
-            "averaging='compounded', which needs only the two endpoint "
-            "discount factors."
-        ) from exc
+    if n_days is None:
+        try:
+            n_days = int(np.asarray(end_date) - np.asarray(start_date))
+        except Exception as exc:  # pragma: no cover - traced dates
+            raise ValueError(
+                "An arithmetic-average future needs a concrete day count "
+                "over [start_date, end_date], but the dates are traced. "
+                "Build the instrument outside the jit boundary, or use "
+                "averaging='compounded', which needs only the two endpoint "
+                "discount factors."
+            ) from exc
     if n_days < 1:
         raise ValueError(
             f"An arithmetic-average future spans {n_days} days; it needs "
@@ -222,6 +231,7 @@ def _arithmetic_average_forward(
     start_date: Int[Array, ""],
     end_date: Int[Array, ""],
     tau: Float[Array, ""],
+    n_days: int | None = None,
 ) -> Float[Array, ""]:
     """Day-count-weighted arithmetic average of the daily overnight
     forwards over :math:`[T_0, T_1]`.
@@ -262,13 +272,71 @@ def _arithmetic_average_forward(
             day count.  For the ``act_*`` conventions used by overnight
             futures this equals :math:`\\sum_j \\delta_j` exactly, which
             is what makes the expression above a true weighted average.
+        n_days: Span in days, when the caller knows it at trace time.
+            ``None`` reads it off the dates, which requires them to be
+            concrete.  See :func:`_daily_boundaries`.
 
     Returns:
         The averaged forward rate, annualised.
     """
-    boundaries = _daily_boundaries(start_date, end_date)
+    boundaries = _daily_boundaries(start_date, end_date, n_days)
     ratios = curve(boundaries[:-1]) / curve(boundaries[1:])
     return jnp.sum(ratios - 1.0) / tau
+
+
+def _arithmetic_average_forwards(
+    curve,
+    start_dates: Int[Array, " n"],
+    end_dates: Int[Array, " n"],
+    taus: Float[Array, " n"],
+    max_days: int,
+) -> Float[Array, " n"]:
+    """Averaged forwards for a whole schedule at once, from a static bound.
+
+    The vectorised counterpart of :func:`_arithmetic_average_forward`,
+    computing the same quantity for every period of a leg. It exists
+    because the scalar version needs each period's *exact* day count,
+    which can only be read from concrete dates — so a leg arriving as a
+    traced argument cannot use it at all.
+
+    The fix is to subdivide on a single **static upper bound** and clip
+    each period's grid at its own end date:
+
+    .. math::
+        b_{ij} = \\min(T_i^s + j,\\; T_i^e), \\qquad j = 0 \\ldots M.
+
+    Periods shorter than :math:`M` therefore repeat their end date, and
+    those surplus boundaries contribute
+    :math:`P(0,T_i^e)/P(0,T_i^e) - 1`, which is **exactly** zero in
+    IEEE-754 — a ratio of one float to itself is exactly ``1.0``. No mask
+    is needed and no bias is introduced, so one bound serves a schedule
+    of ragged periods. Only the *bound* is static; the dates stay
+    dynamic, which is the rule set out in
+    [JAX Patterns § 2.5](../architecture/jax-patterns.md).
+
+    This is also why ``max_days`` must be validated by the caller: a
+    bound *smaller* than the longest period silently truncates that
+    period's average rather than failing, because the clip simply stops
+    early. :func:`valax.pricing.analytic.legs.floating_leg_pv` guards it
+    with ``eqx.error_if``.
+
+    Args:
+        curve: The projection curve.
+        start_dates: Accrual start of each period (ordinals).
+        end_dates: Accrual end of each period (ordinals).
+        taus: Accrual fraction of each period, in the leg's day count.
+        max_days: Static upper bound on any period's span in days. Must
+            be at least the longest period, which the caller checks.
+
+    Returns:
+        One averaged forward rate per period, annualised.
+    """
+    offsets = jnp.arange(max_days + 1)
+    boundaries = jnp.minimum(
+        start_dates[:, None] + offsets[None, :], end_dates[:, None]
+    )
+    ratios = curve(boundaries[:, :-1]) / curve(boundaries[:, 1:])
+    return jnp.sum(ratios - 1.0, axis=1) / taus
 
 
 def _floating_leg_pv(

@@ -30,6 +30,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from equinox import EquinoxRuntimeError
 
 from valax.curves.discount import DiscountCurve
 from valax.curves.fixings import (
@@ -39,11 +40,17 @@ from valax.curves.fixings import (
 )
 from valax.curves.graph import CurveGraph
 from valax.curves.instruments import (
+    _arithmetic_average_forward,
     _compounded_float_leg_pv,
     _floating_leg_pv,
 )
 from valax.dates.daycounts import year_fraction, ymd_to_ordinal
-from valax.instruments.legs import FixedLeg, FloatingLeg, MultiLegSwap
+from valax.instruments.legs import (
+    FixedLeg,
+    FloatingLeg,
+    MultiLegSwap,
+    max_period_days,
+)
 from valax.pricing.analytic.legs import (
     fixed_leg_pv,
     floating_leg_pv,
@@ -645,6 +652,19 @@ class TestAveragedLeg:
         assert gap == pytest.approx(rough, rel=0.15)
         assert gap > 0.0
 
+    def test_an_explicit_span_matches_the_read_one_bit_for_bit(self):
+        """The ``n_days`` parameter added to the shared scalar helper
+        must be an *override*, not a different calculation — otherwise
+        the bootstrap's averaged futures and the leg engine would
+        silently diverge on the same convention."""
+        span = int(ENDS[0] - STARTS[0])
+        tau = year_fraction(STARTS[:1], ENDS[:1], "act_360")[0]
+        read = _arithmetic_average_forward(FWD, STARTS[0], ENDS[0], tau)
+        given = _arithmetic_average_forward(
+            FWD, STARTS[0], ENDS[0], tau, n_days=span
+        )
+        assert read == given
+
     def test_seasoning_an_averaged_leg_is_refused(self):
         """The realised part of an arithmetic average is a sum of
         recorded rates, and ``FixingSeries`` only reduces them to a
@@ -801,30 +821,173 @@ class TestJitAndGradients:
             float(floating_leg_pv(leg, GRAPH)), rel=1e-14
         )
 
-    def test_an_averaged_leg_cannot_be_jitted(self):
-        """``"averaged"`` is the one convention that does not survive a
-        ``jit`` boundary, and it says so rather than failing obscurely.
+class TestAveragedLegUnderJit:
+    """The averaged convention needs a *shape* at trace time.
 
-        The arithmetic average is defined *per rate day*, so the period
-        has to be subdivided into its actual days — a shape, which must
-        be known at trace time. A leg's dates are array fields, hence
-        tracers under ``filter_jit``, and they cannot be made static
-        because a ``jnp`` array is unhashable. So the limitation is
-        structural, not an oversight: price an averaged leg eagerly, or
-        use ``"compounded"``, which needs only the two endpoint discount
-        factors. Pinned here so the diagnostic cannot silently decay into
-        a ``TracerArrayConversionError``.
-        """
-        leg = _floating(
+    An arithmetic average is defined per rate day, so a period must be
+    subdivided into its actual days — and that array's length depends on
+    the dates' *values*. XLA requires shapes at trace time, so there are
+    exactly three ways to price one, and this class pins all three plus
+    the diagnostic for the case that genuinely cannot work.
+
+    The resolution is **not** to make the dates static. That would
+    recompile per distinct schedule and make legs unstackable, since
+    differing statics change the treedef. Only the *bound* is promoted;
+    see [JAX Patterns § 2.5](../architecture/jax-patterns.md).
+    """
+
+    def _leg(self, **kwargs):
+        return _floating(
             compounding="averaged",
             index_id="USD.SOFR",
             forward_id="USD.SOFR",
+            **kwargs,
         )
-        # Eagerly it prices fine ...
-        assert float(floating_leg_pv(leg, GRAPH)) > 0.0
-        # ... and under jit it explains itself.
-        with pytest.raises(ValueError, match="concrete day count"):
-            eqx.filter_jit(floating_leg_pv)(leg, GRAPH)
+
+    def test_mode_1_eager(self):
+        assert float(floating_leg_pv(self._leg(), GRAPH)) > 0.0
+
+    def test_mode_2_closed_over_jits_without_a_bound(self):
+        """With the leg closed over, its dates are compile-time
+        constants, so the span can still be read — provided the read
+        happens *before* indexing.
+
+        ``np.asarray(dates)[i]`` is concrete; ``np.asarray(dates[i])``
+        is not, because the ``jnp`` index is itself a traced operation.
+        That ordering is the whole difference, and it is why scalar-dated
+        ``MoneyMarketFuture`` has always worked closed-over while an
+        array-dated leg did not.
+        """
+        leg = self._leg()
+        eager = float(floating_leg_pv(leg, GRAPH))
+        jitted = float(eqx.filter_jit(lambda g: floating_leg_pv(leg, g))(GRAPH))
+        assert jitted == pytest.approx(eager, rel=1e-13)
+
+    def test_mode_3_arg_passed_needs_a_bound(self):
+        """Passed as an argument the dates are genuinely traced, so the
+        span cannot be read at all — and the error says what to do."""
+        with pytest.raises(ValueError, match="max_days"):
+            eqx.filter_jit(floating_leg_pv)(self._leg(), GRAPH)
+
+    def test_mode_3_arg_passed_jits_with_a_bound(self):
+        leg = self._leg(max_days=max_period_days(STARTS, ENDS))
+        eager = float(floating_leg_pv(self._leg(), GRAPH))
+        jitted = float(eqx.filter_jit(floating_leg_pv)(leg, GRAPH))
+        assert jitted == pytest.approx(eager, rel=1e-13)
+
+    def test_the_bounded_path_is_bit_for_bit_the_eager_one(self):
+        """Eagerly the two routes agree *exactly*, despite one padding
+        every period to a common length.
+
+        Clipping each period's grid at its own end date makes the surplus
+        boundaries contribute ``P(T_e)/P(T_e) - 1``, which is exactly
+        zero because a float divided by itself is exactly ``1.0``. So the
+        padding is not merely negligible — it is inert.
+        """
+        bounded = self._leg(max_days=max_period_days(STARTS, ENDS))
+        assert floating_leg_pv(bounded, GRAPH) == floating_leg_pv(
+            self._leg(), GRAPH
+        )
+
+    def test_it_holds_on_ragged_periods(self):
+        """One bound must serve periods of *different* lengths, which is
+        the case padding exists for. A semiannual stub beside annual
+        periods would be priced wrong by any scheme that assumed a
+        uniform day count."""
+        ends = jnp.asarray(
+            [int(REF) + 365, int(REF) + 731, int(REF) + 912],
+            dtype=jnp.int32,
+        )
+        starts = jnp.asarray(
+            [int(REF), int(REF) + 365, int(REF) + 731], dtype=jnp.int32
+        )
+        spans = [365, 366, 181]
+        assert [
+            int(e - s) for s, e in zip(starts.tolist(), ends.tolist())
+        ] == spans
+        common = dict(
+            accrual_start_dates=starts,
+            accrual_end_dates=ends,
+            payment_dates=ends,
+        )
+        eager = self._leg(**common)
+        bounded = self._leg(**common, max_days=max_period_days(starts, ends))
+        assert floating_leg_pv(bounded, GRAPH) == floating_leg_pv(
+            eager, GRAPH
+        )
+
+    @pytest.mark.parametrize("jitted", [False, True])
+    def test_an_undersized_bound_raises_rather_than_truncating(self, jitted):
+        """The one way this design could be silently wrong.
+
+        A bound shorter than the longest period does not error on its
+        own — the grid just clips early and the average is taken over
+        too few days. Measured at roughly *half* the correct rate for a
+        200-day bound on annual periods, which is the kind of error that
+        looks like a plausible number. ``eqx.error_if`` makes it loud,
+        eagerly and under ``jit`` alike.
+        """
+        leg = self._leg(max_days=200)
+        price = (
+            eqx.filter_jit(floating_leg_pv) if jitted else floating_leg_pv
+        )
+        with pytest.raises(EquinoxRuntimeError):
+            price(leg, GRAPH)
+
+    def test_a_bound_is_rejected_on_a_convention_that_cannot_use_it(self):
+        """Pairing guard: only the averaged convention subdivides a
+        period, so only it has a shape to bound."""
+        with pytest.raises(ValueError, match="only applies to"):
+            _floating(compounding="compounded", max_days=366)
+
+    def test_a_degenerate_bound_is_rejected(self):
+        with pytest.raises(ValueError, match="at least 1 day"):
+            self._leg(max_days=0)
+
+    def test_max_period_days_needs_concrete_dates(self):
+        """The helper is deliberately eager — it is the step that turns a
+        schedule into a static bound, so it must run before the trace."""
+
+        @jax.jit
+        def f(starts, ends):
+            return max_period_days(starts, ends)
+
+        with pytest.raises(ValueError, match="concrete dates"):
+            f(STARTS, ENDS)
+
+    def test_a_bounded_leg_can_be_stacked_and_vmapped(self):
+        """The capability that static dates would have cost.
+
+        Because only the bound is static and the dates stay dynamic, two
+        legs share a treedef and so stack into one batched pytree. Had
+        the dates been static, differing schedules would change the
+        treedef and ``tree_map(stack, ...)`` would fail outright.
+        """
+        leg = self._leg(max_days=max_period_days(STARTS, ENDS))
+        book = jax.tree_util.tree_map(lambda *x: jnp.stack(x), leg, leg)
+        prices = eqx.filter_vmap(lambda l: floating_leg_pv(l, GRAPH))(book)
+        assert prices.shape == (2,)
+        assert float(prices[0]) == pytest.approx(
+            float(floating_leg_pv(leg, GRAPH)), rel=1e-13
+        )
+
+    def test_the_bounded_path_differentiates_under_jit(self):
+        leg = self._leg(max_days=max_period_days(STARTS, ENDS))
+
+        def pv(dfs):
+            graph = CurveGraph(
+                curves={
+                    "_default_": DISC,
+                    "USD.SOFR": eqx.tree_at(
+                        lambda c: c.discount_factors, FWD, dfs
+                    ),
+                }
+            )
+            return floating_leg_pv(leg, graph)
+
+        grad = eqx.filter_jit(jax.grad(pv))(FWD.discount_factors)
+        assert jnp.all(jnp.isfinite(grad))
+        assert float(jnp.max(jnp.abs(grad))) > 0.0
 
     def test_swap_pv_jits_with_seasoning(self):
         swap = MultiLegSwap(legs=(_fixed(pay=True), _seasoned_leg()))

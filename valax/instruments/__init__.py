@@ -50,6 +50,7 @@ from valax.instruments.legs import (
     FloatingLeg,
     Leg,
     MultiLegSwap,
+    max_period_days,
 )
 
 # FX derivatives

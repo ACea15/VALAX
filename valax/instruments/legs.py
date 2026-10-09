@@ -48,10 +48,61 @@ rather than by luck.
 from typing import Optional, Union
 
 import equinox as eqx
+import numpy as np
 from jaxtyping import Float, Int
 from jax import Array
 
 from valax.dates.daycounts import ALL_DAY_COUNT_NAMES, DAY_COUNT_FNS
+
+
+def max_period_days(
+    accrual_start_dates: Int[Array, " n"],
+    accrual_end_dates: Int[Array, " n"],
+) -> int:
+    """Longest accrual period in days, as a Python ``int``.
+
+    The bound to pass as :attr:`FloatingLeg.max_days` for an averaged
+    leg. Deliberately **eager**: it reads the date values, so it must be
+    called before a ``jit`` boundary, and it returns a plain ``int`` so
+    the result is hashable and therefore usable as a static field.
+
+    It is a separate function rather than something the leg derives in
+    ``__check_init__`` because ``__check_init__`` re-runs on any
+    ``__init__`` executed inside a trace, where the dates are tracers and
+    reading their values raises. See
+    [JAX Patterns § 2.5](../architecture/jax-patterns.md).
+
+    Args:
+        accrual_start_dates: Accrual start of each period (ordinals).
+        accrual_end_dates: Accrual end of each period (ordinals).
+
+    Returns:
+        The maximum of ``end - start`` across periods.
+
+    Raises:
+        ValueError: If the dates are traced, or if even the longest
+            period is shorter than a day.
+    """
+    try:
+        spans = np.asarray(accrual_end_dates) - np.asarray(
+            accrual_start_dates
+        )
+    except Exception as exc:
+        raise ValueError(
+            "max_period_days needs concrete dates: it is the eager step "
+            "that turns a schedule into the static bound an averaged leg "
+            "compiles against. Call it outside the jit boundary and pass "
+            "the result as FloatingLeg(max_days=...)."
+        ) from exc
+    longest = int(spans.max())
+    if longest < 1:
+        raise ValueError(
+            f"The longest accrual period spans {longest} days; it needs "
+            f"at least one. Check that accrual_end_dates are strictly "
+            f"after accrual_start_dates."
+        )
+    return longest
+
 
 #: Compounding conventions available to :class:`FloatingLeg`, which
 #: documents each one and the two constraints on ``"averaged"``.
@@ -232,16 +283,26 @@ class FloatingLeg(eqx.Module):
       interest-on-interest. Used by a few markets and by averaged
       overnight futures.
 
-    **The averaged convention cannot be priced inside a ``jit``
-    boundary.** The average is defined per rate day, so the period must
-    be subdivided into its actual days, and that shape must be known at
-    trace time. A leg's dates are array fields, hence tracers under
-    ``filter_jit``, and cannot be made static because a ``jnp`` array is
-    unhashable. Price an averaged leg eagerly, or use ``"compounded"``,
-    which needs only the two endpoint discount factors. It also requires
-    an actual/N day count, since the weighted average collapses to a sum
-    of daily ratios only when a period's year fraction equals the sum of
-    its daily fractions.
+    **The averaged convention needs a shape at trace time.** The average
+    is defined per rate day, so a period must be subdivided into its
+    actual days, and that array's length depends on the dates' *values*.
+    There are therefore three ways to price one:
+
+    * **eagerly** — always works;
+    * **closed over** a traced function — works, because the dates are
+      then compile-time constants;
+    * **as a traced argument** (and hence under ``vmap``) — needs
+      ``max_days``, a static bound on the subdivision. Derive it with
+      :func:`max_period_days`.
+
+    Without ``max_days`` the third case raises, naming the way out. Only
+    the *bound* is static; the dates stay dynamic, which is what keeps
+    one compilation serving every schedule and keeps legs stackable. See
+    [JAX Patterns § 2.5](../architecture/jax-patterns.md).
+
+    An averaged leg also requires an actual/N day count, since the
+    weighted average collapses to a sum of daily ratios only when a
+    period's year fraction equals the sum of its daily fractions.
 
     The vocabulary matches
     :attr:`valax.instruments.rates.OISSwap.compounding`
@@ -299,6 +360,13 @@ class FloatingLeg(eqx.Module):
         discount_id: Identifier of the curve this leg discounts on.
         forward_id: Identifier of the projection curve. ``None`` means
             project off the discount curve, i.e. single-curve.
+        max_days: Static upper bound on any accrual period's span in
+            days, used only by ``compounding="averaged"``. Supplying it
+            lets the leg be priced as a *traced* argument — and hence
+            under ``vmap`` — because the daily subdivision then has a
+            trace-time shape. Derive it with :func:`max_period_days`.
+            ``None`` keeps the eager route, which reads the span off the
+            dates and so needs them concrete.
     """
 
     accrual_start_dates: Int[Array, " n"]
@@ -314,6 +382,7 @@ class FloatingLeg(eqx.Module):
     index_id: str = eqx.field(static=True, default="_default_")
     discount_id: str = eqx.field(static=True, default="_default_")
     forward_id: Optional[str] = eqx.field(static=True, default=None)
+    max_days: Optional[int] = eqx.field(static=True, default=None)
 
     def __check_init__(self) -> None:
         """Validate structure and convention pairing — never a value."""
@@ -323,6 +392,25 @@ class FloatingLeg(eqx.Module):
                 f"of {COMPOUNDING_CONVENTIONS}."
             )
         _check_day_count(self)
+        if self.max_days is not None:
+            # Same pairing discipline as ``fixing_dates``: a field no
+            # branch would consult is a configuration error, not a
+            # harmless extra.  Only the averaged convention subdivides a
+            # period, so only it has a shape to bound.
+            if self.compounding != "averaged":
+                raise ValueError(
+                    f"max_days only applies to "
+                    f"compounding='averaged', not "
+                    f"{self.compounding!r}: it bounds the daily "
+                    f"subdivision of an accrual period, and the simple "
+                    f"and compounded conventions never subdivide one. "
+                    f"Drop max_days."
+                )
+            if self.max_days < 1:
+                raise ValueError(
+                    f"max_days must be at least 1 day, got "
+                    f"{self.max_days}."
+                )
         if self.compounding == "averaged" and self.day_count == "30_360":
             # The averaged forward is a *day-count-weighted* average, and
             # it collapses to a sum of daily discount-factor ratios only

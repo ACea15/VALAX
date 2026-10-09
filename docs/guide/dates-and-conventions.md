@@ -408,3 +408,13 @@ generate_schedule(2027, 1, 15, 2025, 1, 15)  # ValueError: not strictly before
 
 The arrays it returns are ordinary ordinal arrays and are safe to close over
 inside `eqx.filter_jit`.
+
+That split is deliberate and general. Dates stay **dynamic** `jnp` integer
+arrays rather than static Python data, so one compilation serves every
+schedule of the same length and a book of trades can be stacked and `vmap`ped
+— which static dates would make impossible. The cost is that any computation
+needing a date's *value* at trace time (a daily subdivision, say) cannot be
+traced, and must instead promote a static *bound*. Making the dates NumPy does
+not help: `equinox` treats `np.ndarray` as dynamic too. The rule, the measured
+comparison of all four representations, and the three sanctioned ways out are
+in [JAX Patterns § 2.5](../architecture/jax-patterns.md#25-when-you-genuinely-need-a-value-at-trace-time-data-dependent-shapes).

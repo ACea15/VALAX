@@ -12,6 +12,81 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — an averaged leg can now be traced, via a static shape bound
+
+The arithmetic-average convention was documented as structurally un-`jit`-able.
+That was wrong, and the correction is worth stating because the reasoning
+generalises.
+
+An average is defined per rate day, so a period must be subdivided into its
+actual days — an array whose *length* depends on the dates' values, which XLA
+forbids. The tempting fix is to change how dates are represented. Measured on
+the pinned equinox 0.13.6 / jax 0.9.2:
+
+| Dates as | Value readable at trace time? | Compilations over 4 schedules | Stack + `vmap`? |
+|---|---|---|---|
+| `jnp` array, normal field | ✗ | **1** | ✓ |
+| `np` array, normal field | ✗ (`eqx.is_array(np.ndarray)` is `True`) | 1 | ✓ |
+| `np` array, `static=True` | ✓ | per schedule | ✗ |
+| `tuple[int, ...]`, `static=True` | ✓ | **3** | ✗ |
+
+NumPy is not an escape hatch — `filter_jit` traces it identically. A static
+`np.ndarray` draws equinox's own *"usually a mistake"* warning, since treedefs
+compare with `==`. And genuinely static dates recompile per schedule and make
+legs **unstackable** (`Mismatch custom node data`), which collides with the
+portfolio grouping key in `PRICING_ONTOLOGY.md` § 0.1: every distinct schedule
+would become its own group.
+
+So the data stays dynamic and only the **shape-determining scalar** is
+promoted: `FloatingLeg.max_days`, derived eagerly with
+`max_period_days(starts, ends)`. Same pattern as
+`HolidayCalendar.max_closure_run`. An averaged leg now prices three ways —
+eagerly, closed over a traced function, or as a **traced argument** and hence
+under `vmap`, with the bound.
+
+Two details that make it exact rather than approximate:
+
+- **Clipping, not masking.** Padding each period's grid to the common length
+  and clipping at that period's own end makes surplus boundaries contribute
+  `P(T_e)/P(T_e) - 1`, which is *exactly* zero in IEEE-754. The bounded path
+  is therefore **bit-for-bit** identical to the per-period one eagerly,
+  verified on ragged 365/366/181-day periods — so one bound serves a ragged
+  schedule with no bias.
+- **An under-sized bound raises.** It would otherwise truncate silently: a
+  200-day bound on annual periods returned roughly *half* the correct average.
+  Guarded with `eqx.error_if`, which fires eagerly, under `jit` and under
+  `vmap`.
+
+Also fixed an ordering bug that was the real reason a *closed-over* leg
+failed: `np.asarray(dates)[i]` is concrete, but `np.asarray(dates[i])` is not,
+because the `jnp` index is itself a traced operation. Hoisting the read is why
+scalar-dated `MoneyMarketFuture` always worked closed-over while an
+array-dated leg did not.
+
+`MoneyMarketFuture` is deliberately untouched — it never passes the new
+`n_days` override, so the curve bootstrap's averaged-futures path is unchanged,
+and `TestAveragedFutures` passes unmodified.
+
+### Added — documentation for the static/dynamic boundary
+
+`docs/architecture/jax-patterns.md` § 2.5, the shape-shaped twin of the
+existing § 2.4 on runtime control flow. States the rule — **static is for
+shapes, dynamic is for values** — with the measured table above, why static
+dates were rejected, and the three sanctioned escape hatches with their
+shipped call sites: precompute eagerly (`generate_schedule`), promote a static
+bound then clip (`max_closure_run`, `max_days`), or read concretely before
+indexing. Also records that `__check_init__` re-runs on any `__init__`
+executed **inside a trace** — not on unflattening — so it cannot host a value
+check.
+
+This is the specification the long-open "static/dynamic pytree hygiene audit"
+(`PRICING_ONTOLOGY.md` § 14.2) would check against. That item stays open:
+writing the convention down is not enforcing it.
+
+Cross-linked from the pages that own the adjacent subjects rather than
+restated: calendars and schedules in `guide/dates-and-conventions.md`, legs and
+cashflows in `guide/fixed-income.md`, and `CONTRIBUTING.md` § 2.5.
+
 ### Added — swap legs, amortisation, pricer-side fixings and per-leg curves
 
 Roadmap Tier 1.4. `valax.instruments.legs` represents a trade as a tuple of
@@ -65,12 +140,14 @@ different.
 
 Two limitations are stated rather than defaulted:
 
-- **`"averaged"` cannot be priced under `jit`.** The average is defined per
-  rate day, so the period must be subdivided into its actual days, and that
-  shape must be known at trace time. A leg's dates are array fields, hence
-  tracers under `filter_jit`, and cannot be made static because a `jnp` array
-  is unhashable. The diagnostic is pinned by a test so it cannot decay into a
-  bare `TracerArrayConversionError`.
+- **`"averaged"` needs a concrete day count.** The average is defined per rate
+  day, so the period must be subdivided into its actual days, and that shape
+  must be known at trace time. As first shipped, this meant an averaged leg
+  priced eagerly only, and the diagnostic was pinned by a test so it could not
+  decay into a bare `TracerArrayConversionError`. **Superseded** by the static
+  `max_days` bound described in the entry above, which makes an averaged leg
+  traceable as an argument and under `vmap`; the limitation was incidental, not
+  structural.
 - **LIBOR-in-arrears is absent, not approximated.** A rate observed at `T_i`
   for `[T_i, T_i + tenor]` but applied to `[T_{i-1}, T_i]` is not worth its
   forward; it needs a convexity adjustment. There is therefore no such

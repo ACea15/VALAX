@@ -54,6 +54,7 @@ from typing import Optional
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Float, Int
 from jax import Array
 
@@ -65,7 +66,10 @@ from valax.curves.graph import CurveGraph
 # it keeps a single definition of "arithmetic average of the daily
 # forwards"; re-deriving it here would create a second one that could
 # drift.
-from valax.curves.instruments import _arithmetic_average_forward
+from valax.curves.instruments import (
+    _arithmetic_average_forward,
+    _arithmetic_average_forwards,
+)
 from valax.dates.daycounts import year_fraction
 from valax.instruments.legs import FixedLeg, FloatingLeg, Leg, MultiLegSwap
 
@@ -266,14 +270,57 @@ def floating_leg_pv(
                 f"leg with compounding='compounded', or value it with "
                 f"no history for its index."
             )
-        rates = jnp.stack(
-            [
-                _arithmetic_average_forward(
-                    forward_curve, starts[i], ends[i], taus[i]
-                )
-                for i in range(leg.n_periods)
-            ]
-        )
+        if leg.max_days is None:
+            # Eager route: each period's exact day count is read off its
+            # dates, so they must be concrete.  Note the *order* --
+            # ``np.asarray`` on the whole array first, then a NumPy
+            # index.  Indexing with ``jnp`` first yields a tracer even
+            # when the leg is a compile-time constant, because the index
+            # is itself a traced operation; this ordering is what lets a
+            # closed-over leg price under ``jit``.
+            try:
+                concrete_starts = np.asarray(starts)
+                concrete_ends = np.asarray(ends)
+            except Exception as exc:
+                raise ValueError(
+                    "An averaged leg with no max_days needs a concrete "
+                    "day count per period, but this leg's dates are "
+                    "traced. Either close the leg over the traced "
+                    "function instead of passing it as an argument, or "
+                    "set max_days (see "
+                    "valax.instruments.legs.max_period_days), which "
+                    "compiles the daily subdivision against a static "
+                    "bound and works under jit and vmap alike."
+                ) from exc
+            rates = jnp.stack(
+                [
+                    _arithmetic_average_forward(
+                        forward_curve,
+                        starts[i],
+                        ends[i],
+                        taus[i],
+                        n_days=int(concrete_ends[i] - concrete_starts[i]),
+                    )
+                    for i in range(leg.n_periods)
+                ]
+            )
+        else:
+            # An under-sized bound would truncate each period's average
+            # rather than fail, because the grid simply clips early --
+            # measured at roughly half the correct rate for a 200-day
+            # bound on annual periods.  ``eqx.error_if`` catches it
+            # eagerly, under ``jit`` and under ``vmap`` alike.
+            checked_ends = eqx.error_if(
+                ends,
+                jnp.max(ends - starts) > leg.max_days,
+                f"max_days={leg.max_days} is smaller than this leg's "
+                f"longest accrual period, which would silently truncate "
+                f"its average. Derive the bound with "
+                f"valax.instruments.legs.max_period_days.",
+            )
+            rates = _arithmetic_average_forwards(
+                forward_curve, starts, checked_ends, taus, leg.max_days
+            )
     else:  # "simple"
         projected = (forward_curve(starts) / df_ends_fwd - 1.0) / taus
         if has_history:

@@ -182,6 +182,15 @@ offset, which is why the calendar carries a prefix sum of its business days. Not
 `ymd_to_ordinal` cannot be read back with `int()` inside `jit` — resolve such
 bounds eagerly and store them as static fields.
 
+Dates stay *dynamic* array leaves, never static Python data: static dates would
+recompile per schedule and make trades unstackable. When something genuinely
+needs a date's **value** at trace time — a data-dependent shape, such as
+subdividing a period into its days — promote the minimum shape-determining
+scalar instead and leave the dates dynamic. Making them NumPy is not a way out;
+`equinox` treats `np.ndarray` as dynamic too. See
+[JAX Patterns § 2.5](docs/architecture/jax-patterns.md) for the measured
+comparison and the three sanctioned patterns.
+
 ### 2.6 No scipy inside JIT-traced code
 
 `scipy.optimize`, `scipy.linalg`, etc. are not JAX-traceable. Use the

@@ -178,6 +178,8 @@ factor design and the seasoning cut-over are documented in
 
 ::: valax.instruments.MultiLegSwap
 
+::: valax.instruments.max_period_days
+
 ## Interest rate derivatives
 
 ### Caplet / cap
