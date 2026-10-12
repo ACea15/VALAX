@@ -28,6 +28,14 @@ Stage 4 — Portfolio
 Time evolution & risk
     :func:`evolve_market`, :func:`sample_scenario_set`.
 
+Quote universes (truth → quotes → calibration chain)
+    :class:`RatesWorldSpec`, :func:`sample_rates_world`,
+    :func:`synthesize_curve_quote_set`, :class:`EquityWorldSpec`,
+    :func:`sample_equity_world`, :func:`synthesize_smile_quote_set`,
+    :func:`synthesize_model_quotes`, :func:`rates_snapshot`,
+    :func:`equity_snapshot`, :func:`sample_quote_scenarios`,
+    :func:`sample_equity_trades`, :func:`sample_swap_book`.
+
 Arbitrage stress tests
     :class:`ArbDiagnosis`, :func:`inject_non_psd_correlation`,
     :func:`inject_butterfly_arb`, :func:`inject_non_convex_smile`,
@@ -89,6 +97,25 @@ from valax.market.synthetic.snapshots import (
     sample_market_data,
     sample_market_with_correlation,
 )
+from valax.market.synthetic.universe import (
+    CurveQuoteSet,
+    EquityWorld,
+    EquityWorldSpec,
+    RatesWorld,
+    RatesWorldSpec,
+    SmileQuoteSet,
+    SyntheticSnapshot,
+    equity_snapshot,
+    rates_snapshot,
+    sample_equity_trades,
+    sample_equity_world,
+    sample_quote_scenarios,
+    sample_rates_world,
+    sample_swap_book,
+    synthesize_curve_quote_set,
+    synthesize_model_quotes,
+    synthesize_smile_quote_set,
+)
 
 
 __all__ = [
@@ -137,4 +164,22 @@ __all__ = [
     "inject_negative_density",
     "inject_inconsistent_bootstrap_quotes",
     "inject_basket_variance_violation",
+    # Quote universes (truth → quotes → calibration chain)
+    "CurveQuoteSet",
+    "EquityWorld",
+    "EquityWorldSpec",
+    "RatesWorld",
+    "RatesWorldSpec",
+    "SmileQuoteSet",
+    "SyntheticSnapshot",
+    "equity_snapshot",
+    "rates_snapshot",
+    "sample_equity_trades",
+    "sample_equity_world",
+    "sample_quote_scenarios",
+    "sample_rates_world",
+    "sample_swap_book",
+    "synthesize_curve_quote_set",
+    "synthesize_model_quotes",
+    "synthesize_smile_quote_set",
 ]

@@ -132,10 +132,21 @@ Runnable scripts in `examples/` demonstrate the full library with synthetic mark
 | `07_synthetic_market.py` | Synthetic market snapshot/correlation generators, portfolio sampling, batched pricing |
 | `08_end_to_end_workflow.py` | Full six-stage workflow: synthetic world → noisy observations → calibration → portfolio → pricing/Greeks → arbitrage stress test |
 | `09_pca_rates_pnl.py` | Synthetic yield-curve history, PCA rates factor model, level/slope/curvature shocks, bond-ladder P&L |
+| `10_unified_market_tiers.py` | One option on three markets — flat Black-Scholes, bootstrapped curve + SABR smile, + calibrated Heston — through the same quotes → calibrate → price → quote-risk workflow |
+| `11_unified_multicurve_rates.py` | Synthetic OIS + 3M quotes → joint bootstrap → swap book → book quote risk in one adjoint sweep (vs autodiff and FD), single-curve limit |
+| `12_unified_equity_smile_and_model.py` | Noisy equity quotes → curve, SABR smiles, Heston → European / barrier / Asian prices → Monte Carlo quote risk with fixed-input sensitivities |
+| `13_unified_quote_scenarios.py` | Correlated quote scenarios → `vmap` recalibration + repricing compiled once → P&L explain vs first-order quote risk → VaR / ES |
+
+Examples 10–13 exercise the unified calibration framework end to end on
+synthetic *quotes* generated from a known true market
+(`valax.market.rates_snapshot` / `equity_snapshot`) and assert their own
+claims; `tests/test_examples/` runs them in fast mode
+(`VALAX_EXAMPLES_FAST=1`).
 
 `examples/comparisons/` additionally contains side-by-side comparison scripts
 (e.g. against QuantLib) covering options, fixed income, SABR, caps/swaptions,
-Monte Carlo, PDE/lattice, Heston smiles, and risk/VaR.
+Monte Carlo, PDE/lattice, Heston smiles, risk/VaR, local-vol PDE, and
+Hull-White, G2++ and Cheyette across MC, tree, PDE and analytic engines.
 
 ```bash
 python examples/01_equity_options.py

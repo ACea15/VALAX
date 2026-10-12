@@ -38,6 +38,57 @@ A worked example walking all six stages lives in
     bootstrap, validation, IRS + swaption pricing, and autodiff DV01 — with
     inline commentary on the modelling assumptions at each step.
 
+## Synthetic quote universes
+
+The stages above produce *calibrated objects* directly. To exercise the
+unified calibration framework end to end, `valax.market` can also produce what
+a desk observes — **quotes** — from a sampled true market, together with the
+calibration chain that consumes them:
+
+1. sample a true market — an OIS curve (Nelson-Siegel-Svensson), projection
+   curves (OIS plus a smooth tenor basis), spot, dividend, a SABR smile term
+   structure;
+2. quote it with the library's own code — curve quotes are the par values
+   that zero each bootstrap instrument's residual on the true curves
+   (`valax.curves.par_quote`), smile quotes are the true smile's vols,
+   premium quotes are `price` under a true model
+   (`synthesize_model_quotes`);
+3. add Gaussian noise (rate bp, vol bp, relative premium);
+4. return the quotes **with their chain nodes**, built from the same
+   specification, plus the truth.
+
+```python
+import valax
+from valax.calibration import calibrate_market
+from valax.market import SeedRegistry, default_config, equity_snapshot, rates_snapshot
+
+registry = SeedRegistry(master_seed=7, library_version=valax.__version__)
+cfg = default_config()
+
+rates, world = rates_snapshot(registry, cfg, bp_noise=0.5)         # OIS + 3M
+equity, eq_world = equity_snapshot(registry, cfg, vol_bp_noise=10.0)
+
+calibrated = calibrate_market(equity.chain, equity.quotes, equity.fixed, strict=True)
+```
+
+The true curves lie exactly in the bootstrap's representation (log-linear
+discount factors on the quote maturities), so a **noise-free** snapshot
+recalibrates to the truth to solver tolerance — the strongest end-to-end check
+of a chain. `RatesWorldSpec(zero_basis=True)` gives the single-curve limit with
+multi-curve plumbing. `sample_quote_scenarios` stacks correlated quote
+scenarios (rate level/slope, spot, vol level/skew with spot-vol correlation)
+for `jax.vmap` over `calibrate_market`; `sample_equity_trades` and
+`sample_swap_book` build products on the same world.
+
+Examples 10–13 (`examples/1*_unified_*.py`) walk the full workflow on these
+snapshots; see also [From Quotes to Risk](calibration-to-risk.md).
+
+!!! note "Noise model"
+    Quotes receive i.i.d. Gaussian noise today. Planned: bid/ask pairs whose
+    half-spread becomes the least-squares weight, noise correlated across a
+    strip, and stale / missing quotes flagged through `QuoteProvenance` — the
+    extension point is documented in `valax/market/synthetic/universe.py`.
+
 ## Quick start
 
 ```python
@@ -126,16 +177,23 @@ from valax.market import (
     inject_pcp_violation, inject_negative_density,
     inject_inconsistent_bootstrap_quotes,
     inject_basket_variance_violation,
+    # Quote universes (truth → quotes → calibration chain)
+    RatesWorldSpec, sample_rates_world, synthesize_curve_quote_set,
+    EquityWorldSpec, sample_equity_world, synthesize_smile_quote_set,
+    synthesize_model_quotes, rates_snapshot, equity_snapshot,
+    sample_quote_scenarios, sample_equity_trades, sample_swap_book,
 )
 ```
 
 ## What this module deliberately does *not* do
 
 - It does not perform real calibration to market data.
-- It does not synthesise random vol surfaces (SVI/SABR) attached to
-  `MarketData` — `MarketData.vols` is a scalar-per-asset; full surface
-  synthesis is a follow-up that requires extending the schema.
-- It does not synthesise FX, credit, or inflation data.
+- It does not attach vol surfaces to the legacy `MarketData` —
+  `MarketData.vols` is a scalar per asset. SABR smile term structures are
+  synthesised on the `MarketState` path instead
+  ([quote universes](#synthetic-quote-universes)).
+- It does not synthesise FX, credit, inflation or rates-vol (swaption, cap)
+  quotes yet.
 - It does not implement detection of injected arbitrages — those
   exception types are *reserved* (see
   `valax.core.diagnostics`), and the corresponding tests are

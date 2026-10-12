@@ -70,6 +70,19 @@ def generate_gbm_paths(
     return jax.vmap(single_path)(keys)
 
 
+def _safe_sqrt(x: Float[Array, "..."]) -> Float[Array, "..."]:
+    """``sqrt(x)`` for ``x >= 0`` with a finite derivative at ``x = 0``.
+
+    The QE scheme evaluates both branches of ``jnp.where`` and clamps their
+    radicands to zero; a bare ``jnp.sqrt`` there has an infinite derivative,
+    and ``inf * 0`` in the unselected branch turns the whole pathwise
+    gradient into NaN (the double-``where`` pitfall, see
+    ``docs/architecture/jax-patterns.md`` §3). Prices are unchanged.
+    """
+    positive = x > 0.0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, x, 1.0)), 0.0)
+
+
 def generate_heston_paths(
     model: HestonModel,
     spot: Float[Array, ""],
@@ -176,9 +189,9 @@ def generate_heston_paths(
         inv_psi = 1.0 / jnp.where(psi > tiny, psi, 1.0)
         two_inv = 2.0 * inv_psi
         rad = jnp.maximum(two_inv * (two_inv - 1.0), 0.0)
-        b2 = jnp.maximum(two_inv - 1.0 + jnp.sqrt(rad), 0.0)
+        b2 = jnp.maximum(two_inv - 1.0 + _safe_sqrt(rad), 0.0)
         a = m_safe / (1.0 + b2)
-        v_quad = a * (jnp.sqrt(b2) + z_v) ** 2
+        v_quad = a * (_safe_sqrt(b2) + z_v) ** 2
 
         # ── Exponential branch (psi > psi_c, equivalently psi > 1 is
         # the well-defined region; psi_c is the empirical switch point
@@ -207,7 +220,7 @@ def generate_heston_paths(
             + K0
             + K1 * v
             + K2 * v_next
-            + jnp.sqrt(var_term) * z_s
+            + _safe_sqrt(var_term) * z_s
         )
         return (log_s_next, v_next), (log_s_next, v_next)
 

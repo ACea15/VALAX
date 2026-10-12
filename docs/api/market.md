@@ -349,6 +349,46 @@ cache. See [From Quotes to Risk](../guide/calibration-to-risk.md).
 
 ::: valax.market.QuoteSet
 
+## Synthetic quote universes
+
+True markets quoted with the library's own residuals and pricers, returned
+with the calibration chain that consumes them. See
+[Synthetic market data](../guide/synthetic_market.md#synthetic-quote-universes).
+
+::: valax.market.RatesWorldSpec
+
+::: valax.market.RatesWorld
+
+::: valax.market.sample_rates_world
+
+::: valax.market.CurveQuoteSet
+
+::: valax.market.synthesize_curve_quote_set
+
+::: valax.market.EquityWorldSpec
+
+::: valax.market.EquityWorld
+
+::: valax.market.sample_equity_world
+
+::: valax.market.SmileQuoteSet
+
+::: valax.market.synthesize_smile_quote_set
+
+::: valax.market.synthesize_model_quotes
+
+::: valax.market.SyntheticSnapshot
+
+::: valax.market.rates_snapshot
+
+::: valax.market.equity_snapshot
+
+::: valax.market.sample_quote_scenarios
+
+::: valax.market.sample_equity_trades
+
+::: valax.market.sample_swap_book
+
 ## See also
 
 - [User Guide → Synthetic Market Data](../guide/synthetic_market.md) — tutorial walkthrough.

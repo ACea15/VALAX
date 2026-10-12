@@ -28,6 +28,7 @@ from valax.curves.bootstrap_graph import (
     curve_quote_vector,
     curve_residual_fn,
     log_dfs_from_graph,
+    par_quote,
     quote_jacobian,
 )
 from valax.curves.multi_curve import MultiCurveSet, bootstrap_multi_curve

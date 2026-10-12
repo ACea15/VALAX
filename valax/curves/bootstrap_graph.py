@@ -675,6 +675,42 @@ def curve_residual_fn(
     return residual
 
 
+def par_quote(
+    instrument: BootstrapInstrument,
+    graph: CurveGraph,
+    reference_date: Int[Array, ""],
+    *,
+    fixings: FixingHistory | None = None,
+) -> Float[Array, ""]:
+    """Fair quote of a bootstrap instrument on a given curve graph.
+
+    Every VALAX quote residual is linear in its primary quote, so one
+    Newton step from any starting quote lands exactly on the value that
+    zeroes the residual. This is how synthetic markets produce quotes that
+    are *exactly* consistent with a ground-truth curve: price the quote
+    instrument with its own residual, rather than a re-implementation.
+
+    Args:
+        instrument: The bootstrap quote (its embedded quote value is only a
+            starting point).
+        graph: Curves to price against (must contain every curve the
+            instrument touches).
+        reference_date: Valuation date ordinal.
+        fixings: Optional realised-fixings registry.
+
+    Returns:
+        The quote, in the instrument's native units, at which its residual
+        vanishes on ``graph``.
+
+    Raises:
+        TypeError: If the instrument type has no registered quote field.
+    """
+    fix = empty_fixing_history() if fixings is None else fixings
+    ref = jnp.asarray(reference_date, dtype=jnp.int32)
+    residual = instrument.residual(graph, fix, ref)
+    return _fitted_quote(instrument, graph, fix, ref, residual)
+
+
 def validate_curve_system(
     curve_specs: Sequence[CurveSpec],
     instruments: Sequence[BootstrapInstrument],

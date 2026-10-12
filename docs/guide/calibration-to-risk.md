@@ -12,6 +12,10 @@ multi-curve with a calibrated smile and model:
 
 The maths is on [Calibration Chains](../theory/calibration-chains.md) and the
 design on [Calibration, Pricing & Risk Architecture](../architecture/calibration-pricing-risk.md).
+Runnable end-to-end versions on synthetic quotes generated from a known true
+market are `examples/10_unified_market_tiers.py` to
+`examples/13_unified_quote_scenarios.py`; the quote generator is described in
+[Synthetic market data](synthetic_market.md#synthetic-quote-universes).
 Every snippet below is JIT-safe: the calibration is traceable, so
 `eqx.filter_jit`, `jax.grad` and `jax.vmap` all apply.
 
