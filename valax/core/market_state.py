@@ -211,6 +211,45 @@ class MarketState(eqx.Module):
         )
 
     @classmethod
+    def flat(
+        cls,
+        rate: Float[Array, ""] | float,
+        *,
+        spot: Float[Array, ""] | float | None = None,
+        vol: Float[Array, ""] | float | None = None,
+        dividend: Float[Array, ""] | float | None = None,
+        reference_date: int | Array = 0,
+        day_count: str = "act_365",
+    ) -> "MarketState":
+        """Build a constant-parameter market: flat rate, flat vol, one spot.
+
+        The degenerate end of the market spectrum — the Black-Scholes world
+        — expressed in the same container as a multi-curve market, so the
+        same ``price`` call and the same risk functions apply. The rate
+        becomes a two-pillar flat curve (exactly ``exp(-rate * t)``), so
+        ``jax.grad`` w.r.t. the market reports rho on its discount factors.
+
+        Args:
+            rate: Continuously-compounded flat rate.
+            spot: Optional spot level of the single underlying.
+            vol: Optional flat volatility.
+            dividend: Optional continuous dividend yield.
+            reference_date: Valuation date ordinal of the flat curve.
+            day_count: Day count of the flat curve.
+
+        Returns:
+            A single-curve :class:`MarketState` under the sentinel id.
+        """
+        from valax.curves.discount import flat_curve
+
+        return cls.single_curve(
+            flat_curve(rate, reference_date, day_count=day_count),
+            spot=spot,
+            vol=None if vol is None else jnp.asarray(vol),
+            dividend=dividend,
+        )
+
+    @classmethod
     def from_market_data(
         cls,
         market_data: Any,

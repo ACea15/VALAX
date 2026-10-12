@@ -69,7 +69,7 @@ import lineax as lx
 from jaxtyping import Float
 from jax import Array
 
-from valax.greeks.adjoint import CalibrationLevel, level_adjoint
+from valax.calibration.level import CalibrationLevel, level_adjoint
 from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_normal_implied_vol
 from valax.surfaces.optionlet_surface import OptionletVolSurface

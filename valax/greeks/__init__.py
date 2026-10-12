@@ -10,6 +10,9 @@ Two layers coexist:
 * :mod:`valax.greeks.adjoint` / :mod:`valax.greeks.vol_adjoint` — quote-space
   (hedge-space) risk: the same gradient pushed one calibration further back, to
   the curve quotes and the volatility quotes a desk actually trades.
+* :mod:`valax.greeks.quote_risk` — quote risk through a whole calibration
+  chain (curves → vols → model), by an explicit adjoint sweep and,
+  independently, by autodiff through the solves.
 """
 
 from valax.greeks.autodiff import greeks, greek
@@ -44,6 +47,14 @@ from valax.greeks.vol_adjoint import (
     sabr_theta,
     sabr_theta_names,
     vol_quote_vegas,
+)
+from valax.greeks.quote_risk import (
+    QuoteRisk,
+    QuoteRiskReconciliation,
+    chain_adjoint,
+    quote_risk_adjoint,
+    quote_risk_autodiff,
+    reconcile_quote_risk,
 )
 from valax.greeks.market_greeks import (
     bucketed_curve_deltas,
@@ -95,4 +106,11 @@ __all__ = [
     "cube_node_level",
     "cube_node_cotangent",
     "optionlet_slice_level",
+    # Quote risk through a whole calibration chain — two independent paths
+    "QuoteRisk",
+    "QuoteRiskReconciliation",
+    "chain_adjoint",
+    "quote_risk_adjoint",
+    "quote_risk_autodiff",
+    "reconcile_quote_risk",
 ]

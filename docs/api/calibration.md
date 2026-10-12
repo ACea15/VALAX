@@ -6,6 +6,72 @@ map constrained parameters to unconstrained space via
 and return the fitted model together with a solver `Solution` for
 convergence diagnostics.
 
+The per-model calibrators below predate the **unified calibration layer**
+documented first, which expresses every calibration as a level returning a
+`CalibrationResult` and composes levels into chains; they are being migrated
+onto it. Walkthrough: [From Quotes to Risk](../guide/calibration-to-risk.md);
+design: [Calibration, Pricing & Risk Architecture](../architecture/calibration-pricing-risk.md).
+
+## Unified calibration layer
+
+### Solver settings
+
+::: valax.calibration.settings.SolverSettings
+
+::: valax.calibration.settings.run_solver
+
+::: valax.calibration.settings.make_solver
+
+### Levels and results
+
+`CalibrationLevel`, `level_adjoint` and the conditioning diagnostics live in
+`valax.calibration.level` and are documented with the risk they produce under
+[Greeks › Generic calibration levels](greeks.md#generic-calibration-levels).
+
+::: valax.calibration.level.LevelInputs
+
+::: valax.calibration.result.CalibrationResult
+
+::: valax.calibration.result.CalibrationDiagnostics
+
+::: valax.calibration.result.CalibrationError
+
+### Chains
+
+::: valax.calibration.chain.CalibrationNode
+
+::: valax.calibration.chain.CalibrationChain
+
+::: valax.calibration.chain.CalibratedMarket
+
+::: valax.calibration.chain.calibrate_market
+
+::: valax.calibration.chain.calibrate_model
+
+::: valax.calibration.chain.solve_level
+
+::: valax.calibration.chain.explicit_level
+
+::: valax.calibration.chain.install_curves
+
+::: valax.calibration.chain.install_surface
+
+::: valax.calibration.chain.install_market_fields
+
+### Node factories
+
+::: valax.calibration.nodes.market_inputs_node
+
+::: valax.calibration.nodes.curve_graph_node
+
+::: valax.calibration.nodes.instrument_quotes
+
+::: valax.calibration.nodes.sabr_smile_node
+
+::: valax.calibration.nodes.equity_forward
+
+::: valax.calibration.nodes.price_fit_node
+
 ## SABR
 
 Fit SABR to a volatility smile. Typical use: fix `beta` and calibrate

@@ -53,11 +53,18 @@ Vanilla contracts are documented on the pricing-method pages:
 
 ## Coverage matrix
 
+The **Calibration** column names the route that produces each input. Every
+route can also be expressed as a level of a calibration chain (quotes →
+curves → vol objects → model) with quote-space risk through the whole chain —
+see [From Quotes to Risk](../guide/calibration-to-risk.md); which levels exist
+as chain nodes today is tracked on the
+[roadmap](../roadmap.md#unified-calibration-pricing-and-risk).
+
 ### Equity options & exotics
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [European](#european-option) | Analytic · MC · PDE · Lattice | constant · Heston · Dupire local vol · SLV | SABR / Heston / SLV / Dupire | GBM (or chosen model); continuous hedging | ✅ |
+| [European](#european-option) | Analytic · MC · PDE · Lattice | constant · Heston · Dupire local vol · SLV | SABR / Heston / SLV / Dupire; as a chain: curves → SABR smile → Heston (`calibrate_market` / `calibrate_model`, quote risk via `chain_adjoint`) | GBM (or chosen model); continuous hedging | ✅ |
 | [American](#american-option) | PDE · Lattice | constant | — | early exercise; GBM | ✅ |
 | [Equity barrier](#equity-barrier-option) | MC · PDE | constant · Heston · local · SLV | as per model | continuous monitoring; sigmoid-smoothed | ✅ |
 | [Asian](#asian-option) | MC | constant · Heston · local · SLV | as per model | discrete averaging (arith/geo) | ✅ |

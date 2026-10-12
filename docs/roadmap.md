@@ -166,7 +166,8 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
                    │
                    │ λ_c composed: curve_quote_deltas ✅ (IFT, FD-gated)
                    │ λ_v composed: vol_quote_vegas    ✅ (IFT on the fit's FOC)
-                   │ λ_m           ❌ (model level not yet a CalibrationLevel)
+                   │ λ_m           🟡 per underlying via chain_adjoint ✅; per-trade basket ❌
+                   │ whole chain:  calibrate_market → chain_adjoint ✅ (§5.6)
                    │ p̄  reported:  fixed_input_adjoints ✅ (no IFT step needed)
                    ▼
             greeks 🟡 ── risk 🟡 ── calibration 🟡 ── surfaces 🟡 ── portfolio ❌
@@ -1327,12 +1328,34 @@ see the [Scaling Up](scaling/index.md) section for the full design.
 - [ ] **Shape-stable / padded batching** — fixed-shape padding so the JIT cache is reused across differently-sized books
 - [ ] **Multi-device parallelism** — shard the instrument / scenario axis across GPUs/TPUs via `jax.sharding` `Mesh` / `shard_map` (today: single-device XLA + `vmap` only)
 - [ ] **GPU/TPU benchmark suite** — published GPU-vs-CPU throughput (roadmap P5.2)
-- [ ] **Unified market-quote container + quote-space (hedge-space) risk** — one container spanning all rate / FX / vol / credit quotes, with PV differentiated end-to-end through calibration so book Greeks/vega come out as hedge-ratio sensitivities to tradeable quotes. **Container shipped** (ontology P2): `valax.core.MarketState` — keyed `CurveGraph` + vol surfaces + spots + fixings + credit/inflation/FX — together with the unified `valax.core.price(instrument, model, market, method=...)` signature and `valax.core.resolve`. **Curve leg shipped** (P4): `valax.greeks.adjoint.curve_quote_deltas` differentiates PV end-to-end through the curve bootstrap by the implicit function theorem, with `CurveAdjoint` reusing one factorisation across a portfolio. **Volatility leg shipped**: `calibrate_swaption_cube_from_curves` derives each node's forward and annuity from the curves, so `dθ_v/dθ_c` is no longer identically zero, and `valax.greeks.vol_adjoint` (`sabr_slice_level` → `vol_quote_vegas`) gives `λ_v` — vega against vol quotes, plus the `dR_v/dθ_c` curve contribution, both FD-validated. **Fixed inputs shipped**: `valax.greeks.fixed_inputs` reports `p̄` separately, and `valax.market.SnapshotProvenance` labels the resulting vectors. **Still missing:** the *model* leg — no `λ_m` level exists, so `dR_m/dθ_c` is absent and an exotic's recalibration response reaches the curves only through the explicit recalibrate-then-price route of `fixed_input_adjoints`, not through the adjoint chain; and the container still spans rates and vols rather than FX and credit quotes. See the [Audit Conformance Map](architecture/aad-audit-conformance.md) for the requirement-by-requirement status.
+- [ ] **Unified market-quote container + quote-space (hedge-space) risk** — one container spanning all rate / FX / vol / credit quotes, with PV differentiated end-to-end through calibration so book Greeks/vega come out as hedge-ratio sensitivities to tradeable quotes. **Container shipped** (ontology P2): `valax.core.MarketState` — keyed `CurveGraph` + vol surfaces + spots + fixings + credit/inflation/FX — together with the unified `valax.core.price(instrument, model, market, method=...)` signature and `valax.core.resolve`. **Curve leg shipped** (P4): `valax.greeks.adjoint.curve_quote_deltas` differentiates PV end-to-end through the curve bootstrap by the implicit function theorem, with `CurveAdjoint` reusing one factorisation across a portfolio. **Volatility leg shipped**: `calibrate_swaption_cube_from_curves` derives each node's forward and annuity from the curves, so `dθ_v/dθ_c` is no longer identically zero, and `valax.greeks.vol_adjoint` (`sabr_slice_level` → `vol_quote_vegas`) gives `λ_v` — vega against vol quotes, plus the `dR_v/dθ_c` curve contribution, both FD-validated. **Fixed inputs shipped**: `valax.greeks.fixed_inputs` reports `p̄` separately, and `valax.market.SnapshotProvenance` labels the resulting vectors. **Quote container and model leg shipped (per underlying)**: `valax.market.QuoteSet` keys every quote and fixed input, and `valax.greeks.quote_risk.chain_adjoint` sweeps curves → vols → model generically (see §5.6). **Still missing:** the *per-trade* model leg (Hull-White on a co-terminal basket, so rates exotics still reach the curves through `fixed_input_adjoints`' recalibrate-then-price route), rates vol levels as chain nodes, and FX and credit quote levels. See the [Audit Conformance Map](architecture/aad-audit-conformance.md) for the requirement-by-requirement status.
 
 **Why:** the JAX-native design makes book- and business-scale a composition
 problem (`vmap` / `jit` / `grad` stack over pure pytree pricers) rather than a
 rewrite. Single-device batching ships today; the heterogeneous book engine and
 multi-device sharding are the remaining pieces.
+
+### 5.6 Unified Calibration, Pricing and Risk {#unified-calibration-pricing-and-risk}
+
+One contract for every calibration and one sweep from price to quotes — see
+[Calibration, Pricing & Risk Architecture](architecture/calibration-pricing-risk.md)
+and the maths in [Calibration Chains](theory/calibration-chains.md).
+
+- [x] **Keyed quote container** — `valax.market.QuoteSet`: identifier-keyed quotes `q` and fixed inputs `p`, differentiable and vmappable
+- [x] **Solver settings + traceable convergence** — `valax.calibration.SolverSettings` / `run_solver` (one solver factory), `CalibrationResult` with a JAX-boolean `converged` flag and eager `check()`
+- [x] **Generic calibration level** — `valax.calibration.level` (`CalibrationLevel`, `LevelInputs`, `level_adjoint`) and `valax.calibration.chain.solve_level` / `explicit_level`
+- [x] **Calibration chains** — `CalibrationNode`, `CalibrationChain`, `calibrate_market` (traceable: `jit` / `grad` / `vmap` over quote scenarios), `calibrate_model` (model as a separate input)
+- [x] **Chain nodes: explicit inputs, curves, SABR smiles, any model through `price`** — `market_inputs_node`, `curve_graph_node`, `sabr_smile_node`, `price_fit_node` (`valax.calibration.nodes`)
+- [x] **Constant-parameter market as a chain** — `MarketState.flat` / `market_inputs_node`; quote risk reproduces textbook Black-Scholes Greeks
+- [x] **Two differentiation paths + reconciliation** — `valax.greeks.quote_risk`: `chain_adjoint` / `quote_risk_adjoint` (explicit IFT sweep, book-linear) and `quote_risk_autodiff` (implicit adjoint through the solves), `reconcile_quote_risk`
+- [x] **Model leg (per underlying)** — `price_fit_node` + `calibrate_model` gives `λ_m`, folded into `chain_adjoint` via `model_levels` (Heston validated against the autodiff path)
+- [ ] **Migrate the per-model calibrators** — `calibrate_sabr`, `calibrate_heston`, `calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette*`, `calibrate_slv*`, `strip_caplet_vols` and the cube / surface loops onto `SolverSettings` + `CalibrationResult` (today: string solver selection, three return shapes, unchecked `throw=False` in four places)
+- [ ] **Rates vol levels as chain nodes** — swaption cube and optionlet strip (`calibrate_swaption_cube_from_curves`, `vol_adjoint`) as `CalibrationNode`s
+- [ ] **Per-trade model basket** — Hull-White / G2++ calibrated per trade to a co-terminal basket, batched with `filter_vmap`; requires de-embedding `initial_curve` from the short-rate models
+- [ ] **Constrained (KKT) and FX smile levels** — arbitrage-free SVI, the FX delta system
+- [ ] **Every pricer reachable from `price`** — register the rates pricers that bypass it (graph pricers, legs, Hull-White tree), policy-supplied default configs
+- [ ] **Derivative convergence of numerical engines** — PDE / lattice / MC Greeks against exact oracles with documented per-engine tolerances
+- [ ] **Position / portfolio layer** — quantity and trade id, grouping by structure and shape, manual schedule padding, book-level quote risk through one sweep
 
 ---
 

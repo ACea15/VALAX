@@ -26,8 +26,10 @@ Unlike QuantLib's `instrument.setPricingEngine(engine)` pattern, VALAX instrumen
 instrument.setPricingEngine(engine)
 price = instrument.NPV()
 
-# VALAX style
-price = black_scholes_price(option, spot, vol, rate, dividend)
+# VALAX style: one front door over (instrument, model, market)
+pv = price(option, BlackScholesModel(), market).price
+# ...or a kernel directly
+pv = black_scholes_price(option, spot, vol, rate, dividend)
 ```
 
 This separation enables composability — any pricing function works with `jax.grad`, `jax.vmap`, and `jax.jit` without special handling.
@@ -55,21 +57,22 @@ This works for **all** pricing methods — analytical, Monte Carlo, PDE, and lat
 
 ```
 valax/
-├── core/          # Type aliases, constants
-├── dates/         # Day count conventions, ordinal dates, schedule generation
-├── curves/        # DiscountCurve, interpolation, forward/zero rates
-├── instruments/   # Data-only pytrees (options, bonds, swaps)
-├── models/        # Stochastic process definitions (GBM, Heston)
+├── core/          # MarketState, price() front door, resolve / bind, pricer registry
+├── dates/         # Day counts, calendars, schedules, accrual
+├── curves/        # DiscountCurve, CurveGraph, joint multi-curve bootstrap
+├── instruments/   # Data-only pytrees (options, bonds, swaps, legs, FX, credit)
+├── models/        # Model parameters (BS, Heston, SABR, HW, G2++, Cheyette, LMM)
+├── calibration/   # Solver settings, levels, CalibrationResult, chains + nodes, per-model fits
 ├── pricing/
-│   ├── analytic/  # Black-Scholes, Black-76, Bachelier, bond pricing
+│   ├── analytic/  # Closed forms and semi-analytics
 │   ├── mc/        # Monte Carlo engine (diffrax SDE paths)
-│   ├── pde/       # Crank-Nicolson finite differences (lineax)
-│   └── lattice/   # CRR binomial tree
-├── greeks/        # Generic autodiff wrappers
-├── surfaces/      # Volatility surfaces (Grid, SABR, SVI) + calibration
-├── market/        # MarketData container, scenario definitions
-├── risk/          # Scenario generation, curve shocks, VaR/ES
-└── portfolio/     # vmap batch pricing
+│   ├── pde/       # Finite differences (1D, ADI 2D)
+│   └── lattice/   # Binomial and Hull-White trees
+├── greeks/        # Market / model greeks, IFT adjoints, quote risk through chains
+├── surfaces/      # Vol surfaces and cubes (constant, grid, SABR, SVI, optionlet)
+├── market/        # QuoteSet, provenance, keyed scenarios, synthetic markets
+├── risk/          # Keyed shocks, repricing, ladders, VaR/ES, bucketing
+└── portfolio/     # Homogeneous vmap batch pricing (legacy)
 ```
 
 ## Dependency Roles
@@ -78,19 +81,35 @@ valax/
 |---|---|
 | **equinox** | All data structures. `eqx.Module` = frozen dataclass + JAX pytree. Use `eqx.filter_jit`/`eqx.filter_grad` for modules with static fields. |
 | **diffrax** | SDE path simulation for Monte Carlo. Provides Euler-Maruyama, Milstein, and higher-order methods with full differentiability. |
-| **optimistix** | Root-finding for curve bootstrapping. Supports implicit differentiation through the solve. |
-| **optax** | Gradient-based optimization for model calibration. |
+| **optimistix** | Every calibration solve (root-find, least squares, minimise) through `valax.calibration.run_solver`. Its implicit adjoint is the autodiff path of quote risk. |
+| **optax** | First-order optimisers, selectable as a calibration `SolverSettings.method`. |
 | **lineax** | Tridiagonal linear solvers for Crank-Nicolson PDE stepping. |
 | **jaxtyping** | Shape/dtype annotations: `Float[Array, "n_paths n_steps"]`. |
 
 ## Data Flow
 
 ```
-Instrument (pytree)   ─┐
-                       ├─→  pricing_fn()  ─→  price (scalar)
-Market Data (arrays)  ─┘        │
-                                │
-                           jax.grad()  ─→  Greeks
-                           jax.vmap()  ─→  Portfolio prices
-                           jax.jit()   ─→  Compiled execution
+quotes q, fixed inputs p (QuoteSet)
+      │  calibrate_market(chain, q, p)         curves → spots → vol objects
+      ▼
+MarketState ─────────────┐
+      │  calibrate_model(node, q, market, p)   per basket / underlying
+      ▼                  │
+model ───────────────────┤
+Instrument (pytree) ─────┤
+                         ▼
+          price(instrument, model, market)  ─→  PricingResult
+                         │
+                   eqx.filter_grad  ─→  market / model cotangents
+                         │
+                   chain_adjoint    ─→  quote risk q̄, fixed-input risk p̄
+                   (or quote_risk_autodiff, reconciled)
 ```
+
+`jax.jit`, `jax.vmap` and `jax.grad` apply at every stage: the calibration is
+traceable, so a scenario batch of quote sets recalibrates and reprices in one
+compiled program, and a book's cotangents add before a single sweep. A
+constant-parameter Black-Scholes market is the degenerate case of the same
+flow (`MarketState.flat`, or a chain with one explicit level). The full design
+— contracts, decisions and how to extend the framework — is on
+[Calibration, Pricing & Risk](calibration-pricing-risk.md).

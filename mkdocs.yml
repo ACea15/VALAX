@@ -93,6 +93,7 @@ nav:
       - Dates, Schedules & Accrual: guide/dates-and-conventions.md
   - Calibration:
       - Overview: guide/calibration.md
+      - From Quotes to Risk: guide/calibration-to-risk.md
       - Yield Curves & Bootstrapping: guide/curves.md
       - Why Multi-Curve?: guide/why-multicurve.md
       - Volatility Surfaces: guide/vol-surfaces.md
@@ -105,6 +106,7 @@ nav:
       - Parallelism & Devices: scaling/parallelism.md
   - Architecture & Validation:
       - Overview: architecture/overview.md
+      - Calibration, Pricing & Risk: architecture/calibration-pricing-risk.md
       - Productionisation Design: architecture/production.md
       - JAX Patterns: architecture/jax-patterns.md
       - PDE Solvers Design: architecture/pde-design.md
@@ -125,6 +127,7 @@ nav:
       - Greeks & Automatic Differentiation: theory/greeks.md
       - Risk Measures: theory/risk-measures.md
       - Calibration Theory: theory/calibration.md
+      - "Calibration Chains: Quotes to Risk": theory/calibration-chains.md
       - Interest-Rate Derivatives: theory/rate-derivatives.md
       - References: theory/references.md
       - Rates:

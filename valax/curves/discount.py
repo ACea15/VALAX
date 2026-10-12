@@ -70,6 +70,45 @@ class DiscountCurve(eqx.Module):
         return jnp.exp(log_df_interp)
 
 
+def flat_curve(
+    rate: float | Float[Array, ""],
+    reference_date: int | Int[Array, ""] = 0,
+    horizon_years: float = 100.0,
+    day_count: str = "act_365",
+) -> DiscountCurve:
+    """Two-pillar curve at a constant continuously-compounded rate.
+
+    The degenerate curve of a constant-parameter (Black-Scholes) market: log-
+    linear interpolation between ``DF = 1`` at ``reference_date`` and
+    ``exp(-rate * horizon)`` at the far pillar is exactly ``exp(-rate * t)``,
+    and flat extrapolation beyond it keeps the zero rate constant. Fully
+    differentiable in ``rate``.
+
+    Args:
+        rate: Continuously-compounded zero rate.
+        reference_date: Valuation date ordinal.
+        horizon_years: Far-pillar maturity in years; only needs to exceed the
+            longest horizon priced.
+        day_count: Day-count convention of the curve.
+
+    Returns:
+        A :class:`DiscountCurve`.
+    """
+    rate_arr = jnp.asarray(rate, dtype=jnp.float64)
+    ref = jnp.asarray(reference_date, dtype=jnp.int32)
+    far = ref + jnp.int32(int(horizon_years * 365.0))
+    # Times measured in the curve's own day count, so the far-pillar DF is
+    # exactly exp(-rate * t(far)) whatever the convention.
+    far_time = year_fraction(ref, far, day_count)
+    times = jnp.stack([jnp.zeros_like(far_time), far_time]).astype(jnp.float64)
+    return DiscountCurve(
+        pillar_dates=jnp.stack([ref, far]),
+        discount_factors=jnp.exp(-rate_arr * times),
+        reference_date=ref,
+        day_count=day_count,
+    )
+
+
 def forward_rate(
     curve: DiscountCurve,
     start: Int[Array, ""],

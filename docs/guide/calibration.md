@@ -10,6 +10,12 @@ This page covers the **end-to-end calibration workflow**: which liquid market in
     pricing, and autodiff DV01 — in a single runnable example with the
     modelling assumptions called out at each step.
 
+!!! tip "Chaining calibrations"
+    This page covers the individual fits. To chain them — quotes → curves →
+    smiles → model — with one convergence contract (`SolverSettings`,
+    `CalibrationResult`) and quote-space risk through the whole chain, see
+    [From Quotes to Risk](calibration-to-risk.md).
+
 ## 1. End-to-End Workflow at a Glance
 
 Every VALAX calibration follows the same three-stage pipeline:

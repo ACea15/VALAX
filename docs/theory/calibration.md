@@ -56,3 +56,12 @@ VALAX optimizes over the **unconstrained** variable $x$ and applies the transfor
 - **SVI:** Five parameters for a single-expiry smile can be over-parameterized when only a few strikes are liquid.
 
 **Regularization** (not yet implemented): Adding a penalty term $\lambda \|\boldsymbol{\theta} - \boldsymbol{\theta}_{\text{prior}}\|^2$ to the loss function biases the solution toward a prior (e.g., yesterday's parameters), improving stability at the cost of fit quality. This is standard practice for Heston calibration in production.
+
+### 8.5 Calibrations as Levels of a Chain
+
+A single fit is one **level** of a longer chain — curves, then vol objects,
+then the pricing model — and its sensitivities to the market quotes come from
+the implicit function theorem applied to the fit's residual (or, for a least
+squares fit, to its first-order condition). The general framework, the adjoint
+sweep that turns a price gradient into quote risk, and the chains for rates,
+equities and FX are on [Calibration Chains](calibration-chains.md).

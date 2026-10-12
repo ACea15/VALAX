@@ -675,6 +675,78 @@ def curve_residual_fn(
     return residual
 
 
+def validate_curve_system(
+    curve_specs: Sequence[CurveSpec],
+    instruments: Sequence[BootstrapInstrument],
+) -> None:
+    """Eagerly check that a joint curve system is square and closed.
+
+    The eager half of a curve build, split out so a traceable solve (see
+    :func:`valax.calibration.nodes.curve_graph_node`) can validate once at
+    construction and then run inside ``jit`` / ``grad``.
+
+    Args:
+        curve_specs: The curves to solve for.
+        instruments: The bootstrap quotes.
+
+    Raises:
+        ValueError: If the system is not square, or an instrument touches a
+            curve absent from ``curve_specs``.
+    """
+    _validate_square(curve_specs, instruments)
+    _validate_curves_touched(curve_specs, instruments)
+
+
+def initial_log_dfs(
+    reference_date: Int[Array, ""],
+    curve_specs: Sequence[CurveSpec],
+    initial_guess: Mapping[str, Float[Array, " n"]] | None = None,
+) -> Float[Array, " n_total"]:
+    """Initial log-DF state for a joint curve solve.
+
+    Args:
+        reference_date: Valuation date ordinal.
+        curve_specs: The curves to solve for; their order fixes the layout.
+        initial_guess: Optional per-curve log-DF vectors keyed by
+            ``curve_id``; missing curves fall back to a flat 4% guess.
+
+    Returns:
+        The flat initial state vector.
+
+    Raises:
+        ValueError: If a provided guess has the wrong length.
+    """
+    ref_i32 = jnp.asarray(reference_date, dtype=jnp.int32)
+    return _pack_initial_guess(initial_guess, ref_i32, curve_specs)
+
+
+def curve_graph_from_log_dfs(
+    log_dfs: Float[Array, " n_total"],
+    curve_specs: Sequence[CurveSpec],
+    reference_date: Int[Array, ""],
+) -> CurveGraph:
+    """Rebuild a :class:`CurveGraph` from the flat solver state ``theta_c``.
+
+    The inverse of :func:`log_dfs_from_graph`, and the ``assemble`` map of the
+    curve calibration level: it is traceable and differentiable in
+    ``log_dfs``.
+
+    Args:
+        log_dfs: Concatenated pillar log-DFs in ``curve_specs`` order.
+        curve_specs: The curve specs defining the layout.
+        reference_date: Valuation date ordinal.
+
+    Returns:
+        The calibrated :class:`CurveGraph`.
+    """
+    return _build_graph_from_log_dfs(
+        log_dfs,
+        curve_specs,
+        _spec_offsets(curve_specs),
+        jnp.asarray(reference_date, dtype=jnp.int32),
+    )
+
+
 # ── Quote-sensitivity Jacobian ───────────────────────────────────────
 
 

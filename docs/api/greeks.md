@@ -162,3 +162,25 @@ is a genuine input to the fit, which is what
 arranged; on the caller-supplied-forward route it is structurally zero.
 
 ::: valax.greeks.vol_adjoint
+
+## Quote risk through a calibration chain
+
+The whole chain at once — curves, vol objects, a calibrated model — by two
+independent paths: the explicit adjoint sweep, which walks the chain's levels
+backwards with one transposed solve each and is linear in its seed (so a book
+is swept once with its summed cotangent), and autodiff through the solves.
+`reconcile_quote_risk` compares them. Walkthrough:
+[From Quotes to Risk](../guide/calibration-to-risk.md); maths:
+[Calibration Chains § I.4](../theory/calibration-chains.md#i4-the-adjoint-sweep).
+
+::: valax.greeks.quote_risk.QuoteRisk
+
+::: valax.greeks.quote_risk.chain_adjoint
+
+::: valax.greeks.quote_risk.quote_risk_adjoint
+
+::: valax.greeks.quote_risk.quote_risk_autodiff
+
+::: valax.greeks.quote_risk.reconcile_quote_risk
+
+::: valax.greeks.quote_risk.QuoteRiskReconciliation

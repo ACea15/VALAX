@@ -3,6 +3,7 @@
 from valax.curves.discount import (
     DISCOUNT_CURVE_INTERP,
     DiscountCurve,
+    flat_curve,
     forward_rate,
     zero_rate,
 )

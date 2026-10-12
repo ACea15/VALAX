@@ -51,7 +51,7 @@ sharply by layer, so it is worth stating up front.
 |---|---|---|
 | **1a — Curves** | Curve node values | ✅ Joint Newton bootstrap, implicit-diff quote Jacobian, **full adjoint chain to quote space** (`λ_c`) |
 | **1b — Volatility objects** | Optionlet vols, SABR cube parameters | ✅ Cap/optionlet stripping and the swaption cube are both curve-coupled and differentiable: `calibrate_swaption_cube_from_curves` derives each node's forward and annuity from the curves, so `dθ_v/dθ_c` is non-zero and FD-validated, and `λ_v` reports vega against vol quotes |
-| **2 — Model** | `σ(t)`, skew parameters | 🟡 Dual-curve Hull-White / G2++ calibration ships, and a model fit *can* be differentiated end to end (T-14's re-calibrated reading). But there is no `λ_m` **adjoint level**, so the model layer is not in the IFT chain: `dR_m/dθ_c` is absent, and an exotic's recalibration response reaches the curves only via an explicit recalibrate-then-price call |
+| **2 — Model** | `σ(t)`, skew parameters | 🟡 A model level now joins the IFT chain generically: `price_fit_node` + `calibrate_model` emit a level whose `λ_m` is folded in by `valax.greeks.quote_risk.chain_adjoint`, so `dR_m/dθ_c` and `dR_m/dθ_v` reach the curve and vol quotes (validated for Heston per underlying against the independent autodiff path). Still missing: the **per-trade** basket of the rates spec (Hull-White on a co-terminal basket), so a rates exotic's recalibration response reaches the curves only via an explicit recalibrate-then-price call |
 | **Fixed inputs `p`** | Not solved for | ✅ `FixedInputs` / `fixed_input_adjoints` report `p̄` separately from `q̄`, with snapshot provenance to label both |
 
 The remaining gap is Layer 2's missing `λ_m`. It is narrower than it was —
@@ -289,6 +289,30 @@ The four choices the specification requires to be stated explicitly:
 | **Neglected convexities** (C-7) | Futures convexity is **explicitly neglected by default** (`no_convexity_adj`) with a plug-in point (`ConvexityAdjFn`) for a desk-supplied or constant adjustment; no model-based adjustment ships. FRA settlement convexity and OIS payment-lag **timing** convexity are **neglected without being modelled**. The latter is now a genuinely second-order omission rather than a consequence of ignoring the lag outright: since N-3 closed, the lagged coupon is discounted at its true `T^p`, and what remains neglected is only the drift correction from the compounded rate no longer being a martingale under the `T^p`-forward measure. **Cash-settled swaption convexity** is likewise neglected: `swaption_forward_and_numeraire(settlement="cash")` evaluates the street-standard flat-yield annuity *at the forward* rather than inside the expectation, so the smile-integral correction (Mercurio 2008) is not applied. Second order in vol, and stated in the module's own docstring |
 | **Gauss-Newton vs full Hessian** (R-5) | **Full Hessian.** The smile level's residual *is* the gradient of the weighted SSE (`valax.greeks.sabr_slice_level`), so `dR_v/dθ_v` obtained by `jax.jacobian` is exactly `J^T W J + Σ_k r_k ∇²r_k` — the Gauss-Newton term plus the curvature term, with nothing dropped. Chosen over Gauss-Newton because the two coincide to the size of the residual on a tight fit, so the approximation only ever matters when the fit is *loose* — precisely when a sensitivity is most likely to be trusted wrongly. There is no neglected term to monitor; `SliceVolAdjoint.stationarity_norm` surfaces the first-order-condition violation instead, which is the assumption that *can* fail |
 | **Multiplicative vs additive basis** (§ 6.2) | **Additive**: `valax.pricing.multicurve.tenor_basis` computes a deterministic spread `s = F_x − F_d` from today's curves and adds it to the model-implied rate |
+
+## Asset-class chain requirements (RT, EQ, FX, XA)
+
+The cross-asset requirements of [Calibration Chains](../theory/calibration-chains.md)
+(Part III), against the generic chain layer (`valax.calibration.chain`,
+`valax.greeks.quote_risk`).
+
+| Req. | Requirement (short) | Status |
+|---|---|---|
+| RT-1 | Rates meet the Audit in full | 🟡 per the rows above |
+| RT-2 | Equities / FX use the rates OIS and xccy curves from the same snapshot | 🟡 a `CalibrationChain` builds each curve once and every later level reads it from the same `MarketState`; no FX / xccy chain is assembled yet |
+| EQ-1 | Forward with discrete dividends discounted at `r_s`, documented repo convention | ❌ continuous dividend yield only (`equity_forward`) |
+| EQ-2 | American quotes: joint forward + vol fit per expiry | ❌ |
+| EQ-3 | Constrained fits on the KKT active set, changes flagged | ❌ SVI is not a chain level |
+| EQ-4 | Dupire inputs smooth; local variance positive | ❌ Dupire is not a chain level |
+| EQ-5 | Level 2 calibrated once per underlying, shared | ✅ `calibrate_model` on the snapshot market; the result is passed to every trade's `quote_risk_adjoint(model_result=...)` |
+| EQ-6 | MC triggers smoothed, regression frozen, duality gap reported | 🟡 smoothing ships (`valax.pricing.mc.payoffs`); duality gap not reported |
+| EQ-7 | Correlations / quanto inputs are fixed inputs with sensitivities | 🟡 the mechanism ships (`fixed_fields` → `p̄`); no correlation level is wired |
+| FX-1 … FX-8 | Spot-date forwards, delta system, conventions, touch level, hybrids | ❌ no FX chain levels yet |
+| XA-1 | Shared objects built once per snapshot | ✅ by construction of `calibrate_market` |
+| XA-2 | Quote risk spans every asset class a trade depends on | ✅ mechanism: `chain_adjoint` accumulates upstream cotangents across levels (curve → spot → smile → model validated); cross-asset levels pending |
+| XA-3 | A rates quote change rebuilds every dependent object | ✅ `calibrate_market` recalibrates the whole chain; the autodiff path differentiates through every dependency |
+| XA-4 | Collateral currency selects the discount curve uniformly | 🟡 via instrument selectors (`discount_id`), not a CSA model (see C-2) |
+| XA-5 | Keys unique across asset classes | 🟡 `QuoteSet` keys are free-form; uniqueness is by convention |
 
 ---
 

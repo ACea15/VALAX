@@ -102,12 +102,16 @@ leverage grids) need ridge/regularisation to keep the calibration Jacobian
 well-conditioned.
 
 !!! note "Built vs planned"
-    **Built:** differentiable calibrations (`optimistix` implicit diff), the curve
-    bootstrap adjoint `quote_jacobian`, and the pushforward/pullback algebra in
-    `valax/risk/bucketing.py`. **Planned:** a single unified market-quote
-    container spanning all rate / FX / vol / credit quotes, with the
-    quotes→calibrate→price pipeline wired end-to-end as the canonical book-risk
-    basis (see the [roadmap](../roadmap.md)).
+    **Built:** the keyed quote container `QuoteSet`, calibration chains
+    (`calibrate_market` → curves, spots, SABR smiles; `calibrate_model` → any
+    model through `price`), and quote risk through the whole chain by two
+    reconciled paths — the explicit adjoint sweep `chain_adjoint` (one sweep
+    for a whole book's summed cotangent) and autodiff through the solves
+    (`quote_risk_autodiff`); plus the curve-only adjoints and the
+    pushforward/pullback algebra in `valax/risk/bucketing.py`. See
+    [From Quotes to Risk](../guide/calibration-to-risk.md). **Planned:** FX and
+    credit quote levels, rates vol cubes as chain nodes, per-trade model baskets
+    (see the [roadmap](../roadmap.md#unified-calibration-pricing-and-risk)).
 
 ## Reliability caveats to respect at scale
 

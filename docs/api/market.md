@@ -340,6 +340,15 @@ zipping short.
 
 ::: valax.market.SnapshotProvenance
 
+## Market quotes
+
+The quote values themselves — the `q` (and fixed inputs `p`) a calibration
+chain is built and differentiated from. Values are differentiable leaves;
+provenance stays in `SnapshotProvenance` above so it never enters the JIT
+cache. See [From Quotes to Risk](../guide/calibration-to-risk.md).
+
+::: valax.market.QuoteSet
+
 ## See also
 
 - [User Guide → Synthetic Market Data](../guide/synthetic_market.md) — tutorial walkthrough.

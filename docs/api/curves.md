@@ -20,6 +20,8 @@ extrapolation beyond the pillar range. Callable directly:
 
 ::: valax.curves.zero_rate
 
+::: valax.curves.flat_curve
+
 ## Inflation curve
 
 Term structure of forward CPI levels. Interpolates in **log-CPI**

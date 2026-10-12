@@ -641,6 +641,11 @@ quotes ──build──▶ MarketState ──calibrate──▶ model ──pri
 including calibration diagnostics and residual analysis — see
 [Tutorial — Rates End-to-End](tutorial-rates.md).
 
+The same pipeline extends past the curves: a vol smile fitted on the curve
+forwards and a model calibrated on the market are further levels of one
+calibration chain, and quote risk through all of them is one sweep — see
+[From Quotes to Risk](calibration-to-risk.md).
+
 ## 10. Extending: register your own pricer
 
 A pricer is registered against `(instrument, model, method)`. Adapters are

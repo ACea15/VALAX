@@ -2,6 +2,7 @@
 
 from valax.market.data import MarketData
 from valax.market.provenance import QuoteProvenance, SnapshotProvenance
+from valax.market.quotes import QuoteSet
 from valax.market.scenario import (
     MarketScenario,
     ScenarioSet,
