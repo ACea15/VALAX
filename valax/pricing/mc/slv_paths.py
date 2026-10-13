@@ -90,6 +90,23 @@ from valax.models.slv import SLVModel
 SchemeName = Literal["midpoint_euler", "milstein"]
 
 
+def _safe_sqrt(x: Float[Array, "..."]) -> Float[Array, "..."]:
+    """``sqrt(max(x, 0))`` with a zero (not infinite) derivative at ``x <= 0``.
+
+    Double-where: the square root never sees a non-positive argument, so
+    reverse-mode AD does not form ``0 · ∞ = NaN`` when a variance (or an
+    unselected QE branch) sits exactly at zero. Values equal ``jnp.sqrt``.
+
+    Args:
+        x: Values (variances or QE intermediates).
+
+    Returns:
+        ``sqrt(x)`` where ``x > 0``, else 0.
+    """
+    pos = x > 0.0
+    return jnp.where(pos, jnp.sqrt(jnp.where(pos, x, 1.0)), 0.0)
+
+
 def _qe_variance_step_factory(
     kappa: Float[Array, ""],
     theta: Float[Array, ""],
@@ -131,10 +148,13 @@ def _qe_variance_step_factory(
         # Quadratic branch.
         inv_psi = 1.0 / jnp.where(psi > tiny, psi, 1.0)
         two_inv = 2.0 * inv_psi
+        # Safe square roots: on the exponential branch (psi > 2) ``rad`` and
+        # ``b2`` hit 0, and a plain sqrt would put NaN into the gradient of
+        # the unselected branch.
         rad = jnp.maximum(two_inv * (two_inv - 1.0), 0.0)
-        b2 = jnp.maximum(two_inv - 1.0 + jnp.sqrt(rad), 0.0)
+        b2 = jnp.maximum(two_inv - 1.0 + _safe_sqrt(rad), 0.0)
         a = m_safe / (1.0 + b2)
-        v_quad = a * (jnp.sqrt(b2) + z_v) ** 2
+        v_quad = a * (_safe_sqrt(b2) + z_v) ** 2
 
         # Exponential branch.
         p = jnp.clip((psi - 1.0) / (psi + 1.0), min=0.0, max=1.0 - 1e-12)
@@ -225,7 +245,7 @@ def generate_slv_paths(
             v_next = qe_step(v, z_v, u)
 
             L_n = _L_at_paths(log_S, t_mid)
-            sqrt_v = jnp.sqrt(jnp.maximum(v, 0.0))
+            sqrt_v = _safe_sqrt(v)
             sigma = L_n * sqrt_v
 
             log_S_next = (
@@ -256,7 +276,7 @@ def generate_slv_paths(
             v_next = qe_step(v, z_v, u)
 
             L_n, dL_dk = _L_and_grad_at_paths(log_S, t_mid)
-            sqrt_v = jnp.sqrt(jnp.maximum(v, 0.0))
+            sqrt_v = _safe_sqrt(v)
             sigma = L_n * sqrt_v
             # ∂σ/∂k = (∂L/∂k) · √V (V is the state, not a function of k).
             dsigma_dk = dL_dk * sqrt_v

@@ -45,8 +45,12 @@ from valax.pricing.analytic.sabr import (
 )
 from valax.pricing.analytic.heston import heston_cos_price
 from valax.pricing.analytic.dupire import (
+    DEFAULT_LOCAL_VOL_GUARD,
+    LocalVolGuard,
     dupire_local_vol,
     dupire_local_vol_from_strike,
+    guarded_local_variance,
+    guarded_local_vol,
 )
 from valax.pricing.analytic.fx import (
     fx_forward_rate,

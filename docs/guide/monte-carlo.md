@@ -307,6 +307,28 @@ closed-form $w(k, T)$ gives exact derivatives via `jax.grad`. `SABRVolSurface`
 and `GridVolSurface` also satisfy the protocol but typically give noisier
 local-vol estimates at extreme strikes.
 
+**Guard against unusable wings.** A path can wander where the surface is not
+a usable model — on a Hagan SABR smile, `k = log(K/F) ≈ −14` returns NaN —
+and one NaN path makes the whole price NaN. `generate_local_vol_paths`
+therefore evaluates Dupire through
+[`guarded_local_vol`](../api/pricing.md#valax.pricing.analytic.guarded_local_vol)
+with the default
+[`LocalVolGuard`](../api/pricing.md#valax.pricing.analytic.LocalVolGuard):
+
+1. the query is clamped to $|k| \le 8\sqrt{w(0, T)}$ (eight ATM
+   total-implied standard deviations) — local vol is flat in $k$ beyond;
+2. a non-positive Gatheral denominator (butterfly arbitrage) or a non-finite
+   term falls back to the implied variance $w(k, T)/T$ at the clamped point;
+3. the local variance is clipped to $[10^{-8},\ 25\, w(0, T)/T]$.
+
+Inside the domain, on an arbitrage-free surface, the guarded value *is*
+Dupire; every branch is a double-`where`, so gradients w.r.t. surface
+parameters stay finite. On example 17's SABR market the reported repro
+(20 000 paths × 48 steps) goes from NaN to a 1Y ATM call of 11.855, against
+11.857 with hand-clamped wings. Pass `guard=None` (or a custom
+`LocalVolGuard`) to change it; raw Dupire's NaN is then the arbitrage
+diagnostic.
+
 **Dupire-consistency gate.** SVI → Dupire → LV MC reprices the input vanilla
 IV grid to < 20 bp absolute IV (4 seeds × 100k paths × 500 steps; see
 `tests/test_pricing/test_local_vol_paths.py::TestDupireConsistency`).
@@ -343,7 +365,7 @@ result = calibrate_slv_leverage(
     log_moneyness_grid=jnp.linspace(-0.25, 0.25, 11),
     time_grid=jnp.linspace(0.05, 2.0, 10),
     n_paths=10_000, key=jax.random.PRNGKey(0),
-    method="kernel", n_iterations=2, ridge=1e-3,
+    method="kernel", n_iterations=2,   # default ridge: 30 pseudo-particles
 )
 leverage = result.value            # LeverageGrid
 result.diagnostics.max_abs_residual  # last fixed-point increment max|L_K - L_{K-1}|
@@ -360,9 +382,10 @@ S, V = generate_slv_paths(
 
 `calibrate_slv_leverage` (and the two-pass `calibrate_slv`, whose `.value` is
 the `SLVModel` and whose Heston fit is `result.children[0]`; pass
-`heston_settings=SolverSettings(...)` to tune it) returns a
-`CalibrationResult`. The leverage pass is a fixed-point iteration (default
-`n_iterations=2`); its diagnostics are the last outer-pass increment — see the
+`heston_settings=SolverSettings(...)` to tune it, or `heston=` to supply a
+fitted backbone) returns a `CalibrationResult`. Each leverage pass is a full
+Guyon–Henry-Labordère sweep (default `n_iterations=2`); its diagnostics are
+the last pass-to-pass increment, a Monte Carlo stability check — see the
 [SLV guide](slv.md) for what converges and what does not.
 
 **Scheme.** Variance leg uses Andersen-QE (exact in distribution at

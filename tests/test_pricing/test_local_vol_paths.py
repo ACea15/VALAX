@@ -330,11 +330,14 @@ class TestGolden:
         payoff = jnp.maximum(paths[:, -1] - K, 0.0)
         price = jnp.exp(-rate * T) * jnp.mean(payoff)
 
-        # Strict golden — exact bit-equal to drift detect.
+        # Strict golden — exact bit-equal to drift detect. v2: the default
+        # LocalVolGuard (|k| <= 8 ATM sd, variance in [1e-8, 25 · ATM]) moved
+        # this price by 2e-8 relative (a few paths beyond the early-time
+        # domain); with guard=None it is unchanged from v1.
         assert_matches_golden(
             "local_vol_mc_canonical",
             price,
-            version=1,
+            version=2,
             rtol=1e-12,
             atol=1e-12,
         )
@@ -506,3 +509,99 @@ class TestSchemeComparison:
             f"{se_diff:.5f}: Milstein appears MORE biased than Euler. "
             f"Per-seed diffs: {[round(d, 5) for d in paired_diffs]}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 9. LocalVolGuard: finite paths where raw Dupire is NaN
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _example17_lv_model():
+    """Example 17's SABR-smile market (Hagan surface, flat 1Y carry)."""
+    from valax.surfaces.sabr_surface import SABRVolSurface
+
+    surface = SABRVolSurface(
+        expiries=jnp.array([0.5, 1.0]),
+        forwards=jnp.array([101.50646605234357, 101.60090387045518]),
+        alphas=jnp.array([2.941672587386952, 2.928149508698076]),
+        betas=jnp.array([0.5, 0.5]),
+        rhos=jnp.array([-0.5435316093507521, -0.4118260146951523]),
+        nus=jnp.array([0.8955175856106505, 0.7463431942501192]),
+    )
+    model = LocalVolModel.from_flat_rate(
+        surface, rate=0.027146146570611727, dividend=0.02528628643942919,
+    )
+    return model, surface, jnp.array(101.41211601397752)
+
+
+class TestLocalVolGuard:
+    def test_example17_repro_is_finite(self):
+        """The reported repro: 20k paths × 48 steps, key 2017. Raw Dupire
+        lets one path crash deep into the wing, where Hagan's SABR is NaN;
+        the default guard keeps every path finite."""
+        model, _, spot = _example17_lv_model()
+        key = jax.random.PRNGKey(2017)
+        raw = generate_local_vol_paths(model, spot, 1.0, 48, 20_000, key, guard=None)
+        assert not bool(jnp.all(jnp.isfinite(raw)))  # anti-vacuity
+        paths = generate_local_vol_paths(model, spot, 1.0, 48, 20_000, key)
+        assert bool(jnp.all(jnp.isfinite(paths)))
+        price = jnp.exp(-model.rate) * jnp.mean(jnp.maximum(paths[:, -1] - spot, 0.0))
+        assert 11.0 < float(price) < 12.7  # 1Y ATM smile call ≈ 11.79
+
+    def test_example17_gradients_finite(self):
+        """Double-where guards: d price / d surface parameters stays finite."""
+        import equinox as eqx
+
+        model, surface, spot = _example17_lv_model()
+
+        def pv(surf):
+            m = eqx.tree_at(lambda mm: mm.surface, model, surf)
+            S = generate_local_vol_paths(m, spot, 1.0, 48, 20_000, jax.random.PRNGKey(2017))
+            return jnp.mean(jnp.maximum(S[:, -1] - spot, 0.0))
+
+        g = eqx.filter_grad(pv)(surface)
+        leaves = [x for x in jax.tree_util.tree_leaves(g) if hasattr(x, "shape")]
+        assert leaves and all(bool(jnp.all(jnp.isfinite(x))) for x in leaves)
+        assert float(jnp.max(jnp.abs(g.alphas))) > 0.0
+
+    def test_guard_is_dupire_inside_its_domain(self, smile_lv_model):
+        """Inside the domain, on an arbitrage-free surface, guarded == raw."""
+        from valax.pricing.analytic.dupire import dupire_local_vol, guarded_local_vol
+
+        _, surf = smile_lv_model
+        ks = jnp.linspace(-0.5, 0.5, 21)
+        for T in (0.25, 1.0):
+            raw = jax.vmap(lambda k: dupire_local_vol(surf, k, jnp.array(T)))(ks)
+            guarded = jax.vmap(lambda k: guarded_local_vol(surf, k, jnp.array(T)))(ks)
+            assert jnp.allclose(raw, guarded, rtol=1e-14, atol=0.0)
+
+    def test_guard_domain_and_range(self):
+        """Beyond n_sd ATM standard deviations the local vol is flat in k;
+        everywhere it is finite and within [floor, cap]."""
+        from valax.pricing.analytic.dupire import (
+            LocalVolGuard, guarded_local_variance,
+        )
+
+        _, surface, _ = _example17_lv_model()
+        T = jnp.array(1.0)
+        guard = LocalVolGuard()
+        w_atm = surface.total_variance(jnp.array(0.0), T)
+        edge = -guard.n_sd * jnp.sqrt(w_atm)
+        far = guarded_local_variance(surface, jnp.array(-14.5), T)
+        at_edge = guarded_local_variance(surface, edge, T)
+        assert jnp.isfinite(far) and jnp.allclose(far, at_edge, rtol=1e-14)
+        ks = jnp.linspace(-20.0, 5.0, 101)
+        var = jax.vmap(lambda k: guarded_local_variance(surface, k, T))(ks)
+        assert bool(jnp.all(jnp.isfinite(var)))
+        assert float(jnp.min(var)) >= guard.variance_floor
+        assert float(jnp.max(var)) <= guard.variance_cap_multiple * float(w_atm / T) * (1 + 1e-12)
+
+    def test_guarded_paths_jit(self, smile_lv_model):
+        import equinox as eqx
+
+        model, _ = smile_lv_model
+        f = eqx.filter_jit(
+            lambda m, s, k: generate_local_vol_paths(m, s, 1.0, 20, 500, k, scheme="milstein")
+        )
+        paths = f(model, jnp.array(100.0), jax.random.PRNGKey(3))
+        assert paths.shape == (500, 21) and bool(jnp.all(jnp.isfinite(paths)))

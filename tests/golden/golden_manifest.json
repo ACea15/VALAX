@@ -27,9 +27,9 @@
     "jax_version": "0.9.2",
     "library_version": "0.1.0",
     "master_seed": -1,
-    "sha256": "b94950609402fca90eef92b6342cce323bf121d70248ca440f9d9dd25fe82ca1",
+    "sha256": "589402bf24bf3f3015cb82b827499b644d0c3cd8c0eea76b7e67432346664184",
     "shape": [],
-    "version": 1
+    "version": 2
   },
   "slv_mc_canonical": {
     "dtype": "float64",

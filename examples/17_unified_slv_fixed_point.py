@@ -2,16 +2,18 @@
 
   1. Sample a true equity market (OIS curve, spot, dividend, SABR smile term
      structure), quote it with noise, and calibrate the market chain (curve →
-     spot/dividend → SABR smiles). Calibrate Heston to the 1Y smile quotes
-     (κ held fixed) — pass 1 of the two-pass SLV calibration.
-  2. Calibrate the SLV leverage ``L(k, t)`` (pass 2) for
-     ``n_iterations = 1, 2, 3, …``. The leverage is the output of a Monte Carlo
-     fixed point ``L_{k+1} = G(L_k)``, and the result says so: the last
-     increment ``L_K − L_{K−1}`` is the residual, ``converged`` is
-     ``max|ΔL| <= atol`` (never for a single pass), the clip fraction is
-     reported, and ``check()`` covers the Heston child too. Each SLV model
-     reprices the vanilla smile by Monte Carlo, including the 6M expiry the
-     Heston backbone was *not* fitted to.
+     spot/dividend → SABR smiles). Calibrate the Heston backbone to *both*
+     smiles (κ held fixed) — pass 1 of the two-pass SLV calibration. A
+     one-expiry, five-parameter Heston fit on this market does not converge;
+     the two-expiry fit does.
+  2. ``calibrate_slv(heston=…)`` builds the leverage ``L(k, t)`` (pass 2) on
+     top of that backbone for ``n_iterations = 1, 2, 3, …``. Each pass is a
+     full Guyon–Henry-Labordère forward sweep, so one pass is already the
+     self-consistent calibration; later passes re-simulate it, and the result
+     reports the last increment ``L_K − L_{K−1}`` as the residual (a Monte
+     Carlo stability check), ``converged`` as ``max|ΔL| <= atol`` (never for a
+     single pass), the clip fraction, and the Heston backbone as its child.
+     Each SLV model reprices the vanilla smile by Monte Carlo.
   3. Price an up-and-out call under local vol, Heston and SLV — three models
      that agree on the 1Y vanillas, three different barrier prices.
   4. Risk of the SLV barrier to every market quote by plain reverse-mode AD
@@ -19,6 +21,10 @@
      Heston fit (implicit adjoint), the *unrolled* leverage passes, and the
      Monte Carlo pricer. One entry is checked against a central finite
      difference that reruns every calibration with the same random numbers.
+
+The local-vol model prices on the raw SABR surface: the default
+``LocalVolGuard`` of the path generator keeps a path that wanders deep into
+the wing (where Hagan's expansion returns NaN) finite.
 
 Run::
 
@@ -28,7 +34,6 @@ Run::
 # %% Imports and setup
 from __future__ import annotations
 
-import dataclasses
 import os
 
 import equinox as eqx
@@ -40,14 +45,15 @@ from jaxtyping import Float
 
 import valax
 from valax.calibration import (
+    SLV_SETTINGS,
     CalibrationError,
     SolverSettings,
+    calibrate_heston,
     calibrate_market,
     calibrate_model,
-    calibrate_slv_leverage,
+    calibrate_slv,
     price_fit_node,
 )
-from valax.calibration.slv import SLV_SETTINGS
 from valax.calibration.transforms import HESTON_TRANSFORMS
 from valax.core.binding import project_rate
 from valax.core.pricing import price
@@ -59,7 +65,6 @@ from valax.market import (
     default_config,
     equity_snapshot,
 )
-from valax.models import SLVModel
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
 from valax.models.local_vol import LocalVolModel
@@ -67,22 +72,28 @@ from valax.pricing.analytic.black_scholes import (
     black_scholes_implied_vol,
     black_scholes_price,
 )
+from valax.pricing.analytic.heston import heston_cos_price
 from valax.pricing.mc.engine import MCConfig
 
 jax.config.update("jax_enable_x64", True)
 
 FAST = os.environ.get("VALAX_EXAMPLES_FAST") == "1"
 VOL_NOISE_BP = 10.0
-T_EXO = 1.0  # Heston basket expiry, leverage horizon, exotic expiry
+T_EXO = 1.0  # leverage horizon, exotic expiry
 KAPPA = 1.5  # Heston mean reversion (held fixed)
-MIX = 0.5  # SLV mixing fraction: backbone vol-of-vol = MIX × Heston ξ
 ITERATIONS = (1, 2, 3) if FAST else (1, 2, 3, 4, 5)
 # Leverage calibration: cheap (one particle step per time row), same in both modes.
 N_CAL = 50_000
 K_GRID = jnp.linspace(-0.4, 0.4, 17)  # log-moneyness grid of L
-T_GRID = jnp.linspace(T_EXO / 16, T_EXO, 16)
-RIDGE = 200.0  # kernel-estimator prior weight (see the note in section 2)
-MC = MCConfig(n_paths=20_000 if FAST else 100_000, n_steps=48)
+# One leverage row per pricing step: the swarm and the pricer then take the
+# same time steps and query L at the same midpoints.
+N_STEPS = 48
+T_GRID = jnp.linspace(T_EXO / N_STEPS, T_EXO, N_STEPS)
+# Fixed-point tolerance on max|ΔL| over the whole grid. Measured noise floor of
+# this budget (two independent 50k-particle sweeps): ≈ 0.1 — the sparse
+# early-time wing cells dominate the max; ATM cells move by ~0.01.
+SLV_ATOL = 0.2
+MC = MCConfig(n_paths=20_000 if FAST else 100_000, n_steps=N_STEPS)
 # Section 4 differentiates through every particle, so it runs a smaller budget.
 N_CAL_RISK = 5_000 if FAST else 10_000
 MC_RISK = MCConfig(n_paths=5_000 if FAST else 20_000, n_steps=24)
@@ -102,7 +113,7 @@ spec = EquityWorldSpec(expiries=(0.5, 1.0))
 I_EXO = spec.expiries.index(T_EXO)
 
 # %% 1. Market chain and the Heston backbone
-header("1. Quotes → curve → SABR smiles; Heston fitted to the 1Y smile (pass 1)")
+header("1. Quotes → curve → SABR smiles; Heston backbone on both smiles (pass 1)")
 
 snap, world = equity_snapshot(registry, cfg, spec, bp_noise=0.5, vol_bp_noise=VOL_NOISE_BP)
 smile_q = snap.parts["smile"]
@@ -114,29 +125,15 @@ print(f"  spot {float(market.spot()):.2f}, dividend {float(market.dividend()):.3
       f"smile fit RMSE {smile_rmse_bp:.1f} vol bp (quote noise {VOL_NOISE_BP:.0f})")
 assert smile_rmse_bp < 1.5 * VOL_NOISE_BP
 
-heston_node = price_fit_node(
-    "spx_heston",
-    template=HestonModel(
-        v0=jnp.asarray(0.04), kappa=jnp.asarray(KAPPA), theta=jnp.asarray(0.04),
-        xi=jnp.asarray(0.5), rho=jnp.asarray(-0.6),
-    ),
-    transforms={k: HESTON_TRANSFORMS[k] for k in ("v0", "theta", "xi", "rho")},
-    basket=[EuropeanOption(strike=k, expiry=jnp.asarray(T_EXO)) for k in world.strikes[I_EXO]],
-    quote_keys=smile_q.vol_keys[I_EXO],
-    quote_form="lognormal_vol",
-    fixed_fields={"kappa": KAPPA_KEY},
-)
-fixed = snap.fixed.merge(QuoteSet.from_dict({KAPPA_KEY: KAPPA}))
+# The flat carry every model below shares: the 1Y curve rate and the dividend.
+# The SLV particle method and path generator drift at a flat r − q; at 1Y this
+# is exactly the curve's forward, which is what the leverage horizon and the
+# exotic see. All models share it so their prices differ only through dynamics.
+RATE_1Y = project_rate(market.curve(), jnp.asarray(T_EXO))
 
 
 def flat_carry(model, mkt):
-    """Pin a model's rate/dividend at the 1Y curve rate and the dividend.
-
-    The SLV particle method and path generator drift at a flat ``r − q``; at
-    1Y this is exactly the curve's forward, which is what the 1Y Heston
-    basket, the leverage horizon and the exotic all see. All models below
-    share it so their prices differ only through the dynamics.
-    """
+    """Pin a model's rate/dividend at the 1Y curve rate and the dividend."""
     rate = project_rate(mkt.curve(), jnp.asarray(T_EXO))
     return eqx.tree_at(
         lambda m: (m.rate, m.dividend), model, (rate, mkt.dividend()),
@@ -144,65 +141,56 @@ def flat_carry(model, mkt):
     )
 
 
+# Why two expiries: on one SABR smile the five Heston parameters lie in a flat
+# valley (κ, ξ and v0 trade off). ``calibrate_heston`` takes one expiry per
+# quote, so the same call on both smiles is well posed.
+def cos_call(model, k, s, r, q, t):
+    return heston_cos_price(EuropeanOption(strike=k, expiry=t), s, r, q, model)
+
+
+strikes = jnp.concatenate([jnp.asarray(world.strikes[i]) for i in range(I_EXO + 1)])
+expiries = jnp.concatenate([
+    jnp.full(len(world.strikes[i]), spec.expiries[i]) for i in range(I_EXO + 1)
+])
+smile_prices = jax.vmap(lambda k, t: black_scholes_price(
+    EuropeanOption(strike=k, expiry=t), market.spot(), surface(k, t), RATE_1Y,
+    market.dividend()))(strikes, expiries)
+one_y = np.asarray(expiries) == T_EXO
+for label, sel, t in (("1Y only ", one_y, jnp.asarray(T_EXO)),
+                      ("both    ", slice(None), expiries)):
+    r = calibrate_heston(strikes[sel], smile_prices[sel], market.spot(), RATE_1Y,
+                         market.dividend(), t, cos_call)
+    m = r.value
+    print(f"  calibrate_heston, 5 free, {label}: converged {str(bool(r.converged)):5}  "
+          f"{int(r.diagnostics.n_steps):3d} steps  κ {float(m.kappa):5.2f}  ξ {float(m.xi):5.2f}")
+    if label.startswith("1Y"):
+        assert not bool(r.converged)
+    else:
+        assert bool(r.converged)
+
+# The chain node used below (and differentiated in section 4) is the same
+# two-expiry fit through the pricer registry, with κ held fixed and reported.
+heston_node = price_fit_node(
+    "spx_heston",
+    template=HestonModel(
+        v0=jnp.asarray(0.04), kappa=jnp.asarray(KAPPA), theta=jnp.asarray(0.04),
+        xi=jnp.asarray(0.5), rho=jnp.asarray(-0.6),
+    ),
+    transforms={k: HESTON_TRANSFORMS[k] for k in ("v0", "theta", "xi", "rho")},
+    basket=[
+        EuropeanOption(strike=k, expiry=jnp.asarray(spec.expiries[i]))
+        for i in range(I_EXO + 1) for k in world.strikes[i]
+    ],
+    quote_keys=[k for i in range(I_EXO + 1) for k in smile_q.vol_keys[i]],
+    quote_form="lognormal_vol",
+    fixed_fields={"kappa": KAPPA_KEY},
+)
+fixed = snap.fixed.merge(QuoteSet.from_dict({KAPPA_KEY: KAPPA}))
 heston_result = calibrate_model(heston_node, snap.quotes, market, fixed, strict=True)
 heston = flat_carry(heston_result.value, market)
-print(f"  Heston: v0 {float(heston.v0):.4f}  θ {float(heston.theta):.4f}  "
-      f"ξ {float(heston.xi):.3f}  ρ {float(heston.rho):+.3f}  (κ = {KAPPA} fixed)")
-print(f"  1Y basket fit RMSE {float(heston_result.diagnostics.rmse):.2e} (price units), "
+print(f"  backbone node: v0 {float(heston.v0):.4f}  θ {float(heston.theta):.4f}  "
+      f"ξ {float(heston.xi):.3f}  ρ {float(heston.rho):+.3f}  (κ = {KAPPA} fixed), "
       f"{int(heston_result.diagnostics.n_steps)} LM steps")
-
-
-def slv_backbone(hst: HestonModel) -> HestonModel:
-    """The SLV stochastic-vol backbone: Heston with its vol-of-vol scaled by MIX."""
-    return eqx.tree_at(lambda m: m.xi, hst, MIX * hst.xi)
-
-
-def leverage_fit(hst, mkt, n_iterations, *, n_paths=N_CAL, settings=None):
-    """Pass 2: the leverage fixed point against the market's SABR surface."""
-    return calibrate_slv_leverage(
-        slv_backbone(hst), mkt.surface(), mkt.spot(), K_GRID, T_GRID, n_paths, CAL_KEY,
-        method="kernel", ridge=RIDGE, n_iterations=n_iterations, settings=settings,
-    )
-
-
-def two_pass(lev, hst_result, hst, mkt):
-    """The composite ``calibrate_slv`` returns: pass 2 carrying pass 1 as a child.
-
-    ``calibrate_slv`` runs pass 1 itself with ``calibrate_heston`` — all five
-    Heston parameters free on one expiry, which on this smile wanders down a
-    flat valley and never converges. Pass 1 here is the κ-fixed basket node
-    above, so the two results are composed the same way by hand.
-    """
-    slv = SLVModel.from_heston_and_leverage(slv_backbone(hst), mkt.surface(), lev.value)
-    return dataclasses.replace(lev, value=slv, children=(hst_result,))
-
-
-class ClampedWings(eqx.Module):
-    """The SABR surface with flat total variance beyond ``|k| > k_max``.
-
-    Hagan's expansion is not usable at ``|log(K/F)| ≫ 1``; a local-vol path
-    that wanders there would return NaN. Flat wings keep Dupire finite and
-    leave every quoted strike (|k| < 0.25) untouched.
-    """
-
-    surface: eqx.Module
-    k_max: float = eqx.field(static=True, default=1.0)
-
-    def total_variance(
-        self, log_moneyness: Float[Array, ""], expiry: Float[Array, ""]
-    ) -> Float[Array, ""]:
-        """Total variance at the clamped log-moneyness.
-
-        Args:
-            log_moneyness: ``k = log(K / F_T)``.
-            expiry: Year fraction.
-
-        Returns:
-            ``w(clip(k, -k_max, k_max), T)``.
-        """
-        k = jnp.clip(log_moneyness, -self.k_max, self.k_max)
-        return self.surface.total_variance(k, expiry)
-
 
 # The vanilla grid every model must reprice: all quoted strikes up to 1Y.
 vanillas = [
@@ -245,22 +233,38 @@ def mc_vanilla_ivs(model, mkt):
 heston_err_bp = (np.asarray(analytic_ivs(heston, market)) - target_iv) * 1e4
 heston_rms = rms_by_expiry(heston_err_bp)
 print("  Heston (COS) vs the SABR smile, RMS IV error: " + ", ".join(
-    f"{spec.expiries[i]}Y {e:.0f} bp" for i, e in enumerate(heston_rms))
-    + "  (only 1Y is in the basket)")
+    f"{spec.expiries[i]}Y {e:.0f} bp" for i, e in enumerate(heston_rms)))
+
+
+def slv_fit(hst_result, mkt, n_iterations, *, n_paths=N_CAL, atol=SLV_ATOL):
+    """Pass 2 on top of the fitted backbone: ``calibrate_slv(heston=…)``.
+
+    The node result is recorded as the child; its model leaves rate/dividend
+    to the market, so the flat carry is passed explicitly.
+    """
+    return calibrate_slv(
+        spot=mkt.spot(), rate=project_rate(mkt.curve(), jnp.asarray(T_EXO)),
+        dividend=mkt.dividend(), surface=mkt.surface(),
+        log_moneyness_grid=K_GRID, time_grid=T_GRID, n_paths=n_paths, key=CAL_KEY,
+        heston=hst_result, method="kernel", n_iterations=n_iterations,
+        settings=SolverSettings(atol=atol, rtol=0.0),
+    )
+
 
 # %% 2. The leverage fixed point
-header("2. SLV leverage as a fixed point: n_iterations sweep (pass 2)")
+header("2. SLV leverage: Guyon–Henry-Labordère passes, n_iterations sweep (pass 2)")
 
-print(f"  backbone: Heston with ξ × {MIX} (mixing fraction); kernel estimator, ridge {RIDGE:.0f};")
-print(f"  {N_CAL} particles on a {len(T_GRID)}t × {len(K_GRID)}k grid; "
+print("  backbone: the full Heston fit (no vol-of-vol mixing); kernel estimator,")
+print(f"  default ridge; {N_CAL} particles on a {len(T_GRID)}t × {len(K_GRID)}k grid; "
       f"vanillas repriced with {MC.n_paths} paths × {MC.n_steps} steps")
-print(f"  convergence: max|L_K − L_(K−1)| <= atol = {SLV_SETTINGS.atol} (SLV_SETTINGS)\n")
+print(f"  convergence: max|L_K − L_(K−1)| <= atol = {SLV_ATOL} (above the noise floor of "
+      f"this budget; SLV_SETTINGS default {SLV_SETTINGS.atol})\n")
 fits, increments, slv_err_bp, slv_sd_bp = {}, {}, {}, {}
 print(f"  {'n':>2} {'max|ΔL|':>9} {'rms ΔL':>8} {'conv':>6} {'clip':>6}"
       + "".join(f"{f'RMS IV err {t}Y':>17}" for t in spec.expiries[:I_EXO + 1])
       + f"{'max|err|/σ_MC':>15}")
 for n in ITERATIONS:
-    fit = fits[n] = two_pass(leverage_fit(heston, market, n), heston_result, heston, market)
+    fit = fits[n] = slv_fit(heston_result, market, n)
     d = fit.diagnostics
     increments[n] = float(d.max_abs_residual)
     iv, sd = mc_vanilla_ivs(fit.value, market)
@@ -270,13 +274,13 @@ for n in ITERATIONS:
           f"{float(d.extras['clip_fraction']):6.1%}"
           + "".join(f"{e:14.0f} bp" for e in rms_by_expiry(slv_err_bp[n]))
           + f"{float(np.max(np.abs(slv_err_bp[n]) / slv_sd_bp[n])):15.1f}")
-print("  (n = 1 measures the distance from the L ≡ 1 warm start, not convergence)")
+print("  (n = 1 reports the distance from L ≡ 1 — there is nothing to compare it with)")
 
 # The report is exactly the documented contract.
 for n, fit in fits.items():
     d = fit.diagnostics
     assert fit.theta is None and fit.problem == "fixed_point" and int(d.n_steps) == n
-    assert bool(d.converged) == (n >= 2 and increments[n] <= SLV_SETTINGS.atol)
+    assert bool(d.converged) == (n >= 2 and increments[n] <= SLV_ATOL)
     assert 0.0 <= float(d.extras["clip_fraction"]) <= 1.0
     assert len(fit.children) == 1 and fit.children[0].name == "spx_heston"
 for n in ITERATIONS[1:]:
@@ -285,14 +289,18 @@ for n in ITERATIONS[1:]:
     step = fits[n].value.leverage.values - fits[n - 1].value.leverage.values
     assert jnp.allclose(fits[n].diagnostics.residuals, step.ravel(), atol=1e-12)
 assert not bool(fits[1].converged)
-assert increments[2] < 0.25 * increments[1]  # the second pass removes the warm-start error
+# One GHL pass is already self-consistent: the vanillas are repriced as well
+# after one pass as after several (within the pricing noise).
+rms_1 = max(rms_by_expiry(slv_err_bp[1]))
+rms_best = min(max(rms_by_expiry(slv_err_bp[n])) for n in ITERATIONS)
+assert rms_1 < rms_best + 10.0, (rms_1, rms_best)
 floor = max(increments[n] for n in ITERATIONS[1:])
 print("\n  max|ΔL| by pass: " + " → ".join(f"{increments[n]:.3f}" for n in ITERATIONS) + ".")
-print("  Once the warm-start error is gone the increment is Monte Carlo noise (every")
-print(f"  pass re-simulates the swarm with fresh randomness): bounded by {floor:.3f} for")
-print("  n >= 2 but not monotone — more passes cannot push it below the noise floor;")
-print("  more particles can.")
-assert floor < 3 * SLV_SETTINGS.atol
+print("  Every pass is a full self-consistent sweep with fresh randomness, so from")
+print(f"  n = 2 on the increment is the Monte Carlo noise of the estimator, bounded")
+print(f"  by {floor:.3f} and not monotone: a stability check, not a contraction. More")
+print("  passes cannot push it down; more particles (or a larger ridge) can.")
+assert floor <= SLV_ATOL
 
 try:
     fits[1].check()
@@ -300,13 +308,10 @@ try:
 except CalibrationError as e:
     print(f"  n=1 check(): CalibrationError — {str(e)[:70]}…")
 n_conv = next(n for n in ITERATIONS if bool(fits[n].converged))
-slv_fit = fits[n_conv].check()  # covers the Heston child as well
-slv = slv_fit.value
+slv_result = fits[n_conv].check()  # covers the Heston child as well
+slv = slv_result.value
 print(f"  n={n_conv} check(): passes (fixed point and Heston child)")
-tight = two_pass(
-    leverage_fit(heston, market, n_conv, settings=SolverSettings(atol=1e-3, rtol=0.0)),
-    heston_result, heston, market,
-)
+tight = slv_fit(heston_result, market, n_conv, atol=1e-3)
 try:
     tight.check()
     raise AssertionError("atol below the MC noise floor must fail")
@@ -316,8 +321,15 @@ except CalibrationError:
 slv_rms = rms_by_expiry(slv_err_bp[n_conv])
 print(f"\n  RMS IV error vs the smile: Heston {heston_rms[0]:.0f} bp at {spec.expiries[0]}Y "
       f"→ SLV {slv_rms[0]:.0f} bp; 1Y {heston_rms[I_EXO]:.0f} → {slv_rms[I_EXO]:.0f} bp")
-assert slv_rms[0] < heston_rms[0]  # SLV fixes the expiry Heston was not fitted to
-assert max(slv_rms) < 40.0  # particle-method accuracy at this budget (docs: 100–200 bp at 10k)
+z_max = float(np.max(np.abs(slv_err_bp[n_conv]) / slv_sd_bp[n_conv]))
+rms_range = (min(max(rms_by_expiry(slv_err_bp[n])) for n in ITERATIONS),
+             max(max(rms_by_expiry(slv_err_bp[n])) for n in ITERATIONS))
+print(f"  worst SLV vanilla {z_max:.1f} σ_MC from the smile. σ_MC is the pricing noise only;")
+print("  the leverage carries its own estimator noise — the worst-expiry RMS error ranges")
+print(f"  {rms_range[0]:.0f}–{rms_range[1]:.0f} bp across the independent passes above. "
+      "Heston's error is systematic.")
+assert z_max < 4.0  # pricing noise + leverage-estimator noise, no systematic error
+assert max(slv_rms) < 40.0  # particle-method accuracy at this budget
 
 # %% 3. Exotic: LV vs Heston vs SLV
 header("3. Up-and-out call under local vol, Heston and SLV (same vanillas)")
@@ -328,7 +340,10 @@ barrier = EquityBarrierOption(
     is_call=True, is_up=True, is_knock_in=False, smoothing=0.5,
 )
 vanilla = EuropeanOption(strike=spot, expiry=jnp.asarray(T_EXO))
-local_vol = flat_carry(LocalVolModel(surface=ClampedWings(surface)), market)
+# Raw SABR surface: the path generator's default LocalVolGuard clamps the
+# Dupire query to |k| <= 8 ATM standard deviations, so a path deep in the wing
+# (where Hagan's expansion returns NaN) stays finite.
+local_vol = flat_carry(LocalVolModel(surface=surface), market)
 smile_pv = float(price(vanilla, BlackScholesModel(), market).price)
 
 
@@ -363,12 +378,15 @@ print(f"  SLV between LV and Heston: {between}")
 header("4. Quote risk of the SLV barrier: AD through calibrations + fixed point + MC")
 
 
-def slv_barrier_pv(quotes: QuoteSet) -> Float[Array, ""]:
-    """Quotes → curve/smile → Heston → leverage (unrolled) → SLV barrier price."""
+def slv_barrier_pv(quotes: QuoteSet, backbone=None) -> Float[Array, ""]:
+    """Quotes → curve/smile → Heston → leverage (unrolled) → SLV barrier price.
+
+    ``backbone`` (a fitted Heston result) holds pass 1 fixed; ``None``
+    recalibrates it from the quotes like everything else.
+    """
     mkt = calibrate_market(snap.chain, quotes, fixed).market
-    hst = flat_carry(heston_node.calibrate(quotes, mkt, fixed).value, mkt)
-    lev = leverage_fit(hst, mkt, 2, n_paths=N_CAL_RISK).value
-    model = SLVModel.from_heston_and_leverage(slv_backbone(hst), mkt.surface(), lev)
+    hst = heston_node.calibrate(quotes, mkt, fixed) if backbone is None else backbone
+    model = slv_fit(hst, mkt, 2, n_paths=N_CAL_RISK).value
     return price(barrier, model, mkt, method="mc", config=MC_RISK, key=PRICE_KEY).price
 
 
@@ -384,26 +402,52 @@ print(f"  rho    Σ ∂V/∂OIS (per bp)  {sum(float(g[k]) for k in snap.parts['
 print("  vega to smile quotes (per vol point), by expiry:")
 for t, row in zip(spec.expiries, smile_q.vol_keys):
     print(f"    T={t:<5} " + "  ".join(f"{float(g[k]) * 1e-2:+.4f}" for k in row))
+assert np.all(np.isfinite(np.asarray([float(v) for v in g.values.values()])))
 
+
+def central_fd(fn, key, h):
+    up = float(fn(snap.quotes.with_values({key: snap.quotes[key] + h})))
+    dn = float(fn(snap.quotes.with_values({key: snap.quotes[key] - h})))
+    return (up - dn) / (2 * h)
+
+
+# Spot-check 1: everything downstream of the Heston backbone — the smile fit
+# (implicit adjoint), the unrolled GHL passes and the MC pricer — against a
+# central FD that reruns them with the same random numbers. This part of the
+# Monte Carlo sample is a smooth function of the quotes.
+pv_held = eqx.filter_jit(lambda q: slv_barrier_pv(q, heston_result))
+g_held = eqx.filter_jit(jax.grad(lambda q: slv_barrier_pv(q, heston_result)))(snap.quotes)
 vol_keys = [k for row in smile_q.vol_keys for k in row]
-k_star = max(vol_keys, key=lambda k: abs(float(g[k])))
-h = 1e-4  # one vol bp
-fd = (float(pv_fn(snap.quotes.with_values({k_star: snap.quotes[k_star] + h})))
-      - float(pv_fn(snap.quotes.with_values({k_star: snap.quotes[k_star] - h})))) / (2 * h)
-rel = abs(float(g[k_star]) - fd) / abs(fd)
-print(f"\n  spot-check {k_star}: AD {float(g[k_star]):+.6f}  vs  full-recalibration "
+k_star = max(vol_keys, key=lambda k: abs(float(g_held[k])))
+fd = central_fd(pv_held, k_star, 1e-4)  # one vol bp
+rel = abs(float(g_held[k_star]) - fd) / abs(fd)
+print(f"\n  spot-check {k_star}, Heston backbone held: AD {float(g_held[k_star]):+.6f}  vs  "
       f"central FD {fd:+.6f}  (rel. diff {rel:.1e})")
 assert rel < 1e-2
-assert np.all(np.isfinite(np.asarray([float(v) for v in g.values.values()])))
+
+# Spot-check 2: through the backbone as well. Each Andersen-QE variance step
+# picks its branch by ψ = s²/m² ≷ 1.5, and ψ depends on (κ, θ, ξ). At this
+# vol-of-vol some particle-steps sit near the switch, so moving the Heston fit
+# flips branches: the sample is only *piecewise* smooth in the quotes. AD is
+# the pathwise derivative of the smooth pieces; a bump FD picks up the flips
+# and does not converge as h → 0 — so it cannot verify AD here.
+fds = {h: central_fd(pv_fn, k_star, h) for h in (1e-4, 1e-5)}
+print(f"  full chain incl. the Heston refit: AD {float(g[k_star]):+.4f}; central FD "
+      + ", ".join(f"{fd_h:+.1f} (h={h:g})" for h, fd_h in fds.items()))
+print("  — the FD is dominated by QE branch flips (it does not settle as h shrinks).")
 
 # %% 5. What the fixed point is, and is not
 header("5. The strategy")
 print("  • The leverage is an explicit level (theta=None, problem='fixed_point'): its")
-print("    value is the output of n_iterations unrolled Monte Carlo passes, not the")
-print("    root of a residual. Nothing is solved, so there is no IFT level to invert.")
-print("  • Its residual is the last increment L_K − L_(K−1); converged means that")
-print("    increment is below atol, and atol must sit above the MC noise floor —")
-print("    one pass never counts, and extra passes stop helping once at the floor.")
+print("    value is the output of n_iterations unrolled Monte Carlo passes, each a")
+print("    self-consistent Guyon–Henry-Labordère sweep — not the root of a residual.")
+print("    Nothing is solved, so there is no IFT level to invert.")
+print("  • Its residual is the last increment L_K − L_(K−1): the Monte Carlo noise")
+print("    of the estimator. converged means that increment is below atol, and atol")
+print("    must sit above the noise floor — one pass never counts, and extra passes")
+print("    cannot push the increment down; more particles can.")
 print("  • Its risk is plain reverse-mode AD through the passes actually run (and")
-print("    through the Monte Carlo pricer), exact for the grid returned: the FD")
-print("    spot-check above reruns the same passes with the same random numbers.")
+print("    through the Monte Carlo pricer), exact for the grid returned wherever the")
+print("    sample is smooth: the held-backbone FD check above reruns the same passes")
+print("    with the same random numbers. Through the Heston parameters the QE")
+print("    variance scheme makes the sample piecewise smooth; AD is then pathwise.")

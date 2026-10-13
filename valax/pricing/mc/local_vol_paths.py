@@ -93,9 +93,17 @@ the Dupire layer). The Milstein scheme additionally calls
 — mathematically this is a *third* derivative of total variance, still
 clean under x64 but worth knowing if you trace memory.
 
-Gradients through ``generate_local_vol_paths`` w.r.t. surface parameters
-are well-defined for both schemes as long as no path triggers a
-butterfly-arbitrage NaN at the queried ``(k_t, t_n)``.
+Guard: by default the local vol is evaluated through
+:func:`~valax.pricing.analytic.dupire.guarded_local_vol` with
+:data:`~valax.pricing.analytic.dupire.DEFAULT_LOCAL_VOL_GUARD` — the query is
+clamped to ``|k| <= 8 sqrt(w(0, t))`` (flat local vol beyond), a non-positive
+Gatheral denominator falls back to the implied variance, and the local
+variance is clipped to ``[1e-8, 25 · ATM implied variance]``. Raw Dupire on a
+Hagan SABR surface returns NaN for a path that wanders to ``k ≈ -14``, and
+one such path makes the whole price NaN; with the guard every path is finite
+and so are gradients w.r.t. surface parameters. Inside the domain, on an
+arbitrage-free surface, the guarded local vol *is* Dupire. Pass
+``guard=None`` for raw Dupire (NaN on butterfly arbitrage — a diagnostic).
 """
 
 from __future__ import annotations
@@ -108,7 +116,12 @@ from jax import Array
 from jaxtyping import Float
 
 from valax.models.local_vol import LocalVolModel
-from valax.pricing.analytic.dupire import dupire_local_vol
+from valax.pricing.analytic.dupire import (
+    DEFAULT_LOCAL_VOL_GUARD,
+    LocalVolGuard,
+    dupire_local_vol,
+    guarded_local_vol,
+)
 
 
 SchemeName = Literal["midpoint_euler", "milstein"]
@@ -123,6 +136,7 @@ def generate_local_vol_paths(
     key: jax.Array,
     *,
     scheme: SchemeName = "midpoint_euler",
+    guard: LocalVolGuard | None = DEFAULT_LOCAL_VOL_GUARD,
 ) -> Float[Array, "n_paths n_steps_plus1"]:
     """Generate spot paths under a local volatility SDE.
 
@@ -142,6 +156,10 @@ def generate_local_vol_paths(
             for path-dependent payoffs (barriers, lookbacks) where
             *strong*-order convergence matters. See module docstring
             for the full trade-off discussion.
+        guard: Domain / fallback / range guard on the local vol (see
+            :class:`~valax.pricing.analytic.dupire.LocalVolGuard`);
+            ``None`` evaluates raw Dupire, which is NaN wherever the
+            surface's own formula breaks down or has butterfly arbitrage.
 
     Returns:
         Spot paths, shape ``(n_paths, n_steps + 1)``. Column 0 is
@@ -170,6 +188,13 @@ def generate_local_vol_paths(
     def _k_of(log_S, t):
         return log_S - (log_spot + mu * t)
 
+    if guard is None:
+        def local_vol(kk, tt):
+            return dupire_local_vol(surface, kk, tt)
+    else:
+        def local_vol(kk, tt):
+            return guarded_local_vol(surface, kk, tt, guard)
+
     # Static dispatch on scheme — chosen at trace time, the unused
     # closure is not compiled. See ``docs/architecture/jax-patterns.md``
     # §2.1 for the rationale: ``scheme`` is a concrete Python string at
@@ -180,7 +205,7 @@ def generate_local_vol_paths(
         # σ_loc only — no derivative needed.
         def _sigma_at_paths(log_S, t):
             k = _k_of(log_S, t)
-            return jax.vmap(lambda kk: dupire_local_vol(surface, kk, t))(k)
+            return jax.vmap(lambda kk: local_vol(kk, t))(k)
 
         def step(carry, scan_input):
             log_S = carry
@@ -198,7 +223,7 @@ def generate_local_vol_paths(
         # σ_loc and ∂σ_loc/∂k jointly — ``value_and_grad`` avoids two
         # forward passes.
         _sigma_and_grad_scalar = jax.value_and_grad(
-            lambda kk, tt: dupire_local_vol(surface, kk, tt),
+            lambda kk, tt: local_vol(kk, tt),
             argnums=0,
         )
 
