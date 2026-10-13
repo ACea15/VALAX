@@ -76,6 +76,7 @@ class TestSABRCalibration:
         fitted = calibrate_sabr(
             strikes, market_vols, forward, expiry,
             initial_guess=guess,
+            fixed_beta=None,  # beta calibrated too (the default fixes 0.5)
         ).value
 
         # Looser tolerances — beta is poorly identified

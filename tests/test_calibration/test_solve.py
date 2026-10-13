@@ -69,6 +69,17 @@ def _batched(q, u):
     )
 
 
+def _batched_one(th0, node_in):
+    """The default per-node solve of a batched level (for wrapping)."""
+    from valax.calibration.result import diagnostics_from_solution
+    from valax.calibration.settings import run_solver
+
+    sol = run_solver("least_squares", _node_residual, th0, node_in, _LS)
+    return sol.value, diagnostics_from_solution(
+        sol, _node_residual(sol.value, node_in)
+    )
+
+
 def _price(theta):
     return jnp.sum(theta[:, 0] + theta[:, 1] ** 2)
 
@@ -126,6 +137,41 @@ class TestBatchedLevel:
         out = jax.vmap(lambda q_: _batched(q_, jnp.asarray(1.0)).theta)(batch)
         assert out.shape == (2, 3, 2)
 
+    def test_sub_labels_name_node_and_stage(self):
+        """Per-stage diagnostics: labels are the (node, stage) product."""
+        from valax.calibration.result import CalibrationDiagnostics
+
+        def node_solve(th0, node_in):
+            th, diag = _batched_one(th0, node_in)
+            two = lambda x: jnp.stack([x, x])  # noqa: E731
+            return th, CalibrationDiagnostics(
+                residuals=jnp.stack([diag.residuals, diag.residuals]),
+                max_abs_residual=two(diag.max_abs_residual),
+                rmse=two(diag.rmse), n_steps=two(diag.n_steps),
+                converged=jnp.stack([jnp.asarray(True), diag.converged & False]),
+            )
+
+        res = solve_batched_level(
+            "toy", "least_squares", _node_residual,
+            jnp.tile(jnp.array([1.0, 0.0]), (3, 1)),
+            LevelInputs(quotes=_quotes(), upstream=1.0),
+            _node_inputs, _assemble, _LS, labels=("n0", "n1", "n2"),
+            node_solve_fn=node_solve, sub_labels=("s0", "s1"),
+        )
+        assert res.labels == (
+            "n0 s0", "n0 s1", "n1 s0", "n1 s1", "n2 s0", "n2 s1",
+        )
+        assert res.failed_labels() == ("n0 s1", "n1 s1", "n2 s1")
+        assert res.node_max_abs_residuals().shape == (6,)
+        with pytest.raises(ValueError, match="sub-labels"):
+            solve_batched_level(
+                "toy", "least_squares", _node_residual,
+                jnp.tile(jnp.array([1.0, 0.0]), (3, 1)),
+                LevelInputs(quotes=_quotes(), upstream=1.0),
+                _node_inputs, _assemble, _LS, labels=("n0", "n1", "n2"),
+                sub_labels=("s0", "s1"),
+            )
+
     def test_label_count_mismatch_raises(self):
         with pytest.raises(ValueError, match="labels"):
             solve_batched_level(
@@ -176,6 +222,53 @@ class TestFailureNaming:
         assert res.failed_labels() == ("b2",)
         with pytest.raises(CalibrationError, match=r"b2"):
             res.check()
+
+    def test_joint_nan_quote_is_named_exactly(self):
+        """A NaN quote poisons every residual of a joint solve: name the quote."""
+        res = solve_level(
+            "joint", "root", _joint_residual, jnp.ones(3),
+            LevelInputs(quotes=jnp.array([4.0, jnp.nan, 9.0])), _assemble,
+            SolverSettings(method="newton", max_steps=40),
+            labels=("b1", "b2", "b3"),
+        )
+        assert not bool(res.converged)
+        assert not np.isfinite(res.node_max_abs_residuals()).any()
+        assert res.failed_labels() == ("b2",)
+
+    def test_joint_failure_names_the_worst_cluster(self):
+        """Not every node above an absolute bound: the cluster at the worst."""
+        res = solve_level(
+            "joint", "root", _joint_residual, jnp.array([1.0, 0.7, 1.0]),
+            LevelInputs(quotes=jnp.array([4.0, -1.0, 9.0])), _assemble,
+            SolverSettings(method="newton", max_steps=3),
+            labels=("b1", "b2", "b3"),
+        )
+        node_res = res.node_max_abs_residuals()
+        # Every node is still far above the old 1e3 * atol default bound ...
+        assert (node_res > 1e3 * res.settings.atol).all()
+        # ... but only the impossible one is within the worst cluster.
+        assert res.failed_labels() == ("b2",)
+        # An explicit bound keeps its absolute semantics.
+        assert res.failed_labels(max_residual=1e-12) == ("b1", "b2", "b3")
+
+    def test_diverged_joint_solve_falls_back_on_initial_residuals(self):
+        """All residuals NaN: the starting point still singles out the quote."""
+
+        def residual(theta, inputs):
+            # log(theta) is NaN once Newton overshoots theta below zero, and
+            # the coupling spreads that NaN to every node.
+            return jnp.log(theta) - inputs.quotes + 1e-3 * jnp.sum(theta)
+
+        res = solve_level(
+            "joint", "root", residual, jnp.ones(4),
+            LevelInputs(quotes=jnp.array([0.1, 0.0, -0.1, -400.0])), _assemble,
+            SolverSettings(method="newton", max_steps=40),
+            labels=("a", "b", "c", "d"),
+        )
+        assert not bool(res.converged)
+        assert not np.isfinite(res.node_max_abs_residuals()).any()
+        assert "initial_residuals" in res.diagnostics.extras
+        assert res.failed_labels() == ("d",)
 
     def test_max_residual_names_node(self):
         res = _batched(_quotes(), jnp.asarray(1.0))

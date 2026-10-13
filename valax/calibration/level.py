@@ -41,7 +41,7 @@ from jax import Array
 
 
 class LevelInputs(eqx.Module):
-    """The three input blocks of a calibration level.
+    """The input blocks of a calibration level.
 
     Splitting the inputs this way is what makes a single VJP of the residual
     produce the three adjoints the chain needs, without any per-level code.
@@ -56,11 +56,20 @@ class LevelInputs(eqx.Module):
         fixed: Inputs held fixed by the calibration (SABR beta, mean
             reversion, convexity adjustments, …), usually a
             :class:`~valax.market.quotes.QuoteSet`, or ``None``.
+        data: Instrument / trade data the residual reads that is not a
+            market input (e.g. a per-trade calibration basket, possibly
+            traced under ``eqx.filter_vmap``). Carried as pytree leaves —
+            rather than closed over by the static ``residual_fn`` — so a
+            result returned from ``jit`` / ``vmap`` holds no stale tracers
+            and its eager helpers (``condition_number()``) still work. Not a
+            risk input: :func:`~valax.greeks.quote_risk.chain_adjoint` and
+            the quote-risk paths ignore its cotangent.
     """
 
     quotes: Any
     upstream: Any = None
     fixed: Any = None
+    data: Any = None
 
 
 class CalibrationLevel(eqx.Module):

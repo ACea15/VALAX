@@ -51,7 +51,11 @@ from jax import Array
 
 from valax.calibration.basket import basket_fit_level
 from valax.calibration.level import LevelInputs
-from valax.calibration.result import CalibrationProvenance, CalibrationResult
+from valax.calibration.result import (
+    CalibrationProvenance,
+    CalibrationResult,
+    engine_provenance,
+)
 from valax.calibration.settings import SolverSettings
 from valax.calibration.transforms import (
     CHEYETTE_2F_TRANSFORMS,
@@ -136,6 +140,34 @@ def cheyette_provenance(
     )
 
 
+@engine_provenance.register(CheyetteModel)
+@engine_provenance.register(CheyetteModel2F)
+def _cheyette_engine_provenance(
+    model: CheyetteModel | CheyetteModel2F, method: str, config: Any = None
+) -> CalibrationProvenance:
+    """Cheyette through ``price``: the PDE recipes are the frozen-``y`` engine.
+
+    Every Cheyette PDE recipe registered with ``price`` is frozen-``y``, so a
+    basket priced with ``method="pde"`` is engine-bound
+    (:func:`cheyette_provenance`). Monte Carlo simulates the exact ``y`` and is
+    only discretised.
+
+    Args:
+        model: The Cheyette template.
+        method: The concrete pricing method of the basket.
+        config: The basket's pricing config.
+
+    Returns:
+        The provenance to record.
+    """
+    del model
+    if method == "pde":
+        return cheyette_provenance("frozen", config)
+    return CalibrationProvenance(
+        method=method, engine_kind="discretised", config=config
+    )
+
+
 def _cheyette_fit(
     name: str,
     instruments: tuple,
@@ -158,8 +190,9 @@ def _cheyette_fit(
     def bind(model: Any, inp: LevelInputs) -> Any:
         return with_discount_curve(model, inp.upstream)
 
-    def prices(model: Any, _inp: LevelInputs) -> Float[Array, " n"]:
-        return cheyette_pde_prices(model, instruments, engine, config)
+    def prices(model: Any, inp: LevelInputs) -> Float[Array, " n"]:
+        # Basket from ``inputs.data``, not a closure (tracer-free results).
+        return cheyette_pde_prices(model, inp.data, engine, config)
 
     return basket_fit_level(
         name,
@@ -174,6 +207,7 @@ def _cheyette_fit(
         relative=relative,
         settings=CHEYETTE_SETTINGS if settings is None else settings,
         provenance=cheyette_provenance(engine, config),
+        data=tuple(instruments),
         model_label=model_label,
     )
 

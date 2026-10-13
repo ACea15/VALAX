@@ -93,7 +93,7 @@ def calibrate_sabr_surface(
     forwards: Float[Array, " n_expiries"],
     expiries: Float[Array, " n_expiries"],
     *,
-    fixed_beta: Float[Array, ""] | None = None,
+    fixed_beta: Float[Array, ""] | float | None = 0.5,
     weights_per_expiry: list[Float[Array, " n_k"]] | None = None,
     settings: SolverSettings | None = None,
     name: str = "sabr_surface",
@@ -110,7 +110,9 @@ def calibrate_sabr_surface(
         market_vols_per_expiry: List of observed vol arrays, one per expiry.
         forwards: Forward price at each expiry.
         expiries: Expiry grid (year fractions).
-        fixed_beta: If provided, beta is fixed across all slices.
+        fixed_beta: Beta held fixed across all slices — 0.5 by default, as
+            for :func:`~valax.calibration.sabr.calibrate_sabr` and the chain
+            nodes; ``None`` calibrates it per slice.
         weights_per_expiry: Optional per-strike weights, one array per expiry.
         settings: Per-slice solver settings; defaults to
             :data:`~valax.calibration.settings.FIT_SETTINGS`.

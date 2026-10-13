@@ -10,22 +10,31 @@ The two-factor and skewed siblings of example 14's per-trade Hull-White:
      (a, b) and the correlation ρ held fixed as fixed inputs. A co-terminal
      basket alone cannot separate the two factors (the fit is singular), so
      the basket adds the 1Y-tenor swaption at the first exercise date (short
-     vs. long rates is what the second factor moves). G2++ has no analytic
-     swaption route in
-     ``price``; the basket is priced through ``price(..., method="pde")``
-     (2-D ADI), and same-shaped baskets are fitted in one ``eqx.filter_vmap``.
-  3. Price the Bermudans through ``price`` (G2++ PDE) and check the basket
-     PDE against the Brigo-Mercurio closed form.
+     vs. long rates is what the second factor moves). The basket is priced by
+     ``price``'s default for Swaption × G2PPModel — the Brigo-Mercurio closed
+     form — and same-shaped baskets are fitted in one ``eqx.filter_vmap``.
+  3. Price the Bermudans through ``price`` (G2++ 2-D ADI PDE) and measure the
+     grid's own swaption error against the closed form.
   4. Quote risk of one Bermudan by the adjoint sweep (λ_m through cube and
      curves) and independently by autodiff through every calibration and
-     every PDE; the basket target shifts give the vega profile; one target
+     the PDE; the basket target shifts give the vega profile; one target
      shift and one cube quote are checked by full recalibration.
-  5. Cheyette (frozen-y PDE, σ and skew β fitted to a two-strike co-terminal
+  5. **Exact vs engine-consistent calibration**: fit the same basket on the
+     Bermudan's own PDE grid instead. The closed-form fit has portable
+     parameters (provenance ``exact``); the PDE fit fits its basket *as the
+     grid prices it* (``discretised``, config recorded), so the grid's
+     swaption bias does not add to its basket miss. Full mode adds a coarser
+     grid and a converged reference: on each grid the engine-consistent
+     fit's Bermudan error is several times smaller (it cancels against the
+     basket's).
+  6. Cheyette (frozen-y PDE, σ and skew β fitted to a two-strike co-terminal
      basket). The Cheyette PDE has no discount/projection split, so it runs
      on a **single-curve** market (OIS discounts and projects) and ``price``
-     refuses a trade that names a distinct projection curve. Adjoint vs.
-     autodiff, one FD check.
-  6. Model risk: Hull-White, G2++ and Cheyette, each fitted per trade to the
+     refuses a trade that names a distinct projection curve. The fit records
+     its engine-bound provenance; ``check_engine`` refuses another grid.
+     Adjoint vs. autodiff and an FD check (full mode; the test suite runs
+     them too).
+  7. Model risk: Hull-White, G2++ and Cheyette, each fitted per trade to the
      same Bermudan's basket on the same single-curve market.
 
 Run::
@@ -53,6 +62,7 @@ from valax.calibration import (
     swaption_basket_node,
 )
 from valax.calibration.cheyette import CHEYETTE_SETTINGS, cheyette_provenance
+from valax.calibration.result import CalibrationError, check_engine
 from valax.calibration.transforms import free
 from valax.core.binding import bind_curves
 from valax.core.pricing import price
@@ -79,9 +89,9 @@ jax.config.update("jax_enable_x64", True)
 
 FAST = os.environ.get("VALAX_EXAMPLES_FAST") == "1"
 VOL_NOISE_BP = 0.5
-# G2++ (two-factor ADI) and Cheyette (frozen-y, one-factor) grids. The fits
-# are *on-engine*: basket and Bermudan share the grid, so the grid only sets
-# how close the engine is to the continuous model, not the calibration.
+# Bermudan grids: G2++ (two-factor ADI) and Cheyette (frozen-y, one factor).
+# The G2++ basket is priced by the closed form; Cheyette's (no closed form)
+# on its own grid, which makes its parameters engine-bound.
 PDE_G2 = (PDEConfig2D(n_x=41, n_y=41, n_time=40, x_range=5.0) if FAST
           else PDEConfig2D(n_x=81, n_y=81, n_time=100, x_range=5.0))
 PDE_CH = (PDEConfig(n_spot=101, n_time=60, spot_range=5.0) if FAST
@@ -148,7 +158,8 @@ def target_keys(name: str, n: int) -> tuple[str, ...]:
     return tuple(f"{name}.TARGET.{i}" for i in range(n))
 
 
-def g2_node(basket, cube_id, name="g2"):
+def g2_node(basket, cube_id, name="g2", method="analytic", config=None):
+    """Per-trade G2++ level; the basket engine is ``(method, config)``."""
     keys = target_keys(name, len(basket))
     node = swaption_basket_node(
         name,
@@ -163,8 +174,8 @@ def g2_node(basket, cube_id, name="g2"):
         fixed_fields={"mean_reversion_x": A_KEY, "mean_reversion_y": B_KEY,
                       "correlation": RHO_KEY},
         target_keys=keys,
-        method="pde",
-        config=PDE_G2,
+        method=method,
+        config=config,
     )
     return node, keys
 
@@ -189,7 +200,7 @@ print(f"  cube fit RMSE {rmse_bp:.2f} normal-vol bp (quote noise {VOL_NOISE_BP} 
 assert rmse_bp < 1.5 * VOL_NOISE_BP
 
 # %% 2. Per-trade G2++, batched
-header("2. G2++ (σ, η) fitted per trade, a/b/ρ fixed, PDE basket (filter_vmap)")
+header("2. G2++ (σ, η) fitted per trade, a/b/ρ fixed, closed-form basket (filter_vmap)")
 
 ref = int(world.rates.reference_date)
 atm = float(jnp.mean(cube.forwards))
@@ -208,24 +219,24 @@ batched = eqx.filter_vmap(g2_fit)(stacked)
 assert bool(jnp.all(batched.diagnostics.converged))
 assert batched.value.initial_curve is None  # curve-free: price binds the curve
 # The basket is a traced argument, so one compiled fit serves every trade.
-# The batched and single fits run the same BFGS on PDE prices whose
-# floating-point reduction order differs under vmap; they stop at points
-# ~1e-9..3e-8 apart (relative) along the level's flattest direction, inside
-# the solver tolerance — hence 1e-7, not the 1e-10 of the closed-form
-# Hull-White fit.
+# The two-factor level is flatter than Hull-White's (condition number ~1e3),
+# so BFGS under vmap — a different floating-point reduction order — stops a
+# few 1e-9 apart (relative) inside its 1e-12 tolerance: 5e-8, not HW's 1e-10.
 g2_fit_one = eqx.filter_jit(g2_fit)
 for i, (t, b) in enumerate(zip(trades, baskets)):
     one = g2_fit_one(b)
     for f in ("volatility_x", "volatility_y"):
         np.testing.assert_allclose(getattr(batched.value, f)[i], getattr(one.value, f),
-                                   rtol=1e-7)
+                                   rtol=5e-8)
     print(f"  trade {i}: K={float(t.strike):.3%}  σ={float(batched.value.volatility_x[i]):.5f}"
           f"  η={float(batched.value.volatility_y[i]):.5f}  basket RMSE "
           f"{float(batched.diagnostics.rmse[i]):.1e} (relative)")
-print("  filter_vmap fits == trade-by-trade fits (rtol 1e-7)")
+print(f"  filter_vmap fits == trade-by-trade fits (rtol 5e-8); provenance "
+      f"{one.provenance.method} / {one.provenance.engine_kind}")
+assert one.provenance.engine_kind == "exact"
 
 # %% 3. Price the book
-header("3. Bermudans through price() (G2++ 2-D PDE); basket PDE vs closed form")
+header("3. Bermudans through price() (G2++ 2-D PDE); the grid's own swaption error")
 
 models = [tree_index(batched.value, i) for i in range(len(trades))]
 disc = calibrated.market.curve(world.discount_id)
@@ -244,8 +255,9 @@ for sw in baskets[0]:
     worst = max(worst, abs(pde / exact - 1.0))
     tenor = (int(sw.fixed_dates[-1]) - int(sw.expiry_date)) / 365
     print(f"    {(int(sw.expiry_date) - ref) / 365:.0f}Yx{tenor:.0f}Y: cube {mkt * 1e4:7.2f} bp"
-          f"  G2++ PDE {pde * 1e4:7.2f} bp  Brigo-Mercurio {exact * 1e4:7.2f} bp")
-print(f"  max |PDE / closed form - 1| = {worst:.1e} (grid error of the basket engine)")
+          f"  Brigo-Mercurio {exact * 1e4:7.2f} bp  G2++ PDE {pde * 1e4:7.2f} bp")
+print(f"  max |PDE / closed form - 1| = {worst:.1e}: the Bermudan's grid misprices the")
+print("  basket the model was fitted to by this much (see section 5)")
 assert worst < (1e-2 if FAST else 2e-3)
 
 # %% 4. Quote risk of trade 0
@@ -254,10 +266,15 @@ header("4. Quote risk of trade 0: adjoint (λ_m) vs autodiff, vega profile, FD")
 trade, basket = trades[0], baskets[0]
 node, keys = g2_node(basket, vol_spec.cube_id)
 model_result = calibrate_model(node, quotes, calibrated.market, fixed, strict=True)
-if not FAST:  # eager Hessian through the PDE basket: skipped in fast mode
-    g2_cond = float(model_result.condition_number())
-    print(f"  per-trade G2++ level: cond(∂R/∂θ) = {g2_cond:.1e} (well posed with 2Yx1Y)")
-    assert g2_cond < 1e5
+g2_cond = float(model_result.condition_number())
+co_node, co_keys = g2_node(basket[:3], vol_spec.cube_id, name="g2co")
+co_cond = float(co_node.calibrate(
+    QuoteSet(), calibrated.market,
+    fixed.merge(QuoteSet.from_dict({k: 0.0 for k in co_keys})),
+).condition_number())
+print(f"  per-trade G2++ level: cond(∂R/∂θ) = {g2_cond:.1e} with the 2Yx1Y option, "
+      f"{co_cond:.1e} on the co-terminals alone")
+assert g2_cond < 1e5 < co_cond
 adj = quote_risk_adjoint(
     trade, None, calibrated, model_result=model_result, method="pde", config=PDE_G2
 )
@@ -306,13 +323,12 @@ def pv_fn(qq, pp):
 
 vol_key = vols.swaption_keys[vol_spec.expiry_years.index(2)][vol_spec.tenor_years.index(5)][
     vol_spec.strike_offsets_bp.index(0.0)]  # 2Yx5Y ATM: the cell the 2Yx5Y basket option reads
-# The discrete 2-D PDE price is piecewise smooth in its inputs (max(swap, 0)
-# sampled at nodes: a node crossing the exercise boundary is a kink), and each
-# recalibration stops at BFGS stationarity (~1e-11 noise in price). The step
-# sits between the two floors: ≥ 1e-6 can straddle a grid kink, ≤ 1e-7 starts
-# to see the solver noise. Adjoint and autodiff are the exact derivative of the
-# discrete map, so inside a smooth piece they agree with FD to ~1e-6.
-for kind, key, h in (("p", keys[1], 3e-7), ("q", vol_key, 3e-7)):
+# The PDE smooths its payoff and exercise projection over each node's cell
+# (PDEConfig2D.smooth_payoff, the default), so the discrete price is C^1 in its
+# inputs and an ordinary step works: no grid kink to straddle, and at h = 1e-5
+# the recalibration's stopping noise (~1e-11 in price) is ~1e-6 of the slope.
+# Adjoint and autodiff are the exact derivative of the discrete map.
+for kind, key, h in (("p", keys[1], 1e-5), ("q", vol_key, 1e-5)):
     if kind == "p":
         up = pv_fn(quotes, fixed.with_values({key: fixed[key] + h}))
         dn = pv_fn(quotes, fixed.with_values({key: fixed[key] - h}))
@@ -322,12 +338,91 @@ for kind, key, h in (("p", keys[1], 3e-7), ("q", vol_key, 3e-7)):
         dn = pv_fn(quotes.with_values({key: quotes[key] - h}), fixed)
         got = float(adj.quotes[key])
     fd = float((up - dn) / (2 * h))
-    print(f"  full-recalibration FD ∂V/∂{key}: {fd:+.6f}  vs adjoint {got:+.6f}")
+    print(f"  full-recalibration FD ∂V/∂{key}: {fd:+.6f}  vs adjoint {got:+.6f}"
+          f"  (rel {got / fd - 1:+.1e})")
     assert abs(fd) > 1e-3, key  # a live sensitivity, not 0 == 0
-    np.testing.assert_allclose(got, fd, rtol=5e-4)
+    # Observed: ~5e-7 on the basket target, ~5e-5 on the cube quote (fast mode).
+    np.testing.assert_allclose(got, fd, rtol=2e-4)
 
-# %% 5. Cheyette on a single-curve market
-header("5. Cheyette (σ, β) per trade on a single-curve market (frozen-y PDE)")
+# %% 5. Exact vs engine-consistent calibration
+header("5. Exact (closed-form) vs engine-consistent (PDE-grid) calibration of trade 0")
+
+# The same basket, fitted on the Bermudan's own grid. Its parameters are
+# "the best fit of the basket *as this grid prices it*": recorded as
+# discretised, with the grid, and differing from the exact fit by the grid's
+# swaption error. (Two parameters, four options: both are least-squares fits
+# with a residual, not exact repricings.)
+pde_node, pde_keys = g2_node(basket, vol_spec.cube_id, name="g2pde",
+                             method="pde", config=PDE_G2)
+pde_fixed = fixed.merge(QuoteSet.from_dict({k: 0.0 for k in pde_keys}))
+pde_fit = pde_node.calibrate(quotes, calibrated.market, pde_fixed)
+assert bool(pde_fit.converged)
+exact_fit = model_result
+print(f"  {'basket engine':<22}{'σ':>10}{'η':>10}   provenance")
+for label, res in (("closed form", exact_fit), ("PDE (Bermudan grid)", pde_fit)):
+    p = res.provenance
+    print(f"  {label:<22}{float(res.value.volatility_x):10.6f}{float(res.value.volatility_y):10.6f}"
+          f"   {p.method} / {p.engine_kind}")
+assert exact_fit.provenance.engine_kind == "exact"
+assert pde_fit.provenance.engine_kind == "discretised"
+assert pde_fit.provenance.config == PDE_G2
+for f in ("volatility_x", "volatility_y"):
+    rel = abs(float(getattr(pde_fit.value, f)) / float(getattr(exact_fit.value, f)) - 1.0)
+    assert rel < 5e-2, (f, rel)
+
+
+def basket_rmse_on(model, cfg):
+    """RMSE of the relative basket misses vs the cube, priced on grid ``cfg``.
+
+    The level's own objective evaluated on that grid, so the PDE fit — the
+    minimiser of exactly this — can do no worse than the exact fit here.
+    """
+    misses = np.array([
+        float(price(sw, model, calibrated.market, method="pde", config=cfg).price)
+        / float(swaption_price(sw, disc, cube, fwd)) - 1.0
+        for sw in basket
+    ])
+    return float(np.sqrt(np.mean(misses ** 2)))
+
+
+def bermudan_on(model, cfg):
+    return float(price(trade, model, calibrated.market, method="pde", config=cfg).price)
+
+
+miss_exact, miss_pde = (basket_rmse_on(r.value, PDE_G2) for r in (exact_fit, pde_fit))
+v_exact, v_pde = (bermudan_on(r.value, PDE_G2) for r in (exact_fit, pde_fit))
+print(f"  fit RMSE on its own engine: exact fit {float(exact_fit.diagnostics.rmse):.3e} "
+      f"(closed form), PDE fit {float(pde_fit.diagnostics.rmse):.3e} (grid)")
+print(f"  basket RMSE as the Bermudan's grid prices it: exact fit {miss_exact:.3e}, "
+      f"PDE fit {miss_pde:.3e}")
+print("  — for the exact fit the grid's swaption bias adds to the fit residual")
+np.testing.assert_allclose(miss_pde, float(pde_fit.diagnostics.rmse), rtol=1e-6)
+print(f"  Bermudan on that grid: exact fit {v_exact * 1e4:.3f} bp, PDE fit {v_pde * 1e4:.3f} bp "
+      f"(Δ {(v_pde - v_exact) * 1e4:+.3f} bp)")
+assert miss_pde <= miss_exact  # the PDE fit minimises exactly this objective
+if not FAST:
+    # Converged reference: the exact fit's Bermudan on a much finer grid.
+    fine = PDEConfig2D(n_x=161, n_y=161, n_time=200, x_range=5.0)
+    v_ref = bermudan_on(exact_fit.value, fine)
+    coarse = PDEConfig2D(n_x=41, n_y=41, n_time=40, x_range=5.0)
+    coarse_fit = g2_node(basket, vol_spec.cube_id, name="g2pde",
+                         method="pde", config=coarse)[0].calibrate(
+        quotes, calibrated.market, pde_fixed)
+    print(f"  converged reference (exact fit, {fine.n_x}x{fine.n_y}x{fine.n_time}): "
+          f"{v_ref * 1e4:.3f} bp; Bermudan error by grid:")
+    for cfg, on_engine in ((coarse, coarse_fit), (PDE_G2, pde_fit)):
+        e_exact = bermudan_on(exact_fit.value, cfg) - v_ref
+        e_pde = bermudan_on(on_engine.value, cfg) - v_ref
+        print(f"    {cfg.n_x}x{cfg.n_y}x{cfg.n_time}: exact fit {e_exact * 1e4:+.3f} bp,"
+              f" engine-consistent fit {e_pde * 1e4:+.3f} bp")
+        # The grid's Bermudan error largely cancels against its basket's.
+        assert abs(e_pde) < abs(e_exact), (cfg, e_pde, e_exact)
+print("  The closed form gives portable parameters and smooth, cheap risk; the")
+print("  engine-consistent fit trades that for a Bermudan priced against a basket")
+print("  fitted on its own grid. The provenance records which one each result is.")
+
+# %% 6. Cheyette on a single-curve market
+header("6. Cheyette (σ, β) per trade on a single-curve market (frozen-y PDE)")
 
 # Cheyette's PDE recipes take no projection curve: on the multi-curve market
 # price() refuses rather than silently dropping the 3M basis.
@@ -372,39 +467,51 @@ ch_node = swaption_basket_node(
 ch_res = calibrate_model(ch_node, sc_quotes, sc_cal.market, sc_fixed_q, strict=True)
 ch = ch_res.value
 assert ch.initial_curve is None
-prov = cheyette_provenance("frozen", PDE_CH)
 print(f"  σ={float(ch.volatility):.5f}  β={float(ch.skew):+.3f}  basket RMSE "
       f"{float(ch_res.diagnostics.rmse):.1e}"
       + ("" if FAST else f"  cond {float(ch_res.condition_number()):.1e}"))
-print(f"  engine provenance: {prov.method} / {prov.engine_kind} (frozen-y parameters are"
-      " engine-bound)")
+prov = ch_res.provenance
+assert prov == cheyette_provenance("frozen", PDE_CH)
+print(f"  provenance recorded by the node: {prov.method} / {prov.engine_kind}"
+      " (frozen-y parameters are engine-bound)")
+assert check_engine(ch_res, "pde", PDE_CH) is ch_res
+finer = PDEConfig(n_spot=2 * PDE_CH.n_spot, n_time=2 * PDE_CH.n_time, spot_range=5.0)
+try:
+    check_engine(ch_res, "pde", finer)
+    raise AssertionError("an engine-bound fit was accepted on another grid")
+except CalibrationError as exc:
+    print(f"  check_engine on a finer grid refused: {str(exc)[:68]}...")
 ch_pv = float(price(sc_trade, ch, sc_cal.market, method="pde", config=PDE_CH).price)
 ch_euro = max(float(price(sw, ch, sc_cal.market, method="pde", config=PDE_CH).price)
               for sw in ch_basket[:3])
 print(f"  Bermudan {ch_pv * 1e4:.2f} bp ≥ max co-terminal European {ch_euro * 1e4:.2f} bp")
 assert ch_pv >= ch_euro - 1e-6
 
-ch_adj = quote_risk_adjoint(sc_trade, None, sc_cal, model_result=ch_res,
-                            method="pde", config=PDE_CH)
-ch_ad = quote_risk_autodiff(sc_trade, None, sc_chain, sc_quotes, sc_fixed_q,
-                            model_node=ch_node, method="pde", config=PDE_CH)
-ch_rec = reconcile_quote_risk(ch_adj, ch_ad, rtol=1e-6, atol=1e-10)
-print(f"  adjoint vs autodiff: max |Δ| = {ch_rec.max_abs_diff:.1e}  ok={ch_rec.ok}"
-      f"  (stationarity {float(ch_adj.level_residuals['ch']):.0e})")
-assert ch_rec.ok, ch_rec
-ch_pv_fn = eqx.filter_jit(lambda pp: price(
-    sc_trade, ch_node.calibrate(sc_quotes, sc_cal.market, pp).value,
-    sc_cal.market, method="pde", config=PDE_CH,
-).price)
-k1, h = ch_keys[1], 1e-6
-fd = float((ch_pv_fn(sc_fixed_q.with_values({k1: h}))
-            - ch_pv_fn(sc_fixed_q.with_values({k1: -h}))) / (2 * h))
-print(f"  FD ∂V/∂T_1 {fd:+.6f} vs adjoint {float(ch_adj.fixed[k1]):+.6f};"
-      f"  ∂V/∂κ {float(ch_adj.fixed[KAPPA_KEY]):+.2e}")
-np.testing.assert_allclose(float(ch_adj.fixed[k1]), fd, rtol=5e-4)
+if FAST:
+    print("  (adjoint vs autodiff and the FD check of the Cheyette level run in full")
+    print("   mode and in tests/test_calibration/test_per_trade_basket.py)")
+else:
+    ch_adj = quote_risk_adjoint(sc_trade, None, sc_cal, model_result=ch_res,
+                                method="pde", config=PDE_CH)
+    ch_ad = quote_risk_autodiff(sc_trade, None, sc_chain, sc_quotes, sc_fixed_q,
+                                model_node=ch_node, method="pde", config=PDE_CH)
+    ch_rec = reconcile_quote_risk(ch_adj, ch_ad, rtol=1e-6, atol=1e-10)
+    print(f"  adjoint vs autodiff: max |Δ| = {ch_rec.max_abs_diff:.1e}  ok={ch_rec.ok}"
+          f"  (stationarity {float(ch_adj.level_residuals['ch']):.0e})")
+    assert ch_rec.ok, ch_rec
+    ch_pv_fn = eqx.filter_jit(lambda pp: price(
+        sc_trade, ch_node.calibrate(sc_quotes, sc_cal.market, pp).value,
+        sc_cal.market, method="pde", config=PDE_CH,
+    ).price)
+    k1, h = ch_keys[1], 1e-6
+    fd = float((ch_pv_fn(sc_fixed_q.with_values({k1: h}))
+                - ch_pv_fn(sc_fixed_q.with_values({k1: -h}))) / (2 * h))
+    print(f"  FD ∂V/∂T_1 {fd:+.6f} vs adjoint {float(ch_adj.fixed[k1]):+.6f};"
+          f"  ∂V/∂κ {float(ch_adj.fixed[KAPPA_KEY]):+.2e}")
+    np.testing.assert_allclose(float(ch_adj.fixed[k1]), fd, rtol=5e-4)
 
-# %% 6. Model risk on one trade
-header("6. Model risk: HW vs G2++ vs Cheyette, per trade, same market and trade")
+# %% 7. Model risk on one trade
+header("7. Model risk: HW vs G2++ vs Cheyette, per trade, same market and trade")
 
 hw_basket = coterminal_swaptions(sc_trade)
 hw_node = swaption_basket_node(
@@ -419,7 +526,7 @@ fits = {
     "Hull-White": (calibrate_model(hw_node, sc_quotes, sc_cal.market, sc_fixed_q, strict=True),
                    PDE_HW, "co-terminal (3)"),
     "G2++": (calibrate_model(sc_g2_node, sc_quotes, sc_cal.market, sc_fixed_q, strict=True),
-             PDE_G2, "co-terminal + 2Yx1Y (4)"),
+             PDE_G2, "co-terminal + 2Yx1Y (4), closed form"),
     "Cheyette": (ch_res, PDE_CH, "co-terminal + 2Yx5Y @ K+100bp (4)"),
 }
 sc_disc = sc_cal.market.curve(sc_world.discount_id)

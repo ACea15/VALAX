@@ -67,6 +67,7 @@ def basket_fit_level(
     settings: SolverSettings | None = None,
     provenance: CalibrationProvenance | None = None,
     model_label: str = "model",
+    data: Any = None,
 ) -> CalibrationResult:
     """Fit a model's parameters to a basket of prices as one level.
 
@@ -90,6 +91,10 @@ def basket_fit_level(
         settings: Solver settings; defaults to :data:`BASKET_SETTINGS`.
         provenance: The pricing engine of ``prices_fn``.
         model_label: Model name used in validation errors.
+        data: Trade data ``prices_fn`` reads from ``inputs.data`` (e.g. the
+            basket instruments) instead of closing over it — needed when the
+            basket may be traced, so the returned result holds no stale
+            tracer (see :class:`~valax.calibration.level.LevelInputs`).
 
     Returns:
         The :class:`~valax.calibration.result.CalibrationResult`; the fitted
@@ -114,7 +119,7 @@ def basket_fit_level(
         jnp.ones_like(quotes) if weights is None
         else jnp.asarray(weights, dtype=jnp.float64)
     )
-    inputs = LevelInputs(quotes=quotes, upstream=upstream, fixed=fixed)
+    inputs = LevelInputs(quotes=quotes, upstream=upstream, fixed=fixed, data=data)
     bind = (lambda m, _inp: m) if bind_fn is None else bind_fn
 
     def assemble(theta: dict, inp: LevelInputs) -> Any:

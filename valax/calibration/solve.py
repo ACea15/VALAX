@@ -18,6 +18,7 @@ types — not on ``valax.core`` — so the per-model calibrators, which
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Callable, Sequence
 
 import jax
@@ -89,12 +90,23 @@ def solve_level(
     solution = run_solver(problem, residual_fn, theta0, inputs, settings)
     theta = solution.value
     fit_residuals = residual_fn(theta, inputs)
+    diagnostics = diagnostics_from_solution(solution, fit_residuals)
+    if problem == "root" and labels:
+        # The residual at the starting point: when a joint solve diverges to
+        # NaN its final residuals carry no information, but each quote's
+        # distance from the initial guess still singles out an off-market
+        # one (see CalibrationResult.failed_labels). One residual evaluation.
+        diagnostics = dataclasses.replace(diagnostics, extras={
+            "initial_residuals": jax.lax.stop_gradient(
+                jnp.ravel(residual_fn(theta0, inputs))
+            ),
+        })
 
     return CalibrationResult(
         value=assemble_fn(theta, inputs),
         theta=theta,
         inputs=inputs,
-        diagnostics=diagnostics_from_solution(solution, fit_residuals),
+        diagnostics=diagnostics,
         residual_fn=_level_residual(problem, residual_fn),
         assemble_fn=assemble_fn,
         settings=settings,
@@ -151,6 +163,7 @@ def solve_batched_level(
     provenance: CalibrationProvenance | None = None,
     node_solve_fn: Callable[[Any, Any], tuple[Any, CalibrationDiagnostics]]
     | None = None,
+    sub_labels: Sequence[str] = (),
 ) -> CalibrationResult:
     r"""Solve one independent problem per node and package them as one level.
 
@@ -187,14 +200,23 @@ def solve_batched_level(
             call per node — for a node that is itself solved in stages (a
             sequential cap strip). It must drive ``node_residual_fn`` to
             zero (or to its least-squares optimum).
+        sub_labels: Names of the sub-nodes of every node, for a
+            ``node_solve_fn`` that reports per-stage diagnostics (one entry
+            per cap-strip bucket): its diagnostics then carry a trailing
+            sub-node axis of this length, and the result's labels are the
+            row-major product ``"<label> <sub_label>"`` (``"K=3.00% cap
+            2Y"``), aligned with the flattened ``(node, sub_node)``
+            diagnostics. A failure is then named down to the sub-node.
 
     Returns:
         A :class:`~valax.calibration.result.CalibrationResult` whose
-        diagnostics carry a leading node axis aligned with ``labels``.
+        diagnostics carry a leading node axis (and a sub-node axis when
+        ``sub_labels`` is given) aligned with its labels.
 
     Raises:
-        ValueError: If ``problem`` is unknown or the number of labels does not
-            match the node axis.
+        ValueError: If ``problem`` is unknown, the number of labels does not
+            match the node axis, or ``sub_labels`` does not match the
+            sub-node axis of the diagnostics.
     """
     _check_problem("solve_batched_level", problem)
     settings = SolverSettings() if settings is None else settings
@@ -214,6 +236,15 @@ def solve_batched_level(
 
     solve = solve_one if node_solve_fn is None else node_solve_fn
     theta, diagnostics = jax.vmap(solve)(theta0, node_inputs)
+    sub_labels = tuple(sub_labels)
+    if sub_labels:
+        sub_shape = jnp.shape(diagnostics.converged)[1:]
+        if sub_shape != (len(sub_labels),):
+            raise ValueError(
+                f"solve_batched_level({name!r}): {len(sub_labels)} sub-labels "
+                f"for per-node diagnostics of shape {sub_shape}."
+            )
+        labels = tuple(f"{l} {s}" for l in labels for s in sub_labels)
     node_level = _level_residual(problem, node_residual_fn)
 
     def level_residual(th: Any, inp: LevelInputs) -> Float[Array, " n"]:

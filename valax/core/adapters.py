@@ -13,7 +13,8 @@ Two families are registered:
   Heston-COS European, Black-Scholes digital, and the binomial American.
   The model supplies vol / rate / dividend; the market supplies spot.
 * **Short-rate closed forms** — the European swaption under Hull-White
-  (Jamshidian); the model's curve is bound from the market by ``price``.
+  (Jamshidian) and G2++ (Brigo-Mercurio); the model's curve is bound from
+  the market by ``price``.
 * **Model-free** (``model=None``) — instruments priced by curve
   discounting alone: fixed-rate bonds, vanilla and OIS swaps, FRNs.
   These take their discount curve (and optional projection curve) from
@@ -42,12 +43,14 @@ from valax.instruments.options import (
 )
 from valax.instruments.rates import InterestRateSwap, OISSwap, Swaption
 from valax.models.black_scholes import BlackScholesModel
+from valax.models.g2pp import G2PPModel
 from valax.models.heston import HestonModel
 from valax.models.hull_white import HullWhiteModel
 from valax.pricing.analytic.black_scholes import black_scholes_price
 from valax.pricing.analytic.bonds import fixed_rate_bond_price
 from valax.pricing.analytic.digital import digital_option_price
 from valax.pricing.analytic.floating import floating_rate_bond_price, ois_swap_price
+from valax.pricing.analytic.g2pp_swaptions import g2pp_swaption_price
 from valax.pricing.analytic.heston import heston_cos_price
 from valax.pricing.analytic.hull_white_swaptions import hw_swaption_price
 from valax.pricing.analytic.swaptions import swap_price
@@ -242,6 +245,25 @@ def _swaption_hw_analytic(
     )
 
 
+@register_pricer(Swaption, G2PPModel, "analytic")
+def _swaption_g2pp_analytic(
+    *, instrument, model, market, resolved, config, key,
+) -> PricingResult:
+    """European swaption under G2++: the Brigo-Mercurio one-dimensional integral.
+
+    As for Hull-White, ``price`` has bound the model's ``initial_curve`` and
+    the projection curve enters through the frozen tenor-basis overlay. Exact
+    to the 64-node Gauss-Hermite quadrature (well below 1e-8 relative), smooth
+    in the parameters, so it is the default engine and the one per-trade
+    basket calibrations price their basket with.
+    """
+    del market, config, key
+    return PricingResult(
+        price=g2pp_swaption_price(instrument, model, resolved.forward_curve),
+        method="analytic",
+    )
+
+
 # ── ``method="auto"`` policy (Q2) ────────────────────────────────────
 #
 # Only pairs whose default differs from the priority order, or whose
@@ -257,3 +279,4 @@ set_auto_method(InterestRateSwap, type(None), "analytic")
 set_auto_method(OISSwap, type(None), "analytic")
 set_auto_method(FloatingRateBond, type(None), "analytic")
 set_auto_method(Swaption, HullWhiteModel, "analytic")
+set_auto_method(Swaption, G2PPModel, "analytic")

@@ -32,9 +32,11 @@ per-node diagnostics: ``converged``, ``max_abs_residual``, ``rmse`` and
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Callable
 
 import equinox as eqx
+import jax.errors as jax_errors
 import jax.numpy as jnp
 import numpy as np
 import optimistix as optx
@@ -55,6 +57,14 @@ LEVEL_KINDS = ("root", "least_squares", "explicit", "fixed_point")
 
 #: Engine kinds recorded in :attr:`CalibrationProvenance.engine_kind`.
 ENGINE_KINDS = ("exact", "discretised", "modelling_bias")
+
+#: Failure attribution of a non-converged joint root level: the nodes whose
+#: ``max|residual|`` is at least this fraction of the largest node residual
+#: are named (:meth:`CalibrationResult.failed_labels`) — those within a factor
+#: two of the worst. Relative rather than absolute because a failed joint
+#: solve spreads residuals over every node; the cluster around the worst one
+#: is where the bad quote sits.
+FAILURE_CLUSTER_FRACTION = 0.5
 
 
 class CalibrationError(RuntimeError):
@@ -106,6 +116,43 @@ class CalibrationProvenance(eqx.Module):
             ) from exc
 
 
+#: Provenance of a fit priced by a closed form (Jamshidian for Hull-White,
+#: the Brigo-Mercurio integral for G2++, Heston COS, Black-Scholes): exact, so
+#: the parameters are portable to any engine.
+CLOSED_FORM_PROVENANCE = CalibrationProvenance(
+    method="analytic", engine_kind="exact"
+)
+
+
+@functools.singledispatch
+def engine_provenance(
+    model: Any, method: str, config: Any = None
+) -> CalibrationProvenance:
+    """The provenance of a fit whose basket is priced by ``(model, method, config)``.
+
+    Dispatches on the model type, so a model whose engine carries a modelling
+    bias registers its own rule (Cheyette's frozen-``y`` PDE does, in
+    :mod:`valax.calibration.cheyette`). The default: ``"analytic"`` is a
+    closed form (:data:`CLOSED_FORM_PROVENANCE`); every other method
+    (``"pde"``, ``"mc"``, ``"lattice"``) is ``"discretised"`` with its config
+    recorded — the bias converges away, so the provenance is audit metadata.
+
+    Args:
+        model: The model (or template) being calibrated.
+        method: A concrete pricing method (resolve ``"auto"`` first).
+        config: The pricing config of the basket.
+
+    Returns:
+        The :class:`CalibrationProvenance` to record on the result.
+    """
+    del model
+    if method == "analytic":
+        return CLOSED_FORM_PROVENANCE
+    return CalibrationProvenance(
+        method=method, engine_kind="discretised", config=config
+    )
+
+
 class CalibrationDiagnostics(eqx.Module):
     """Convergence report of one calibration level.
 
@@ -126,7 +173,11 @@ class CalibrationDiagnostics(eqx.Module):
         converged: Whether the solver reported success.
         extras: Level-specific auxiliary diagnostics (arrays keyed by name),
             e.g. the fraction of a leverage grid that hit its clip bounds.
-            Reported, never used to decide convergence.
+            Reported, never used to decide convergence. The key
+            ``"root_cause"`` (bool, shaped like ``converged``) is understood
+            by :meth:`CalibrationResult.root_cause_labels`: a sequential solve
+            (a cap strip) marks the node whose *own* solve failed first, as
+            opposed to the later nodes that inherit its failure.
     """
 
     residuals: Float[Array, "*nodes n_residuals"]
@@ -155,12 +206,15 @@ def diagnostics_from_solution(
     """
     residuals = jnp.atleast_1d(jnp.asarray(residuals))
     n_steps = solution.stats.get("num_steps", jnp.asarray(-1))
+    max_abs = jnp.max(jnp.abs(residuals))
     return CalibrationDiagnostics(
         residuals=residuals,
-        max_abs_residual=jnp.max(jnp.abs(residuals)),
+        max_abs_residual=max_abs,
         rmse=jnp.sqrt(jnp.mean(residuals ** 2)),
         n_steps=jnp.asarray(n_steps, dtype=jnp.int32),
-        converged=solution.result == optx.RESULTS.successful,
+        # A non-finite residual is never a solution, whatever the solver says.
+        converged=(solution.result == optx.RESULTS.successful)
+        & jnp.isfinite(max_abs),
     )
 
 
@@ -237,9 +291,13 @@ class CalibrationResult(eqx.Module):
         settings: The solver settings used. Static.
         name: Human-readable level name, used in alerts and errors. Static.
         labels: Node names (smile expiries, cube cells, strip buckets). For
-            a batched level they index the leading axis of the diagnostics;
-            for a joint level they index equal-sized blocks of the residual
-            vector. Empty when the level has no node structure. Static.
+            a batched level they index the node axes of the diagnostics —
+            the leading axis, or several leading axes flattened row-major
+            (a cap matrix strip is labelled per ``(strike, bucket)``, e.g.
+            ``"K=3.00% cap 2Y"``, against ``(n_strikes, n_buckets)``
+            diagnostics); for a joint level they index equal-sized blocks
+            of the residual vector. Empty when the level has no node
+            structure. Static.
         problem: Level kind, one of :data:`LEVEL_KINDS`. Static.
         provenance: Engine the level was calibrated on, or ``None`` when
             the level is engine-free (curves, closed-form vol fits). Static.
@@ -302,6 +360,55 @@ class CalibrationResult(eqx.Module):
             return jnp.asarray(1.0)
         return level_condition_number(level)
 
+    def _per_node(self, arr: Any) -> np.ndarray | None:
+        """``arr`` as ``(n_labels, -1)`` when its leading axes are the node axes.
+
+        The node axes are the leading axes whose sizes multiply to the number
+        of labels — one axis for a slice / cube level, two (strike, bucket)
+        for a cap matrix strip. ``None`` when no such prefix exists.
+        """
+        n = len(self.labels)
+        a = np.asarray(arr)
+        size = 1
+        for k, d in enumerate(a.shape):
+            size *= d
+            if size == n:
+                return a.reshape((n, -1))
+            if size > n:
+                break
+        return None
+
+    def _nonfinite_quote_mask(self) -> np.ndarray | None:
+        """Per-label ``~isfinite(quote)`` when the labels name the quotes.
+
+        Recognised when ``inputs.quotes`` is a ``QuoteSet`` holding every
+        label as a key (a :func:`~valax.calibration.nodes.curve_graph_node`)
+        or a flat vector with one entry per label (a
+        :func:`~valax.curves.bootstrap_graph.bootstrap_curve_graph`, labelled
+        ``"<i>:<Type>"`` in quote order); ``None`` otherwise.
+        """
+        n = len(self.labels)
+        quotes = getattr(self.inputs, "quotes", None)
+        values = getattr(quotes, "values", None)
+        try:
+            if isinstance(values, dict):
+                if not all(label in values for label in self.labels):
+                    return None
+                arr = np.array(
+                    [np.asarray(values[label], dtype=float).reshape(-1)
+                     for label in self.labels]
+                )
+                if arr.shape != (n, 1):
+                    return None
+                arr = arr[:, 0]
+            else:
+                arr = np.asarray(quotes, dtype=float)
+                if arr.ndim != 1 or arr.size != n:
+                    return None
+        except (TypeError, ValueError, jax_errors.TracerArrayConversionError):
+            return None
+        return ~np.isfinite(arr)
+
     def node_max_abs_residuals(self) -> np.ndarray:
         """Per-node ``max|residual|`` aligned with :attr:`labels` (eager).
 
@@ -313,8 +420,9 @@ class CalibrationResult(eqx.Module):
         if n == 0:
             return np.zeros((0,))
         res = np.abs(np.asarray(self.diagnostics.residuals))
-        if res.ndim >= 2 and res.shape[0] == n:
-            return res.reshape(n, -1).max(axis=1)
+        per = self._per_node(res) if res.ndim >= 2 else None
+        if per is not None and per.shape[1] > 0:
+            return per.max(axis=1)
         flat = res.ravel()
         if flat.size == 0 or flat.size % n:
             return np.zeros((0,))
@@ -323,37 +431,140 @@ class CalibrationResult(eqx.Module):
     def failed_labels(self, max_residual: float | None = None) -> tuple[str, ...]:
         """Names of the nodes that failed (eager).
 
-        A node fails when its own solve did not converge (batched levels) or
-        when its residual exceeds ``max_residual``. For a joint level whose
-        single solve failed, nodes are attributed by residual: those above
-        ``max_residual`` (default ``1e3 * settings.atol`` for exact levels),
-        or else the worst node.
+        **Batched levels** (one solve per node): a node fails when its own
+        solve did not converge, its residual is non-finite, or it exceeds
+        ``max_residual``.
+
+        **Joint levels** (one solve for every node, e.g. a curve build): a
+        node is attributed in this order —
+
+        1. if any node's *own quote* is non-finite (labels that name quotes:
+           ``QuoteSet`` keys, or a flat quote vector aligned with the
+           labels), exactly those nodes — a NaN quote poisons every residual
+           of the joint solve, so residuals cannot localise it;
+        2. with an explicit ``max_residual``, the nodes above it (and any
+           non-finite node);
+        3. otherwise, for a failed solve: for a root level the **worst
+           cluster** — nodes whose residual is at least
+           :data:`FAILURE_CLUSTER_FRACTION` of the largest, so one bad quote
+           is not drowned in the residuals its failure spreads to the rest
+           of the system; for a least-squares level the worst node. Partly
+           non-finite residuals name the non-finite nodes. When *every*
+           residual is non-finite (the solve diverged to NaN, e.g. an
+           infeasible quote), the cluster is taken on the residuals at the
+           starting point (``diagnostics.extras["initial_residuals"]``,
+           recorded by :func:`~valax.calibration.solve.solve_level` for
+           labelled root levels), where an off-market quote stands out — a
+           heuristic, so treat it as "start here"; with no such record every
+           node is named.
 
         Args:
             max_residual: Optional bound on each node's ``max|residual|``.
 
         Returns:
-            Failed node labels, in label order.
+            Failed node labels, in label order. For a sequential solve, see
+            :meth:`root_cause_labels` for the first failure.
         """
-        if not self.labels:
+        labels = self.labels
+        if not labels:
             return ()
-        conv = np.asarray(self.diagnostics.converged)
+        n = len(labels)
+        conv = np.asarray(self.diagnostics.converged).astype(bool)
         node_res = self.node_max_abs_residuals()
-        failed = np.zeros(len(self.labels), dtype=bool)
-        batched = conv.ndim >= 1 and conv.shape[0] == len(self.labels)
-        if batched:
-            failed |= ~conv.astype(bool).reshape(len(self.labels), -1).all(1)
-        if node_res.size:
-            failed |= ~np.isfinite(node_res)
-            bound = max_residual
-            if bound is None and not batched and not bool(conv.all()):
-                if self.problem == "root":
-                    bound = 1e3 * max(self.settings.atol, 1e-14)
-            if bound is not None:
-                failed |= node_res > bound
-            if not batched and not bool(conv.all()) and not failed.any():
-                failed[int(np.nanargmax(node_res))] = True
-        return tuple(l for l, f in zip(self.labels, failed) if f)
+        has_res = node_res.size == n
+        nonfinite = ~np.isfinite(node_res) if has_res else np.zeros(n, bool)
+        failed = np.zeros(n, dtype=bool)
+        per_conv = self._per_node(conv) if conv.ndim >= 1 else None
+
+        if per_conv is not None:  # batched: every node reports its own solve
+            failed |= ~per_conv.all(axis=1) | nonfinite
+            if max_residual is not None and has_res:
+                failed |= node_res > max_residual
+            return tuple(l for l, f in zip(labels, failed) if f)
+
+        solve_failed = not bool(conv.all())
+        if max_residual is not None and has_res:
+            failed |= nonfinite | (node_res > max_residual)
+        if solve_failed or failed.any():
+            bad_quotes = self._nonfinite_quote_mask()
+            if bad_quotes is not None and bad_quotes.any():
+                return tuple(l for l, f in zip(labels, bad_quotes) if f)
+        if solve_failed and has_res and not failed.any():
+            evidence = node_res
+            if nonfinite.all():
+                # Diverged to NaN: the final residuals say nothing. Fall back
+                # on the residuals at the starting point, where an
+                # off-market quote stands out from the rest.
+                initial = self._split_max(
+                    self.diagnostics.extras.get("initial_residuals")
+                    if isinstance(self.diagnostics.extras, dict) else None
+                )
+                if initial is None or not np.isfinite(initial).all():
+                    return labels
+                evidence = initial
+            elif nonfinite.any():
+                return tuple(l for l, f in zip(labels, nonfinite) if f)
+            top = float(evidence.max())
+            if self.problem == "root" and top > 0.0:
+                failed |= evidence >= FAILURE_CLUSTER_FRACTION * top
+            else:
+                failed[int(np.argmax(evidence))] = True
+        return tuple(l for l, f in zip(labels, failed) if f)
+
+    def _split_max(self, residuals: Any) -> np.ndarray | None:
+        """Per-label ``max|r|`` of a flat residual vector, or ``None``."""
+        if residuals is None:
+            return None
+        flat = np.abs(np.asarray(residuals)).ravel()
+        n = len(self.labels)
+        if flat.size == 0 or flat.size % n:
+            return None
+        return flat.reshape(n, -1).max(axis=1)
+
+    def root_cause_labels(
+        self, max_residual: float | None = None
+    ) -> tuple[str, ...]:
+        """The failed nodes that *caused* the failure (eager).
+
+        For a sequential solve — a cap strip, where bucket ``i`` reads the
+        vols of buckets ``< i`` — a failed bucket installs NaN and every later
+        bucket of its column inherits the failure. The level then records
+        ``diagnostics.extras["root_cause"]``, and this returns only the nodes
+        whose own solve failed first (one per strike column). For any other
+        level it equals :meth:`failed_labels`.
+
+        Args:
+            max_residual: Forwarded to :meth:`failed_labels`.
+
+        Returns:
+            Root-cause labels, in label order.
+        """
+        failed = self.failed_labels(max_residual)
+        extras = self.diagnostics.extras
+        cause = extras.get("root_cause") if isinstance(extras, dict) else None
+        if cause is None or not failed:
+            return failed
+        per = self._per_node(np.asarray(cause).astype(bool))
+        if per is None:
+            return failed
+        roots = tuple(
+            l for l, c in zip(self.labels, per.any(axis=1)) if c and l in failed
+        )
+        return roots or failed
+
+    def _where(self, max_residual: float | None) -> str:
+        """`` at node(s) [...]`` (plus the root cause) for an error message."""
+        nodes = self.failed_labels(max_residual)
+        if not nodes:
+            return ""
+        where = f" at node(s) {list(nodes)}"
+        roots = self.root_cause_labels(max_residual)
+        if roots != nodes:
+            where += (
+                f"; first failure(s) {list(roots)} — the later nodes of a "
+                f"sequential solve inherit it"
+            )
+        return where
 
     def check(
         self,
@@ -385,8 +596,7 @@ class CalibrationResult(eqx.Module):
             child.check(max_residual=max_residual)
         diag = self.diagnostics
         if not bool(jnp.all(diag.converged)):
-            nodes = self.failed_labels(max_residual)
-            where = f" at node(s) {list(nodes)}" if nodes else ""
+            where = self._where(max_residual)
             raise CalibrationError(
                 f"{self.name}: {self.problem} level did not converge{where} "
                 f"(max|residual| = {float(jnp.max(diag.max_abs_residual)):.3e}, "
@@ -395,9 +605,8 @@ class CalibrationResult(eqx.Module):
             )
         if max_residual is not None:
             worst = float(jnp.max(diag.max_abs_residual))
-            if worst > max_residual:
-                nodes = self.failed_labels(max_residual)
-                where = f" at node(s) {list(nodes)}" if nodes else ""
+            if not worst <= max_residual:  # NaN-safe
+                where = self._where(max_residual)
                 raise CalibrationError(
                     f"{self.name}: max|residual| = {worst:.3e} exceeds "
                     f"{max_residual:.3e}{where}."
@@ -456,14 +665,17 @@ def check_engine(
 
 
 __all__ = [
+    "CLOSED_FORM_PROVENANCE",
     "CalibrationDiagnostics",
     "CalibrationError",
     "CalibrationProvenance",
     "CalibrationResult",
     "ENGINE_KINDS",
+    "FAILURE_CLUSTER_FRACTION",
     "LEVEL_KINDS",
     "check_engine",
     "diagnostics_from_solution",
+    "engine_provenance",
     "explicit_diagnostics",
     "fixed_point_diagnostics",
 ]

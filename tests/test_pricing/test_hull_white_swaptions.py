@@ -125,6 +125,14 @@ class TestCriticalRate:
             assert float(other) == pytest.approx(float(base), abs=1e-10)
 
 
+    def test_failed_solve_is_nan_not_a_silent_iterate(self, model):
+        # A coupon bond with no positive flow never reaches par: no root.
+        expiry = jnp.asarray(1.0)
+        cf_times = jnp.array([2.0, 3.0])
+        r_star = hw_critical_rate(model, expiry, cf_times, jnp.zeros(2))
+        assert jnp.isnan(r_star)
+
+
 class TestZCBOption:
     def test_call_put_parity(self, model):
         """ZBC - ZBP == P(0,S) - X*P(0,T), the forward-contract value."""

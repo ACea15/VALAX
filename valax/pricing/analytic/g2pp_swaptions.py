@@ -156,7 +156,10 @@ def _critical_y(
             ``float_start`` under a frozen tenor basis.
 
     Returns:
-        Critical value :math:`\bar y`.
+        Critical value :math:`\bar y`, or NaN if the Newton solve fails — so
+        a failed boundary surfaces as a non-finite price (and, inside a
+        calibration, as a named non-finite residual) instead of a silently
+        wrong one.
     """
     def residual(y: Float[Array, ""], args) -> Float[Array, ""]:
         return jnp.sum(lambdas0 * jnp.exp(-B_b * y)) - par_value
@@ -168,7 +171,7 @@ def _critical_y(
         max_steps=100,
         throw=False,
     )
-    return sol.value
+    return jnp.where(sol.result == optx.RESULTS.successful, sol.value, jnp.nan)
 
 
 def g2pp_swaption_price(

@@ -37,7 +37,7 @@ from jax import Array
 
 from valax.calibration.basket import basket_fit_level
 from valax.calibration.level import LevelInputs
-from valax.calibration.result import CalibrationProvenance, CalibrationResult
+from valax.calibration.result import CLOSED_FORM_PROVENANCE, CalibrationResult
 from valax.calibration.settings import SolverSettings
 from valax.calibration.transforms import TransformSpec, positive
 from valax.curves.discount import DiscountCurve
@@ -170,9 +170,15 @@ def calibrate_hull_white(
             is *not* a calibration degree of freedom.
         initial_guess: Starting model.  Defaults to
             :math:`a = 0.05`, :math:`\sigma = 0.01`.
-        fixed_mean_reversion: If given, :math:`a` is held at this value and
-            only :math:`\sigma` is fitted.  Recommended -- see the module
-            docstring on parameter correlation.
+        fixed_mean_reversion: If given, :math:`a` is held at this value (a
+            reported fixed input) and only :math:`\sigma` is fitted. The
+            default ``None`` fits both, which is right for a **surface or
+            diagonal** basket spanning several expiries *and* tenors — the
+            tenor dimension identifies :math:`a`. For a **co-terminal**
+            basket (one Bermudan), :math:`a` and :math:`\sigma` are strongly
+            correlated (see the module docstring), so fix :math:`a` — as
+            :func:`~valax.calibration.nodes.swaption_basket_node` does by
+            ``fixed_fields`` in the per-trade examples.
         weights: Per-quote residual weights.  Default: uniform.
         relative: Divide each residual by its market price (default).  Prices
             across an expiry/tenor grid span an order of magnitude, so absolute
@@ -226,7 +232,9 @@ def calibrate_hull_white(
         return with_discount_curve(model, inp.upstream[0])
 
     def prices(model: HullWhiteModel, inp: LevelInputs) -> Float[Array, " n"]:
-        return hw_swaption_prices(model, swaptions, inp.upstream[1])
+        # The basket travels in ``inputs.data`` (not a closure), so a result
+        # returned from jit / vmap holds no stale tracer.
+        return hw_swaption_prices(model, inp.data, inp.upstream[1])
 
     return basket_fit_level(
         name,
@@ -242,11 +250,10 @@ def calibrate_hull_white(
         settings=settings,
         provenance=JAMSHIDIAN_PROVENANCE,
         model_label="Hull-White",
+        data=swaptions,
     )
 
 
-#: Provenance of a closed-form-priced fit (Jamshidian for Hull-White, the
-#: Brigo-Mercurio integral for G2++): exact, so parameters are portable.
-JAMSHIDIAN_PROVENANCE = CalibrationProvenance(
-    method="analytic", engine_kind="exact"
-)
+#: Alias of :data:`~valax.calibration.result.CLOSED_FORM_PROVENANCE`, kept for
+#: the Hull-White (Jamshidian) call sites.
+JAMSHIDIAN_PROVENANCE = CLOSED_FORM_PROVENANCE

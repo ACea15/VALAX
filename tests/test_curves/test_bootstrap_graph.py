@@ -23,6 +23,7 @@ Coverage:
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from valax.curves import (
@@ -784,6 +785,101 @@ class TestExtendedDiagnostics:
         assert bool(converged)
         assert jnp.allclose(
             dfs, eager.value["USD.SOFR.3M"].discount_factors, rtol=1e-12
+        )
+
+
+# ── Failure localisation of the joint build ──────────────────────────
+
+
+@pytest.fixture(scope="module")
+def dual_curve_world():
+    """A 14-quote dual-curve (OIS + 3M) synthetic build and its node."""
+    from valax.market.synthetic import (
+        RatesVolSpec,
+        RatesWorldSpec,
+        SeedRegistry,
+        SyntheticMarketConfig,
+        rates_vol_snapshot,
+    )
+
+    jax.config.update("jax_enable_x64", True)
+    snap, world = rates_vol_snapshot(
+        SeedRegistry(20260216, "test"), SyntheticMarketConfig(),
+        RatesWorldSpec(pillar_years=(1, 2, 3, 5, 7, 10, 12)),
+        RatesVolSpec(expiry_years=(1,), tenor_years=(2,), cap_years=(1,)),
+        bp_noise=0.5,
+    )
+    return snap, world
+
+
+def _with_quote(inst, value):
+    from valax.curves.bootstrap_graph import _QUOTE_FIELD
+
+    field = _QUOTE_FIELD[type(inst).__name__]
+    return eqx.tree_at(lambda i: getattr(i, field), inst, jnp.asarray(value))
+
+
+class TestFailureLocalisation:
+    """A failed joint build names the bad quote, not all of them."""
+
+    def test_nan_quote_is_named_exactly_by_the_node(self, dual_curve_world):
+        snap, _ = dual_curve_world
+        node = snap.parts["curves"].node
+        assert len(node.quote_keys) >= 10
+        for key in ("USD.OIS.3Y", "USD.IRS3M.10Y"):
+            res = node.calibrate(snap.quotes.with_values({key: jnp.nan}))
+            assert not bool(res.converged)
+            assert res.failed_labels() == (key,)
+
+    def test_nan_quote_is_named_exactly_by_bootstrap_curve_graph(
+        self, dual_curve_world
+    ):
+        snap, world = dual_curve_world
+        curves = snap.parts["curves"]
+        insts = list(curves.instruments)
+        bad = 9
+        insts[bad] = _with_quote(insts[bad], jnp.nan)
+        res = bootstrap_curve_graph(
+            world.rates.reference_date, curves.specs, insts,
+        )
+        assert not bool(res.converged)
+        assert res.failed_labels() == (curve_instrument_labels(insts)[bad],)
+
+    def test_off_market_quote_is_named(self, dual_curve_world):
+        """Infeasible quotes diverge to NaN; the starting point localises them."""
+        snap, _ = dual_curve_world
+        node = snap.parts["curves"].node
+        for key, value in (("USD.OIS.10Y", 0.2), ("USD.OIS.5Y", -0.5),
+                           ("USD.OIS.12Y", 0.6)):
+            res = node.calibrate(snap.quotes.with_values({key: value}))
+            assert not bool(res.converged), key
+            assert res.failed_labels() == (key,)
+            from valax.calibration import CalibrationError
+
+            with pytest.raises(CalibrationError, match=key.replace(".", r"\.")):
+                res.check()
+
+    def test_max_steps_one_names_the_worst_cluster(self, dual_curve_world):
+        from valax.calibration import SolverSettings, curve_graph_node
+
+        snap, world = dual_curve_world
+        curves = snap.parts["curves"]
+        tight = curve_graph_node(
+            curves.node.name, world.rates.reference_date, curves.specs,
+            curves.instruments, curves.keys,
+            settings=SolverSettings(method="newton", max_steps=1),
+        )
+        res = tight.calibrate(snap.quotes)
+        assert not bool(res.converged)
+        named = res.failed_labels()
+        node_res = res.node_max_abs_residuals()
+        # Something, not everything: the long end, where Newton's first step
+        # from a flat guess leaves the largest error.
+        assert 0 < len(named) < len(res.labels)
+        assert res.labels[int(np.argmax(node_res))] in named
+        # Explicit bound: absolute semantics, every node above it.
+        assert len(res.failed_labels(max_residual=1e-14)) == int(
+            np.sum(node_res > 1e-14)
         )
 
 

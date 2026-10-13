@@ -132,6 +132,7 @@ class TestConditioning:
 
 
 @pytest.mark.parametrize("product", ["swaption", "cap"])
+@pytest.mark.slow  # adjoint vs autodiff vs full-recalibration FD (~43 s)
 class TestQuoteRisk:
     """Adjoint vs autodiff vs full-recalibration FD, curve → vol → price."""
 

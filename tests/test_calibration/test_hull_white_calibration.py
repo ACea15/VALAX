@@ -248,6 +248,21 @@ class TestAPI:
         with pytest.raises(CalibrationError, match="hull_white"):
             res.check()
 
+    def test_jitted_result_reports_its_conditioning(
+        self, curve, swaptions, synthetic_prices
+    ):
+        """The basket travels in ``inputs.data``, not a closure: a result
+        returned from ``filter_jit`` (basket traced) can still evaluate its
+        condition number eagerly — this used to raise
+        ``UnexpectedTracerError``."""
+        jitted = eqx.filter_jit(
+            lambda sw, t: calibrate_hull_white(sw, t, curve)
+        )(tuple(swaptions), synthetic_prices)
+        eager = calibrate_hull_white(swaptions, synthetic_prices, curve)
+        assert jnp.allclose(
+            jitted.condition_number(), eager.condition_number(), rtol=1e-6
+        )
+
     def test_vols_to_prices_roundtrip(self, swaptions, curve):
         """`swaption_prices_from_vols` must agree with the Black-76 pricer."""
         from valax.pricing.analytic.swaptions import swaption_price_black76

@@ -14,12 +14,15 @@ reads the diagnosis back.
      the cell, ``failed_labels()`` returns exactly that cell, and every other
      cell — an independent per-node solve — equals the baseline fit.
   3. A stale cap quote: far off-market it makes the strip bucket infeasible
-     (named by strike column in the chain, by bucket in a standalone strip);
+     — named by strike *and* cap maturity (``"K=-0.86% cap 2Y"``, matching
+     the quote key ``USD.CAP.2Y.-86``), installed as NaN so the later buckets
+     of the column fail too, with ``root_cause_labels()`` naming the first;
      merely stale it strips "fine" and surfaces downstream as unfittable
      optionlet smiles.
   4. Too-tight solver settings (``max_steps=1``): the curve level and a SABR
-     smile report ``converged=False`` and are named; the downstream cube still
-     converges — on the wrong forwards.
+     smile report ``converged=False`` and are named — the curve by its worst
+     cluster of quotes, not all 14; the downstream cube still converges — on
+     the wrong forwards. An infeasible or NaN curve quote is named alone.
   5. Conditioning: a SABR smile quoted at nearly-redundant strikes against
      ``ILL_CONDITIONED_THRESHOLD``, vs. the healthy chain levels.
   6. Engine provenance: a frozen-``y`` Cheyette fit is engine-bound
@@ -125,7 +128,9 @@ for res in base.results:
     assert bool(res.converged) and res.failed_labels() == (), res.name
     assert np.isfinite(kappas[res.name]) and kappas[res.name] < ILL_CONDITIONED_THRESHOLD
 print(f"  cube cells   {base.result(CUBE).labels}")
-print(f"  strip columns {base.result(STRIP).labels} (one bootstrap per strike)")
+strip_labels = base.result(STRIP).labels
+print(f"  strip buckets {strip_labels[:3]} … ({len(strip_labels)} = strikes × cap "
+      f"maturities; one bootstrap per strike, each bucket named)")
 
 # %% 2. A NaN swaption quote in one cube cell
 header("2. NaN swaption vol in the 2Yx10Y cell: named, and isolated")
@@ -175,11 +180,14 @@ for name in (curves.node.name, STRIP, OPT):
 header("3. Off-market cap quote: infeasible strip bucket, or a stale but strippable one")
 
 col = 1
-strike_label = base.result(STRIP).labels[col]
+bucket_labels = cap_strip_labels(world.caps, world.rates.reference_date)
+n_buckets = len(bucket_labels)
+strike_label = strip_labels[col * n_buckets].split(" ")[0]  # e.g. "K=-0.86%"
 cap_key = vols.cap_keys[col][1]  # second cap maturity at this strike
-bucket_labels = cap_strip_labels(world.caps)
-print(f"  strip buckets {bucket_labels} (caps exclude the spot-starting period); "
+bad_node = f"{strike_label} {bucket_labels[1]}"
+print(f"  strip buckets {bucket_labels} — named by cap maturity, like the quote keys; "
       f"bad quote {cap_key}")
+assert cap_key.split(".")[2] == bucket_labels[1].removeprefix("cap ")  # "2Y" ↔ "cap 2Y"
 base_strip = base.market.surfaces[vol_spec.strip_id]
 disc_id, fwd_id = world.discount_id, world.forward_id
 
@@ -191,16 +199,21 @@ def corrupt_cap(factor: float):
 
 # 3a. Far off-market (a tenth of its value): the bucket's incremental premium is
 # out of reach of any non-negative caplet vol, so its Newton root-find fails.
+# The failed bucket installs NaN — like a failed cube cell — so the later
+# buckets of the column (which read it: the strip is triangular) fail too;
+# root_cause_labels() names the first one, the bad quote's bucket.
 bad_q, bad_cal = corrupt_cap(0.1)
 strip_res, opt_res = bad_cal.result(STRIP), bad_cal.result(OPT)
 conv = np.asarray(strip_res.diagnostics.converged)  # (n_strikes, n_buckets)
-bad_buckets = tuple(b for b, ok in zip(bucket_labels, conv[col]) if not ok)
-print(f"  [quote × 0.1] strip failed_labels() = {strip_res.failed_labels()}; "
-      f"failed buckets in that column: {bad_buckets}")
-print(f"    stripped vols at {strike_label}: "
-      f"{np.round(np.asarray(bad_cal.market.surfaces[vol_spec.strip_id].vols[col]) * 1e4, 2)} bp")
-assert strip_res.failed_labels() == (strike_label,)
-assert bad_buckets[0] == bucket_labels[1]  # the bucket of the bad quote fails first
+print(f"  [quote × 0.1] strip failed_labels()     = {strip_res.failed_labels()}")
+print(f"                strip root_cause_labels() = {strip_res.root_cause_labels()}")
+bad_vols = np.asarray(bad_cal.market.surfaces[vol_spec.strip_id].vols[col])
+print(f"    stripped vols at {strike_label}: {np.round(bad_vols * 1e4, 2)} bp")
+assert strip_res.failed_labels() == tuple(
+    f"{strike_label} {b}" for b in bucket_labels[1:])
+assert strip_res.root_cause_labels() == (bad_node,)
+n_first = world.strip.bucket_ends[0]
+assert np.isfinite(bad_vols[:n_first]).all() and np.isnan(bad_vols[n_first:]).all()
 other = [k for k in range(conv.shape[0]) if k != col]
 assert conv[other].all() and conv[col, 0]  # other columns, and the earlier bucket, are fine
 col_diff = float(jnp.max(jnp.abs(bad_cal.market.surfaces[vol_spec.strip_id].vols[jnp.array(other)]
@@ -212,9 +225,11 @@ try:
     raise AssertionError("check() should have raised")
 except CalibrationError as exc:
     print(f"    market.check() raised: {exc}")
-    assert strike_label in str(exc) and STRIP in str(exc)
+    assert bad_node in str(exc) and STRIP in str(exc) and "first failure" in str(exc)
 print(f"    downstream optionlet SABR failed_labels() = {opt_res.failed_labels()}")
-assert len(opt_res.failed_labels()) > 0
+# Every optionlet expiry fed a NaN strike fails; the first bucket's expiries do not.
+opt_conv = np.asarray(opt_res.diagnostics.converged)
+assert opt_conv[:n_first].all() and not opt_conv[n_first:].any()
 
 # The standalone strip of the same column names the cap bucket itself.
 caps_k = [eqx.tree_at(lambda c: c.strike, cap, world.cap_strikes[col]) for cap in world.caps]
@@ -224,14 +239,16 @@ one = strip_caplet_vols(
     forward_curve=base.market.curve(fwd_id), is_normal=True,
     name=f"cap strip {strike_label}",
 )
-print(f"    standalone strip_caplet_vols failed_labels() = {one.failed_labels()}")
-assert one.failed_labels()[0] == bucket_labels[1]
+print(f"    standalone strip_caplet_vols failed_labels() = {one.failed_labels()}, "
+      f"root cause {one.root_cause_labels()}")
+assert one.failed_labels() == bucket_labels[1:]
+assert one.root_cause_labels() == (bucket_labels[1],)
 try:
     one.check()
     raise AssertionError("check() should have raised")
 except CalibrationError as exc:
     print(f"    standalone check() raised: {exc}")
-    assert bucket_labels[1] in str(exc)
+    assert f"first failure(s) {[bucket_labels[1]]}" in str(exc)
 
 # 3b. Merely stale (half its value): the bootstrap still has a root; the damage
 # shows up as a jagged caplet term structure that SABR cannot fit downstream.
@@ -249,7 +266,6 @@ except CalibrationError as exc:
     print(f"    market.check() raised: {exc}")
     assert OPT in str(exc) and stale_opt.failed_labels()[0] in str(exc)
 # Expiries of the untouched first bucket are fitted exactly as in the baseline.
-n_first = world.strip.bucket_ends[0]
 first = float(jnp.max(jnp.abs(stale_cal.market.surfaces[vol_spec.optionlet_id].alphas[:n_first]
                               - base.market.surfaces[vol_spec.optionlet_id].alphas[:n_first])))
 print(f"    first-bucket optionlet alphas vs baseline: max |Δ| = {first:.1e}")
@@ -273,9 +289,28 @@ except CalibrationError as exc:
 tight_cal = calibrate_market(tight_chain, snap.quotes, snap.fixed)
 tc = tight_cal.result(curves.node.name)
 print(f"  {summary(tc)}")
-print(f"  failed_labels() = {tc.failed_labels()}")
-assert not bool(tc.converged) and len(tc.failed_labels()) > 0
+print(f"  failed_labels() = {tc.failed_labels()}  (the worst cluster, not all "
+      f"{len(tc.labels)} quotes)")
+# One Newton step from a flat guess leaves the long end furthest off: the
+# cluster within a factor two of the worst node is named, nothing else.
+tc_res = tc.node_max_abs_residuals()
+long_end = tuple(l for l, r in zip(tc.labels, tc_res) if r >= 0.5 * tc_res.max())
+assert not bool(tc.converged) and tc.failed_labels() == long_end
+assert 0 < len(long_end) < len(tc.labels)
 assert int(tc.diagnostics.n_steps) <= 1
+
+# One infeasible curve quote (a 5Y OIS at -50%: no positive discount factor
+# reprices it) diverges the joint Newton solve to NaN everywhere; the bad
+# quote is still named alone, read off the residuals at the starting point.
+neg_key = "USD.OIS.5Y"
+neg_res = curves.node.calibrate(snap.quotes.with_values({neg_key: -0.5}))
+print(f"  {neg_key} := -50%: converged={bool(neg_res.converged)}, all node residuals "
+      f"NaN={bool(np.isnan(neg_res.node_max_abs_residuals()).all())}, "
+      f"failed_labels() = {neg_res.failed_labels()}")
+assert neg_res.failed_labels() == (neg_key,)
+nan_curve = curves.node.calibrate(snap.quotes.with_values({"USD.IRS3M.7Y": jnp.nan}))
+print(f"  USD.IRS3M.7Y := NaN: failed_labels() = {nan_curve.failed_labels()}")
+assert nan_curve.failed_labels() == ("USD.IRS3M.7Y",)
 fwd_err = float(jnp.max(jnp.abs(tight_cal.market.surfaces[vol_spec.cube_id].forwards
                                 - base_cube.forwards))) * 1e4
 print(f"  downstream cube converged={bool(tight_cal.result(CUBE).converged)} — but its "
@@ -397,6 +432,6 @@ for res in fixed_cal.results:
 diff = max_abs_diff(fixed_cal.market, base.market)
 print(f"  recalibrated market vs baseline: max |Δ| over every leaf = {diff:.1e}")
 assert diff <= 1e-12
-print("\n  Diagnosis order: market.check() names the level and node; failed_labels()")
-print("  and node_max_abs_residuals() localise it; condition_number() flags an")
+print("\n  Diagnosis order: market.check() names the level and node; failed_labels(),")
+print("  root_cause_labels() and node_max_abs_residuals() localise it; condition_number() flags an")
 print("  ill-posed quote set; check_engine() guards engine-bound parameters.")

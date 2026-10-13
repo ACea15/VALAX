@@ -531,7 +531,7 @@ def calibrate_swaption_cube_from_curves(
     dynamics: str | None = None,
     is_normal: bool = False,
     shift: Float[Array, ""] = 0.0,
-    fixed_beta: Float[Array, ""] | None = None,
+    fixed_beta: Float[Array, ""] | float | None = 0.5,
     weights_per_node: Sequence[Sequence[Float[Array, " n_k"]]] | None = None,
     settings: SolverSettings | None = None,
     name: str = "swaption_cube",
@@ -587,7 +587,10 @@ def calibrate_swaption_cube_from_curves(
             lognormal (Black-76). Must match the convention of the quotes.
         shift: Displacement for the normal expansion (used only when
             ``is_normal`` is True).
-        fixed_beta: If provided, beta is fixed across all nodes.
+        fixed_beta: Beta held fixed across all nodes — 0.5 by default, as for
+            :func:`~valax.calibration.sabr.calibrate_sabr` and
+            ``swaption_cube_node``; ``0.0`` for normal-backbone quotes;
+            ``None`` calibrates it per node.
         weights_per_node: Optional nested ``[i][j]`` per-strike weights.
         settings: Per-node solver settings; defaults to
             :data:`~valax.calibration.settings.FIT_SETTINGS`.

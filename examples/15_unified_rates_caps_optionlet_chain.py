@@ -153,7 +153,8 @@ for res in calibrated.results:
     print(f"  {res.name:<20} converged={bool(jnp.all(res.diagnostics.converged))}  "
           f"max|R|={float(jnp.max(res.diagnostics.max_abs_residual)):.1e}  "
           f"cond={float(res.condition_number()):.1e}")
-print(f"  strip: one lower-triangular bootstrap per strike column {strip_fit.labels},")
+print(f"  strip: one lower-triangular bootstrap per strike column, nodes named "
+      f"(strike, bucket): {strip_fit.labels[0]!r} … {strip_fit.labels[-1]!r}")
 print(f"         buckets ending at optionlets {tuple(int(e) for e in world.strip.bucket_ends)} "
       f"= caps {tuple(f'{y}Y' for y in vol_spec.cap_years)}")
 

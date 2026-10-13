@@ -33,9 +33,8 @@ from jaxtyping import Float
 from jax import Array
 
 from valax.calibration.basket import BASKET_SETTINGS, basket_fit_level
-from valax.calibration.hull_white import JAMSHIDIAN_PROVENANCE
 from valax.calibration.level import LevelInputs
-from valax.calibration.result import CalibrationResult
+from valax.calibration.result import CLOSED_FORM_PROVENANCE, CalibrationResult
 from valax.calibration.settings import SolverSettings
 from valax.calibration.transforms import G2PP_TRANSFORMS
 from valax.pricing.multicurve import with_discount_curve
@@ -159,7 +158,8 @@ def calibrate_g2pp(
         return with_discount_curve(model, inp.upstream[0])
 
     def prices(model: G2PPModel, inp: LevelInputs) -> Float[Array, " n"]:
-        return g2pp_swaption_prices(model, swaptions, inp.upstream[1])
+        # Basket from ``inputs.data``, not a closure (tracer-free results).
+        return g2pp_swaption_prices(model, inp.data, inp.upstream[1])
 
     return basket_fit_level(
         name,
@@ -173,6 +173,7 @@ def calibrate_g2pp(
         weights=weights,
         relative=relative,
         settings=settings,
-        provenance=JAMSHIDIAN_PROVENANCE,
+        provenance=CLOSED_FORM_PROVENANCE,
         model_label="G2++",
+        data=tuple(swaptions),
     )

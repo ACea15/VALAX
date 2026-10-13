@@ -601,7 +601,9 @@ def caplet_strip_node(
     Strips every strike column of a flat-vol cap matrix into per-optionlet
     vols (:func:`~valax.surfaces.caplet_stripping.strip_columns_level`: one
     sequential bootstrap per column, ``vmap``-ed, each column reporting its
-    own convergence). Forwards are projected and payoffs discounted off the
+    own convergence per bucket, named ``"K=3.00% cap 2Y"`` — strike column
+    and cap maturity as in the quote key ``"<CCY>.CAP.2Y.<bp>"``; a failed
+    bucket installs NaN). Forwards are projected and payoffs discounted off the
     curves already in the market, so the stripped vols — and everything
     fitted on them — carry the curves' risk. The batched
     :class:`~valax.surfaces.caplet_stripping.CapletVolCurve` is installed
@@ -629,6 +631,7 @@ def caplet_strip_node(
     """
     from valax.surfaces.caplet_stripping import (
         _validate_strip,
+        cap_strip_labels,
         strip_columns_level,
     )
 
@@ -648,12 +651,13 @@ def caplet_strip_node(
     flat_keys = tuple(k for row in key_grid for k in row)
     curves = _curves_reader(discount_id, forward_id)
     node_name = name or strip_id
+    bucket_labels = cap_strip_labels(caps, reference_date)
 
     def calibrate_fn(inputs: LevelInputs):
         return strip_columns_level(
             node_name, tuple(caps), inputs, curves, strikes=strikes,
             quotes_fn=lambda inp: inp.quotes.vector(flat_keys).reshape(n_k, n_c),
-            is_normal=is_normal, settings=settings,
+            is_normal=is_normal, settings=settings, bucket_labels=bucket_labels,
         )
 
     return CalibrationNode(
@@ -792,6 +796,95 @@ def _target_price(
     return price(instrument, BlackScholesModel(vol=quote), market).price
 
 
+_ENGINE_SEVERITY = {"exact": 0, "discretised": 1, "modelling_bias": 2}
+
+
+def _basket_provenance(
+    template: Any, basket: Sequence[Any], method: str, config: Any
+):
+    """Provenance of a basket fit priced through ``price`` (eager).
+
+    Resolves ``method="auto"`` per instrument with the pricing policy, then
+    asks :func:`~valax.calibration.result.engine_provenance` (dispatched on
+    the model type). A basket whose instruments resolve to different engines
+    records the most restrictive one.
+
+    Args:
+        template: The model template.
+        basket: The calibration instruments.
+        method: The node's pricing method (possibly ``"auto"``).
+        config: The node's pricing config.
+
+    Returns:
+        The :class:`~valax.calibration.result.CalibrationProvenance`, or
+        ``None`` for an empty basket or one whose ``"auto"`` method cannot be
+        resolved (``price`` then reports the missing route when the level is
+        calibrated, as before).
+    """
+    from valax.calibration.result import engine_provenance
+    from valax.core.pricing import auto_method
+
+    try:
+        methods = dict.fromkeys(
+            auto_method(inst, template) if method == "auto" else method
+            for inst in basket
+        )
+    except ValueError:
+        return None
+    provs = [engine_provenance(template, m, config) for m in methods]
+    if not provs:
+        return None
+    return max(provs, key=lambda p: _ENGINE_SEVERITY[p.engine_kind])
+
+
+def _trade_data(
+    basket: tuple, template: Any, weights: Float[Array, " n"] | None
+) -> dict:
+    """The ``inputs.data`` block of a basket fit: basket, template, weights.
+
+    Everything the residual reads that is neither a quote, the upstream
+    market nor a fixed input. Carried as pytree leaves so a result returned
+    from ``jit`` / ``vmap`` (where the basket may be traced) closes over no
+    tracer.
+    """
+    w = (
+        jnp.ones((len(basket),)) if weights is None
+        else jnp.asarray(weights, dtype=jnp.float64)
+    )
+    return {"basket": tuple(basket), "template": template, "weights": w}
+
+
+def _with_data(inputs: LevelInputs, data: Any) -> LevelInputs:
+    """``inputs`` with its ``data`` block replaced."""
+    return LevelInputs(
+        quotes=inputs.quotes, upstream=inputs.upstream, fixed=inputs.fixed,
+        data=data,
+    )
+
+
+def _model_assembler(
+    transforms: Mapping[str, TransformSpec],
+    fixed_fields: Mapping[str, str],
+) -> Callable[[dict, LevelInputs], Any]:
+    """``(theta, inputs) -> model`` from the template in ``inputs.data``."""
+
+    def assemble(theta: dict, inputs: LevelInputs) -> Any:
+        model = inputs.data["template"]
+        for f, spec in transforms.items():
+            model = eqx.tree_at(
+                lambda m, _f=f: getattr(m, _f), model,
+                spec.from_unconstrained(theta[f]),
+            )
+        for f, key in fixed_fields.items():
+            model = eqx.tree_at(
+                lambda m, _f=f: getattr(m, _f), model, inputs.fixed[key],
+                is_leaf=lambda x: x is None,
+            )
+        return model
+
+    return assemble
+
+
 def price_fit_node(
     name: str,
     *,
@@ -816,6 +909,9 @@ def price_fit_node(
     pricing share one implementation, and any (instrument, model, method)
     triple reachable from :func:`valax.core.pricing.price` can be calibrated
     with no new code.
+
+    The basket's engine (``method="auto"`` resolved per instrument) is
+    recorded as provenance, as in :func:`swaption_basket_node`.
 
     The same factory serves both scopes: leave ``install_fn=None`` for a
     model-scope node (level 2, e.g. Heston to an equity surface, Hull-White to
@@ -866,26 +962,13 @@ def price_fit_node(
         )
     transforms = dict(transforms)
     fixed_fields = dict(fixed_fields or {})
-    w = jnp.ones((len(basket),)) if weights is None else jnp.asarray(weights)
     settings = FIT_SETTINGS if settings is None else settings
+    data = _trade_data(basket, template, weights)
     theta0 = {
         f: transforms[f].to_unconstrained(jnp.asarray(getattr(template, f)))
         for f in transforms
     }
-
-    def assemble(theta: dict, inputs: LevelInputs) -> Any:
-        model = template
-        for f, spec in transforms.items():
-            model = eqx.tree_at(
-                lambda m, _f=f: getattr(m, _f), model,
-                spec.from_unconstrained(theta[f]),
-            )
-        for f, key in fixed_fields.items():
-            model = eqx.tree_at(
-                lambda m, _f=f: getattr(m, _f), model, inputs.fixed[key],
-                is_leaf=lambda x: x is None,
-            )
-        return model
+    assemble = _model_assembler(transforms, fixed_fields)
 
     def residual_fn(theta: dict, inputs: LevelInputs) -> Float[Array, " n"]:
         from valax.core.pricing import price
@@ -893,18 +976,21 @@ def price_fit_node(
         model = assemble(theta, inputs)
         market = inputs.upstream
         r = []
-        for inst, key in zip(basket, keys):
+        for inst, key in zip(inputs.data["basket"], keys):
             model_price = price(
                 inst, model, market, method=method, config=config
             ).price
             target = _target_price(quote_form, inst, inputs.quotes[key], market)
             r.append(model_price - target)
-        return w * jnp.stack(r)
+        return inputs.data["weights"] * jnp.stack(r)
+
+    provenance = _basket_provenance(template, basket, method, config)
 
     def calibrate_fn(inputs: LevelInputs):
         return solve_level(
-            name, "least_squares", residual_fn, theta0, inputs, assemble,
-            settings,
+            name, "least_squares", residual_fn, theta0,
+            _with_data(inputs, data), assemble,
+            settings, provenance=provenance,
         )
 
     return CalibrationNode(
@@ -988,8 +1074,8 @@ def swaption_basket_node(
     ``cube_id`` and the curves (the smile-aware
     :func:`~valax.pricing.analytic.rates_smile.swaption_price`) — and each
     model price goes through :func:`valax.core.pricing.price` (``method``,
-    the exact Jamshidian route for Hull-White by default), which binds the
-    model's curve from the same market:
+    by default the closed form — Jamshidian for Hull-White, Brigo-Mercurio
+    for G2++), which binds the model's curve from the same market:
 
     .. math::
 
@@ -1010,6 +1096,12 @@ def swaption_basket_node(
 
     Baskets may be traced (closed over inside ``eqx.filter_vmap``), so
     same-shaped per-trade baskets batch into one calibration.
+
+    The result records the basket's engine as provenance
+    (:func:`~valax.calibration.result.engine_provenance`): ``"exact"`` for a
+    closed form, ``"discretised"`` (with ``config``) for PDE / MC, and
+    ``"modelling_bias"`` for Cheyette's frozen-``y`` PDE, which
+    :func:`~valax.calibration.result.check_engine` then binds to that engine.
 
     Args:
         name: Node name.
@@ -1046,26 +1138,16 @@ def swaption_basket_node(
         )
     transforms = dict(transforms)
     fixed_fields = dict(fixed_fields or {})
-    w = jnp.ones((n,)) if weights is None else jnp.asarray(weights)
     settings = BASKET_SETTINGS if settings is None else settings
+    # The basket, its weights and the template may be traced (a node built
+    # inside ``eqx.filter_vmap`` per trade): they travel as ``inputs.data``
+    # leaves, never closed over by the static residual / assemble maps.
+    data = _trade_data(basket, template, weights)
     theta0 = {
         f: transforms[f].to_unconstrained(jnp.asarray(getattr(template, f)))
         for f in transforms
     }
-
-    def assemble(theta: dict, inputs: LevelInputs) -> Any:
-        model = template
-        for f, spec in transforms.items():
-            model = eqx.tree_at(
-                lambda m, _f=f: getattr(m, _f), model,
-                spec.from_unconstrained(theta[f]),
-            )
-        for f, key in fixed_fields.items():
-            model = eqx.tree_at(
-                lambda m, _f=f: getattr(m, _f), model, inputs.fixed[key],
-                is_leaf=lambda x: x is None,
-            )
-        return model
+    assemble = _model_assembler(transforms, fixed_fields)
 
     def targets(inputs: LevelInputs) -> Float[Array, " n"]:
         from valax.core.resolve import discount_id_of, forward_id_of
@@ -1074,7 +1156,7 @@ def swaption_basket_node(
         market = inputs.upstream
         cube = market.surfaces[cube_id]
         out = []
-        for k, inst in enumerate(basket):
+        for k, inst in enumerate(inputs.data["basket"]):
             fwd_id = forward_id_of(inst)
             t = swaption_price(
                 inst, market.curve(discount_id_of(inst)), cube,
@@ -1092,16 +1174,19 @@ def swaption_basket_node(
         market = inputs.upstream
         prices = jnp.stack([
             price(inst, model, market, method=method, config=config).price
-            for inst in basket
+            for inst in inputs.data["basket"]
         ])
         t = targets(inputs)
         scale = jnp.maximum(jnp.abs(t), 1e-8) if relative else jnp.ones_like(t)
-        return w * (prices - t) / scale
+        return inputs.data["weights"] * (prices - t) / scale
+
+    provenance = _basket_provenance(template, basket, method, config)
 
     def calibrate_fn(inputs: LevelInputs):
         return solve_level(
-            name, "least_squares", residual_fn, theta0, inputs, assemble,
-            settings, labels=targets_keyed,
+            name, "least_squares", residual_fn, theta0,
+            _with_data(inputs, data), assemble,
+            settings, labels=targets_keyed, provenance=provenance,
         )
 
     return CalibrationNode(

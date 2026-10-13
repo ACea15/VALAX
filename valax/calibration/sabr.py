@@ -148,7 +148,7 @@ def calibrate_sabr(
     expiry: Float[Array, ""],
     *,
     initial_guess: SABRModel | None = None,
-    fixed_beta: Float[Array, ""] | None = None,
+    fixed_beta: Float[Array, ""] | float | None = 0.5,
     weights: Float[Array, " n"] | None = None,
     settings: SolverSettings | None = None,
     vol_fn: Callable = sabr_implied_vol,
@@ -170,9 +170,13 @@ def calibrate_sabr(
         forward: Forward price.
         expiry: Time to expiry.
         initial_guess: Starting SABRModel. If None, uses a heuristic.
-        fixed_beta: If provided, beta is held fixed (a fixed input of the
-            level) rather than calibrated. Common: 0.5 for equity, 0.0 for
-            rates.
+        fixed_beta: Beta held fixed (a fixed input of the level) — **0.5 by
+            default**, the same default as the chain nodes
+            (``sabr_smile_node``, ``swaption_cube_node``,
+            ``optionlet_sabr_node``): beta and alpha are poorly jointly
+            identified from one smile (freeing beta costs ~260x in
+            conditioning), so market practice is to fix it. ``0.0`` for
+            normal-backbone rates smiles; ``None`` calibrates beta too.
         weights: Per-strike weights for residuals. Default: uniform.
         settings: Solver settings; defaults to
             :data:`~valax.calibration.settings.FIT_SETTINGS`

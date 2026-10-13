@@ -190,3 +190,70 @@ class TestForwardCurve:
         assert float(
             g2pp_swaption_price(s, model, forward_curve=model.initial_curve)
         ) == float(g2pp_swaption_price(s, model))
+
+
+class TestPriceRoute:
+    """``Swaption × G2PPModel × "analytic"`` through :func:`valax.core.price`."""
+
+    @staticmethod
+    def _setup(ref_date, model):
+        from valax.core.market_state import MarketState
+        from valax.curves.graph import CurveGraph
+
+        market = MarketState(curves=CurveGraph(curves={
+            "USD.SOFR.OIS": model.initial_curve,
+            "USD.SOFR.3M": _flat_curve(ref_date, rate=0.035),
+        }))
+        free = eqx.tree_at(lambda m: m.initial_curve, model, None,
+                           is_leaf=lambda x: x is None)
+        return market, free
+
+    @staticmethod
+    def _keyed(s, **selectors):
+        return Swaption(
+            expiry_date=s.expiry_date, fixed_dates=s.fixed_dates, strike=s.strike,
+            notional=s.notional, is_payer=s.is_payer, day_count=s.day_count,
+            **selectors,
+        )
+
+    def test_auto_default_is_analytic_and_matches_kernel(self, ref_date, model):
+        from valax.core.pricing import auto_method, price
+
+        market, free = self._setup(ref_date, model)
+        s = self._keyed(_swaption(ref_date, 2, 5, 0.03, True),
+                        discount_id="USD.SOFR.OIS")
+        assert auto_method(s, free) == "analytic"
+        got = price(s, free, market)
+        assert got.method == "analytic"
+        assert float(got.price) == float(g2pp_swaption_price(s, model))
+
+    def test_multi_curve_projection_matches_kernel(self, ref_date, model):
+        from valax.core.pricing import price
+
+        market, free = self._setup(ref_date, model)
+        s = self._keyed(_swaption(ref_date, 2, 5, 0.03, True),
+                        discount_id="USD.SOFR.OIS", forward_id="USD.SOFR.3M")
+        got = price(s, free, market, method="analytic").price
+        ref = g2pp_swaption_price(s, model, market.curve("USD.SOFR.3M"))
+        assert float(got) == float(ref)
+        assert float(got) > float(g2pp_swaption_price(s, model))
+
+    def test_jit_through_price(self, ref_date, model):
+        from valax.core.pricing import price
+
+        market, free = self._setup(ref_date, model)
+        s = self._keyed(_swaption(ref_date, 2, 5, 0.03, True),
+                        discount_id="USD.SOFR.OIS")
+        f = eqx.filter_jit(lambda m, mk: price(s, m, mk).price)
+        assert jnp.allclose(f(free, market), g2pp_swaption_price(s, model), rtol=1e-14)
+
+
+class TestCriticalBoundary:
+    def test_failed_boundary_solve_is_nan_not_a_silent_iterate(self):
+        from valax.pricing.analytic.g2pp_swaptions import _critical_y
+
+        # Σ λ_i e^{-B y} = 1 has no root when every λ_i is zero.
+        y = _critical_y(jnp.zeros(3), jnp.ones(3))
+        assert jnp.isnan(y)
+        ok = _critical_y(jnp.array([0.5, 0.6]), jnp.array([0.5, 1.0]))
+        assert jnp.isfinite(ok)

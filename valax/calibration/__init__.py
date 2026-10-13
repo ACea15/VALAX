@@ -25,6 +25,7 @@ from valax.calibration.level import (
     level_condition_number,
 )
 from valax.calibration.result import (
+    CLOSED_FORM_PROVENANCE,
     ENGINE_KINDS,
     LEVEL_KINDS,
     CalibrationDiagnostics,
@@ -33,6 +34,7 @@ from valax.calibration.result import (
     CalibrationResult,
     check_engine,
     diagnostics_from_solution,
+    engine_provenance,
     explicit_diagnostics,
     fixed_point_diagnostics,
 )
@@ -89,7 +91,11 @@ from valax.calibration.cheyette import (
     cheyette_provenance,
 )
 from valax.calibration.heston import calibrate_heston
-from valax.calibration.slv import calibrate_slv, calibrate_slv_leverage
+from valax.calibration.slv import (
+    SLV_SETTINGS,
+    calibrate_slv,
+    calibrate_slv_leverage,
+)
 
 # The chain layer depends on valax.core / valax.market / valax.surfaces, and
 # valax.core itself imports this package (via valax.surfaces), so its symbols

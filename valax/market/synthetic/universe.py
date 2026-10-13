@@ -1034,17 +1034,25 @@ def synthesize_rates_vol_quote_set(
     swpn_flat = [k for row in swpn_keys for keys in row for k in keys]
     swpn_clean = jnp.concatenate(swpn_vols)
 
+    # Cap keys name the maturity exactly as the strip labels its buckets
+    # ("cap 2Y" <-> "USD.CAP.2Y.<bp>"), measured from the valuation date.
+    from valax.surfaces.caplet_stripping import cap_strip_labels
+
+    maturities = [
+        label.removeprefix("cap ")
+        for label in cap_strip_labels(world.caps, rates.reference_date)
+    ]
     cap_keys, cap_vols = [], []
     for s_idx, strike in enumerate(world.cap_strikes):
         row = []
-        for cap in world.caps:
+        for cap, maturity in zip(world.caps, maturities):
             struck = _restrike(cap, strike)
             n = int(struck.fixing_dates.shape[0])
             target = cap_pricer(struck, disc, world.strip.vols[s_idx, :n], fwd)
             cap_vols.append(
                 _flat_cap_vol(struck, disc, fwd, target, spec.is_normal)
             )
-            row.append(f"{ccy}.CAP.{n // 4 + 1}Y.{round(float(strike) * 1e4)}")
+            row.append(f"{ccy}.CAP.{maturity}.{round(float(strike) * 1e4)}")
         cap_keys.append(tuple(row))
     cap_flat = [k for row in cap_keys for k in row]
     cap_clean = jnp.stack(cap_vols)

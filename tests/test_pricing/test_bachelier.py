@@ -113,6 +113,15 @@ class TestBachelierImpliedVol:
         iv = bachelier_implied_vol(option, fwd, price, rate)
         assert abs(float(iv) - float(true_vol)) < 1e-8
 
+    def test_price_below_intrinsic_is_nan(self):
+        """No vol reprices a sub-intrinsic premium: NaN, not the last iterate."""
+        option = EuropeanOption(
+            strike=jnp.array(90.0), expiry=jnp.array(1.0), is_call=True
+        )
+        fwd, rate = jnp.array(100.0), jnp.array(0.02)
+        intrinsic = jnp.exp(-rate) * 10.0
+        assert jnp.isnan(bachelier_implied_vol(option, fwd, 0.9 * intrinsic, rate))
+
     def test_jit_compiles(self):
         option = EuropeanOption(
             strike=jnp.array(100.0), expiry=jnp.array(1.0), is_call=True

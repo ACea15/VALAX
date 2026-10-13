@@ -163,6 +163,7 @@ def _retarget(result: CalibrationResult, market: MarketState) -> CalibrationResu
         quotes=result.inputs.quotes,
         upstream=market,
         fixed=result.inputs.fixed,
+        data=result.inputs.data,
     )
     return dataclasses.replace(result, inputs=inputs)
 
@@ -178,7 +179,8 @@ def _pull_back(
     Two contributions: the explicit one through ``assemble_fn`` (objects that
     read their inputs directly, e.g. a surface storing its forwards) and, for
     solved levels, the implicit one through ``theta`` by the implicit function
-    theorem.
+    theorem. The cotangent of ``inputs.data`` (trade data such as a basket's
+    strikes) is computed but never accumulated: it is not a risk input.
     """
 
     def scalar(theta_inputs: tuple) -> Float[Array, ""]:

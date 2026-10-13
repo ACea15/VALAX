@@ -405,28 +405,50 @@ def _strip_plan(caps: Sequence[Cap]) -> tuple[np.ndarray, tuple[int, ...]]:
     return index, ends
 
 
-def cap_strip_labels(caps: Sequence[Cap]) -> tuple[str, ...]:
-    """Bucket labels of a strip, e.g. ``("cap 1Y", "cap 2Y")`` (eager).
+def cap_strip_labels(
+    caps: Sequence[Cap],
+    reference_date: Any = None,
+) -> tuple[str, ...]:
+    """Bucket labels of a strip by cap **maturity**, e.g. ``("cap 1Y", "cap 2Y")``.
 
-    Each label is the cap's tenor (first accrual start to last accrual end).
-    Falls back to positional labels when the dates are traced.
+    The market names a cap by its maturity measured from the spot / effective
+    date — the first fixing of the full, spot-starting strip — even though the
+    quoted strip drops that already-fixing first period: a "1Y" quarterly cap
+    strips three caplets (fixing at 3M, 6M, 9M), ending at 1Y. Each label is
+    therefore the year fraction from ``reference_date`` to the cap's last
+    accrual end, snapped to a market tenor by
+    :func:`~valax.calibration.solve.period_label`, so ``"cap 2Y"`` matches a
+    quote key such as ``"USD.CAP.2Y.<strike>"``.
+
+    Eager; falls back to positional labels (``"cap 1"``) when the dates are
+    traced.
 
     Args:
         caps: Quoted caps, ascending in maturity.
+        reference_date: Spot / effective date ordinal the maturity is
+            measured from (the curve's reference date). When ``None`` it is
+            inferred as one accrual period before the first quoted
+            optionlet's start — the dropped spot-starting period.
 
     Returns:
         One label per quoted cap.
     """
+    ref = None if reference_date is None else _concrete(reference_date)
     labels = []
     for i, cap in enumerate(caps):
         start, end = _concrete(cap.start_dates), _concrete(cap.end_dates)
-        if start is None or end is None:
+        if start is None or end is None or (
+            reference_date is not None and ref is None
+        ):
             labels.append(f"cap {i + 1}")
             continue
+        origin = (
+            int(start[0]) - (int(end[0]) - int(start[0]))
+            if ref is None else int(ref)
+        )
         with jax.ensure_compile_time_eval():
             t = float(year_fraction(
-                jnp.asarray(int(start[0])), jnp.asarray(int(end[-1])),
-                cap.day_count,
+                jnp.asarray(origin), jnp.asarray(int(end[-1])), cap.day_count,
             ))
         labels.append(f"cap {period_label(t)}")
     return tuple(labels)
@@ -575,6 +597,13 @@ def strip_buckets(
 
     Returns:
         ``(bucket_vols, diagnostics)`` with one diagnostics entry per bucket.
+        A bucket whose root-find failed, or whose root is a non-positive
+        vol (an infeasible quote), gets a **NaN** vol (never a finite
+        best effort), so every later bucket of the strip — which reads it —
+        fails too; ``diagnostics.extras["root_cause"]`` marks the first
+        failed bucket (see
+        :meth:`~valax.calibration.result.CalibrationResult.root_cause_labels`).
+        Converged buckets, and their gradients, are unaffected.
     """
     settings = STRIP_SETTINGS if settings is None else settings
     caps = tuple(caps)
@@ -594,7 +623,8 @@ def strip_buckets(
 
     known = jnp.zeros((0,), dtype=jnp.float64)
     guess = jnp.asarray(_DEFAULT_GUESS[is_normal], dtype=jnp.float64)
-    converged, steps = [], []
+    converged, steps, root_cause = [], [], []
+    upstream_ok = jnp.asarray(True)
     for i in range(n_caps):
 
         def bucket_residual(sigma, args, _i=i):
@@ -607,9 +637,24 @@ def strip_buckets(
         if guesses is not None:
             guess = guesses[i]
         sol = run_solver("root", bucket_residual, guess, (known, inputs), settings)
-        known = jnp.concatenate([known, jnp.reshape(sol.value, (1,))])
-        guess = jax.lax.stop_gradient(sol.value)
-        converged.append(sol.result == optx.RESULTS.successful)
+        # A bucket must also have a *positive* vol: Black-76 and Bachelier
+        # both price with sigma < 0 (they depend on sigma only through
+        # sigma * sqrt(T) and its square), so an infeasible quote can
+        # otherwise "converge" to a negative vol with no failure reported.
+        ok = (
+            (sol.result == optx.RESULTS.successful)
+            & jnp.all(jnp.isfinite(bucket_residual(sol.value, (known, inputs))))
+            & (sol.value > 0.0)
+        )
+        # A failed bucket installs NaN, never a plausible-looking vol (as a
+        # failed cube cell does). ``where`` against a constant: the gradient
+        # of a converged bucket is untouched and no NaN reaches it.
+        vol = jnp.where(ok, sol.value, jnp.nan)
+        known = jnp.concatenate([known, jnp.reshape(vol, (1,))])
+        guess = jax.lax.stop_gradient(jnp.where(ok, sol.value, guess))
+        converged.append(ok)
+        root_cause.append(~ok & upstream_ok)
+        upstream_ok = upstream_ok & ok
         steps.append(sol.stats.get("num_steps", jnp.asarray(-1)))
 
     final = jnp.stack([one_cap(i, known, inputs) for i in range(n_caps)])
@@ -619,6 +664,9 @@ def strip_buckets(
         rmse=jnp.abs(final),
         n_steps=jnp.stack(steps).astype(jnp.int32),
         converged=jnp.stack(converged),
+        # The strip is triangular: a failed bucket's NaN fails every later
+        # bucket of the column. ``root_cause`` marks the first one.
+        extras={"root_cause": jnp.stack(root_cause)},
     )
     return known, diagnostics
 
@@ -773,7 +821,7 @@ def strip_caplet_vols(
         lambda up: up,
         quote_kind=quote_kind, is_normal=is_normal, interp=interp,
         initial_vols=initial,
-        labels=cap_strip_labels(caps),
+        labels=cap_strip_labels(caps, curve.reference_date),
         settings=settings,
     )
 
@@ -829,16 +877,17 @@ def strip_optionlet_surface(
     The whole quotes → surface leg in one call, as two levels:
 
     1. **strip** every strike column (:func:`caplet_strip_level`, batched
-       over strikes so each column reports its own convergence, labelled
-       ``"K=3.00%"``) — every quoted cap is repriced exactly, dual-curve;
+       over strikes so each bucket of each column reports its own
+       convergence, labelled ``"K=3.00% cap 2Y"``) — every quoted cap is
+       repriced exactly, dual-curve;
     2. **fit** one SABR smile per optionlet expiry on the stripped vols
        (:func:`valax.surfaces.optionlet_surface.build_sabr_caplet_surface`),
        anchored on the projected forwards read off the curves with
        :func:`optionlet_forwards`.
 
     The returned result is the SABR level, with the strip level as its
-    child, so ``result.check()`` covers both and names the failing strike
-    column or expiry slice.
+    child, so ``result.check()`` covers both and names the failing
+    ``(strike, cap)`` bucket or expiry slice.
 
     Args:
         caps: Nested cap schedule, ascending in maturity.  The strike
@@ -943,13 +992,19 @@ def strip_columns_level(
     quotes_fn: Callable[[LevelInputs], Float[Array, "n_strikes n_caps"]] | None = None,
     is_normal: bool = False,
     settings: SolverSettings | None = None,
+    bucket_labels: Sequence[str] | None = None,
 ) -> CalibrationResult:
     """Strip several strike columns of a cap matrix as one batched level.
 
     Each column is the strip of :func:`caplet_strip_level` re-struck at its
     strike, solved bucket by bucket and independently of the other columns
-    (own convergence flags, labelled ``"K=3.00%"``) inside one ``vmap``. The
-    curves ``curves_fn(inputs.upstream)`` are shared by every column and stay
+    inside one ``vmap``. Every ``(strike, bucket)`` reports its own
+    convergence and is labelled by both (``"K=3.00% cap 2Y"``, row-major,
+    aligned with the ``(n_strikes, n_buckets)`` diagnostics), so a failure
+    names the strike column *and* the cap maturity; a failed bucket installs
+    NaN and fails the later buckets of its column, the first being reported
+    by ``result.root_cause_labels()``. The curves
+    ``curves_fn(inputs.upstream)`` are shared by every column and stay
     differentiable upstream inputs.
 
     Args:
@@ -963,6 +1018,9 @@ def strip_columns_level(
         is_normal: Bachelier (True) or Black-76 (False) pricing.
         settings: Per-column solver settings; defaults to
             :data:`STRIP_SETTINGS`.
+        bucket_labels: One label per cap; defaults to
+            :func:`cap_strip_labels` measured from the discount curve's
+            reference date (positional when that date is traced).
 
     Returns:
         A batched :class:`~valax.calibration.result.CalibrationResult` whose
@@ -1006,6 +1064,16 @@ def strip_columns_level(
         if concrete is not None
         else tuple(f"K{i}" for i in range(n))
     )
+    if bucket_labels is None:
+        bucket_labels = cap_strip_labels(
+            caps, curves_fn(inputs.upstream)[0].reference_date
+        )
+    bucket_labels = tuple(bucket_labels)
+    if len(bucket_labels) != len(caps):
+        raise ValueError(
+            f"strip_columns_level({name!r}): {len(bucket_labels)} bucket "
+            f"labels for {len(caps)} caps."
+        )
 
     def node_solve(theta0, node_in: LevelInputs):
         return strip_buckets(
@@ -1017,7 +1085,7 @@ def strip_columns_level(
         name, "root", residual,
         jax.lax.stop_gradient(jnp.asarray(quotes_fn(inputs), dtype=jnp.float64)),
         inputs, node_inputs, assemble, settings, labels=labels,
-        node_solve_fn=node_solve,
+        node_solve_fn=node_solve, sub_labels=bucket_labels,
     )
 
 

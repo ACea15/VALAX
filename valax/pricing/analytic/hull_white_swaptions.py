@@ -129,7 +129,10 @@ def hw_critical_rate(
             swaption's effective strike on the bond.  Defaults to ``1.0``.
 
     Returns:
-        Critical short rate :math:`r^\star`.
+        Critical short rate :math:`r^\star`, or NaN if the Newton solve fails
+        — a failed decomposition surfaces as a non-finite price (inside a
+        calibration, a named non-finite residual) instead of a silently wrong
+        one.
     """
     if initial_guess is None:
         initial_guess = hw_instantaneous_forward(model, expiry_time)
@@ -147,7 +150,7 @@ def hw_critical_rate(
         max_steps=100,
         throw=False,
     )
-    return sol.value
+    return jnp.where(sol.result == optx.RESULTS.successful, sol.value, jnp.nan)
 
 
 def hw_zcb_option_price(

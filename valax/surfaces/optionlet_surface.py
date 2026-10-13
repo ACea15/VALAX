@@ -178,7 +178,7 @@ def build_sabr_caplet_surface(
     *,
     is_normal: bool = False,
     shift: Float[Array, ""] = 0.0,
-    fixed_beta: Float[Array, ""] | None = None,
+    fixed_beta: Float[Array, ""] | float | None = 0.5,
     weights_per_expiry: list[Float[Array, " n_k"]] | None = None,
     settings: SolverSettings | None = None,
     dynamics: str = "sticky_strike",
@@ -204,7 +204,11 @@ def build_sabr_caplet_surface(
             lognormal (Black-76). Must match the convention of the input quotes.
         shift: Displacement for the normal expansion (used only when
             ``is_normal`` is True).
-        fixed_beta: If provided, beta is fixed across all slices.
+        fixed_beta: Beta held fixed across all slices — 0.5 by default, as
+            for :func:`~valax.calibration.sabr.calibrate_sabr` and the chain
+            nodes (alpha and beta are not jointly identifiable from a single
+            cap smile); ``0.0`` for normal-backbone quotes; ``None``
+            calibrates it per slice.
         weights_per_expiry: Optional per-strike weights, one array per expiry.
         settings: Per-slice solver settings; defaults to
             :data:`~valax.calibration.settings.FIT_SETTINGS`.

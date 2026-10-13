@@ -61,7 +61,8 @@ def bachelier_implied_vol(
         rate: Risk-free discount rate (continuously compounded).
 
     Returns:
-        Normal (absolute) volatility that reprices ``price``.
+        Normal (absolute) volatility that reprices ``price``, or NaN when
+        none exists (a price below intrinsic) or the Newton solve fails.
     """
     df = jnp.exp(-rate * option.expiry)
     sqrt_tau = jnp.sqrt(option.expiry)
@@ -85,4 +86,6 @@ def bachelier_implied_vol(
         max_steps=100,
         throw=False,
     )
-    return sol.value
+    # A price with no implied vol (below intrinsic) or a failed solve is NaN,
+    # never the last Newton iterate.
+    return jnp.where(sol.result == optx.RESULTS.successful, sol.value, jnp.nan)
