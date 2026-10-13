@@ -182,9 +182,14 @@ from valax.risk import callable_bond_oas, effective_duration, effective_convexit
 model = HullWhiteModel(
     mean_reversion=jnp.array(0.03),
     volatility=jnp.array(0.01),
-    initial_curve=curve,          # the base (risk-free) discount curve
+    initial_curve=curve,          # bound: the base (risk-free) discount curve
 )
 config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
+# The OAS / effective-duration helpers and mc_price_dispatch below are
+# kernel-level: they shift and read the model's own curve, so they take a
+# *bound* model (here built with initial_curve=, or bind_curves(model, curve)).
+# valax.price(callable, model, market) instead takes the curve-free model
+# (initial_curve=None) and binds the market's curve itself.
 
 oas  = callable_bond_oas(
     callable, model, jnp.array(99.0), config, price_type="clean"

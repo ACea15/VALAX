@@ -23,7 +23,7 @@ restating the number in every test.
 **Stated tolerances.**
 
 * Agreement between the three reports of the *same* Layer-1a Jacobian
-  (``CurveBuildDiagnostics``, ``CurveAdjoint`` and the level-generic
+  (``CalibrationResult.condition_number``, ``CurveAdjoint`` and the level-generic
   helper) -- ``rtol = 1e-10``.  They differentiate the same residual at the
   same point, so anything looser would let them silently diverge.
 * Every level's condition number must be finite and ``>= 1.0 - 1e-10``; a
@@ -150,10 +150,11 @@ def curve_spec():
 def curve_level(curve_spec):
     """A converged Layer-1a build plus its adjoint handle."""
     quotes = _curve_quotes()
-    graph, diagnostics = bootstrap_curve_graph(REF, [curve_spec], quotes)
-    assert diagnostics.converged
+    result = bootstrap_curve_graph(REF, [curve_spec], quotes)
+    assert bool(result.converged)
+    graph = result.value
     adjoint = curve_adjoint(graph, REF, [curve_spec], quotes)
-    return graph, diagnostics, adjoint
+    return graph, result, adjoint
 
 
 # ── Layer 1b fixture: a SABR smile ───────────────────────────────────
@@ -287,8 +288,8 @@ class TestLayer1aReportsItsConditionNumber:
     """The curve build: reported in two places, and they must agree."""
 
     def test_the_build_reports_a_finite_condition_number(self, curve_level):
-        _, diagnostics, _ = curve_level
-        kappa = float(diagnostics.jacobian_condition_number)
+        _, result, _ = curve_level
+        kappa = float(result.condition_number())
         assert np.isfinite(kappa)
         assert kappa >= 1.0 - T13_RTOL
 
@@ -302,9 +303,9 @@ class TestLayer1aReportsItsConditionNumber:
         the single most consequential way this chain can be wrong, and
         one that no residual norm would reveal.
         """
-        _, diagnostics, adjoint = curve_level
+        _, result, adjoint = curve_level
         assert float(adjoint.jacobian_condition_number) == pytest.approx(
-            float(diagnostics.jacobian_condition_number), rel=T13_RTOL
+            float(result.condition_number()), rel=T13_RTOL
         )
 
     def test_the_generic_helper_agrees_with_the_specialised_report(
@@ -324,8 +325,8 @@ class TestLayer1aReportsItsConditionNumber:
         )
 
     def test_a_healthy_build_raises_no_alert(self, curve_level):
-        _, diagnostics, adjoint = curve_level
-        assert condition_alert(diagnostics.jacobian_condition_number) is None
+        _, result, adjoint = curve_level
+        assert condition_alert(result.condition_number()) is None
         assert condition_alert(adjoint.jacobian_condition_number) is None
 
 
@@ -375,9 +376,9 @@ class TestPillarSpacingDoesNotDegradeConditioning:
             for dates, rate in zip(annuities, [0.047, 0.047, 0.050])
         ]
 
-        graph, diagnostics = bootstrap_curve_graph(REF, [spec], quotes)
-        assert diagnostics.converged
-        kappa = float(diagnostics.jacobian_condition_number)
+        result = bootstrap_curve_graph(REF, [spec], quotes)
+        assert bool(result.converged)
+        kappa = float(result.condition_number())
         assert np.isfinite(kappa)
         assert kappa < 10.0
         assert condition_alert(kappa) is None
@@ -416,10 +417,10 @@ class TestADuplicatedQuoteIsCaught:
             _ois_swap(three_year, 0.0481),
         ]
 
-        graph, diagnostics = bootstrap_curve_graph(REF, [curve_spec], quotes)
-        assert not diagnostics.converged
+        result = bootstrap_curve_graph(REF, [curve_spec], quotes)
+        assert not bool(result.converged)
 
-        kappa = diagnostics.jacobian_condition_number
+        kappa = result.condition_number()
         assert not np.isfinite(float(kappa))
 
         alert = condition_alert(kappa, level_name="duplicated OIS strip")

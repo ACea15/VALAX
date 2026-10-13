@@ -66,6 +66,7 @@ import numpy as np
 import pytest
 
 from valax.calibration.hull_white import calibrate_hull_white, hw_swaption_prices
+from valax.core.binding import bind_curves
 from valax.core.market_state import MarketState
 from valax.core.pricing import price
 from valax.curves import (
@@ -285,10 +286,9 @@ class TestSingleCurveLimitAtTheBootstrap:
                 curves_touched=(OIS,),
             ),
         ]
-        discount_graph, diagnostics = bootstrap_curve_graph(
-            REF, [specs[0]], ois_quotes
-        )
-        assert diagnostics.converged
+        discount_result = bootstrap_curve_graph(REF, [specs[0]], ois_quotes)
+        assert bool(discount_result.converged)
+        discount_graph = discount_result.value
         discount = discount_graph[OIS]
 
         # Projection block: IBOR swaps quoted at the OIS par rate of the
@@ -316,10 +316,11 @@ class TestSingleCurveLimitAtTheBootstrap:
             for schedule in schedules
         ]
 
-        graph, joint_diagnostics = bootstrap_curve_graph(
+        joint_result = bootstrap_curve_graph(
             REF, specs, ois_quotes + ibor_quotes
         )
-        assert joint_diagnostics.converged
+        assert bool(joint_result.converged)
+        graph = joint_result.value
 
         projection = graph[P3M]
         for pillar in pillars:
@@ -368,8 +369,9 @@ class TestSingleCurveLimitAtTheBootstrap:
                 index_id=P3M,
             ),
         ]
-        graph, diagnostics = bootstrap_curve_graph(REF, specs, quotes)
-        assert diagnostics.converged
+        result = bootstrap_curve_graph(REF, specs, quotes)
+        assert bool(result.converged)
+        graph = result.value
         pillar = jnp.int32(pillars[0])
         assert abs(
             float(graph[P3M](pillar)) - float(graph[OIS](pillar))
@@ -418,16 +420,16 @@ class TestSingleCurveLimitAtTheModel:
         )
         targets = hw_swaption_prices(truth, swaptions)
 
-        single, _ = calibrate_hull_white(
+        single = calibrate_hull_white(
             swaptions, targets, curve, fixed_mean_reversion=jnp.array(0.08)
-        )
-        dual, _ = calibrate_hull_white(
+        ).value
+        dual = calibrate_hull_white(
             swaptions,
             targets,
             curve,
             fixed_mean_reversion=jnp.array(0.08),
             forward_curve=curve,
-        )
+        ).value
         assert float(dual.volatility) == pytest.approx(
             float(single.volatility), rel=T4_MODEL_RTOL
         )
@@ -521,8 +523,9 @@ def _t8_scan(spec, trade, n_points):
             for i, base in enumerate(_T8_BASE)
         ]
         quotes = _t8_quotes(rates)
-        graph, diagnostics = bootstrap_curve_graph(REF, [spec], quotes)
-        assert diagnostics.converged
+        result = bootstrap_curve_graph(REF, [spec], quotes)
+        assert bool(result.converged)
+        graph = result.value
         market = MarketState(curves=graph)
         prices.append(float(price(trade, None, market).price))
         adjoint = curve_adjoint(graph, REF, [spec], quotes)
@@ -644,8 +647,12 @@ def t9_basket():
         initial_curve=curve,
     )
     targets = hw_swaption_prices(truth, swaptions)
-    fitted, _ = calibrate_hull_white(
-        swaptions, targets, curve, fixed_mean_reversion=jnp.array(0.08)
+    # The calibrated model is curve-free; bind it for kernel-level repricing.
+    fitted = bind_curves(
+        calibrate_hull_white(
+            swaptions, targets, curve, fixed_mean_reversion=jnp.array(0.08)
+        ).value,
+        curve,
     )
     return swaptions, targets, fitted
 

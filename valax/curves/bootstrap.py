@@ -29,8 +29,10 @@ new instrument types plug in with no edits to this file.  Public
 function signatures are unchanged.
 """
 
+import dataclasses
+from typing import Any
+
 import jax.numpy as jnp
-import optimistix as optx
 from jaxtyping import Float, Int
 from jax import Array
 
@@ -210,17 +212,16 @@ def bootstrap_simultaneous(
     instruments: list,
     day_count: str = "act_365",
     initial_guess: Float[Array, " n_pillars"] | None = None,
-    solver: optx.AbstractRootFinder | None = None,
-    max_steps: int = 256,
+    settings: Any = None,
     fixings: FixingHistory | None = None,
-) -> DiscountCurve:
+) -> Any:
     """Build a discount curve by solving all pillar DFs simultaneously.
 
-    Since MC-Curves-2, this is a thin wrapper over
+    A thin wrapper over
     :func:`valax.curves.bootstrap_graph.bootstrap_curve_graph` — the
-    one-curve degenerate case of the joint multi-curve solver.  The
-    public signature is preserved for backwards compatibility; new
-    code should call the joint solver directly.
+    one-curve degenerate case of the joint multi-curve solver — returning
+    the same :class:`~valax.calibration.result.CalibrationResult` with the
+    single :class:`DiscountCurve` as its value.
 
     Working in log-DF space guarantees positive discount factors
     throughout the Newton iteration and matches the log-linear
@@ -241,16 +242,16 @@ def bootstrap_simultaneous(
         day_count: Day count convention for the output curve.
         initial_guess: Starting log-DFs (shape ``n``).  Defaults to a
             flat 4% curve.
-        solver: An ``optimistix.AbstractRootFinder``.  Defaults to
-            ``optimistix.Newton``.
-        max_steps: Maximum solver iterations.
+        settings: :class:`~valax.calibration.settings.SolverSettings`;
+            defaults to Newton to 1e-10.
         fixings: Realised-fixings registry passed to each instrument's
             residual.  Defaults to an empty registry, which is
             sufficient for the three classic quote types.
 
     Returns:
-        A :class:`DiscountCurve` with the specified pillars plus
-        ``DF = 1`` at the reference date.
+        The :class:`~valax.calibration.result.CalibrationResult`; the
+        :class:`DiscountCurve` (the specified pillars plus ``DF = 1`` at the
+        reference date) is ``result.value``.
     """
     # Deferred import breaks a would-be cycle
     # (bootstrap_graph → bootstrap_proto → graph → discount → daycounts).
@@ -279,13 +280,20 @@ def bootstrap_simultaneous(
     if initial_guess is not None:
         init = {_DEFAULT_CURVE_ID: jnp.asarray(initial_guess)}
 
-    graph, _ = bootstrap_curve_graph(
+    result = bootstrap_curve_graph(
         ref_i32,
         [spec],
         instruments,
         fixings=fixings,
-        solver=solver,
         initial_guess=init,
-        max_steps=max_steps,
+        settings=settings,
+        name="discount_curve",
     )
-    return graph[_DEFAULT_CURVE_ID]
+    curve = result.value[_DEFAULT_CURVE_ID]
+    return dataclasses.replace(
+        result,
+        value=curve,
+        assemble_fn=lambda theta, inputs, _f=result.assemble_fn: _f(
+            theta, inputs
+        )[_DEFAULT_CURVE_ID],
+    )

@@ -76,14 +76,21 @@ References:
     projection/discounting split this module implements.
 """
 
-from typing import Any, Sequence
+import dataclasses
+from typing import Any, Callable, Sequence
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optimistix as optx
 from jaxtyping import Float
 from jax import Array
+
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationDiagnostics, CalibrationResult
+from valax.calibration.settings import SolverSettings, run_solver
+from valax.calibration.solve import period_label, solve_batched_level
 
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import year_fraction
@@ -382,6 +389,312 @@ def _validate_strip(
 # ── The strip ────────────────────────────────────────────────────────
 
 
+#: Default settings of the strip: Newton to 1e-12 on the bucket vols.
+STRIP_SETTINGS = SolverSettings(
+    method="newton", rtol=1e-12, atol=1e-12, max_steps=100
+)
+
+
+def _strip_plan(caps: Sequence[Cap]) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Optionlet → bucket index map and bucket ends of a nested strip."""
+    ends = tuple(int(jnp.asarray(c.fixing_dates).shape[0]) for c in caps)
+    index = np.concatenate([
+        np.full(end - start, i, dtype=np.int32)
+        for i, (start, end) in enumerate(zip((0,) + ends[:-1], ends))
+    ])
+    return index, ends
+
+
+def cap_strip_labels(caps: Sequence[Cap]) -> tuple[str, ...]:
+    """Bucket labels of a strip, e.g. ``("cap 1Y", "cap 2Y")`` (eager).
+
+    Each label is the cap's tenor (first accrual start to last accrual end).
+    Falls back to positional labels when the dates are traced.
+
+    Args:
+        caps: Quoted caps, ascending in maturity.
+
+    Returns:
+        One label per quoted cap.
+    """
+    labels = []
+    for i, cap in enumerate(caps):
+        start, end = _concrete(cap.start_dates), _concrete(cap.end_dates)
+        if start is None or end is None:
+            labels.append(f"cap {i + 1}")
+            continue
+        with jax.ensure_compile_time_eval():
+            t = float(year_fraction(
+                jnp.asarray(int(start[0])), jnp.asarray(int(end[-1])),
+                cap.day_count,
+            ))
+        labels.append(f"cap {period_label(t)}")
+    return tuple(labels)
+
+
+def caplet_strip_level(
+    name: str,
+    caps: Sequence[Cap],
+    inputs: LevelInputs,
+    curves_fn: Callable[[Any], tuple[DiscountCurve, DiscountCurve | None]],
+    *,
+    quote_kind: str = "vol",
+    is_normal: bool = False,
+    interp: str = "piecewise_constant",
+    initial_vols: Float[Array, " n_caps"] | None = None,
+    labels: Sequence[str] | None = None,
+    settings: SolverSettings | None = None,
+    quotes_fn: Callable[[LevelInputs], Float[Array, " n_caps"]] | None = None,
+) -> CalibrationResult:
+    r"""A cap strip as one root level on upstream curves.
+
+    The single implementation of the strip, shared by
+    :func:`strip_caplet_vols` and the chain node
+    :func:`valax.calibration.nodes.caplet_strip_node`. The unknowns are the
+    bucket vols :math:`\sigma_i` (one per quoted cap); the level residual is
+    the price error of every quoted cap per unit notional,
+
+    .. math::
+
+        R_i(\sigma) = \frac{\text{Cap}_i(\sigma_{1..i}; P_d, P_f)
+        - \text{Cap}^{\text{mkt}}_i(q_i; P_d, P_f)}{N_i},
+
+    which is lower-triangular in :math:`\sigma` (cap ``i`` only sees buckets
+    ``1..i``). It is *solved* bucket by bucket — the classical bootstrap,
+    one scalar root-find each (:func:`strip_buckets`) — so every bucket
+    reports its own convergence and a failed bucket is named without
+    poisoning the ones before it; it is *differentiated* as the one
+    triangular system, so the IFT adjoint is a single step with the curves
+    ``curves_fn(inputs.upstream)`` as differentiable upstream inputs.
+
+    Args:
+        name: Level name used in diagnostics.
+        caps: Quoted caps, ascending and nested (validated by the caller).
+        inputs: ``quotes`` — one flat vol (``quote_kind="vol"``) or premium
+            (``"premium"``) per cap; ``upstream`` — whatever ``curves_fn``
+            reads; ``fixed`` — optionally ``{"strike": K}`` to re-strike the
+            caps.
+        curves_fn: ``upstream -> (discount_curve, forward_curve | None)``.
+        quote_kind: ``"vol"`` or ``"premium"``.
+        is_normal: Bachelier (True) or Black-76 (False) pricing.
+        interp: Interpolation recorded on the returned
+            :class:`CapletVolCurve`.
+        initial_vols: First guess per bucket (defaults to the quoted vols,
+            or 20% / 80 bp then the previous bucket for premium quotes).
+        labels: Bucket labels (default: positional).
+        settings: Per-bucket solver settings; defaults to
+            :data:`STRIP_SETTINGS`.
+        quotes_fn: ``inputs -> (n_caps,)`` quotes; defaults to
+            ``inputs.quotes`` (a chain node reads them from a ``QuoteSet``).
+
+    Returns:
+        The :class:`~valax.calibration.result.CalibrationResult`, with
+        per-bucket diagnostics; the :class:`CapletVolCurve` is
+        ``result.value``.
+
+    Raises:
+        ValueError: If ``quote_kind`` is unknown.
+    """
+    if quote_kind not in ("vol", "premium"):
+        raise ValueError(
+            f"caplet_strip_level: quote_kind must be 'vol' or 'premium', got "
+            f"{quote_kind!r}."
+        )
+    settings = STRIP_SETTINGS if settings is None else settings
+    caps = tuple(caps)
+    index, ends = _strip_plan(caps)
+    labels = tuple(labels) if labels is not None else tuple(
+        f"cap {i + 1}" for i in range(len(caps))
+    )
+    residual = caplet_strip_residual_fn(
+        caps, curves_fn, quote_kind=quote_kind, is_normal=is_normal,
+        quotes_fn=quotes_fn,
+    )
+    theta, diagnostics = strip_buckets(
+        caps, curves_fn, inputs, quote_kind=quote_kind, is_normal=is_normal,
+        initial_vols=initial_vols, settings=settings, quotes_fn=quotes_fn,
+    )
+
+    def assemble(sigmas: Float[Array, " n_caps"], inp: LevelInputs) -> CapletVolCurve:
+        curve, forward_curve = curves_fn(inp.upstream)
+        longest = _struck(caps[-1], inp)
+        return CapletVolCurve(
+            expiries=optionlet_expiries(longest, curve),
+            vols=sigmas[index],
+            strike=jnp.asarray(longest.strike),
+            forwards=optionlet_forwards(longest, curve, forward_curve),
+            bucket_ends=ends,
+            is_normal=is_normal,
+            interp=interp,
+        )
+
+    return CalibrationResult(
+        value=assemble(theta, inputs),
+        theta=theta,
+        inputs=inputs,
+        diagnostics=diagnostics,
+        residual_fn=residual,
+        assemble_fn=assemble,
+        settings=settings,
+        name=name,
+        labels=labels,
+        problem="root",
+    )
+
+
+def strip_buckets(
+    caps: Sequence[Cap],
+    curves_fn: Callable[[Any], tuple[DiscountCurve, DiscountCurve | None]],
+    inputs: LevelInputs,
+    *,
+    quote_kind: str = "vol",
+    is_normal: bool = False,
+    initial_vols: Float[Array, " n_caps"] | None = None,
+    settings: SolverSettings | None = None,
+    quotes_fn: Callable[[LevelInputs], Float[Array, " n_caps"]] | None = None,
+) -> tuple[Float[Array, " n_caps"], CalibrationDiagnostics]:
+    """Solve a cap strip bucket by bucket (the sequential bootstrap).
+
+    One scalar root-find per quoted cap through
+    :func:`~valax.calibration.settings.run_solver`, holding the earlier
+    buckets fixed; the earlier buckets and the level inputs travel in the
+    solver's ``args`` so the autodiff path differentiates through every
+    stage. Traceable and ``vmap``-safe.
+
+    Args:
+        caps: Quoted caps, ascending and nested.
+        curves_fn: ``upstream -> (discount_curve, forward_curve | None)``.
+        inputs: The strip's level inputs (see :func:`caplet_strip_level`).
+        quote_kind: ``"vol"`` or ``"premium"``.
+        is_normal: Bachelier (True) or Black-76 (False) pricing.
+        initial_vols: First guess per bucket.
+        settings: Per-bucket solver settings; defaults to
+            :data:`STRIP_SETTINGS`.
+        quotes_fn: ``inputs -> (n_caps,)`` quotes; defaults to
+            ``inputs.quotes``.
+
+    Returns:
+        ``(bucket_vols, diagnostics)`` with one diagnostics entry per bucket.
+    """
+    settings = STRIP_SETTINGS if settings is None else settings
+    caps = tuple(caps)
+    n_caps = len(caps)
+    quotes_fn = _default_quotes if quotes_fn is None else quotes_fn
+    one_cap = _cap_residual_fn(caps, curves_fn, quote_kind, is_normal, quotes_fn)
+    if initial_vols is not None:
+        guesses = jax.lax.stop_gradient(
+            jnp.asarray(initial_vols, dtype=jnp.float64)
+        )
+    elif quote_kind == "vol":
+        guesses = jax.lax.stop_gradient(
+            jnp.asarray(quotes_fn(inputs), dtype=jnp.float64)
+        )
+    else:
+        guesses = None
+
+    known = jnp.zeros((0,), dtype=jnp.float64)
+    guess = jnp.asarray(_DEFAULT_GUESS[is_normal], dtype=jnp.float64)
+    converged, steps = [], []
+    for i in range(n_caps):
+
+        def bucket_residual(sigma, args, _i=i):
+            prev, inp = args
+            sigmas = jnp.concatenate(
+                [prev, jnp.reshape(sigma, (1,)), jnp.zeros((n_caps - _i - 1,))]
+            )
+            return one_cap(_i, sigmas, inp)
+
+        if guesses is not None:
+            guess = guesses[i]
+        sol = run_solver("root", bucket_residual, guess, (known, inputs), settings)
+        known = jnp.concatenate([known, jnp.reshape(sol.value, (1,))])
+        guess = jax.lax.stop_gradient(sol.value)
+        converged.append(sol.result == optx.RESULTS.successful)
+        steps.append(sol.stats.get("num_steps", jnp.asarray(-1)))
+
+    final = jnp.stack([one_cap(i, known, inputs) for i in range(n_caps)])
+    diagnostics = CalibrationDiagnostics(
+        residuals=final[:, None],
+        max_abs_residual=jnp.abs(final),
+        rmse=jnp.abs(final),
+        n_steps=jnp.stack(steps).astype(jnp.int32),
+        converged=jnp.stack(converged),
+    )
+    return known, diagnostics
+
+
+def _struck(cap: Cap, inputs: LevelInputs) -> Cap:
+    """Re-strike ``cap`` when the level carries a strike input."""
+    fixed = inputs.fixed or {}
+    if "strike" not in fixed:
+        return cap
+    return eqx.tree_at(lambda c: c.strike, cap, fixed["strike"])
+
+
+def _default_quotes(inputs: LevelInputs) -> Float[Array, " n_caps"]:
+    """Quotes stored directly as an array on the level inputs."""
+    return inputs.quotes
+
+
+def _cap_residual_fn(
+    caps: tuple,
+    curves_fn: Callable,
+    quote_kind: str,
+    is_normal: bool,
+    quotes_fn: Callable[[LevelInputs], Float[Array, " n_caps"]] = _default_quotes,
+) -> Callable[[int, Float[Array, " n_caps"], LevelInputs], Float[Array, ""]]:
+    """Price error of quoted cap ``i`` per unit notional (``i`` static)."""
+    index, _ = _strip_plan(caps)
+    pricer = cap_price_bachelier if is_normal else cap_price_black76
+
+    def one(i: int, sigmas: Float[Array, " n_caps"], inputs: LevelInputs):
+        curve, forward_curve = curves_fn(inputs.upstream)
+        cap = _struck(caps[i], inputs)
+        n_i = int(jnp.asarray(cap.fixing_dates).shape[0])
+        model = pricer(cap, curve, sigmas[index[:n_i]], forward_curve)
+        q = quotes_fn(inputs)[i]
+        if quote_kind == "vol":
+            target = pricer(cap, curve, q, forward_curve)
+        else:
+            target = q
+        return (model - target) / cap.notional
+
+    return one
+
+
+def caplet_strip_residual_fn(
+    caps: Sequence[Cap],
+    curves_fn: Callable[[Any], tuple[DiscountCurve, DiscountCurve | None]],
+    *,
+    quote_kind: str = "vol",
+    is_normal: bool = False,
+    quotes_fn: Callable[[LevelInputs], Float[Array, " n_caps"]] | None = None,
+) -> Callable[[Float[Array, " n_caps"], LevelInputs], Float[Array, " n_caps"]]:
+    """Residual of the cap strip (see :func:`caplet_strip_level`).
+
+    Args:
+        caps: Quoted caps, ascending and nested.
+        curves_fn: ``upstream -> (discount_curve, forward_curve | None)``.
+        quote_kind: ``"vol"`` or ``"premium"``.
+        is_normal: Bachelier (True) or Black-76 (False) pricing.
+        quotes_fn: ``inputs -> (n_caps,)`` quotes; defaults to
+            ``inputs.quotes``.
+
+    Returns:
+        ``(bucket_vols, inputs) -> per-cap price error per unit notional``.
+    """
+    caps = tuple(caps)
+    one = _cap_residual_fn(
+        caps, curves_fn, quote_kind, is_normal,
+        _default_quotes if quotes_fn is None else quotes_fn,
+    )
+
+    def residual(sigmas: Float[Array, " n_caps"], inputs: LevelInputs):
+        return jnp.stack([one(i, sigmas, inputs) for i in range(len(caps))])
+
+    return residual
+
+
 def strip_caplet_vols(
     caps: Sequence[Cap],
     curve: DiscountCurve,
@@ -392,17 +705,17 @@ def strip_caplet_vols(
     is_normal: bool = False,
     interp: str = "piecewise_constant",
     initial_vol: Float[Array, ""] | float | None = None,
-    rtol: float = 1e-12,
-    atol: float = 1e-12,
-    max_steps: int = 100,
-) -> CapletVolCurve:
+    settings: SolverSettings | None = None,
+    name: str = "caplet_strip",
+) -> CalibrationResult:
     """Strip a quoted cap strip into per-optionlet volatilities.
 
-    Solves the nested bootstrap described in the module docstring: one
-    scalar ``optimistix.Newton`` root-find per quoted maturity, each
-    solving for the volatility shared by that maturity's *incremental*
-    optionlets while holding the previously stripped ones fixed.  The
-    result reprices every quoted cap by construction.
+    Solves the nested bootstrap described in the module docstring as one
+    lower-triangular root level (:func:`caplet_strip_level`): the vol shared
+    by each maturity's *incremental* optionlets is the unknown of that
+    maturity's equation. The result reprices every quoted cap by
+    construction, reports convergence like every other level, and names a
+    failed bucket (``"cap 5Y"``) in ``result.check()``.
 
     Dual-curve by default: forwards are projected off ``forward_curve``
     and payoffs discounted off ``curve``, so the same quotes strip to
@@ -417,7 +730,7 @@ def strip_caplet_vols(
         curve: Discount (OIS / collateral) curve.
         cap_vols: Flat quoted volatility per cap, in the ``is_normal``
             convention.  The market's usual quoting form; converted to
-            premiums internally.  Mutually exclusive with
+            premiums inside the residual.  Mutually exclusive with
             ``cap_premiums``.
         cap_premiums: Quoted premium per cap, for desks that quote price.
             Mutually exclusive with ``cap_vols``.
@@ -430,17 +743,17 @@ def strip_caplet_vols(
             lognormal Black-76.
         interp: Interpolation mode recorded on the returned curve; see
             :class:`CapletVolCurve`.
-        initial_vol: First guess for the leading bucket.  Defaults to the
-            quoted flat vol when ``cap_vols`` is given, else 20% / 80 bp
-            by convention.  Later buckets start from the previous
-            solution.
-        rtol: Relative tolerance of the scalar root-find.
-        atol: Absolute tolerance of the scalar root-find.
-        max_steps: Maximum Newton steps per bucket.
+        initial_vol: First guess for every bucket.  Defaults to the quoted
+            flat vols when ``cap_vols`` is given, else 20% / 80 bp by
+            convention.
+        settings: Solver settings; defaults to :data:`STRIP_SETTINGS`
+            (Newton to 1e-12).
+        name: Level name used in diagnostics.
 
     Returns:
-        A :class:`CapletVolCurve` covering every optionlet of the longest
-        quoted cap.
+        The :class:`~valax.calibration.result.CalibrationResult`; the
+        :class:`CapletVolCurve` covering every optionlet of the longest
+        quoted cap is ``result.value``.
 
     Raises:
         ValueError: If the strip is empty, the quotes are ambiguous or
@@ -449,75 +762,19 @@ def strip_caplet_vols(
             already fixed (zero vega — drop it from the quoted strip).
     """
     _validate_strip(caps, curve, cap_vols, cap_premiums)
-
-    pricer = cap_price_bachelier if is_normal else cap_price_black76
-    longest = caps[-1]
-
-    if cap_vols is not None:
-        quoted_vols = jnp.asarray(cap_vols)
-        targets = [
-            pricer(cap, curve, quoted_vols[i], forward_curve)
-            for i, cap in enumerate(caps)
-        ]
-    else:
-        quoted_vols = None
-        premiums = jnp.asarray(cap_premiums)
-        targets = [premiums[i] for i in range(len(caps))]
-
+    quote_kind = "vol" if cap_vols is not None else "premium"
+    quotes = jnp.asarray(cap_vols if cap_vols is not None else cap_premiums)
+    initial = None
     if initial_vol is not None:
-        guess = jnp.asarray(initial_vol, dtype=float)
-    elif quoted_vols is not None:
-        guess = quoted_vols[0]
-    else:
-        guess = jnp.asarray(_DEFAULT_GUESS[is_normal])
-
-    solver = optx.Newton(rtol=rtol, atol=atol)
-    stripped: list[Float[Array, " n_bucket"]] = []
-    bucket_ends: list[int] = []
-    n_prev = 0
-
-    for i, cap in enumerate(caps):
-        n_i = int(jnp.asarray(cap.fixing_dates).shape[0])
-        n_new = n_i - n_prev
-        known = (
-            jnp.concatenate(stripped) if stripped
-            else jnp.zeros((0,), dtype=float)
-        )
-        target = targets[i]
-
-        def residual(
-            sigma: Float[Array, ""],
-            args: None,
-            _cap: Cap = cap,
-            _known: Float[Array, " n_known"] = known,
-            _n_new: int = n_new,
-            _target: Float[Array, ""] = target,
-        ) -> Float[Array, ""]:
-            vols = jnp.concatenate([_known, jnp.full((_n_new,), sigma)])
-            return pricer(_cap, curve, vols, forward_curve) - _target
-
-        if quoted_vols is not None:
-            # The quoted flat vol is the best available starting point:
-            # it reprices the whole strip, so the incremental bucket's
-            # vol is a local correction to it.
-            guess = quoted_vols[i]
-
-        sol = optx.root_find(
-            residual, solver, guess, max_steps=max_steps, throw=False,
-        )
-        stripped.append(jnp.full((n_new,), sol.value))
-        guess = sol.value
-        bucket_ends.append(n_i)
-        n_prev = n_i
-
-    return CapletVolCurve(
-        expiries=optionlet_expiries(longest, curve),
-        vols=jnp.concatenate(stripped),
-        strike=jnp.asarray(longest.strike),
-        forwards=optionlet_forwards(longest, curve, forward_curve),
-        bucket_ends=tuple(bucket_ends),
-        is_normal=is_normal,
-        interp=interp,
+        initial = jnp.full((len(caps),), jnp.asarray(initial_vol, dtype=float))
+    return caplet_strip_level(
+        name, caps,
+        LevelInputs(quotes=quotes, upstream=(curve, forward_curve)),
+        lambda up: up,
+        quote_kind=quote_kind, is_normal=is_normal, interp=interp,
+        initial_vols=initial,
+        labels=cap_strip_labels(caps),
+        settings=settings,
     )
 
 
@@ -563,25 +820,25 @@ def strip_optionlet_surface(
     is_normal: bool = False,
     shift: Float[Array, ""] | float = 0.0,
     fixed_beta: Float[Array, ""] | float | None = 0.5,
-    solver: str = "levenberg_marquardt",
-    max_steps: int = 256,
-    strip_max_steps: int = 100,
-) -> OptionletVolSurface:
+    settings: SolverSettings | None = None,
+    strip_settings: SolverSettings | None = None,
+    name: str = "optionlet_surface",
+) -> CalibrationResult:
     r"""Strip a quoted cap matrix into a SABR optionlet volatility surface.
 
-    The whole quotes → surface leg in one call:
+    The whole quotes → surface leg in one call, as two levels:
 
-    1. strip each strike column with :func:`strip_caplet_vols` (so every
-       quoted cap is repriced exactly, dual-curve);
-    2. transpose into one smile per optionlet expiry;
-    3. read the at-the-money anchor — the projected forwards — off the
-       curves with :func:`optionlet_forwards`;
-    4. fit one SABR model per expiry via
-       :func:`valax.surfaces.optionlet_surface.build_sabr_caplet_surface`.
+    1. **strip** every strike column (:func:`caplet_strip_level`, batched
+       over strikes so each column reports its own convergence, labelled
+       ``"K=3.00%"``) — every quoted cap is repriced exactly, dual-curve;
+    2. **fit** one SABR smile per optionlet expiry on the stripped vols
+       (:func:`valax.surfaces.optionlet_surface.build_sabr_caplet_surface`),
+       anchored on the projected forwards read off the curves with
+       :func:`optionlet_forwards`.
 
-    Step 3 is the point of the routine: the forwards the smile fit is
-    calibrated around come from the projection curve, rather than being a
-    pre-computed array the caller has to supply consistently by hand.
+    The returned result is the SABR level, with the strip level as its
+    child, so ``result.check()`` covers both and names the failing strike
+    column or expiry slice.
 
     Args:
         caps: Nested cap schedule, ascending in maturity.  The strike
@@ -616,23 +873,26 @@ def strip_optionlet_surface(
             [calibration guide](../guide/calibration.md#solvers).  Rates
             desks fix beta by convention (0.5, or 0 for a normal-quoted
             market).  Pass ``None`` to free it anyway.
-        solver: Per-slice optimizer name (see
-            :func:`valax.calibration.sabr.calibrate_sabr`).
-        max_steps: Maximum iterations per SABR slice.
-        strip_max_steps: Maximum Newton steps per bootstrap bucket.
+        settings: Per-slice SABR solver settings; defaults to
+            :data:`~valax.calibration.settings.FIT_SETTINGS`.
+        strip_settings: Strip solver settings; defaults to
+            :data:`STRIP_SETTINGS`.
+        name: Level name of the SABR fit (the strip is ``name + ".strip"``).
 
     Returns:
-        A fitted
+        The SABR level's
+        :class:`~valax.calibration.result.CalibrationResult`; the
         :class:`~valax.surfaces.optionlet_surface.OptionletVolSurface`
-        whose expiry grid is the optionlet grid of the longest cap.
+        (expiry grid = the optionlet grid of the longest cap) is
+        ``result.value`` and the strip is ``result.children[0]``.
 
     Raises:
         ValueError: If ``cap_vol_matrix`` does not have shape
             ``(len(strikes), len(caps))``, or any per-strike strip is
             invalid (see :func:`strip_caplet_vols`).
     """
-    strikes = jnp.asarray(strikes)
-    cap_vol_matrix = jnp.asarray(cap_vol_matrix)
+    strikes = jnp.asarray(strikes, dtype=jnp.float64)
+    cap_vol_matrix = jnp.asarray(cap_vol_matrix, dtype=jnp.float64)
     n_strikes = int(strikes.shape[0])
     expected = (n_strikes, len(caps))
     if cap_vol_matrix.shape != expected:
@@ -641,30 +901,23 @@ def strip_optionlet_surface(
             f"{cap_vol_matrix.shape}, expected {expected} = "
             f"(len(strikes), len(caps))."
         )
-
-    columns = []
     for k in range(n_strikes):
-        struck = [
-            eqx.tree_at(lambda c: c.strike, cap, strikes[k]) for cap in caps
-        ]
-        columns.append(
-            strip_caplet_vols(
-                struck,
-                curve,
-                cap_vols=cap_vol_matrix[k],
-                forward_curve=forward_curve,
-                is_normal=is_normal,
-                max_steps=strip_max_steps,
-            )
-        )
+        struck = [eqx.tree_at(lambda c: c.strike, cap, strikes[k]) for cap in caps]
+        _validate_strip(struck, curve, cap_vol_matrix[k], None)
 
-    # (n_strikes, n_optionlets) → one smile per optionlet expiry.
-    vol_grid = jnp.stack([column.vols for column in columns])
-    expiries = columns[-1].expiries
-    forwards = columns[-1].forwards
+    strip = strip_columns_level(
+        f"{name}.strip", caps,
+        LevelInputs(quotes=cap_vol_matrix, upstream=(curve, forward_curve)),
+        lambda up: up, strikes=strikes, is_normal=is_normal,
+        settings=strip_settings,
+    )
+    columns = strip.value
+    vol_grid = columns.vols                       # (n_strikes, n_optionlets)
+    expiries = columns.expiries[-1]
+    forwards = columns.forwards[-1]
     n_expiries = int(expiries.shape[0])
 
-    return build_sabr_caplet_surface(
+    fit = build_sabr_caplet_surface(
         strikes_per_expiry=[strikes for _ in range(n_expiries)],
         market_vols_per_expiry=[vol_grid[:, j] for j in range(n_expiries)],
         forwards=forwards,
@@ -674,16 +927,111 @@ def strip_optionlet_surface(
         fixed_beta=(
             None if fixed_beta is None else jnp.asarray(fixed_beta)
         ),
-        solver=solver,
-        max_steps=max_steps,
+        settings=settings,
+        name=name,
+    )
+    return dataclasses.replace(fit, children=(strip,))
+
+
+def strip_columns_level(
+    name: str,
+    caps: Sequence[Cap],
+    inputs: LevelInputs,
+    curves_fn: Callable[[Any], tuple[DiscountCurve, DiscountCurve | None]],
+    *,
+    strikes: Float[Array, " n_strikes"],
+    quotes_fn: Callable[[LevelInputs], Float[Array, "n_strikes n_caps"]] | None = None,
+    is_normal: bool = False,
+    settings: SolverSettings | None = None,
+) -> CalibrationResult:
+    """Strip several strike columns of a cap matrix as one batched level.
+
+    Each column is the strip of :func:`caplet_strip_level` re-struck at its
+    strike, solved bucket by bucket and independently of the other columns
+    (own convergence flags, labelled ``"K=3.00%"``) inside one ``vmap``. The
+    curves ``curves_fn(inputs.upstream)`` are shared by every column and stay
+    differentiable upstream inputs.
+
+    Args:
+        name: Level name used in diagnostics.
+        caps: Nested cap schedule (strikes are replaced per column).
+        inputs: The level's inputs as stored on the result.
+        curves_fn: ``upstream -> (discount_curve, forward_curve | None)``.
+        strikes: Column strikes (conventions, held constant).
+        quotes_fn: ``inputs -> (n_strikes, n_caps)`` flat cap vols; defaults
+            to ``inputs.quotes``.
+        is_normal: Bachelier (True) or Black-76 (False) pricing.
+        settings: Per-column solver settings; defaults to
+            :data:`STRIP_SETTINGS`.
+
+    Returns:
+        A batched :class:`~valax.calibration.result.CalibrationResult` whose
+        value is a :class:`CapletVolCurve` with a leading strike axis.
+    """
+    settings = STRIP_SETTINGS if settings is None else settings
+    caps = tuple(caps)
+    index, ends = _strip_plan(caps)
+    strikes = jnp.asarray(strikes, dtype=jnp.float64)
+    n = int(strikes.shape[0])
+    quotes_fn = _default_quotes if quotes_fn is None else quotes_fn
+    identity = lambda up: up  # noqa: E731 — node inputs carry the curves
+    residual = caplet_strip_residual_fn(caps, identity, is_normal=is_normal)
+
+    def node_inputs(inp: LevelInputs) -> LevelInputs:
+        curves = jax.tree.map(
+            lambda x: jnp.broadcast_to(x, (n,) + jnp.shape(x)),
+            curves_fn(inp.upstream),
+        )
+        return LevelInputs(
+            quotes=quotes_fn(inp), upstream=curves, fixed={"strike": strikes},
+        )
+
+    def assemble(sigmas: Float[Array, "n_strikes n_caps"], inp: LevelInputs):
+        curve, forward_curve = curves_fn(inp.upstream)
+        longest = caps[-1]
+        expiries = optionlet_expiries(longest, curve)
+        fwds = optionlet_forwards(longest, curve, forward_curve)
+        return CapletVolCurve(
+            expiries=jnp.broadcast_to(expiries, (n,) + expiries.shape),
+            vols=sigmas[:, index],
+            strike=strikes,
+            forwards=jnp.broadcast_to(fwds, (n,) + fwds.shape),
+            bucket_ends=ends,
+            is_normal=is_normal,
+        )
+
+    concrete = _concrete(strikes)
+    labels = (
+        tuple(f"K={100 * float(k):.2f}%" for k in concrete)
+        if concrete is not None
+        else tuple(f"K{i}" for i in range(n))
+    )
+
+    def node_solve(theta0, node_in: LevelInputs):
+        return strip_buckets(
+            caps, identity, node_in, is_normal=is_normal,
+            initial_vols=theta0, settings=settings,
+        )
+
+    return solve_batched_level(
+        name, "root", residual,
+        jax.lax.stop_gradient(jnp.asarray(quotes_fn(inputs), dtype=jnp.float64)),
+        inputs, node_inputs, assemble, settings, labels=labels,
+        node_solve_fn=node_solve,
     )
 
 
 __all__ = [
+    "STRIP_SETTINGS",
     "CapletVolCurve",
     "cap_price_from_strip",
+    "cap_strip_labels",
+    "caplet_strip_level",
+    "caplet_strip_residual_fn",
+    "strip_buckets",
     "optionlet_expiries",
     "optionlet_forwards",
     "strip_caplet_vols",
+    "strip_columns_level",
     "strip_optionlet_surface",
 ]

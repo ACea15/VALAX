@@ -279,12 +279,16 @@ pillar_dates = jnp.stack(
 ).astype(jnp.int32)
 
 # ── 3.3 Run the simultaneous bootstrap ────────────────────────────
-calibrated_curve = bootstrap_simultaneous(
+result = bootstrap_simultaneous(
     reference_date=ref_arr,
     pillar_dates=pillar_dates,
     instruments=quote_instruments,
     day_count="act_365",
 )
+result.check()                      # CalibrationError if Newton failed
+calibrated_curve = result.value     # DiscountCurve
+print(f"  converged in {int(result.diagnostics.n_steps)} Newton steps, "
+      f"max|residual| = {float(result.diagnostics.max_abs_residual):.1e}")
 
 print("\n--- Calibrated curve vs truth at the pillars ---")
 print("  tenor |  zero (truth) |  zero (cal)   |  Δ (bp)")
@@ -310,7 +314,8 @@ for years in (0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0):
   — roadmapped, not yet shipped.
 - **Single-curve discounting.** OIS discount + tenor-specific forward
   projection is the production setup. The math here generalises one-for-one;
-  see [`bootstrap_multi_curve`](curves.md#5-multi-curve-bootstrap).
+  see the joint multi-curve solver
+  [`bootstrap_curve_graph`](curves.md#5-multi-curve-bootstrap).
 - **Exact analytic Jacobian.** Newton's $\partial R_i / \partial x_j$ is
   computed by `jax.jacobian`, **not** a finite-difference bump. That's why
   the solver converges in a handful of iterations and why differentiating
@@ -522,7 +527,7 @@ def irs_npv_from_quotes(quotes):
         pillar_dates=pillar_dates,
         instruments=new_insts,
         day_count="act_365",
-    )
+    ).value
     return swap_price(irs, new_curve)
 
 quote_dv01 = jax.grad(irs_npv_from_quotes)(noisy_par_rates) * 1e-4

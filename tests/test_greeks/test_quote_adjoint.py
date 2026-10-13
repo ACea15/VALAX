@@ -186,10 +186,11 @@ def _dc_swap():
 
 
 def _build(specs, quote_fn, rates):
-    graph, diag = bootstrap_curve_graph(REF, specs, quote_fn(rates))
-    assert diag.converged
+    res = bootstrap_curve_graph(REF, specs, quote_fn(rates))
+    assert bool(res.converged)
+    graph = res.value
     # R-4: residuals must sit far below the smallest validation bump.
-    assert float(diag.max_abs_residual) < min(BUMPS) * 1e-2
+    assert float(res.diagnostics.max_abs_residual) < min(BUMPS) * 1e-2
     return graph
 
 

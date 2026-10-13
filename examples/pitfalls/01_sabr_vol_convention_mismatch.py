@@ -36,11 +36,16 @@ import optimistix as optx
 
 from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_normal_implied_vol
-from valax.calibration.sabr import calibrate_sabr, _default_sabr_guess
+from valax.calibration import SolverSettings
+from valax.calibration.sabr import (
+    _default_sabr_guess,
+    calibrate_sabr,
+    sabr_slice_inputs,
+    sabr_slice_residual_fn,
+)
 from valax.calibration.transforms import (
     model_to_unconstrained, unconstrained_to_model, positive, correlation,
 )
-from valax.calibration.loss import vol_residuals, weighted_sse
 
 jax.config.update("jax_enable_x64", True)
 
@@ -82,11 +87,13 @@ print("market (normal) vols :", np.round(np.asarray(MARKET), 6))
 # ============================================================================
 # %%
 guess = TRUE if START_AT_TRUTH else None
-fitted, sol = calibrate_sabr(
+fitted = calibrate_sabr(
     strikes=STRIKES, market_vols=MARKET, forward=FORWARD, expiry=EXPIRY,
     initial_guess=guess, fixed_beta=jnp.array(0.0),
-    vol_fn=FIT_VOL, is_normal=not WRONG_MODEL, max_steps=1024,
-)
+    vol_fn=FIT_VOL, is_normal=not WRONG_MODEL,
+    settings=SolverSettings(method="levenberg_marquardt", rtol=1e-8, atol=1e-8,
+                            max_steps=1024),
+).value
 # Residual in the model that was fit (may look fine even when wrong):
 resid_fit = jax.vmap(lambda K: FIT_VOL(fitted, FORWARD, K, EXPIRY))(STRIKES) - MARKET
 # Error you actually care about: re-price with the true (normal) convention.
@@ -109,13 +116,17 @@ if WRONG_MODEL:
 # %% If the true params do not zero the residual, your model != your quotes.
 transforms = {"alpha": positive(), "rho": correlation(), "nu": positive()}
 y_true = model_to_unconstrained(TRUE, transforms)
-args_fit = (transforms, TRUE, FIT_VOL, STRIKES, MARKET, FORWARD, EXPIRY,
-            jnp.ones_like(STRIKES))
-args_true = (transforms, TRUE, NORMAL_VOL, STRIKES, MARKET, FORWARD, EXPIRY,
-             jnp.ones_like(STRIKES))
-print(f"\nSSE at truth, FITTED model = {float(weighted_sse(y_true, args_fit)):.3e}"
+INPUTS = sabr_slice_inputs(STRIKES, MARKET, FORWARD, EXPIRY, fixed_beta=jnp.array(0.0))
+
+
+def sse(vol_fn, y):
+    residual, _ = sabr_slice_residual_fn(vol_fn)
+    return jnp.sum(residual(y, INPUTS) ** 2)
+
+
+print(f"\nSSE at truth, FITTED model = {float(sse(FIT_VOL, y_true)):.3e}"
       f"   ({'nonzero => wrong model' if WRONG_MODEL else 'zero => right model'})")
-print(f"SSE at truth, NORMAL model = {float(weighted_sse(y_true, args_true)):.3e}"
+print(f"SSE at truth, NORMAL model = {float(sse(NORMAL_VOL, y_true)):.3e}"
       "   (zero => truth fits the normal quotes)")
 
 
@@ -140,10 +151,10 @@ print(f"condition number    = {float(sv[0] / sv[-1]):.3e}")
 # %% Contrast the calibrator against a direct optimistix call, and show the
 # RIGHT model recovering truth to machine precision.
 def run_optx(vol_fn, y0):
-    args = (transforms, TRUE, vol_fn, STRIKES, MARKET, FORWARD, EXPIRY, jnp.ones_like(STRIKES))
-    sol = optx.least_squares(vol_residuals, optx.LevenbergMarquardt(rtol=1e-8, atol=1e-8),
-                             y0, args=args, max_steps=1024, throw=False)
-    m = unconstrained_to_model(sol.value, transforms, TRUE)
+    residual, assemble = sabr_slice_residual_fn(vol_fn)
+    sol = optx.least_squares(residual, optx.LevenbergMarquardt(rtol=1e-8, atol=1e-8),
+                             y0, args=INPUTS, max_steps=1024, throw=False)
+    m = assemble(sol.value, INPUTS)
     normal_err = jax.vmap(lambda K: NORMAL_VOL(m, FORWARD, K, EXPIRY))(STRIKES) - MARKET
     return f"alpha={float(m.alpha):.5f}  normal-vol err={float(jnp.max(jnp.abs(normal_err))):.2e}"
 

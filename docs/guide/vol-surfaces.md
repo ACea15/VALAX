@@ -47,17 +47,30 @@ strikes_1y = jnp.linspace(80.0, 120.0, 11)
 vols_3m = ...  # observed smile at 3M
 vols_1y = ...  # observed smile at 1Y
 
-surface = calibrate_sabr_surface(
+result = calibrate_sabr_surface(
     strikes_per_expiry=[strikes_3m, strikes_1y],
     market_vols_per_expiry=[vols_3m, vols_1y],
     forwards=jnp.array([100.0, 100.0]),
     expiries=jnp.array([0.25, 1.0]),
     fixed_beta=jnp.array(0.5),  # common: 0.5 for equity, 0.0 for rates
 )
+result.check()             # raises CalibrationError naming any failed slice
+surface = result.value     # SABRVolSurface
 
 # Query: SABR params are interpolated to the expiry, then Hagan formula applied
 vol = surface(jnp.array(95.0), jnp.array(0.5))
 ```
+
+Like every surface builder, `calibrate_sabr_surface` returns a
+[`CalibrationResult`](../api/calibration.md#valax.calibration.result.CalibrationResult)
+and is a **batched level**: each expiry slice is solved independently in one
+`vmap`, with per-slice diagnostics aligned with `result.labels` (`"3M"`,
+`"1Y"`, …), so a failed slice is reported by name (`result.failed_labels()`)
+rather than poisoning the others. Ragged strike grids are padded with
+zero-weight points. Solver choice is the keyword-only
+`settings=SolverSettings(...)` (default
+[`FIT_SETTINGS`](../api/calibration.md#valax.calibration.settings.FIT_SETTINGS),
+Levenberg–Marquardt).
 
 You can also construct directly from known parameters:
 
@@ -87,21 +100,21 @@ where $k = \log(K/F)$ and implied vol $= \sqrt{w / T}$.
 ```python
 from valax.surfaces import SVIVolSurface, calibrate_svi_slice, calibrate_svi_surface
 
-# Calibrate a single slice
-params, sol = calibrate_svi_slice(
+# Calibrate a single slice — .value is the fitted SVISlice
+params = calibrate_svi_slice(
     strikes=jnp.linspace(80.0, 120.0, 15),
     market_vols=observed_vols,
     forward=jnp.array(100.0),
     expiry=jnp.array(1.0),
-)
+).value
 
-# Or calibrate an entire surface
+# Or calibrate an entire surface (a batched level: one fit per expiry)
 surface = calibrate_svi_surface(
     strikes_per_expiry=[strikes_3m, strikes_6m, strikes_1y],
     market_vols_per_expiry=[vols_3m, vols_6m, vols_1y],
     forwards=jnp.array([100.0, 100.0, 100.0]),
     expiries=jnp.array([0.25, 0.5, 1.0]),
-)
+).check().value
 ```
 
 SVI interpolates **total variance** (not implied vol) across expiries. This preserves the calendar spread no-arbitrage condition: total variance must be non-decreasing in expiry.
@@ -137,7 +150,7 @@ $$
   + \sum_{j \in \mathcal{C}_i \setminus \mathcal{C}_{i-1}} \text{Optionlet}_j(\sigma_i),
 $$
 
-where $\mathcal{C}_i$ is the $i$-th quoted cap's optionlet index set and $\sigma_i$ — the vol shared by the incremental bucket — is the only unknown. Each step is an `optimistix.Newton` root-find, so the whole strip is differentiable by **implicit differentiation**: `jax.grad` of a stripped vol with respect to a quoted cap vol, a discount pillar, or a projection pillar works without unrolling the solver.
+where $\mathcal{C}_i$ is the $i$-th quoted cap's optionlet index set and $\sigma_i$ — the vol shared by the incremental bucket — is the only unknown. Each step is a scalar Newton root-find (bucket by bucket, labelled `"cap 1Y"`, `"cap 2Y"`, …), and the solved buckets are packaged as **one lower-triangular root level**, so the whole strip is differentiable by a single **implicit-function adjoint**: `jax.grad` of a stripped vol with respect to a quoted cap vol, a discount pillar, or a projection pillar works without unrolling the solver.
 
 ```python
 import jax.numpy as jnp
@@ -148,11 +161,13 @@ from valax.surfaces import strip_caplet_vols, cap_price_from_strip
 # ois: discount curve;  sofr3m: projection curve.
 quotes = jnp.array([0.30, 0.34, 0.36, 0.37])   # flat quoted cap vols
 
-strip = strip_caplet_vols(
+result = strip_caplet_vols(
     caps, ois,
     cap_vols=quotes,          # or cap_premiums=... if the desk quotes price
     forward_curve=sofr3m,     # omit for the single-curve strip
 )
+result.check()                # names a failed bucket, e.g. "cap 3Y"
+strip = result.value          # CapletVolCurve
 
 strip.vols        # one vol per optionlet, constant within each quoted bucket
 strip.expiries    # optionlet expiries (year fractions)
@@ -175,15 +190,24 @@ from valax.surfaces import strip_optionlet_surface
 strikes = jnp.array([0.020, 0.028, 0.035, 0.045, 0.060])
 cap_vol_matrix = ...   # shape (n_strikes, n_caps): flat quoted vols
 
-surface = strip_optionlet_surface(
+result = strip_optionlet_surface(
     caps, strikes, cap_vol_matrix, ois,
     forward_curve=sofr3m,
 )
+result.check()                    # checks the strip level (children[0]) too
+surface = result.value            # OptionletVolSurface
+strip_level = result.children[0]  # the column strips, as one root level
 
 surface(jnp.array(0.035), jnp.array(2.5))   # smile-consistent optionlet vol
 ```
 
-The result is an [`OptionletVolSurface`](../api/surfaces.md#optionlet-surface-rates) ready for the caplet / cap / rates-exotics pricers — see [Interest Rate Exotics](rates-exotics.md) for the instruments that consume it.
+The result is the optionlet SABR level with the strip level as
+`result.children[0]`; `settings=` drives the per-expiry SABR fits and
+`strip_settings=` the strip
+([`STRIP_SETTINGS`](../api/surfaces.md#valax.surfaces.caplet_stripping.STRIP_SETTINGS)
+by default).
+
+The surface is an [`OptionletVolSurface`](../api/surfaces.md#optionlet-surface-rates) ready for the caplet / cap / rates-exotics pricers — see [Interest Rate Exotics](rates-exotics.md) for the instruments that consume it.
 
 Two points worth knowing:
 
@@ -191,6 +215,14 @@ Two points worth knowing:
 - **Beta is fixed by default** (`fixed_beta=0.5`). Alpha and beta share the ATM backbone $\sigma_{ATM} \approx \alpha F^{\beta - 1}$ and are not jointly identifiable from a single cap smile — a free-beta Levenberg-Marquardt fit stalls rather than converging (see [Calibration § Solvers](calibration.md#solvers)). Rates desks fix beta by convention; pass `fixed_beta=None` to free it anyway.
 
 **When to use:** any rates workflow that starts from broker cap/floor quotes — pricing caps and floors off a smile rather than a flat vol, feeding an optionlet surface to the rates exotics, or building the vol input for LMM calibration.
+
+**Inside a calibration chain**, the same two levels are the nodes
+[`caplet_strip_node`](../api/calibration.md#valax.calibration.nodes.caplet_strip_node)
+(curves → strip) and
+[`optionlet_sabr_node`](../api/calibration.md#valax.calibration.nodes.optionlet_sabr_node)
+(strip → optionlet SABR surface), so cap-vol quote risk flows through the strip
+and the curves in one adjoint sweep; see
+[From Quotes to Risk](calibration-to-risk.md).
 
 ## Smile dynamics: what moves when the curve moves
 
@@ -321,14 +353,14 @@ Two caveats come with the non-default conventions:
 
 A swaption cube's at-the-money anchor is the forward **par swap rate**, and the
 premium it is quoted against is the **annuity** — both functions of the curves.
-`calibrate_swaption_cube` takes a caller-supplied `forwards` array, and that is
-precisely where the dual-curve chain breaks: a forward handed in from outside is
-a constant as far as the fit is concerned, so $\partial\theta_v/\partial\theta_c
-= 0$ and no curve risk can ever reach the volatility layer.
+A forward handed in from outside would be a constant as far as the fit is
+concerned, so $\partial\theta_v/\partial\theta_c = 0$ and no curve risk could
+ever reach the volatility layer — which is why the cube is calibrated **only**
+from the curves.
 
-`calibrate_swaption_cube_from_curves` closes it. Give it the **schedules** —
-one representative `Swaption` per node — and the curves, and it derives the grid
-axes and the per-node $(S_x, A_d)$ itself, through the same
+`calibrate_swaption_cube_from_curves` takes the **schedules** — one
+representative `Swaption` per node — and the curves, and derives the grid axes
+and the per-node $(S_x, A_d)$ itself, through the same
 `swaption_forward_and_annuity` the pricer uses:
 
 ```python
@@ -356,7 +388,7 @@ nodes = [[node(2026, 5), node(2026, 10)],      # 1y x {5y, 10y}
 offsets = jnp.array([-0.010, -0.005, 0.0, 0.005, 0.010])   # ATM offsets
 vols = ...   # [i][j] array of quoted vols at those offsets
 
-cube = calibrate_swaption_cube_from_curves(
+result = calibrate_swaption_cube_from_curves(
     nodes,
     [[offsets] * 2] * 2,
     vols,
@@ -365,6 +397,9 @@ cube = calibrate_swaption_cube_from_curves(
     quote_form="atm_offset",  # strikes are offsets to each node's own forward
     fixed_beta=jnp.array(0.5),
 )
+result.labels     # one "<expiry>x<tenor>" label per cell, e.g. "1Yx5Y"
+result.check()    # a failed cell is named, e.g. "2Yx10Y"
+cube = result.value
 
 cube.forwards     # curve-derived F_0 per node, not caller-supplied
 cube.expiries     # year fractions, exactly what the pricer will query at
@@ -385,15 +420,19 @@ Three things this buys:
   a hair off its own grid point.
 - **Curve risk reaches the vols.** `jax.grad` of a fitted parameter with respect
   to a discount or projection pillar is non-zero, because the forward really is
-  an input to the least squares. It is identically zero on the
-  caller-supplied-forward route — both are asserted in
-  `tests/test_greeks/test_vol_adjoint.py`.
+  an input to the least squares (asserted in
+  `tests/test_greeks/test_vol_adjoint.py`).
 
-Use `calibrate_swaption_cube_from_graph(..., graph, discount_id, forward_id)` to
-resolve the curves off a bootstrapped
-[`CurveGraph`](curves.md) instead. The original
-`calibrate_swaption_cube` remains as the explicit opt-out for when the forwards
-genuinely are exogenous.
+Each (expiry, tenor) cell is solved independently as one slice of a batched
+level (one `vmap`), so a cell that fails to fit is reported by its label rather
+than failing the whole cube. Use
+`calibrate_swaption_cube_from_graph(..., graph, discount_id, forward_id)` to
+resolve the curves off a bootstrapped [`CurveGraph`](curves.md) instead, or
+[`swaption_cube_node`](../api/calibration.md#valax.calibration.nodes.swaption_cube_node)
+to make the cube a node of a calibration chain (curves → cube), so swaption-vol
+quote risk and the curve risk of the forwards come out of one adjoint sweep —
+the starting point of per-trade model calibration in
+[example 14](../examples.md#per-trade-model-calibration-for-bermudans).
 
 ### Premium quotes
 
@@ -408,7 +447,7 @@ R(\sigma_N;\, \theta_c, q)
     \mathrm{Bachelier}\!\left(S_x(\theta_c), K, \sigma_N, T\right) - q = 0
 $$
 
-with a scalar `optimistix.Newton`, implicitly differentiated — so the *implied
+as a scalar Newton root level, implicitly differentiated — so the *implied
 vol* carries curve risk, which it cannot if the numeraire is frozen:
 
 ```python
@@ -417,7 +456,7 @@ from valax.surfaces import swaption_implied_normal_vol
 sigma_n = swaption_implied_normal_vol(
     swaption, premium, ois, sofr3m,
     settlement="physical",     # or "cash"
-)
+).value                        # a CalibrationResult; .value is the vol
 ```
 
 The two settlement conventions are not interchangeable and imply different
@@ -547,7 +586,7 @@ svi = calibrate_svi_surface(
     market_vols_per_expiry=[vols_3m, vols_6m, vols_1y],
     forwards=jnp.array([100.0, 100.5, 101.0]),
     expiries=jnp.array([0.25, 0.5, 1.0]),
-)
+).check().value
 
 # 2. Wrap in a local-vol model
 model = LocalVolModel.from_flat_rate(svi, rate=0.03, dividend=0.01)

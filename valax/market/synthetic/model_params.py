@@ -188,15 +188,24 @@ _HW_RANGES: dict[str, tuple[float, float]] = {
 
 def sample_hull_white_params(
     registry: SeedRegistry,
-    initial_curve: DiscountCurve,
+    initial_curve: DiscountCurve | None = None,
 ) -> HullWhiteModel:
-    """Draw a :class:`HullWhiteModel` calibrated to a supplied curve.
+    """Draw a :class:`HullWhiteModel`, optionally bound to a supplied curve.
 
-    The initial curve is *not* sampled here — pass one produced by
-    :func:`~valax.market.synthetic.curves.sample_nss_curve` (or any
-    other source) so the model exactly reproduces it.
+    The initial curve is *not* sampled here. Leave it ``None`` for a
+    curve-free model priced through :func:`valax.price` (which binds the
+    market's curve), or pass one produced by
+    :func:`~valax.market.synthetic.curves.sample_nss_curve` (or any other
+    source) for kernel-level use.
 
     Stream prefix: ``synthetic.model.hw.*``.
+
+    Args:
+        registry: Seed registry.
+        initial_curve: Curve to bind, or ``None`` for an unbound model.
+
+    Returns:
+        The sampled model.
     """
     a = _u(
         registry.key("synthetic.model.hw.mean_reversion"),

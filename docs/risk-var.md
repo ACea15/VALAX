@@ -105,11 +105,11 @@ Three things follow, and they are the reason the port matters:
     the price and the pillar deltas appear on `group_market_gradient` — at
     which point the warning stops firing by itself.
 
-    Models that reference the market by id — `HullWhiteModel`,
-    `G2PPModel`, or no model at all — were never affected: their curve
-    shocks already reach the price, and the embedded `initial_curve` is
-    vestigial in the price path because the recipe takes `discount_curve`
-    from the market.
+    Curve-bound short-rate models — `HullWhiteModel`, `G2PPModel`,
+    `CheyetteModel` — and trades with no model at all are never affected:
+    the model is curve-free and `price` binds its `initial_curve` from the
+    (shocked) `MarketState` on every call (refusing a pre-bound model), so
+    curve shocks reach the price through the market alone.
 
 ---
 

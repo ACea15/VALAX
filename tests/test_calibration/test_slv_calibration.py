@@ -27,7 +27,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import pytest
 
-from valax.calibration.slv import calibrate_slv_leverage
+from valax.calibration import CalibrationError, SolverSettings
+from valax.calibration.slv import calibrate_slv, calibrate_slv_leverage
 from valax.models import HestonModel
 from valax.pricing.analytic.dupire import dupire_local_vol
 from valax.surfaces import SVIVolSurface
@@ -85,7 +86,7 @@ class TestParticleMethod:
             time_grid=jnp.linspace(0.1, 1.0, 6),
             n_paths=5_000, key=jax.random.PRNGKey(20260101),
             method="particle", n_iterations=1,
-        )
+        ).value
         assert lev.values.shape == (6, 9)
         assert jnp.all(jnp.isfinite(lev.values))
         assert jnp.all(lev.values > 0.0)
@@ -117,7 +118,7 @@ class TestParticleMethod:
             time_grid=jnp.linspace(0.1, T, 6),
             n_paths=10_000, key=jax.random.PRNGKey(20260102),
             method="particle", n_iterations=2,
-        )
+        ).value
         slv = SLVModel.from_heston_and_leverage(heston, smile_surface, lev)
 
         # Independent MC simulation to measure E[V_T | k_T=0].
@@ -167,8 +168,8 @@ class TestKernelMethod:
             n_paths=10_000, key=jax.random.PRNGKey(20260201),
             n_iterations=1,
         )
-        lev_p = calibrate_slv_leverage(method="particle", **common)
-        lev_k = calibrate_slv_leverage(method="kernel", ridge=1e-3, **common)
+        lev_p = calibrate_slv_leverage(method="particle", **common).value
+        lev_k = calibrate_slv_leverage(method="kernel", ridge=1e-3, **common).value
 
         L_p_atm = float(lev_p(jnp.array(0.0), jnp.array(1.0)))
         L_k_atm = float(lev_k(jnp.array(0.0), jnp.array(1.0)))
@@ -195,7 +196,7 @@ class TestKernelMethod:
             return calibrate_slv_leverage(
                 method=method, ridge=1e-2 if method == "kernel" else 0.0,
                 key=jax.random.PRNGKey(seed), **common,
-            ).values
+            ).value.values
 
         L_p_a = cal("particle", 20260301)
         L_p_b = cal("particle", 20260302)
@@ -233,9 +234,9 @@ class TestFixedPoint:
             n_paths=8_000, key=jax.random.PRNGKey(20260401),
             method="kernel", ridge=1e-3,
         )
-        L1 = calibrate_slv_leverage(n_iterations=1, **common).values
-        L2 = calibrate_slv_leverage(n_iterations=2, **common).values
-        L3 = calibrate_slv_leverage(n_iterations=3, **common).values
+        L1 = calibrate_slv_leverage(n_iterations=1, **common).value.values
+        L2 = calibrate_slv_leverage(n_iterations=2, **common).value.values
+        L3 = calibrate_slv_leverage(n_iterations=3, **common).value.values
 
         diff_12 = float(jnp.max(jnp.abs(L2 - L1)))
         diff_23 = float(jnp.max(jnp.abs(L3 - L2)))
@@ -274,3 +275,83 @@ class TestValidation:
                 n_paths=1_000, key=jax.random.PRNGKey(0),
                 method="particle", n_iterations=0,
             )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 5. The fixed point as a reported calibration level
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestFixedPointLevel:
+    """How the MC fixed point is expressed: an explicit level whose
+    diagnostics are the last increment, the convergence test on it, and
+    the clip fraction."""
+
+    COMMON = dict(
+        log_moneyness_grid=jnp.linspace(-0.20, 0.20, 7),
+        time_grid=jnp.linspace(0.1, 1.0, 4),
+        n_paths=4_000, key=jax.random.PRNGKey(20260501),
+        method="kernel", ridge=1e-3,
+    )
+
+    def test_increment_is_the_last_pass_difference(self, heston, smile_surface):
+        args = (heston, smile_surface, jnp.array(100.0))
+        r2 = calibrate_slv_leverage(*args, n_iterations=2, **self.COMMON)
+        r3 = calibrate_slv_leverage(*args, n_iterations=3, **self.COMMON)
+        # Passes use deterministic per-pass keys, so the n=3 increment is
+        # exactly (n=3 grid) - (n=2 grid).
+        expected = (r3.value.values - r2.value.values).ravel()
+        assert jnp.allclose(r3.diagnostics.residuals, expected, atol=1e-12)
+        assert r3.problem == "fixed_point"
+        assert r3.is_explicit and r3.theta is None
+        assert int(r3.diagnostics.n_steps) == 3
+        clip = float(r3.diagnostics.extras["clip_fraction"])
+        assert 0.0 <= clip <= 1.0
+
+    def test_single_pass_is_never_converged(self, heston, smile_surface):
+        res = calibrate_slv_leverage(
+            heston, smile_surface, jnp.array(100.0), n_iterations=1,
+            settings=SolverSettings(atol=1e6), **self.COMMON,
+        )
+        assert not bool(res.converged)
+        with pytest.raises(CalibrationError, match="fixed_point"):
+            res.check()
+
+    def test_tolerance_decides_convergence(self, heston, smile_surface):
+        """Anti-vacuity: the same fixed point is converged under a loose
+        tolerance and reported failed under one below its MC noise."""
+        args = (heston, smile_surface, jnp.array(100.0))
+        loose = calibrate_slv_leverage(
+            *args, n_iterations=2, settings=SolverSettings(atol=10.0),
+            **self.COMMON,
+        )
+        tight = calibrate_slv_leverage(
+            *args, n_iterations=2, settings=SolverSettings(atol=1e-9),
+            **self.COMMON,
+        )
+        assert bool(loose.converged)
+        assert not bool(tight.converged)
+
+    def test_two_pass_slv_carries_the_heston_fit(self, heston, smile_surface):
+        from valax.models import SLVModel
+        from valax.pricing.analytic.heston import heston_cos_price
+        from valax.instruments.options import EuropeanOption
+
+        def cos(model, k, s, r, q, t):
+            return heston_cos_price(
+                EuropeanOption(strike=k, expiry=t, is_call=True), s, r, q, model
+            )
+
+        strikes = jnp.linspace(90.0, 110.0, 5)
+        spot, r, q, t = jnp.array(100.0), heston.rate, heston.dividend, jnp.array(1.0)
+        prices = jax.vmap(lambda k: cos(heston, k, spot, r, q, t))(strikes)
+        res = calibrate_slv(
+            strikes, prices, spot, r, q, t, cos, smile_surface,
+            n_iterations=2, heston_initial_guess=heston,
+            settings=SolverSettings(atol=10.0), **{
+                k: v for k, v in self.COMMON.items()
+            },
+        )
+        assert isinstance(res.value, SLVModel)
+        assert len(res.children) == 1 and res.children[0].name == "slv.heston"
+        res.check()

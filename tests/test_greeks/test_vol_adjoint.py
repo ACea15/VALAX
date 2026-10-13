@@ -120,10 +120,10 @@ def _slice_quotes(forward, expiry):
 
 def _fit(strikes, vols, forward, expiry):
     """The production fit, beta held fixed."""
-    model, _ = calibrate_sabr(
+    model = calibrate_sabr(
         strikes=strikes, market_vols=vols, forward=forward, expiry=expiry,
         fixed_beta=jnp.array(BETA),
-    )
+    ).value
     return model
 
 
@@ -482,18 +482,15 @@ class TestCurveContributionThroughTheFit:
                     [[strikes, strikes], [strikes, strikes]],
                     [[vols, vols], [vols, vols]],
                     c, fixed_beta=jnp.array(BETA),
-                )
+                ).value
             else:
-                # The legacy route: forwards handed in, frozen.
-                from valax.surfaces import calibrate_swaption_cube
-                cube = calibrate_swaption_cube(
-                    strikes_per_node=[[strikes, strikes], [strikes, strikes]],
-                    market_vols_per_node=[[vols, vols], [vols, vols]],
-                    forwards=forwards,
-                    expiries=expiries,
-                    tenors=jnp.asarray([5.0, 10.0]),
+                # What the retired frozen-forward cube did: the forward is
+                # computed off the curve but enters the fit as a constant.
+                f, _ = swaption_node_forwards_and_annuities(nodes, c)
+                return calibrate_sabr(
+                    strikes, vols, jax.lax.stop_gradient(f[0, 0]), t00,
                     fixed_beta=jnp.array(BETA),
-                )
+                ).value.alpha
             return cube.alphas[0, 0]
 
         aware = jax.grad(lambda d: cube_alpha(d, True))(curve.discount_factors)
@@ -519,7 +516,7 @@ class TestCubeWiring:
             [[OFFSETS, OFFSETS], [OFFSETS, OFFSETS]],
             [[quotes[i][j][1] for j in range(2)] for i in range(2)],
             curve, quote_form="atm_offset", fixed_beta=jnp.array(BETA),
-        )
+        ).value
         assert cube.quote_form == "atm_offset"
 
         level = cube_node_level(cube, 1, 0, OFFSETS, quotes[1][0][1])
@@ -542,7 +539,7 @@ class TestCubeWiring:
             nodes,
             [[OFFSETS, OFFSETS], [OFFSETS, OFFSETS]],
             vols, curve, quote_form="atm_offset", fixed_beta=jnp.array(BETA),
-        )
+        ).value
 
         cube_bar = jax.grad(
             lambda c: c(

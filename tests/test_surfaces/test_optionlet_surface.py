@@ -77,7 +77,7 @@ class TestLognormalStripping:
 
         surf = build_sabr_caplet_surface(
             strikes_per_expiry, market, forwards, EXPIRIES, fixed_beta=jnp.array(0.5),
-        )
+        ).value
         max_err = max(
             abs(float(surf(strikes[k], EXPIRIES[i]) - market[i][k]))
             for i in range(4) for k in range(strikes.shape[0])
@@ -106,7 +106,7 @@ class TestNormalStripping:
         surf = build_sabr_caplet_surface(
             strikes_per_expiry, market, forwards, EXPIRIES,
             is_normal=True, shift=shift, fixed_beta=jnp.array(0.0),
-        )
+        ).value
         assert surf.is_normal is True
         max_err = max(
             abs(float(surf(strikes[k], EXPIRIES[i]) - market[i][k]))

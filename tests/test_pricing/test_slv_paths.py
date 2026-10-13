@@ -297,7 +297,7 @@ class TestDupireConsistency:
             time_grid=jnp.linspace(0.05, 1.0, 8),
             n_paths=10_000, key=cal_key,
             method="kernel", n_iterations=1, ridge=1e-3,
-        )
+        ).value
         slv = SLVModel.from_heston_and_leverage(heston, surface, leverage)
 
         # Reprice across multiple seeds, averaging prices per strike.

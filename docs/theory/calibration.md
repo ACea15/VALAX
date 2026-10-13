@@ -28,7 +28,7 @@ where $\mathbf{J} = \partial \mathbf{r} / \partial \boldsymbol{\theta}$ is the J
 
 **VALAX advantage:** The Jacobian $\mathbf{J}$ is computed exactly via `jax.jacobian` — no finite differences. This gives faster convergence (accurate search directions) and is cheaper for models with many market quotes (one reverse-mode pass per residual, vs. $2p$ evaluations for $p$-parameter finite differences).
 
-**VALAX implementation:** `valax/calibration/sabr.py` and `valax/calibration/heston.py` use `optimistix.least_squares` (which implements LM). Alternative solvers: BFGS via `optimistix.minimise`, Adam via `optax`.
+**VALAX implementation:** every calibrator is one level solved by `valax.calibration.solve.solve_level` and returns a `CalibrationResult` (`.value`, traceable `.diagnostics`, `.check()`). The solver is chosen with `settings=SolverSettings(method=..., rtol=..., atol=..., max_steps=...)`: least-squares methods `levenberg_marquardt` (the default for smile / Heston fits, `FIT_SETTINGS`), `gauss_newton`, `dogleg`, `bfgs` (via `optimistix.minimise` on the sum of squares) and `optax_adam`; root methods `newton`, `chord`, `levenberg_marquardt`, `dogleg` for exact levels. The short-rate basket fits (Hull–White, G2++, Cheyette) default to line-searched BFGS, because their closed-form engines nest a root-find whose implicit derivative is non-finite far from the solution, where an undamped LM step can land. See [API → Calibration](../api/calibration.md#solver-settings).
 
 ### 8.3 Parameter Constraints and Transforms
 

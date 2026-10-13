@@ -395,11 +395,17 @@ to pin it.
 `calibrate_cheyette_2f` is always frozen-$y$ (the exact-$y$ 2F PDE is the 5-D
 research spike above).
 
-**Solver.** A line-searched `optimistix.BFGS` on the relative-residual sum of
-squares, with `fixed_params` support and the curve pinned (exact-fitted, not a
-degree of freedom). Levenberg–Marquardt is deliberately not offered — the
-residual closes over a sequence of instrument pytrees, which trips `optimistix`
-0.1.0's LM (`List arity mismatch`), the same caveat as `calibrate_g2pp`. Because
+**Solver.** A line-searched BFGS on the relative-residual sum of squares
+(default
+[`CHEYETTE_SETTINGS`](../api/calibration.md#valax.calibration.cheyette.CHEYETTE_SETTINGS),
+BFGS to `1e-10` — looser than the closed-form fits because the PDE has a
+discretisation floor), with `fixed_params` support and the curve pinned
+(exact-fitted, not a degree of freedom: it is the level's upstream input, and
+the returned model is curve-free). The result is a `CalibrationResult` whose
+`.provenance` records the PDE engine (`cheyette_provenance`) — load-bearing
+for the frozen-$y$ engine, whose parameters are valid only on that engine
+(`check_engine`). Any least-squares method can be selected with
+`settings=SolverSettings(...)`. Because
 the PDE sits inside the optimiser loop, use a moderate grid and a small
 instrument set, reusing the mesh across iterations.
 

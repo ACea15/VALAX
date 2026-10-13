@@ -1,5 +1,7 @@
 """Tests for curve bootstrapping: sequential, simultaneous, and multi-curve."""
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -7,7 +9,9 @@ import pytest
 from valax.curves.discount import DiscountCurve, forward_rate, zero_rate
 from valax.curves.instruments import DepositRate, FRA, SwapRate
 from valax.curves.bootstrap import bootstrap_sequential, bootstrap_simultaneous
-from valax.curves.multi_curve import MultiCurveSet, bootstrap_multi_curve
+from valax.curves.bootstrap_graph import bootstrap_curve_graph
+from valax.curves.graph import CurveSpec
+from valax.curves.multi_curve import MultiCurveSet
 from valax.dates.daycounts import ymd_to_ordinal, year_fraction
 from valax.instruments.rates import InterestRateSwap
 from valax.pricing.analytic.swaptions import swap_price
@@ -223,7 +227,7 @@ class TestSequentialVsSimultaneous:
         pillar_dates = jnp.stack(
             [jnp.asarray(d.end_date, dtype=jnp.int32) for d in deposits]
         )
-        sim_curve = bootstrap_simultaneous(REF, pillar_dates, deposits)
+        sim_curve = bootstrap_simultaneous(REF, pillar_dates, deposits).value
 
         # Compare DFs at pillar dates
         seq_dfs = seq_curve(pillar_dates)
@@ -246,7 +250,7 @@ class TestSequentialVsSimultaneous:
             int(sw1.fixed_dates[-1]),
             int(sw2.fixed_dates[-1]),
         ], dtype=jnp.int32)
-        sim_curve = bootstrap_simultaneous(REF, pillar_dates, instruments)
+        sim_curve = bootstrap_simultaneous(REF, pillar_dates, instruments).value
 
         seq_dfs = seq_curve(pillar_dates)
         sim_dfs = sim_curve(pillar_dates)
@@ -307,7 +311,7 @@ class TestDifferentiability:
             pillar_dates = jnp.array(
                 [int(_make_date(2026, 1, 1))], dtype=jnp.int32
             )
-            curve = bootstrap_simultaneous(REF, pillar_dates, [dep])
+            curve = bootstrap_simultaneous(REF, pillar_dates, [dep]).value
             return curve(_make_date(2026, 1, 1))
 
         grad = jax.grad(price_fn)(dep_rate)
@@ -316,6 +320,37 @@ class TestDifferentiability:
 
 
 # ── Test: Multi-curve bootstrap ──────────────────────────────────────
+
+_OIS_ID = "USD.SOFR.OIS"
+_FWD_ID = "USD.SOFR.3M"
+
+
+def _build_multi_curve(ois_deps, fwd_deps):
+    """Joint OIS + 3M deposit build, viewed as a :class:`MultiCurveSet`."""
+
+    def spec(curve_id, deps):
+        return CurveSpec(
+            curve_id=curve_id,
+            currency="USD",
+            pillar_dates=jnp.stack(
+                [jnp.asarray(d.end_date, dtype=jnp.int32) for d in deps]
+            ),
+            day_count="act_365",
+        )
+
+    instruments = [
+        dataclasses.replace(d, curves_touched=(_OIS_ID,)) for d in ois_deps
+    ] + [
+        dataclasses.replace(d, curves_touched=(_FWD_ID,)) for d in fwd_deps
+    ]
+    res = bootstrap_curve_graph(
+        REF,
+        [spec(_OIS_ID, ois_deps), spec(_FWD_ID, fwd_deps)],
+        instruments,
+    )
+    assert bool(res.converged)
+    return MultiCurveSet.from_graph(res.value, _OIS_ID, {"3M": _FWD_ID})
+
 
 class TestMultiCurve:
     def test_discount_curve_built(self):
@@ -329,11 +364,7 @@ class TestMultiCurve:
             _make_deposit(2026, 1, 1, 0.047),
         ]
 
-        mcs = bootstrap_multi_curve(
-            reference_date=REF,
-            discount_instruments=ois_deps,
-            forward_instruments={"3M": fwd_deps},
-        )
+        mcs = _build_multi_curve(ois_deps, fwd_deps)
 
         assert isinstance(mcs, MultiCurveSet)
         assert isinstance(mcs.discount_curve, DiscountCurve)
@@ -357,11 +388,7 @@ class TestMultiCurve:
             _make_deposit(2026, 1, 1, 0.047),
         ]
 
-        mcs = bootstrap_multi_curve(
-            reference_date=REF,
-            discount_instruments=ois_deps,
-            forward_instruments={"3M": fwd_deps},
-        )
+        mcs = _build_multi_curve(ois_deps, fwd_deps)
 
         fwd_curve = mcs.forward_curves["3M"]
         for dep in fwd_deps:

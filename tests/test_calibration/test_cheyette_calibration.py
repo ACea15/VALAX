@@ -9,10 +9,17 @@ every iteration — since the target is generated on the *same* mesh, so the
 recovery is a clean inverse problem rather than a grid-convergence test.
 """
 
+import dataclasses
+
 import equinox as eqx
 import jax.numpy as jnp
 import pytest
 
+from valax.calibration import (
+    CalibrationError,
+    SolverSettings,
+    check_engine,
+)
 from valax.calibration.cheyette import (
     calibrate_cheyette,
     calibrate_cheyette_2f,
@@ -20,6 +27,7 @@ from valax.calibration.cheyette import (
 )
 import jax
 
+from valax.core.binding import bind_curves
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.instruments.rates import Caplet, Swaption
@@ -115,12 +123,13 @@ class TestRoundTrip1F:
             skew=jnp.array(0.0),
             initial_curve=curve,
         )
-        fit, _ = calibrate_cheyette(
+        fit = calibrate_cheyette(
             strike_slice, market, curve,
             initial_guess=guess,
             fixed_params={"mean_reversion": 0.05},
-            engine="frozen", config=CFG_FROZEN_1F, max_steps=200,
-        )
+            engine="frozen", config=CFG_FROZEN_1F,
+            settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=200),
+        ).value
         assert float(fit.volatility) == pytest.approx(0.012, rel=1e-2)
         assert float(fit.skew) == pytest.approx(0.25, abs=1e-2)
 
@@ -132,12 +141,15 @@ class TestRoundTrip1F:
             initial_curve=curve,
         )
         market = cheyette_pde_prices(true, strike_slice, "frozen", CFG_FROZEN_1F)
-        fit, _ = calibrate_cheyette(
+        fit = calibrate_cheyette(
             strike_slice, market, curve,
             fixed_params={"mean_reversion": 0.05},
-            engine="frozen", config=CFG_FROZEN_1F, max_steps=200,
+            engine="frozen", config=CFG_FROZEN_1F,
+            settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=200),
+        ).value
+        reprice = cheyette_pde_prices(
+            bind_curves(fit, curve), strike_slice, "frozen", CFG_FROZEN_1F
         )
-        reprice = cheyette_pde_prices(fit, strike_slice, "frozen", CFG_FROZEN_1F)
         rel = jnp.abs(reprice - market) / jnp.abs(market)
         assert float(jnp.max(rel)) < 1e-3
 
@@ -191,12 +203,13 @@ class TestRoundTrip1FCapletSlice:
             skew=jnp.array(0.0),
             initial_curve=curve,
         )
-        fit, _ = calibrate_cheyette(
+        fit = calibrate_cheyette(
             caplet_slice, market, curve,
             initial_guess=guess,
             fixed_params={"mean_reversion": 0.05},
-            engine="frozen", config=CFG_FROZEN_1F, max_steps=200,
-        )
+            engine="frozen", config=CFG_FROZEN_1F,
+            settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=200),
+        ).value
         assert float(fit.volatility) == pytest.approx(0.012, rel=2e-2)
         assert float(fit.skew) == pytest.approx(0.25, abs=2e-2)
 
@@ -233,11 +246,12 @@ class TestRoundTrip1FExactEngine:
             initial_curve=curve,
         )
         market = cheyette_pde_prices(true, insts, "exact", CFG_EXACT_1F)
-        fit, _ = calibrate_cheyette(
+        fit = calibrate_cheyette(
             insts, market, curve,
             fixed_params={"mean_reversion": 0.05},
-            engine="exact", config=CFG_EXACT_1F, max_steps=150,
-        )
+            engine="exact", config=CFG_EXACT_1F,
+            settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=150),
+        ).value
         assert float(fit.volatility) == pytest.approx(0.011, rel=2e-2)
         assert float(fit.skew) == pytest.approx(0.2, abs=2e-2)
 
@@ -267,15 +281,16 @@ class TestRoundTrip2F:
             lambda m: (m.volatility_1, m.volatility_2), true,
             (jnp.array(0.009), jnp.array(0.009)),
         )
-        fit, _ = calibrate_cheyette_2f(
+        fit = calibrate_cheyette_2f(
             insts, market, curve,
             initial_guess=guess,
             fixed_params={
                 "mean_reversion_1": 0.5, "mean_reversion_2": 0.1,
                 "skew_1": 0.1, "skew_2": 0.05, "correlation": -0.5,
             },
-            config=CFG_FROZEN_2F, max_steps=200,
-        )
+            config=CFG_FROZEN_2F,
+            settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=200),
+        ).value
         assert float(fit.volatility_1) == pytest.approx(0.011, rel=2e-2)
         assert float(fit.volatility_2) == pytest.approx(0.007, rel=3e-2)
 
@@ -313,14 +328,36 @@ class TestGuards:
             initial_curve=curve,
         )
         market = cheyette_pde_prices(true, strike_slice, "frozen", CFG_FROZEN_1F)
-        fit, _ = calibrate_cheyette(
+        fit = calibrate_cheyette(
             strike_slice, market, curve,
             fixed_params={"mean_reversion": 0.05},
-            config=CFG_FROZEN_1F, max_steps=20,
+            config=CFG_FROZEN_1F,
+            settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=20),
+        ).value
+        # The curve is market data, not a DOF: the fitted model is curve-free.
+        assert fit.initial_curve is None
+
+
+class TestProvenance:
+    """Frozen-y parameters are engine-bound; the result says so and enforces it."""
+
+    def test_frozen_fit_is_engine_bound(self, curve, strike_slice):
+        true = CheyetteModel(
+            mean_reversion=jnp.array(0.05),
+            volatility=jnp.array(0.011),
+            skew=jnp.array(0.1),
+            initial_curve=curve,
         )
-        assert jnp.array_equal(
-            fit.initial_curve.discount_factors, curve.discount_factors
+        market = cheyette_pde_prices(true, strike_slice, "frozen", CFG_FROZEN_1F)
+        res = calibrate_cheyette(
+            strike_slice, market, curve,
+            fixed_params={"mean_reversion": 0.05},
+            config=CFG_FROZEN_1F,
+            settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=20),
         )
-        assert jnp.array_equal(
-            fit.initial_curve.pillar_dates, curve.pillar_dates
-        )
+        assert res.provenance.engine_kind == "modelling_bias"
+        assert res.provenance.method == "pde"
+        assert res.provenance.config == CFG_FROZEN_1F
+        assert check_engine(res, "pde", CFG_FROZEN_1F) is res
+        with pytest.raises(CalibrationError, match="modelling bias"):
+            check_engine(res, "pde", dataclasses.replace(CFG_FROZEN_1F, n_spot=241))

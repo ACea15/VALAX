@@ -80,8 +80,34 @@ scenarios (rate level/slope, spot, vol level/skew with spot-vol correlation)
 for `jax.vmap` over `calibrate_market`; `sample_equity_trades` and
 `sample_swap_book` build products on the same world.
 
-Examples 10–13 (`examples/1*_unified_*.py`) walk the full workflow on these
-snapshots; see also [From Quotes to Risk](calibration-to-risk.md).
+**Rates volatility.** `rates_vol_snapshot` extends a rates world with a true
+SABR swaption cube (one smile per expiry × tenor cell, alpha set on each
+cell's true curve-implied forward) and true caplet vols, quoted as
+swaption-vol and flat cap-vol quotes (normal vols by default, configured by
+`RatesVolSpec`). Its chain is curves →
+[`swaption_cube_node`](../api/calibration.md#valax.calibration.nodes.swaption_cube_node)
+and curves →
+[`caplet_strip_node`](../api/calibration.md#valax.calibration.nodes.caplet_strip_node)
+→ [`optionlet_sabr_node`](../api/calibration.md#valax.calibration.nodes.optionlet_sabr_node);
+a noise-free snapshot recovers the true curves, cube and caplet strip to solver
+tolerance (the optionlet SABR fit smooths the strip, so it is not a truth
+recovery).
+
+```python
+from valax.market import RatesVolSpec, RatesWorldSpec, rates_vol_snapshot
+
+snap, vol_world = rates_vol_snapshot(
+    registry, cfg, RatesWorldSpec(), RatesVolSpec(),
+    bp_noise=0.5, vol_bp_noise=0.5,
+)
+calibrated = calibrate_market(snap.chain, snap.quotes, snap.fixed, strict=True)
+```
+
+Examples 10–14 (`examples/1*_unified_*.py`) walk the full workflow on these
+snapshots — example 14 adds per-trade Hull–White calibration on co-terminal
+baskets read off the calibrated cube; see
+[Examples](../examples.md#unified-calibration-pricing-and-risk) and
+[From Quotes to Risk](calibration-to-risk.md).
 
 !!! note "Noise model"
     Quotes receive i.i.d. Gaussian noise today. Planned: bid/ask pairs whose

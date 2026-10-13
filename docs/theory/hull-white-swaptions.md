@@ -153,6 +153,17 @@ Desk practice is therefore to **fix \(a\)** (from a historical estimate or a
 co-terminal fit) and let \(\sigma\) absorb the level. Pass
 `fixed_mean_reversion` to work that way.
 
+`calibrate_hull_white` returns a `CalibrationResult` whose `.value` is a
+curve-free `HullWhiteModel` (`valax.price` binds the market curve at pricing
+time). Its default settings
+([`BASKET_SETTINGS`](../api/calibration.md#valax.calibration.basket.BASKET_SETTINGS))
+are line-searched BFGS rather than Levenberg–Marquardt: the critical-rate
+root-find of §4 has an implicit derivative that is non-finite far from the
+solution, where an undamped LM step can land, while BFGS's line search keeps
+the iterates where the pricer is defined. Per-trade calibration to a
+co-terminal basket read off a calibrated swaption cube is the
+`swaption_basket_node` of [example 14](../examples.md#per-trade-model-calibration-for-bermudans).
+
 ### What it cannot do
 
 A one-factor Gaussian model produces a *normal* volatility term structure that

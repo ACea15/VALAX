@@ -1914,7 +1914,7 @@ class TestBootstrapResidualRoundTrip:
         )
         curve = bootstrap_simultaneous(
             REF, pillar_dates, instruments, day_count="act_365"
-        )
+        ).value
         graph = _wrap_default(curve)
         for inst in instruments:
             r = float(inst.residual(graph, NO_FIXINGS, REF))
@@ -2643,10 +2643,11 @@ class TestAveragedFutures:
             ]
             return bootstrap_curve_graph(REF, [spec], quotes)
 
-        averaged, diag_a = build("arithmetic")
-        compounded, diag_c = build("compounded")
-        assert diag_a.converged and diag_c.converged
-        assert float(diag_a.max_abs_residual) < 1e-12
+        res_a = build("arithmetic")
+        res_c = build("compounded")
+        averaged, compounded = res_a.value, res_c.value
+        assert bool(res_a.converged) and bool(res_c.converged)
+        assert float(res_a.diagnostics.max_abs_residual) < 1e-12
         gap = jnp.abs(
             averaged["USD.SOFR.1M"].discount_factors
             - compounded["USD.SOFR.1M"].discount_factors
@@ -3111,10 +3112,11 @@ class TestPaymentLagUnderTransforms:
             ]
             return bootstrap_curve_graph(REF, [spec], quotes)
 
-        lagged, diag = build(2)
-        assert diag.converged
-        assert float(diag.max_abs_residual) < 1e-12
-        plain, _ = build(0)
+        res = build(2)
+        lagged = res.value
+        assert bool(res.converged)
+        assert float(res.diagnostics.max_abs_residual) < 1e-12
+        plain = build(0).value
         a = lagged.curves["USD.SOFR.OIS"].discount_factors
         b = plain.curves["USD.SOFR.OIS"].discount_factors
         assert jnp.any(jnp.abs(a - b) > 1e-9)

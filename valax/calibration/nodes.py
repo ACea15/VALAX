@@ -22,9 +22,16 @@ Factories provided here span the three tiers of market:
 * :func:`curve_graph_node` — joint single- or multi-curve bootstrap (level 1a);
 * :func:`sabr_smile_node` — SABR smiles per expiry on forwards read from the
   upstream market (level 1b);
+* :func:`swaption_cube_node`, :func:`caplet_strip_node` and
+  :func:`optionlet_sabr_node` — the rates vol levels (swaption cube; cap
+  strip → optionlet SABR), forwards and annuities from the upstream curves
+  (level 1b);
 * :func:`price_fit_node` — any model with a registered pricer, fitted to a
   basket through :func:`valax.core.pricing.price` (level 1b quote conversion
-  or level 2 model calibration — the same factory serves both scopes).
+  or level 2 model calibration — the same factory serves both scopes);
+* :func:`swaption_basket_node` with :func:`coterminal_swaptions` — a rates
+  model fitted per trade to a swaption basket priced off the calibrated cube
+  (level 2), batched over same-shaped baskets with ``eqx.filter_vmap``.
 """
 
 from __future__ import annotations
@@ -46,13 +53,17 @@ from valax.calibration.chain import (
     solve_level,
 )
 from valax.calibration.level import LevelInputs
-from valax.calibration.settings import SolverSettings
+from valax.calibration.settings import (
+    EXACT_SETTINGS,
+    FIT_SETTINGS,
+    SolverSettings,
+)
 from valax.calibration.transforms import (
     TransformSpec,
     correlation,
     positive,
 )
-from valax.core.market_state import MarketState
+from valax.core.market_state import MarketState, validate_surface_id
 from valax.curves.bootstrap_graph import (
     curve_graph_from_log_dfs,
     curve_quote_vector,
@@ -69,19 +80,6 @@ from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol
 from valax.surfaces.constant import ConstantVol
 from valax.surfaces.sabr_surface import SABRVolSurface
-
-
-#: Default settings of an exact (square) level: Newton to 1e-10.
-EXACT_SETTINGS = SolverSettings(method="newton", rtol=1e-10, atol=1e-10)
-
-#: Default settings of a least-squares level: Levenberg-Marquardt to 1e-8.
-#: Looser than :data:`EXACT_SETTINGS` on purpose: a fit's residual does not
-#: vanish, and price-based fits (Fourier / numerical pricers) have a noise
-#: floor near 1e-10 that a tighter step tolerance cannot get under — the
-#: solver would report non-convergence at a perfectly good optimum.
-FIT_SETTINGS = SolverSettings(
-    method="levenberg_marquardt", rtol=1e-8, atol=1e-8, max_steps=512
-)
 
 
 # ── Tier 0: explicit market inputs ───────────────────────────────────
@@ -241,7 +239,8 @@ def curve_graph_node(
 
     def calibrate_fn(inputs: LevelInputs):
         return solve_level(
-            name, "root", residual_fn, theta0, inputs, assemble, settings
+            name, "root", residual_fn, theta0, inputs, assemble, settings,
+            labels=keys,
         )
 
     return CalibrationNode(
@@ -422,6 +421,350 @@ def sabr_smile_node(
     )
 
 
+# ── Level 1b (rates): swaption cube and cap strip on upstream curves ──
+
+
+def _curves_reader(
+    discount_id: str | None, forward_id: str | None
+) -> Callable[[MarketState], tuple]:
+    """``market -> (discount_curve, forward_curve | None)``."""
+
+    def read(market: MarketState) -> tuple:
+        forward = None if forward_id is None else market.curve(forward_id)
+        return market.curve(discount_id), forward
+
+    return read
+
+
+def _padded_keys(
+    key_rows: Sequence[Sequence[str]], width: int
+) -> tuple[str, ...]:
+    """Flatten ragged per-node key rows, padding each by its last key.
+
+    Matches :func:`~valax.calibration.solve.stack_slices`, which pads the
+    numbers the same way with zero weight — so a padded quote is read but
+    contributes (and receives) nothing.
+    """
+    out: list[str] = []
+    for row in key_rows:
+        row = tuple(row)
+        out.extend(row + (row[-1],) * (width - len(row)))
+    return tuple(out)
+
+
+def swaption_cube_node(
+    surface_id: str,
+    *,
+    swaptions: Sequence[Sequence[Any]],
+    strikes_per_node: Sequence[Sequence[Float[Array, " n_k"]]],
+    quote_keys: Sequence[Sequence[Sequence[str]]],
+    discount_id: str | None,
+    reference_date: int | Int[Array, ""],
+    forward_id: str | None = None,
+    quote_form: str = "absolute_strike",
+    dynamics: str | None = None,
+    is_normal: bool = False,
+    shift: float = 0.0,
+    beta: float | None = 0.5,
+    beta_key: str | None = None,
+    weights_per_node: Sequence[Sequence[Float[Array, " n_k"]]] | None = None,
+    settings: SolverSettings | None = None,
+    name: str | None = None,
+) -> CalibrationNode:
+    r"""SABR swaption cube on the upstream curves, as a chain level.
+
+    The rates counterpart of :func:`sabr_smile_node`: one SABR smile per
+    ``(expiry, tenor)`` cell, fitted to quoted vols at the node's strikes,
+    with each cell's forward par swap rate recomputed *inside* the level
+    from the curves already in the market (the pricer's own
+    :func:`~valax.pricing.analytic.swaptions.swaption_forward_and_annuity`).
+    The fit is therefore a differentiable function of the curve pillars, and
+    :func:`~valax.greeks.quote_risk.chain_adjoint` pushes a swaption's vega
+    to the vol quotes *and* the forward's curve risk to the curve quotes —
+    curve → vol → price in one sweep. Shares its implementation with
+    :func:`~valax.surfaces.swaption_cube.calibrate_swaption_cube_from_curves`
+    (:func:`~valax.surfaces.swaption_cube.swaption_cube_level`); cells are
+    solved independently and a failed cell is named (``"5Yx10Y"``).
+
+    Args:
+        surface_id: Key the cube is installed under (e.g. ``"USD.SWPN.VOL"``).
+        swaptions: Nested ``[i][j]`` representative swaptions (schedules
+            define the axes and forwards; strikes ignored).
+        strikes_per_node: Nested ``[i][j]`` strike arrays — absolute, or
+            offsets to the node forward under ``quote_form="atm_offset"``.
+        quote_keys: Nested ``[i][j]`` sequences of quote identifiers, one per
+            strike.
+        discount_id: Discount curve id in the upstream market.
+        reference_date: Valuation date ordinal, used eagerly to derive the
+            cube's expiry / tenor axes.
+        forward_id: Projection curve id (``None`` for single-curve).
+        quote_form: ``"absolute_strike"`` or ``"atm_offset"``.
+        dynamics: Smile dynamics recorded on the cube.
+        is_normal: Normal (Bachelier) quotes if True, else lognormal.
+        shift: Displacement of the normal expansion.
+        beta: Fixed SABR beta, or ``None`` to calibrate beta per cell.
+        beta_key: Fixed-input identifier for beta (overrides ``beta``); its
+            sensitivity is reported.
+        weights_per_node: Optional nested per-strike weights.
+        settings: Per-cell solver settings.
+        name: Node name; defaults to ``surface_id``.
+
+    Returns:
+        A market-scope :class:`~valax.calibration.chain.CalibrationNode`.
+
+    Raises:
+        ValueError: If the grid is not rectangular, the key / strike grids
+            disagree, or the axes are inconsistent.
+    """
+    from valax.calibration.solve import stack_slices
+    from valax.surfaces.swaption_cube import (
+        _validate_node_grid,
+        swaption_cube_level,
+        swaption_node_coordinates,
+    )
+
+    validate_surface_id(surface_id)
+    _validate_node_grid(swaptions)
+    n_e, n_t = len(swaptions), len(swaptions[0])
+    flat_strikes = [jnp.asarray(k) for row in strikes_per_node for k in row]
+    key_rows = [tuple(keys) for row in quote_keys for keys in row]
+    if len(flat_strikes) != n_e * n_t or len(key_rows) != n_e * n_t:
+        raise ValueError(
+            f"swaption_cube_node: strikes_per_node and quote_keys must match "
+            f"the ({n_e}, {n_t}) node grid."
+        )
+    for i, (k, keys) in enumerate(zip(flat_strikes, key_rows)):
+        if k.shape[0] != len(keys):
+            raise ValueError(
+                f"swaption_cube_node: node {i} has {k.shape[0]} strikes but "
+                f"{len(keys)} quote keys."
+            )
+    strikes, _, weights = stack_slices(
+        flat_strikes, flat_strikes,
+        None if weights_per_node is None
+        else [w for row in weights_per_node for w in row],
+    )
+    width = strikes.shape[1]
+    padded = _padded_keys(key_rows, width)
+    keys = tuple(dict.fromkeys(padded))
+    expiries, tenors = swaption_node_coordinates(
+        swaptions, flat_curve(0.0, reference_date)
+    )
+    curves = _curves_reader(discount_id, forward_id)
+    node_name = name or surface_id
+
+    if beta_key is not None:
+        beta_fn = lambda inp: inp.fixed[beta_key]  # noqa: E731
+    elif beta is not None:
+        beta_fn = lambda inp: jnp.asarray(beta)  # noqa: E731
+    else:
+        beta_fn = None
+
+    def calibrate_fn(inputs: LevelInputs):
+        return swaption_cube_level(
+            node_name, swaptions, inputs, curves,
+            strikes=strikes, weights=weights,
+            vols_fn=lambda inp: inp.quotes.vector(padded).reshape(
+                n_e * n_t, width
+            ),
+            beta_fn=beta_fn,
+            expiries=expiries, tenors=tenors, quote_form=quote_form,
+            dynamics=dynamics, is_normal=is_normal, shift=shift,
+            settings=settings,
+        )
+
+    return CalibrationNode(
+        name=node_name,
+        quote_keys=keys,
+        fixed_keys=() if beta_key is None else (beta_key,),
+        calibrate_fn=calibrate_fn,
+        install_fn=install_surface(surface_id),
+        needs_upstream=True,
+    )
+
+
+def caplet_strip_node(
+    strip_id: str,
+    *,
+    caps: Sequence[Any],
+    strikes: Float[Array, " n_strikes"],
+    quote_keys: Sequence[Sequence[str]],
+    discount_id: str | None,
+    reference_date: int | Int[Array, ""],
+    forward_id: str | None = None,
+    is_normal: bool = False,
+    settings: SolverSettings | None = None,
+    name: str | None = None,
+) -> CalibrationNode:
+    r"""Cap-matrix strip on the upstream curves, as a chain level.
+
+    Strips every strike column of a flat-vol cap matrix into per-optionlet
+    vols (:func:`~valax.surfaces.caplet_stripping.strip_columns_level`: one
+    sequential bootstrap per column, ``vmap``-ed, each column reporting its
+    own convergence). Forwards are projected and payoffs discounted off the
+    curves already in the market, so the stripped vols — and everything
+    fitted on them — carry the curves' risk. The batched
+    :class:`~valax.surfaces.caplet_stripping.CapletVolCurve` is installed
+    under ``strip_id`` for a downstream :func:`optionlet_sabr_node`.
+
+    Args:
+        strip_id: Surface key the strip is installed under.
+        caps: Nested cap schedule, ascending in maturity (strikes ignored).
+        strikes: Quoted strike grid (one strip column per strike).
+        quote_keys: ``[k][i]`` quote identifiers — strike ``k``, cap ``i``.
+        discount_id: Discount curve id in the upstream market.
+        reference_date: Valuation date ordinal, used eagerly to reject
+            optionlets that have already fixed.
+        forward_id: Projection curve id (``None`` for single-curve).
+        is_normal: Bachelier (True) or Black-76 (False) quotes.
+        settings: Per-column solver settings.
+        name: Node name; defaults to ``strip_id``.
+
+    Returns:
+        A market-scope :class:`~valax.calibration.chain.CalibrationNode`.
+
+    Raises:
+        ValueError: If ``quote_keys`` does not match ``(len(strikes),
+            len(caps))`` or the strip is invalid.
+    """
+    from valax.surfaces.caplet_stripping import (
+        _validate_strip,
+        strip_columns_level,
+    )
+
+    validate_surface_id(strip_id)
+    strikes = jnp.asarray(strikes, dtype=jnp.float64)
+    n_k, n_c = int(strikes.shape[0]), len(caps)
+    key_grid = tuple(tuple(row) for row in quote_keys)
+    if len(key_grid) != n_k or any(len(r) != n_c for r in key_grid):
+        raise ValueError(
+            f"caplet_strip_node: quote_keys must have shape ({n_k}, {n_c})."
+        )
+    for k in range(n_k):
+        struck = [eqx.tree_at(lambda c: c.strike, cap, strikes[k]) for cap in caps]
+        _validate_strip(
+            struck, flat_curve(0.0, reference_date), jnp.ones(n_c), None
+        )
+    flat_keys = tuple(k for row in key_grid for k in row)
+    curves = _curves_reader(discount_id, forward_id)
+    node_name = name or strip_id
+
+    def calibrate_fn(inputs: LevelInputs):
+        return strip_columns_level(
+            node_name, tuple(caps), inputs, curves, strikes=strikes,
+            quotes_fn=lambda inp: inp.quotes.vector(flat_keys).reshape(n_k, n_c),
+            is_normal=is_normal, settings=settings,
+        )
+
+    return CalibrationNode(
+        name=node_name,
+        quote_keys=flat_keys,
+        fixed_keys=(),
+        calibrate_fn=calibrate_fn,
+        install_fn=install_surface(strip_id),
+        needs_upstream=True,
+    )
+
+
+def optionlet_sabr_node(
+    surface_id: str,
+    *,
+    strip_id: str,
+    beta: float | None = 0.5,
+    beta_key: str | None = None,
+    is_normal: bool = False,
+    shift: float = 0.0,
+    dynamics: str = "sticky_strike",
+    settings: SolverSettings | None = None,
+    name: str | None = None,
+) -> CalibrationNode:
+    r"""SABR optionlet surface fitted on an upstream cap strip.
+
+    The second rates-vol level of the cap chain: one SABR smile per
+    optionlet expiry, fitted to the vols the upstream
+    :func:`caplet_strip_node` installed under ``strip_id`` (strike axis = the
+    strip's strikes), anchored on the strip's curve-projected forwards. The
+    level has **no quotes of its own** — its inputs are entirely upstream —
+    so :func:`~valax.greeks.quote_risk.chain_adjoint` pulls a caplet's vega
+    through it into the strip level and from there onto the cap quotes and
+    the curves. Expiries are fitted independently and named on failure.
+
+    Args:
+        surface_id: Key the :class:`~valax.surfaces.optionlet_surface.OptionletVolSurface`
+            is installed under.
+        strip_id: Surface key of the upstream batched strip.
+        beta: Fixed SABR beta, or ``None`` to calibrate it per expiry.
+        beta_key: Fixed-input identifier for beta (overrides ``beta``).
+        is_normal: Normal (Bachelier) strip vols if True, else lognormal.
+        shift: Displacement of the normal SABR expansion.
+        dynamics: Smile dynamics recorded on the surface.
+        settings: Per-expiry solver settings.
+        name: Node name; defaults to ``surface_id``.
+
+    Returns:
+        A market-scope :class:`~valax.calibration.chain.CalibrationNode`.
+    """
+    from valax.calibration.sabr import sabr_batch_level, sabr_vol_fn
+    from valax.calibration.solve import period_labels
+    from valax.surfaces.optionlet_surface import OptionletVolSurface
+
+    validate_surface_id(surface_id)
+    validate_surface_id(strip_id)
+    node_name = name or surface_id
+
+    def _beta(inp: LevelInputs) -> Float[Array, ""]:
+        if beta_key is not None:
+            return inp.fixed[beta_key]
+        return jnp.asarray(0.5 if beta is None else beta)
+
+    def node_inputs(inp: LevelInputs) -> LevelInputs:
+        strip = inp.upstream.surfaces[strip_id]
+        vols = strip.vols.T                      # (n_expiries, n_strikes)
+        n_exp, n_k = vols.shape
+        fixed = {
+            "forward": strip.forwards[0],
+            "expiry": strip.expiries[0],
+            "strikes": jnp.broadcast_to(strip.strike, (n_exp, n_k)),
+            "weights": jnp.ones((n_exp, n_k)),
+        }
+        if beta is not None or beta_key is not None:
+            fixed["beta"] = jnp.broadcast_to(_beta(inp), (n_exp,))
+        return LevelInputs(quotes=vols, fixed=fixed)
+
+    def value_fn(models, nodes, _inp) -> OptionletVolSurface:
+        return OptionletVolSurface(
+            expiries=nodes.fixed["expiry"],
+            forwards=nodes.fixed["forward"],
+            alphas=models.alpha,
+            betas=models.beta,
+            rhos=models.rho,
+            nus=models.nu,
+            shift=jnp.asarray(shift),
+            is_normal=is_normal,
+            dynamics=dynamics,
+        )
+
+    def calibrate_fn(inputs: LevelInputs):
+        expiries = inputs.upstream.surfaces[strip_id].expiries[0]
+        return sabr_batch_level(
+            node_name, inputs, node_inputs, value_fn,
+            labels=period_labels(expiries),
+            fit_beta=beta is None and beta_key is None,
+            vol_fn=sabr_vol_fn(is_normal, shift),
+            is_normal=is_normal,
+            settings=settings,
+        )
+
+    return CalibrationNode(
+        name=node_name,
+        quote_keys=(),
+        fixed_keys=() if beta_key is None else (beta_key,),
+        calibrate_fn=calibrate_fn,
+        install_fn=install_surface(surface_id),
+        needs_upstream=True,
+    )
+
+
 # ── Any registered model, fitted through price() ─────────────────────
 
 
@@ -574,6 +917,203 @@ def price_fit_node(
     )
 
 
+# ── Level 2 (rates): per-trade model fitted to a swaption basket ─────
+
+
+def coterminal_swaptions(
+    bermudan: Any,
+    *,
+    strike: Float[Array, ""] | None = None,
+) -> tuple:
+    """The co-terminal European basket of a Bermudan swaption (eager).
+
+    One European swaption per exercise date, each exercising into the
+    remaining swap (the Bermudan's fixed schedule after that date) — the
+    standard calibration basket of a one-factor model for a Bermudan, whose
+    exercise value at each date is exactly such a swap.
+
+    Args:
+        bermudan: A :class:`~valax.instruments.rates.BermudanSwaption` with
+            concrete dates.
+        strike: Basket strike; defaults to the Bermudan's strike.
+
+    Returns:
+        One :class:`~valax.instruments.rates.Swaption` per exercise date that
+        leaves at least one coupon, in exercise order.
+    """
+    import numpy as np
+
+    from valax.instruments.rates import Swaption
+
+    fixed = np.asarray(bermudan.fixed_dates)
+    basket = []
+    for e in np.asarray(bermudan.exercise_dates):
+        k = int(np.searchsorted(fixed, e, side="right"))
+        if k >= fixed.shape[0]:
+            continue
+        basket.append(Swaption(
+            expiry_date=jnp.asarray(e, dtype=jnp.int32),
+            fixed_dates=jnp.asarray(fixed[k:], dtype=jnp.int32),
+            strike=bermudan.strike if strike is None else jnp.asarray(strike),
+            notional=bermudan.notional,
+            is_payer=bermudan.is_payer,
+            day_count=bermudan.day_count,
+            discount_id=bermudan.discount_id,
+            forward_id=bermudan.forward_id,
+        ))
+    return tuple(basket)
+
+
+def swaption_basket_node(
+    name: str,
+    *,
+    template: eqx.Module,
+    basket: Sequence[Any],
+    cube_id: str,
+    transforms: Mapping[str, TransformSpec],
+    fixed_fields: Mapping[str, str] | None = None,
+    target_keys: Sequence[str] | None = None,
+    weights: Float[Array, " n"] | None = None,
+    relative: bool = True,
+    method: str = "analytic",
+    config: Any = None,
+    settings: SolverSettings | None = None,
+) -> CalibrationNode:
+    r"""A pricing model fitted per trade to a swaption basket, off the cube.
+
+    Level 2 of the rates chain: the model (e.g. a curve-free
+    :class:`~valax.models.hull_white.HullWhiteModel`) is fitted to the
+    basket's prices *implied by the calibrated market* — each target
+    :math:`T_k` is the basket swaption priced off the cube installed under
+    ``cube_id`` and the curves (the smile-aware
+    :func:`~valax.pricing.analytic.rates_smile.swaption_price`) — and each
+    model price goes through :func:`valax.core.pricing.price` (``method``,
+    the exact Jamshidian route for Hull-White by default), which binds the
+    model's curve from the same market:
+
+    .. math::
+
+        r_k(\theta) = w_k\,\frac{\mathrm{price}(I_k, M(\theta),
+        \text{market}) - T_k(\text{market}) - s_k}{\max(|T_k|, 10^{-8})}
+
+    The level reads the market only (its upstream), so
+    :func:`~valax.greeks.quote_risk.chain_adjoint` pushes the trade's model
+    sensitivity :math:`\lambda_m` through the cube level onto the vol quotes
+    and through the forwards / discounting onto the curve quotes.
+
+    Passing ``target_keys`` adds one held-fixed **target shift** :math:`s_k`
+    per basket instrument (value ``0``): its reported fixed-input
+    sensitivity :math:`\bar p_k = \partial V / \partial T_k` is the
+    trade's exposure to each basket instrument's price — the **vega
+    profile across the basket**, available on both differentiation paths
+    and checkable by bumping the shift.
+
+    Baskets may be traced (closed over inside ``eqx.filter_vmap``), so
+    same-shaped per-trade baskets batch into one calibration.
+
+    Args:
+        name: Node name.
+        template: Model providing structure and every field not calibrated;
+            leave its curve unbound (``price`` binds it).
+        basket: Calibration swaptions (e.g. :func:`coterminal_swaptions`).
+        cube_id: Surface id of the calibrated swaption cube.
+        transforms: ``field -> TransformSpec`` of the calibrated fields.
+        fixed_fields: ``field -> fixed-input key`` held fixed at ``p``.
+        target_keys: One fixed-input key per basket instrument for the
+            target shifts (pass zeros in ``fixed``); ``None`` for none.
+        weights: Per-instrument weights; default ones.
+        relative: Divide each residual by the target price.
+        method: Pricing method of the basket under the model.
+        config: Pricing config of the basket.
+        settings: Solver settings; defaults to
+            :data:`~valax.calibration.basket.BASKET_SETTINGS`.
+
+    Returns:
+        A model-scope :class:`~valax.calibration.chain.CalibrationNode`.
+
+    Raises:
+        ValueError: If ``target_keys`` does not match the basket length.
+    """
+    from valax.calibration.basket import BASKET_SETTINGS
+
+    basket = tuple(basket)
+    n = len(basket)
+    targets_keyed = tuple(target_keys) if target_keys is not None else ()
+    if target_keys is not None and len(targets_keyed) != n:
+        raise ValueError(
+            f"swaption_basket_node({name!r}): {len(targets_keyed)} target keys "
+            f"for {n} basket instruments."
+        )
+    transforms = dict(transforms)
+    fixed_fields = dict(fixed_fields or {})
+    w = jnp.ones((n,)) if weights is None else jnp.asarray(weights)
+    settings = BASKET_SETTINGS if settings is None else settings
+    theta0 = {
+        f: transforms[f].to_unconstrained(jnp.asarray(getattr(template, f)))
+        for f in transforms
+    }
+
+    def assemble(theta: dict, inputs: LevelInputs) -> Any:
+        model = template
+        for f, spec in transforms.items():
+            model = eqx.tree_at(
+                lambda m, _f=f: getattr(m, _f), model,
+                spec.from_unconstrained(theta[f]),
+            )
+        for f, key in fixed_fields.items():
+            model = eqx.tree_at(
+                lambda m, _f=f: getattr(m, _f), model, inputs.fixed[key],
+                is_leaf=lambda x: x is None,
+            )
+        return model
+
+    def targets(inputs: LevelInputs) -> Float[Array, " n"]:
+        from valax.core.resolve import discount_id_of, forward_id_of
+        from valax.pricing.analytic.rates_smile import swaption_price
+
+        market = inputs.upstream
+        cube = market.surfaces[cube_id]
+        out = []
+        for k, inst in enumerate(basket):
+            fwd_id = forward_id_of(inst)
+            t = swaption_price(
+                inst, market.curve(discount_id_of(inst)), cube,
+                None if fwd_id is None else market.curve(fwd_id),
+            )
+            if targets_keyed:
+                t = t + inputs.fixed[targets_keyed[k]]
+            out.append(t)
+        return jnp.stack(out)
+
+    def residual_fn(theta: dict, inputs: LevelInputs) -> Float[Array, " n"]:
+        from valax.core.pricing import price
+
+        model = assemble(theta, inputs)
+        market = inputs.upstream
+        prices = jnp.stack([
+            price(inst, model, market, method=method, config=config).price
+            for inst in basket
+        ])
+        t = targets(inputs)
+        scale = jnp.maximum(jnp.abs(t), 1e-8) if relative else jnp.ones_like(t)
+        return w * (prices - t) / scale
+
+    def calibrate_fn(inputs: LevelInputs):
+        return solve_level(
+            name, "least_squares", residual_fn, theta0, inputs, assemble,
+            settings, labels=targets_keyed,
+        )
+
+    return CalibrationNode(
+        name=name,
+        quote_keys=(),
+        fixed_keys=tuple(dict.fromkeys([*fixed_fields.values(), *targets_keyed])),
+        calibrate_fn=calibrate_fn,
+        install_fn=None,
+        needs_upstream=True,
+    )
+
+
 __all__ = [
     "EXACT_SETTINGS",
     "FIT_SETTINGS",
@@ -583,5 +1123,10 @@ __all__ = [
     "instrument_quotes",
     "market_inputs_node",
     "price_fit_node",
+    "caplet_strip_node",
+    "coterminal_swaptions",
+    "optionlet_sabr_node",
     "sabr_smile_node",
+    "swaption_basket_node",
+    "swaption_cube_node",
 ]

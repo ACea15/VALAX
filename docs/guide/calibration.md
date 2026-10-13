@@ -50,7 +50,7 @@ The table below summarises the full pipeline VALAX supports today (✅) or plans
 | **Equity smile (per slice)** | Listed vanilla calls/puts on a single expiry (broker smile / OPRA chain) | [`calibrate_sabr`](#3-sabr-smile-calibration), [`calibrate_svi_slice`](vol-surfaces.md#svi-surface) | `SABRModel` or `SVIParams` for one expiry | European, American, digital, barrier, compound, chooser, Asian, lookback options |
 | **Equity surface** | Vanilla calls/puts across an (expiry × strike) grid | [`calibrate_sabr_surface`](vol-surfaces.md#sabr-surface), [`calibrate_svi_surface`](vol-surfaces.md#svi-surface), [`GridVolSurface`](vol-surfaces.md#grid-surface) | `SABRVolSurface`, `SVIVolSurface`, `GridVolSurface` | Autocallables, worst-of, cliquet, variance swap, all path-dependent exotics |
 | **Equity stochastic vol** | Listed vanilla call prices (mid) across expiries and strikes | [`calibrate_heston`](#4-heston-stochastic-vol-calibration) | `HestonModel` ($v_0, \kappa, \theta, \xi, \rho$) | Forward-starting options, cliquets, variance swaps, VIX-style products (MC) |
-| **Rates volatility** | ATM swaption straddles, swaption cube ($K \times T_\text{exp} \times T_\text{tail}$), caps/floors | SABR per smile ✅; [`calibrate_hull_white`](#6-dual-curve-rates-calibration-ois-discounting) (Jamshidian) and `calibrate_g2pp` ✅, single- **or** dual-curve | SABR swaption cube; `HullWhiteModel` $(a, \sigma)$; `G2PPModel` | Callable / puttable bonds ✅, Bermudan swaptions, CMS spread options, range accruals |
+| **Rates volatility** | ATM swaption straddles, swaption cube ($K \times T_\text{exp} \times T_\text{tail}$), caps/floors | SABR cube on the curve forwards (`calibrate_swaption_cube_from_curves`, chain: `swaption_cube_node`) ✅; cap strip → optionlet SABR (`strip_optionlet_surface`, chain: `caplet_strip_node` → `optionlet_sabr_node`) ✅; [`calibrate_hull_white`](#6-dual-curve-rates-calibration-ois-discounting) (Jamshidian) and `calibrate_g2pp` ✅, single- **or** dual-curve; Hull-White per trade off the cube ([`swaption_basket_node`](calibration-to-risk.md#rates-per-trade-model-calibration)) ✅ | SABR swaption cube; `OptionletVolSurface`; `HullWhiteModel` $(a, \sigma)$; `G2PPModel` | Callable / puttable bonds ✅, Bermudan swaptions ✅, CMS spread options, range accruals |
 | **FX volatility** | ATM straddles, 25Δ and 10Δ risk reversals + butterflies (broker strangles) | [`calibrate_sabr`](#3-sabr-smile-calibration) on the strike grid implied by the broker convention | FX `SABRVolSurface` / `SVIVolSurface` | FX vanilla, FX barrier, quanto, TARF (planned) |
 | **Credit** | Par CDS spreads at standard IMM tenors (6M, 1Y, 3Y, 5Y, 7Y, 10Y) | Survival-curve bootstrap 🟡 | `SurvivalCurve` (piece-wise constant hazard) | Off-market CDS, index tranches (CDO), CVA |
 
@@ -77,7 +77,7 @@ The interest-rate calibration universe is the most heterogeneous; it combines mo
 | Cross-currency basis swap (e.g. EUR/USD MTM) | 2Y – 30Y | Long end of foreign discount curve | `CrossCurrencyBasisSwap` |
 | Turn-of-year / quarter-end | Specific dates | Calendar liquidity dislocations | `TurnInstrument` |
 
-**Calibration output.** A `CurveGraph` — a dict of `DiscountCurve` values keyed by validated identifiers of the form `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]` (e.g. `USD.SOFR.OIS`, `USD.SOFR.3M`, `EUR.EURIBOR.6M`) — plus a `CurveBuildDiagnostics` report with per-instrument fit table, RMSE, and Jacobian condition number. Any number of currencies and tenors can coexist in a single graph. The legacy single-currency `MultiCurveSet` (OIS + tenor-keyed forwards) is still available for pedagogical two-tier builds and emits a `DeprecationWarning`; see [Curves and Bootstrapping](curves.md) for the full bootstrap mechanics, the joint Newton residual system, and the runnable USD dual-curve example in §5.2.
+**Calibration output.** A `CurveGraph` — a dict of `DiscountCurve` values keyed by validated identifiers of the form `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]` (e.g. `USD.SOFR.OIS`, `USD.SOFR.3M`, `EUR.EURIBOR.6M`) — returned as `bootstrap_curve_graph(...).value` on a `CalibrationResult` that carries the build's convergence, residuals, RMSE and Jacobian condition number (see [§3 Solvers](#curve-builds-report-through-the-same-result)). Any number of currencies and tenors can coexist in a single graph. The legacy single-currency `MultiCurveSet` (OIS + tenor-keyed forwards) remains as a view over a `CurveGraph`; see [Curves and Bootstrapping](curves.md) for the full bootstrap mechanics, the joint Newton residual system, and the runnable USD dual-curve example in §5.2.
 
 **What you can price with it.** Every fixed-income instrument in `valax.instruments`: `ZeroCouponBond`, `FixedRateBond`, `FloatingRateBond`, `InterestRateSwap`, `OISSwap`, `CrossCurrencySwap`, `TotalReturnSwap`, `CMSSwap`, `RangeAccrual`, plus the discount step of every other pricer in the library.
 
@@ -126,14 +126,14 @@ See [Analytical Pricing § FX Options](analytical.md#fx-options-garman-kohlhagen
 
 | Market instrument | What it constrains | Calibration target |
 |-------------------|--------------------|--------------------|
-| ATM swaption straddles (per $T_\text{exp}, T_\text{tail}$) | Black/Bachelier ATM vol surface | Hull-White $(a, \sigma)$ via Jamshidian 🟡 |
+| ATM swaption straddles (per $T_\text{exp}, T_\text{tail}$) | Black/Bachelier ATM vol surface | Hull-White $(a, \sigma)$ via Jamshidian ✅ |
 | Swaption cube ($K \times T_\text{exp} \times T_\text{tail}$) | Full swaption smile | SABR per (expiry, tail) slice |
 | Cap / floor straddles | Caplet vol stripping → caplet term structure | Black-76 caplet vols |
 | Eurodollar / SOFR options | Short-end caplet vol | Caplet vol stripping |
 
-**Calibration output.** A SABR swaption cube and a calibrated `HullWhiteModel` via `calibrate_hull_white`. The Jamshidian decomposition turns each swaption into a portfolio of options on individual ZCBs, each priced by Black-76 on an integrated short-rate variance — fast enough to drive a least-squares fit of $(a, \sigma)$; see [API: Calibration](../api/calibration.md).
+**Calibration output.** A SABR swaption cube (`calibrate_swaption_cube_from_curves`, or `swaption_cube_node` in a chain) and a calibrated `HullWhiteModel` via `calibrate_hull_white` — or, per trade off the calibrated cube, via `swaption_basket_node` (see [From Quotes to Risk](calibration-to-risk.md#rates-per-trade-model-calibration)). The Jamshidian decomposition turns each swaption into a portfolio of options on individual ZCBs, each priced by Black-76 on an integrated short-rate variance — fast enough to drive a least-squares fit of $(a, \sigma)$; see [API: Calibration](../api/calibration.md).
 
-**What you can price with it.** `CallableBond`, `PuttableBond` ✅; `BermudanSwaption` (currently via LSM on LMM paths) ✅; CMS caps/floors, range accruals, callable structured notes 🟡.
+**What you can price with it.** `CallableBond`, `PuttableBond` ✅; `BermudanSwaption` (Hull-White PDE through `price`, or LSM on LMM paths) ✅; CMS caps/floors, range accruals, callable structured notes 🟡.
 
 ### 2.5 Credit (planned)
 
@@ -173,53 +173,116 @@ forward = jnp.array(100.0)
 expiry = jnp.array(1.0)
 
 # Calibrate with beta fixed at 0.5
-fitted, sol = calibrate_sabr(
+result = calibrate_sabr(
     strikes, market_vols, forward, expiry,
     fixed_beta=jnp.array(0.5),
-)
+).check()                       # raises CalibrationError if the fit failed
+fitted = result.value           # the SABRModel
 
 print(f"alpha={float(fitted.alpha):.4f}")
 print(f"rho={float(fitted.rho):.4f}")
 print(f"nu={float(fitted.nu):.4f}")
 ```
 
+Every calibrator in VALAX returns a `CalibrationResult` like this one: the
+calibrated object is `.value`, and the same object carries the solved level
+(`theta`, `inputs`, `residual_fn`) and its diagnostics.
+
 ### Solvers
 
-Three backends are available:
+Solver choice is data, not code: every calibrator takes
+`settings: SolverSettings` and routes through the single factory
+`run_solver`. A `SolverSettings` names the algorithm (`method`), `rtol`,
+`atol`, `max_steps` and `throw`; all fields are static, so changing a
+tolerance changes the compiled program but never the calibrator.
 
-| Solver | Method | Best for |
-|--------|--------|----------|
-| `"levenberg_marquardt"` | Least-squares (optimistix) | Default — fast, exploits Jacobian |
-| `"bfgs"` | Quasi-Newton (optimistix) | Residuals that close over a *sequence* of instrument pytrees (see below) |
-| `"optax_adam"` | Gradient descent (optax) | Research / experimentation |
+| Problem | `method` options (`"auto"` = first) |
+|---|---|
+| `"root"` (square systems: curves, strips, quote conversions) | `newton`, `chord`, `levenberg_marquardt`, `dogleg` |
+| `"least_squares"` (smiles, Heston, model baskets) | `levenberg_marquardt`, `gauss_newton`, `dogleg`, `bfgs`, `optax_adam` |
 
-!!! warning "Writing a new calibrator: the Levenberg-Marquardt arity trap"
+**Defaults per calibrator family.**
 
-    `optimistix` 0.1.0's Levenberg-Marquardt raises **`List arity mismatch`**
-    when the residual function closes over a *sequence* of instrument pytrees
-    — which is the natural shape for any calibrator fitting a surface (a list
-    of swaptions, a strip of caplets, a cube of quotes).
-
-    This is why the short-rate calibrators
-    (`calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette`) default to
-    **line-searched BFGS** rather than LM. Plain undamped Gauss-Newton is not a
-    substitute: it overshoots from distant starting points.
-
-    The smile calibrators (`calibrate_sabr`, `calibrate_heston`) are unaffected
-    — their residuals close over plain arrays of strikes and quotes, so LM
-    remains the default and the faster choice there.
-
-    Any new surface- or cube-stripping calibrator will hit this. Budget for it
-    rather than rediscovering it.
+| Family | Default settings | Why |
+|---|---|---|
+| Curve bootstraps, cap strips, premium → vol | `EXACT_SETTINGS` — Newton to 1e-10 | Square systems with an exact solution |
+| Smiles and surfaces (`calibrate_sabr`, `calibrate_svi_*`, `calibrate_sabr_surface`, cube, optionlet surface), `calibrate_heston` | `FIT_SETTINGS` — Levenberg-Marquardt to 1e-8 | A fit residual does not vanish, and price-based fits have a noise floor near 1e-10 that a tighter step tolerance cannot get under |
+| `calibrate_hull_white`, `calibrate_g2pp`, `swaption_basket_node` | `BASKET_SETTINGS` — line-searched BFGS to 1e-12 | The Jamshidian / Brigo-Mercurio closed forms nest a root-find whose implicit derivative is non-finite far from the solution, where an undamped LM step can land; BFGS's line search keeps the iterates where the pricer is defined. Tight, because the engines have no noise floor |
+| `calibrate_cheyette`, `calibrate_cheyette_2f` | `CHEYETTE_SETTINGS` — BFGS to 1e-10 | As above, with the PDE's discretisation floor |
+| `calibrate_slv_leverage` | `SLV_SETTINGS` — only `atol = 5e-2` is read | A Monte Carlo fixed point, not a solve; see [SLV](slv.md#how-the-fixed-point-is-reported) |
 
 ```python
-# Use BFGS instead
-fitted, sol = calibrate_sabr(
+from valax.calibration import SolverSettings
+
+# BFGS instead of the default Levenberg-Marquardt
+result = calibrate_sabr(
     strikes, market_vols, forward, expiry,
     fixed_beta=jnp.array(0.5),
-    solver="bfgs",
+    settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10),
 )
 ```
+
+**Convergence is traceable.** `throw` defaults to `False`, so a failed solve
+never raises mid-trace: it is *reported* as a JAX boolean,
+`result.diagnostics.converged` (or `result.converged`, which also covers any
+child results), alongside `residuals`, `max_abs_residual`, `rmse` and
+`n_steps`. That survives `jit` and `vmap` — a batch of per-trade calibrations
+returns a batch of flags rather than failing the whole trace. Outside a trace,
+`result.check()` raises `CalibrationError` on failure (optionally also on
+`max_residual=` or `max_condition_number=`), and returns the result so it
+chains; `calibrate_market(..., strict=True)` does the same for a whole chain.
+
+**Failures are named.** Grids of independent fits — a smile per expiry, SABR
+per cube cell, SVI per slice, a strip per strike column — are solved as one
+*batched* level: each node is its own solve with its own `converged` flag,
+all inside one `vmap`, and `labels` names the nodes. So a bad cell is reported
+by name rather than as an index:
+
+```python
+cube = calibrate_swaption_cube_from_curves(...)   # one SABR fit per cell
+cube.failed_labels()                              # e.g. ('5Yx10Y',)
+cube.check()   # CalibrationError: ... did not converge at node(s) ['5Yx10Y'] ...
+```
+
+Labels follow the market's own tenors: `"2Y"` for a smile expiry, `"5Yx10Y"`
+for a cube cell, `"cap 3Y"` for a strip bucket, `"K=3.00%"` for a strike
+column; a curve build labels each quote `"<i>:<Type>"`.
+
+**Engine provenance (Cheyette).** A fitted model is a property of the model
+only if the pricing engine it was fitted on is exact or converges under
+refinement. Frozen-`y` Cheyette carries a *modelling* bias, so its fitted
+parameters are only valid on that engine and grid. Each result records its
+engine as `result.provenance`, and `check_engine` refuses a mismatch where it
+matters:
+
+```python
+from valax.calibration import calibrate_cheyette, check_engine
+
+fit = calibrate_cheyette(basket, targets, curve, engine="frozen", config=cfg).check()
+check_engine(fit, "pde", cfg)        # OK: same engine, same grid
+check_engine(fit, "pde", finer_cfg)  # CalibrationError: modelling-bias engine
+```
+
+Exact-`y` fits (`engine="exact"`) are recorded as `discretised` and Hull-White
+/ G2++ fits as `exact`, for which `check_engine` accepts any engine.
+`price()` never consults provenance — the check is an explicit, eager opt-in.
+
+#### Curve builds report through the same result
+
+`bootstrap_curve_graph` returns the same root level as the chain's
+`curve_graph_node`. The desk diagnostics of a build map onto it as:
+
+| What you want | Where it is |
+|---|---|
+| Calibrated `CurveGraph` | `result.value` |
+| Converged? residuals, RMSE, iterations | `result.diagnostics` (`result.check()` raises) |
+| Jacobian condition number | `result.condition_number()` |
+| Quoted values | `result.inputs.quotes` |
+| Fitted quotes, native units | `fitted_curve_quotes(instruments, result.value, ref)` |
+| Which quote broke the build | `result.failed_labels()` |
+
+`quote_jacobian` raises `CalibrationError` on an unconverged build rather than
+returning sensitivities of a system nobody solved.
 
 ### Weighted Calibration
 
@@ -227,11 +290,11 @@ Emphasize ATM strikes by passing per-strike weights:
 
 ```python
 weights = jnp.exp(-0.5 * ((strikes - forward) / 10.0) ** 2)
-fitted, sol = calibrate_sabr(
+fitted = calibrate_sabr(
     strikes, market_vols, forward, expiry,
     fixed_beta=jnp.array(0.5),
     weights=weights,
-)
+).value
 ```
 
 ## 4. Heston Stochastic-Vol Calibration
@@ -241,11 +304,15 @@ Fit Heston parameters $(v_0, \kappa, \theta, \xi, \rho)$ to **option prices** (n
 ```python
 from valax.calibration import calibrate_heston
 
-fitted, sol = calibrate_heston(
+result = calibrate_heston(
     strikes, market_prices, spot, rate, dividend, expiry,
     pricing_fn=my_heston_pricer,
-)
+).check()
+fitted = result.value     # HestonModel
 ```
+
+Spot, rate, dividend, expiry and the strikes are held-fixed inputs of the
+level, so its adjoint reports their sensitivities alongside the quote ones.
 
 **Inputs.** A strip of vanilla European call (or put) prices observed across strikes for a single expiry, or stacked across multiple expiries (vectorised). Typically taken from the listed equity-index option chain (mid prices) or from a broker-cleaned mid surface.
 
@@ -380,23 +447,38 @@ targets = swaption_prices_from_vols(
 )
 
 # 2. Fit: discount on OIS, project off the tenor curve.
-model, sol = calibrate_hull_white(
+result = calibrate_hull_white(
     surface, targets, ois,
     fixed_mean_reversion=jnp.array(0.08),
     forward_curve=projection,
-    curve_id="USD.SOFR.OIS",     # record the market linkage
-)
+    curve_id="USD.SOFR.OIS",     # the market curve price() will bind
+).check()
+model = result.value
 
 float(model.volatility)   # 0.010261
 model.curve_id            # 'USD.SOFR.OIS'
+model.initial_curve       # None — the fitted model is curve-free
 
-# 3. Fit quality on its own targets.
-model_prices = hw_swaption_prices(model, surface, projection)
+# 3. Fit quality on its own targets (a kernel call: bind the curve explicitly).
+from valax.core.binding import bind_curves
+
+model_prices = hw_swaption_prices(bind_curves(model, ois), surface, projection)
 # max relative error 5.9% — one factor cannot fit a whole surface exactly
 ```
 
 `calibrate_g2pp` takes the same two keywords. `curve` is always the **discount**
 curve (the model stays exact-fitted to it); `forward_curve` only ever projects.
+
+**The fitted model is curve-free, and BFGS is the default.** The curves are
+the level's *upstream* inputs — so the result's adjoint carries their risk —
+but they are not stored on the returned model: `price()` binds the curve from
+the `MarketState` at pricing time, which is what lets curve-free models of the
+same type stack under `vmap`. The default solver is `BASKET_SETTINGS`
+(line-searched BFGS to 1e-12, see [Solvers](#solvers)); a fixed mean reversion
+is a held-fixed input whose sensitivity the level reports. To fit a model per
+trade to a basket read off a calibrated cube instead of to caller-supplied
+target prices, see
+[From Quotes to Risk § Rates](calibration-to-risk.md#rates-per-trade-model-calibration).
 
 ### How much does ignoring the basis cost?
 
@@ -416,24 +498,27 @@ model-generated targets recovers $\sigma = 0.012000$ from a truth of 0.012.
 
 ### Recording the market linkage
 
-Passing `curve_id` writes the discount curve's identifier onto the fitted model,
-so a calibrated model can be re-bound to a shocked
-[`MarketState`](../api/core.md#marketstate) without refitting:
+Passing `curve_id` writes the discount curve's identifier onto the fitted model
+as a static field. `price()` binds `initial_curve` from whatever
+[`MarketState`](../api/core.md#marketstate) it is given — the curve named by
+`curve_id`, else the instrument's discount curve — so pricing under a shocked
+market needs no refit and no re-binding step:
 
 ```python
 from valax.core import MarketState
+from valax.core.pricing import price
 from valax.curves.graph import CurveGraph
 
 shocked = MarketState(
     curves=CurveGraph(curves={"USD.SOFR.OIS": flat_curve(0.040)})
 )
-rebound = model.with_market_curve(shocked)   # same params, re-fitted curve
-
-float(rebound.volatility) == float(model.volatility)   # True
+pv = price(surface[0], model, shocked).price   # same params, shocked curve
 ```
 
-Without `curve_id` the model carries the `"_default_"` sentinel, which is
-correct for a single-curve world and unchanged from before.
+The model's own gradient therefore has no curve leaf: curve risk is reported
+once, on the market. `price()` refuses a model whose `initial_curve` arrives
+pre-bound (that would shadow the market curve); kernel-level callers bind
+explicitly with `bind_curves`, as above.
 
 ### Scope
 
@@ -501,7 +586,8 @@ whose leading digits are noise, because two parameters were nearly redundant
 and the solver had no way to tell you so.
 
 `level_condition_number` reports $\kappa$ for **any** calibration level, so the
-curve bootstrap, the smile fit and a model fit are all measured on one scale;
+curve bootstrap, the smile fit and a model fit are all measured on one scale
+(every calibrator's result exposes it as `result.condition_number()`);
 `condition_alert` tests it against the shared threshold
 `ILL_CONDITIONED_THRESHOLD` (`1e10`) and returns a message, or `None` when the
 level is healthy. It returns text rather than warning or raising, so the caller
@@ -533,12 +619,12 @@ quotes = [
     OISSwapRate(start_date=ref, fixed_dates=jnp.array(pillars, jnp.int32),
                 rate=jnp.array(0.050), day_count="act_365", curves_touched=(ois,)),
 ]
-graph, diag = bootstrap_curve_graph(ref, [spec], quotes)
+build = bootstrap_curve_graph(ref, [spec], quotes).check()
 
 # Layer 1a — the build reports its own conditioning.
-print(f"curve kappa      = {float(diag.jacobian_condition_number):.3e}")
-print("curve alert      =", condition_alert(diag.jacobian_condition_number,
-                                            level_name="USD.SOFR.OIS"))
+kappa = build.condition_number()
+print(f"curve kappa      = {float(kappa):.3e}")
+print("curve alert      =", condition_alert(kappa, level_name="USD.SOFR.OIS"))
 
 # Layer 1b — any level, through the generic helper.
 model = SABRModel(alpha=jnp.array(0.012), beta=jnp.array(0.5),
@@ -624,11 +710,13 @@ makes the number belong, by construction, to the leaf that was priced.
 import jax.numpy as jnp
 
 from valax.calibration.hull_white import calibrate_hull_white, hw_swaption_prices
+from valax.core.binding import bind_curves
 from valax.greeks import fixed_input_adjoints, fixed_inputs_from_paths
 from valax.pricing.analytic.hull_white_swaptions import hw_swaption_price
 
-# `model`, `curve`, `trade` and `basket` as built in the Hull-White recipe
-# of §6; `targets = hw_swaption_prices(model, basket)`.
+# `curve`, `trade` and `basket` as built in the Hull-White recipe of §6, with
+# the fitted model bound for kernel calls: `model = bind_curves(result.value,
+# curve)`; `targets = hw_swaption_prices(model, basket)`.
 
 p = fixed_inputs_from_paths(
     [("hull_white.mean_reversion", lambda m: m.mean_reversion)],
@@ -641,10 +729,10 @@ direct = fixed_input_adjoints(lambda m: hw_swaption_price(trade, m), model, p)
 # (b) Total: mean reversion moves, and the model is re-fitted to the
 #     same basket before pricing.
 def recalibrate_and_price(m):
-    fitted, _ = calibrate_hull_white(
+    fitted = calibrate_hull_white(
         basket, targets, curve, fixed_mean_reversion=m.mean_reversion
-    )
-    return hw_swaption_price(trade, fitted)
+    ).value
+    return hw_swaption_price(trade, bind_curves(fitted, curve))
 
 total = fixed_input_adjoints(recalibrate_and_price, model, p)
 

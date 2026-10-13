@@ -12,6 +12,119 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed (**breaking**) — Phase 3 — unified calibrators, rates vol chain nodes, per-trade model calibration
+
+Every calibrator now has one shape: a level `R(theta; quotes, upstream, fixed) = 0`
+returning a `valax.calibration.CalibrationResult`, and the short-rate models no
+longer carry their curve.
+
+**One return type.** `calibrate_sabr`, `calibrate_heston`,
+`calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette`,
+`calibrate_cheyette_2f`, `calibrate_slv_leverage`, `calibrate_slv`,
+`calibrate_svi_slice`, `calibrate_svi_surface`, `calibrate_sabr_surface`,
+`build_sabr_caplet_surface`, `calibrate_swaption_cube_from_curves` /
+`_from_graph`, `strip_caplet_vols`, `strip_optionlet_surface`,
+`swaption_implied_normal_vol` (`_from_graph`), `bootstrap_curve_graph` and
+`bootstrap_simultaneous` return a `CalibrationResult`: `.value` (the calibrated
+object), `.diagnostics` (`residuals`, `max_abs_residual`, `rmse`, `n_steps`, a
+**traceable** JAX-bool `converged`, `extras`), `.check()` (raises
+`CalibrationError`, naming the failed node), `.labels`, `.condition_number()`,
+`.provenance`, `.children`, `.problem`. `fitted, sol = calibrate_sabr(...)`
+becomes `fitted = calibrate_sabr(...).value`.
+
+**One solver knob.** String `solver=` / `max_steps=` / `rtol=` / `atol=`
+keywords are gone everywhere; pass
+`settings=SolverSettings(method=..., rtol=..., atol=..., max_steps=...)`
+(root: `newton` / `chord` / `levenberg_marquardt` / `dogleg`; least squares:
+`levenberg_marquardt` / `gauss_newton` / `dogleg` / `bfgs` / `optax_adam`).
+Arguments after the market data are keyword-only. Defaults are named
+constants: `EXACT_SETTINGS` (Newton 1e-10), `FIT_SETTINGS` (LM 1e-8, 512
+steps), `BASKET_SETTINGS` (BFGS 1e-12, HW / G2++), `CHEYETTE_SETTINGS` (BFGS
+1e-10), `STRIP_SETTINGS`, `INVERSION_SETTINGS`, `SLV_SETTINGS`. The HW / G2++
+basket fits default to BFGS because Jamshidian / Brigo–Mercurio nest a
+root-find whose implicit derivative is non-finite far from the solution, where
+an undamped LM step can land — this replaces the old "LM not offered
+(optimistix arity mismatch)" explanation. `calibrate_slv(_leverage)` defaults
+to `n_iterations=2`; `heston_solver` / `heston_max_steps` became
+`heston_settings`.
+
+**Surfaces as batched levels.** `calibrate_sabr_surface`,
+`calibrate_svi_surface`, `build_sabr_caplet_surface` and the swaption cube
+solve each slice / cell independently in one `vmap`, with per-node
+diagnostics named by label (`"2Y"`, `"5Yx10Y"`, `"K=3.00%"`); ragged strike
+grids are padded with zero weight. The caplet strip is solved bucket by bucket
+(`"cap 3Y"`) and packaged as one lower-triangular root level for the adjoint;
+`strip_optionlet_surface` returns the SABR level with the strip as
+`.children[0]` (`settings=` / `strip_settings=`).
+
+**Short-rate models de-embedded.** `HullWhiteModel`, `G2PPModel`,
+`CheyetteModel` and `CheyetteModel2F` have `initial_curve: DiscountCurve | None = None`
+and a static `curve_id`. `valax.price` binds `initial_curve` from the
+`MarketState` (`model.curve_id`, else the instrument's discount curve) via
+`valax.core.binding.curve_requirements` and **refuses a pre-bound model**.
+Kernel-level calls bind explicitly with `bind_curves(model, curve_or_market)`;
+`require_initial_curve` raises on an unbound model. Calibrators return
+curve-free models, which stack under `vmap`. Recipes' `with_discount_curve`
+only binds unbound models. The deterministic tenor-basis overlay is declared
+per model type (`valax.pricing.multicurve.basis_overlay`: HW / G2++ yes,
+Cheyette no; `model_tenor_basis`, `model_swap_leg_basis`), and `price()` now
+raises when a trade resolves a distinct projection curve the recipe/model
+cannot use (previously silent).
+
+**New price route.** `Swaption` × `HullWhiteModel` × `"analytic"`
+(Jamshidian) through `price()`, now the auto default for that pair.
+
+**Rates vol levels as chain nodes.** `swaption_cube_node`,
+`caplet_strip_node` and `optionlet_sabr_node` in `valax.calibration.nodes`,
+backed by `swaption_cube_level`, `caplet_strip_level` / `strip_buckets` /
+`strip_columns_level` / `caplet_strip_residual_fn`. Synthetic rates-vol
+universe in `valax.market`: `RatesVolSpec`, `RatesVolWorld`,
+`RatesVolQuoteSet`, `sample_rates_vol_world`,
+`synthesize_rates_vol_quote_set`, `rates_vol_snapshot`.
+
+**Per-trade model calibration.** `coterminal_swaptions(trade)` +
+`swaption_basket_node` fit a short-rate model to a trade's co-terminal basket
+read off the calibrated cube; same-shaped baskets calibrate in one
+`eqx.filter_vmap`. New `examples/14_unified_rates_per_trade_model.py`: curves →
+swaption cube → per-trade Hull–White → Bermudan through `price()` (PDE) →
+quote risk, adjoint vs autodiff reconciled, and the λ_m vega profile across
+the basket checked against full recalibration.
+
+**New public symbols.** `valax.calibration.solve` (`solve_level`,
+`solve_batched_level`, `explicit_level`, `stack_slices`, `period_label`,
+`period_labels`); `CalibrationProvenance`, `check_engine`,
+`fixed_point_diagnostics`, `LEVEL_KINDS`, `ENGINE_KINDS`; `basket_fit_level`;
+`JAMSHIDIAN_PROVENANCE`; `cheyette_provenance`; SABR helpers
+`sabr_slice_inputs`, `sabr_slice_residual_fn`, `sabr_batch_level`,
+`sabr_vol_fn`, `stacked_sabr_inputs`, `SABR_FIXED_BETA_TRANSFORMS`;
+`swaption_node_labels`, `cap_strip_labels`; `fitted_curve_quotes`,
+`curve_instrument_labels`; `curve_requirements`, `bind_curves`.
+
+**Removed.**
+
+- `valax.calibration.loss` (`vol_residuals`, `price_residuals`,
+  `weighted_sse`) — the SABR residual is `sabr_slice_residual_fn` /
+  `sabr_slice_inputs`.
+- `calibrate_swaption_cube` (frozen-forward cube) — the curve-aware
+  `calibrate_swaption_cube_from_curves` / `_from_graph` is the only route.
+- `bootstrap_multi_curve` — use `bootstrap_curve_graph` +
+  `MultiCurveSet.from_graph`.
+- `CurveBuildDiagnostics` — `diag.residuals` / `max_abs_residual` / `rmse` /
+  `n_steps` → `result.diagnostics.*`; `diag.converged` →
+  `bool(result.converged)`; `jacobian_condition_number` →
+  `result.condition_number()`; `quoted_values` → `result.inputs.quotes`;
+  `fitted_quotes` → `fitted_curve_quotes(instruments, graph, reference_date)`.
+- `HullWhiteModel.from_market` / `.with_market_curve` and the `G2PPModel`
+  equivalents — build curve-free models and let `price()` bind the curve.
+- String `solver=` and `max_steps=` / `rtol=` / `atol=` calibrator keywords;
+  `heston_solver` / `heston_max_steps`.
+
+Docs: API pages for calibration, surfaces, curves, core, models, pricing and
+market updated; guides (vol surfaces, curves, why multi-curve, tutorials,
+lattice, PDE, Monte Carlo, callable bonds, synthetic market), theory (curves,
+G2++, multi-curve short rates, Hull–White swaptions, calibration) and
+`docs/examples.md` migrated to the new call shapes.
+
 ### Changed — an averaged leg can now be traced, via a static shape bound
 
 The arithmetic-average convention was documented as structurally un-`jit`-able.

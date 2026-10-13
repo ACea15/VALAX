@@ -50,21 +50,25 @@ heston = HestonModel(
 svi_surface: SVIVolSurface = ...  # calibrated to market vanillas
 
 # Pass 2: build the leverage grid.
-leverage = calibrate_slv_leverage(
+fit = calibrate_slv_leverage(
     heston, svi_surface, spot=jnp.array(100.0),
     log_moneyness_grid=jnp.linspace(-0.25, 0.25, 11),
     time_grid=jnp.linspace(0.05, 2.0, 10),
     n_paths=10_000,
     key=jax.random.PRNGKey(42),
     method="kernel",     # or "particle"
-    n_iterations=2,      # outer fixed-point iterations
+    n_iterations=2,      # outer fixed-point passes (the default)
     ridge=1e-3,          # used only when method="kernel"
 )
+leverage = fit.value     # LeverageGrid
+fit.converged            # max|L_2 - L_1| <= settings.atol (traceable)
 
 slv = SLVModel.from_heston_and_leverage(heston, svi_surface, leverage)
 ```
 
-The output is a `valax.surfaces.LeverageGrid` — a small `(n_t, n_k)` matrix that the path generator queries by bilinear interpolation.
+The calibrated object is `fit.value`, a `valax.surfaces.LeverageGrid` — a small `(n_t, n_k)` matrix that the path generator queries by bilinear interpolation. `fit` itself is a `CalibrationResult` reporting the fixed point (see [below](#how-the-fixed-point-is-reported)).
+
+`calibrate_slv` runs both passes and returns one result: its value is the assembled `SLVModel`, the Heston fit is `result.children[0]`, and `result.check()` / `result.converged` cover both passes. Pass 1's solver is configured with `heston_settings=SolverSettings(...)`, pass 2's tolerance with `settings=`.
 
 ## Choosing particle vs kernel
 
@@ -88,10 +92,40 @@ The Markovian projection identity is a **fixed-point equation**: `L` is defined 
 
 VALAX exposes an outer fixed-point loop via `n_iterations`:
 
-* `n_iterations=1` (default): classical one-shot particle method.
-* `n_iterations ≥ 2`: re-simulate the swarm under the previous iteration's `L`, then rebuild the grid. Empirically the second iteration cuts the residual Markovian-projection error by 30-50% on a typical equity smile; the third iteration brings additional but diminishing returns.
+* `n_iterations=1`: the classical one-shot particle method — usable, but always reported **not converged** (see below).
+* `n_iterations=2` (default): re-simulate the swarm under the previous pass's `L`, then rebuild the grid. Empirically the second pass cuts the residual Markovian-projection error by 30-50% on a typical equity smile, and it is the minimum that *measures* convergence; a third pass brings additional but diminishing returns.
 
-A practical choice is `n_iterations=2` or `3`. The test `tests/test_calibration/test_slv_calibration.py::TestFixedPoint::test_iterations_converge` checks that the per-iteration `L` update contracts in sup-norm.
+The test `tests/test_calibration/test_slv_calibration.py::TestFixedPoint::test_iterations_converge` checks that the per-iteration `L` update contracts in sup-norm.
+
+### How the fixed point is reported
+
+The leverage calibration is **not** a residual driven to zero, and VALAX does not pretend it is. Each pass `L_{k+1} = G(L_k)` re-simulates the swarm with fresh randomness, so the increment `L_{k+1} − L_k` never falls below the Monte Carlo noise of the leverage estimate (roughly `1/√n_paths` relative). There is no solution `R(L) = 0` at which the implicit function theorem could be applied. The strategy is therefore:
+
+1. **An explicit level.** `calibrate_slv_leverage` returns a `CalibrationResult` with `theta=None` and `problem="fixed_point"`. Its value is the output of the `n_iterations` unrolled passes — a differentiable map of the inputs (the Heston model, the target surface, spot).
+2. **Risk by plain AD, never by IFT.** Sensitivities of anything priced off the leverage are reverse-mode AD through the passes actually computed, which is exact for the grid actually returned.
+3. **Convergence on the last increment.** `fixed_point_diagnostics` reports
+    * `diagnostics.residuals` — the last increment `L_K − L_{K−1}` on the grid;
+    * `diagnostics.converged` — `max|L_K − L_{K−1}| ≤ settings.atol`; with `SLV_SETTINGS` (`atol = 5e-2`) the tolerance sits deliberately **above** the Monte Carlo noise floor, so raise `n_paths` before tightening it;
+    * `n_iterations=1` — always `converged=False`, because a single pass only measures the distance from the `L ≡ 1` warm start;
+    * `diagnostics.extras["clip_fraction"]` — the share of grid cells whose raw `L` hit `[L_min, L_max]` in the last pass. Reported, not used for convergence: a high value means the estimator is degenerate somewhere (see *Bandwidth selection* below), whatever the increment says.
+
+```python
+from valax.calibration import SolverSettings
+
+fit = calibrate_slv_leverage(
+    heston, svi_surface, spot=jnp.array(100.0),
+    log_moneyness_grid=jnp.linspace(-0.25, 0.25, 11),
+    time_grid=jnp.linspace(0.05, 2.0, 10),
+    n_paths=50_000, key=jax.random.PRNGKey(42),
+    n_iterations=3,
+    settings=SolverSettings(atol=3e-2, rtol=0.0),  # only atol is read
+)
+float(fit.diagnostics.max_abs_residual)      # max|L_3 - L_2|
+float(fit.diagnostics.extras["clip_fraction"])
+fit.check()                                  # CalibrationError if not converged
+```
+
+The rationale and the maths are recorded once, in [Calibration, Pricing & Risk § D9](../architecture/calibration-pricing-risk.md#3-decisions) and [Calibration Chains § I.8](../theory/calibration-chains.md#i8-fixed-point-levels).
 
 ## SDE and discretisation
 
@@ -160,14 +194,17 @@ heston = HestonModel(
     rate=jnp.array(0.03), dividend=jnp.array(0.01),
 )
 
-# 2. Calibrate the leverage function.
-leverage = calibrate_slv_leverage(
+# 2. Calibrate the leverage function (a fixed-point level; .value is the grid).
+fit = calibrate_slv_leverage(
     heston, surface, spot=jnp.array(100.0),
     log_moneyness_grid=jnp.linspace(-0.25, 0.25, 11),
     time_grid=jnp.linspace(0.05, 2.0, 10),
     n_paths=10_000, key=jax.random.PRNGKey(20260101),
     method="kernel", n_iterations=2, ridge=1e-3,
 )
+print(f"fixed point: max|ΔL| = {float(fit.diagnostics.max_abs_residual):.3f}, "
+      f"converged = {bool(fit.converged)}")
+leverage = fit.value
 
 # 3. Wrap as an SLVModel.
 slv = SLVModel.from_heston_and_leverage(heston, surface, leverage)
@@ -196,7 +233,7 @@ Once the leverage is calibrated, the SLV model behaves like any other `eqx.Modul
 
 * **Calibration accuracy at moderate budgets.** The particle method's MC-noise floor at `n_paths_cal = 10 000` typically gives ~100-200 bp absolute IV residual when SLV is repriced against the input surface — not the sub-20 bp gate LV-1 hits. This is the well-known particle-method limit; for sub-50 bp production accuracy use Fokker-Planck PDE calibration (QuantLib's `HestonSLVProcess`). VALAX's headline `TestDupireConsistency` gate is pinned at 250 bp accordingly; tightening to sub-100 bp is a roadmap item (SLV-2).
 * **Correlation on the QE exponential branch.** The `Z_1 = ρ·Z_v + √(1−ρ²)·Z_⊥` coupling is exact when QE selects the quadratic branch (the typical case) and is approximate on the exponential branch. The exponential branch activates only at extreme variance excursions (`ψ > 1.5`) which are rare for production equity parameters; if your fixture triggers it routinely, expect a sub-bp additional bias.
-* **Bandwidth selection.** Silverman's rule is robust for unimodal swarms but conservative — wide bandwidths over-smooth the conditional expectation at sharp-skew points. If you see leverage values close to `L_min` or `L_max` (the default clip range `[0.05, 5.0]`) in regions where the surface is well-behaved, narrow the bandwidth via the explicit `bandwidth=` argument.
+* **Bandwidth selection.** Silverman's rule is robust for unimodal swarms but conservative — wide bandwidths over-smooth the conditional expectation at sharp-skew points. If you see leverage values close to `L_min` or `L_max` (the default clip range `[0.05, 5.0]`) in regions where the surface is well-behaved — a non-trivial `diagnostics.extras["clip_fraction"]` is the signal — narrow the bandwidth via the explicit `bandwidth=` argument.
 * **`jax_enable_x64=True` is required.** `SLVModel.from_heston_and_leverage` raises `RuntimeError` otherwise (mirrors the Dupire-layer guard). `valax/__init__.py` enables x64 globally on import; the guard is a belt-and-braces check against caller-side overrides.
 * **Time-grid extrapolation.** Querying `LeverageGrid` at `t < time_grid[0]` returns `L(k, time_grid[0])` (flat extrapolation). For a path generator running from `t = 0`, set `time_grid[0]` close to the simulation step `dt/2` to avoid a constant-leverage bias on the first few steps.
 

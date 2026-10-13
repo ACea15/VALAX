@@ -16,7 +16,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | **Models** | Black-Scholes, **Heston (MC + Fang-Oosterlee COS semi-analytic)**, SABR (analytic + MC), LMM (MC with PCA factors), **Hull-White (analytic ZCB, trinomial tree, MC, PDE)**, **G2++ (two-factor Gaussian; MC + PDE)**, **Cheyette (quasi-Gaussian 1F/2F skew; MC + PDE)**, **Local Volatility (Dupire from SVI/SABR/Grid surfaces; MC + PDE)**, **SLV (Heston × leverage; MC)**, **Multi-asset GBM (correlated)** |
 | **Pricing** | Black-Scholes, Black-76, Bachelier, SABR analytic; **Heston Fang-Oosterlee COS**; **Dupire local vol (Gatheral IV-space)**; Monte Carlo (GBM, Heston, SABR, Local Vol, **SLV**, **multi-asset GBM**, LMM, **Hull-White**, **G2++**, **Cheyette**); Crank-Nicolson 1-D PDE; **2-D ADI PDE (Heston)**; **short-rate PDE (Hull-White, G2++, Cheyette)**; CRR binomial tree; Hull-White trinomial tree |
 | **Greeks** | 1st order (delta, vega, rho) and 2nd order (gamma, vanna, volga) via autodiff; key-rate durations via curve pytree differentiation |
-| **Curves** | `DiscountCurve` with log-linear interpolation, flat extrapolation (the only interpolation mode shipped). Keyed multi-curve container `CurveGraph` / `CurveSpec`; joint multi-curve Newton bootstrap `bootstrap_curve_graph` over 11 quote types with `CurveBuildDiagnostics` (repricing residuals, fitted quotes, Jacobian condition number); market-quote sensitivity `quote_jacobian` via implicit differentiation; `SurvivalCurve`, `InflationCurve`, `FixingHistory`, pluggable futures-convexity hooks |
+| **Curves** | `DiscountCurve` with log-linear interpolation, flat extrapolation (the only interpolation mode shipped). Keyed multi-curve container `CurveGraph` / `CurveSpec`; joint multi-curve Newton bootstrap `bootstrap_curve_graph` over 11 quote types, returning a `CalibrationResult` (traceable convergence, repricing residuals, `condition_number()`; fitted quotes via `fitted_curve_quotes`); market-quote sensitivity `quote_jacobian` via implicit differentiation; `SurvivalCurve`, `InflationCurve`, `FixingHistory`, pluggable futures-convexity hooks |
 | **Dates** | Act/360, Act/365, **Act/Act (ISDA, exact)**, 30/360, **Bus/252**; ordinal-based date arithmetic; schedule generation with day-of-month preservation, end-of-month rolls and short/long front/back **stubs**, returning `(accrual_start, accrual_end, payment_dates)`; **accrued interest and clean/dirty prices**; **business-day calendars and adjustment** for TARGET, SOFR/SIFMA, NYSE, London, Tokyo and Brazil, with union/intersection for cross-currency ([Tier 1.3](#13-business-calendars-and-holiday-schedules)). Adjustment is opt-in — the default convention remains `"unadjusted"` |
 | **Calibration** | SABR, Heston, **Hull-White, G2++, Cheyette (1F/2F)**, and **SLV leverage** calibration with LM / BFGS / Optax solvers; parameter constraint transforms. Curve bootstrap (sequential, simultaneous, joint `CurveGraph`) with implicit-diff quote Jacobian; survival curves from CDS spreads via the closed-form credit-triangle approximation (*not* a repricing bootstrap — see [3.4](#34-credit-derivatives)); SABR / SVI vol surfaces, **swaption cube, optionlet surface** |
 | **Portfolio** | `batch_price()` and `batch_greeks()` via vmap |
@@ -166,7 +166,7 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
                    │
                    │ λ_c composed: curve_quote_deltas ✅ (IFT, FD-gated)
                    │ λ_v composed: vol_quote_vegas    ✅ (IFT on the fit's FOC)
-                   │ λ_m           🟡 per underlying via chain_adjoint ✅; per-trade basket ❌
+                   │ λ_m           per underlying ✅; per trade (HW basket) ✅ via chain_adjoint
                    │ whole chain:  calibrate_market → chain_adjoint ✅ (§5.6)
                    │ p̄  reported:  fixed_input_adjoints ✅ (no IFT step needed)
                    ▼
@@ -191,8 +191,10 @@ space, so a curve move reaches the volatility layer. The equity surfaces and
 
 ### Shipped
 
-- [x] **Joint curve build** — `bootstrap_curve_graph` + `CurveSpec` +
-  `CurveBuildDiagnostics` (`valax/curves/bootstrap_graph.py`, `graph.py`);
+- [x] **Joint curve build** — `bootstrap_curve_graph` + `CurveSpec`
+  (`valax/curves/bootstrap_graph.py`, `graph.py`), returning the same
+  `CalibrationResult` root level as `curve_graph_node` (see
+  [§5.6](#unified-calibration-pricing-and-risk));
   11 quote types in `valax/curves/instruments.py`; tenor-basis and
   EUR/USD four-curve builds verified end-to-end
 - [x] **Quote-sensitivity Jacobian** — `quote_jacobian` via
@@ -271,9 +273,10 @@ space, so a curve move reaches the volatility layer. The equity surfaces and
   difference being cumulative-subtraction vs ISDA's per-year summation
 - [x] **Curve-id alphabet frozen** — `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]`,
   enforced by `valax.curves.graph._CURVE_ID_RE`; `_default_` grandfathered
-- [x] **Legacy paths migrated** — `bootstrap_simultaneous` and
-  `bootstrap_multi_curve` are thin wrappers over the joint solver;
-  `MultiCurveSet` is a view over `CurveGraph` (`from_graph` / `to_graph`)
+- [x] **Legacy paths migrated** — `bootstrap_simultaneous` is a thin wrapper
+  over the joint solver; the deprecated `bootstrap_multi_curve` has been
+  removed; `MultiCurveSet` remains as a view over `CurveGraph`
+  (`from_graph` / `to_graph`)
 - [x] **Market container** — `valax.core.MarketState` holds the graph;
   `valax.core.resolve` binds `discount_id` / `forward_id` per trade
 - [x] **Instrument selectors (rates + bonds)** — `discount_id` /
@@ -427,12 +430,12 @@ layer above the group primitives.
   per-asset **vectors** and `n_assets` is derived from `vols.shape[0]`,
   so sourcing them needs a per-asset market lookup). Everything else is
   in place; these two are shape problems, not design problems
-- [ ] **Full curve de-embedding for the rates models** — cosmetic, and
-  measurably so: an HW price moves under a curve shock bit-identically
-  with or without `with_market_curve`, because the recipe takes
-  `discount_curve` from the market, so the embedded `initial_curve` is
-  already vestigial in the price path. Tracked in
-  `PRICING_ONTOLOGY.md` § 0.3
+- [x] **Full curve de-embedding for the short-rate models** — Hull-White,
+  G2++ and Cheyette (1F/2F) carry `initial_curve: DiscountCurve | None = None`
+  plus a static `curve_id`, and `from_market` / `with_market_curve` are gone.
+  `price()` binds the curve through `valax.core.binding.curve_requirements`
+  and refuses a pre-bound one, so curve risk lives only on the market; see
+  [§5.6](#unified-calibration-pricing-and-risk) for the full contract
 - [x] **`IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` risk factor** — the
   basis is now a *coordinate*, not only a scenario: `as_basis_layout`
   reparameterises a projection curve's block into the spread
@@ -497,10 +500,13 @@ layer above the group primitives.
   discount/projection split at all. Needs the engine work in
   [§ 7 Modelling](#7-modelling) first, then the calibrator is a one-line
   pass-through
-- [ ] **`MarketState`-native calibration entry points** — the calibrators take
-  explicit curves (the kernel convention); a facade taking a `MarketState` +
-  `discount_id` / `forward_id` would remove the last manual step between the
-  market container and a calibrated model
+- [ ] **`MarketState`-native calibration entry points** — the standalone
+  calibrators take explicit curves (the kernel convention); a facade taking a
+  `MarketState` + `discount_id` / `forward_id` would remove the last manual
+  step between the market container and a calibrated model. The chain nodes
+  already do this (`curve_graph_node` → `swaption_cube_node` /
+  `caplet_strip_node` → `swaption_basket_node` read their upstream curves from
+  the `MarketState`; see [§5.6](#unified-calibration-pricing-and-risk))
 - [ ] **Curve-aware equity calibration** — `calibrate_heston`,
   `calibrate_sabr`, `calibrate_slv` take loose scalars
   (`rate`, `dividend`, `forward`), never a curve object
@@ -510,9 +516,12 @@ layer above the group primitives.
 `valax/surfaces/caplet_stripping.py` was the first curve-aware module in
 `valax/surfaces/`, taking `DiscountCurve` arguments directly;
 `calibrate_swaption_cube_from_curves` now closes the swaption side the same
-way. `build_sabr_caplet_surface` and `calibrate_swaption_cube` retain their
-caller-supplied pre-computed `forwards` arrays as explicit opt-outs, for when
-the forwards genuinely are exogenous.
+way, and the legacy frozen-forward `calibrate_swaption_cube` has been removed.
+`build_sabr_caplet_surface` retains its caller-supplied pre-computed
+`forwards` array as an explicit opt-out, for when the forwards genuinely are
+exogenous. Both rates vol objects are also chain levels on the upstream curves
+(`swaption_cube_node`, `caplet_strip_node` → `optionlet_sabr_node`; see
+[§5.6](#unified-calibration-pricing-and-risk)).
 
 - [x] **Cap → caplet (optionlet) stripping** — `strip_caplet_vols`
   bootstraps a quoted cap strip into per-optionlet vols (one
@@ -538,8 +547,8 @@ the forwards genuinely are exogenous.
   the grid axes (`swaption_node_coordinates`) and each node's $(S_x, A_d)$
   (`swaption_node_forwards_and_annuities`) themselves, through the pricer's own
   `swaption_forward_and_annuity`. So the fitted SABR parameters are
-  differentiable functions of the curve pillars, where the legacy
-  precomputed-forward route gives identically `0.0`.
+  differentiable functions of the curve pillars, where a fit on a frozen
+  (`stop_gradient`-ed) forward gives identically `0.0`.
 
     This was the load-bearing gap in the adjoint chain, not just a
     convenience one: with the curve absent from the cube's graph,
@@ -640,8 +649,10 @@ the forwards genuinely are exogenous.
 
 #### 5. Single-curve chokepoints
 
-- [ ] **`valax/pricing/lattice/hull_white_tree.py`** — reads
-  `model.initial_curve`, no `forward_curve` parameter. After P5.1 the
+- [ ] **`valax/pricing/lattice/hull_white_tree.py`** — reads the model's
+  bound `initial_curve` (a curve-free model is bound first with
+  `bind_curves`), no `forward_curve` parameter, and is not reachable from
+  `price()`. After P5.1 the
   tree↔PDE↔MC triangulation (load-bearing validation here) only holds
   single-curve, so a dual-curve callable bond has no independent oracle
 - [ ] **`valax/risk/oas.py`** — `bond_z_spread`, `z_spread_duration`,
@@ -889,8 +900,8 @@ These are foundational pieces that block almost everything else. They should be 
 
 - [x] **Sequential bootstrap** from deposits, FRAs, and par swap rates — analytic solve per pillar
 - [x] **Simultaneous bootstrap** via `optimistix.root_find` (Newton) in log-DF space — handles overlapping instruments
-- [x] **Multi-curve framework** — `MultiCurveSet` with OIS discount curve + tenor-specific forward curves, dual-curve swap bootstrap (**deprecated in MC-Curves-2**; superseded by `bootstrap_curve_graph`). Since MC-Curves-2b it is a *view* over `CurveGraph` (`MultiCurveSet.from_graph` / `to_graph`) and `bootstrap_multi_curve` solves through the joint solver
-- [x] **Joint multi-curve Newton solver** (MC-Curves-2) — `bootstrap_curve_graph` over an arbitrary `CurveGraph`, plus `CurveSpec`, `CurveBuildDiagnostics`, and the implicit-adjoint `quote_jacobian` helper
+- [x] **Multi-curve framework** — `MultiCurveSet` with OIS discount curve + tenor-specific forward curves, dual-curve swap bootstrap (**deprecated in MC-Curves-2**; superseded by `bootstrap_curve_graph`). Since MC-Curves-2b it is a *view* over `CurveGraph` (`MultiCurveSet.from_graph` / `to_graph`); its two-tier `bootstrap_multi_curve` entry point has since been removed
+- [x] **Joint multi-curve Newton solver** (MC-Curves-2) — `bootstrap_curve_graph` over an arbitrary `CurveGraph`, plus `CurveSpec` and the implicit-adjoint `quote_jacobian` helper. The build returns a `CalibrationResult` (the same root level as `curve_graph_node`); the old `CurveBuildDiagnostics` report is retired in favour of `result.diagnostics`, `result.condition_number()` and `fitted_curve_quotes`, and `quote_jacobian` raises `CalibrationError` on an unconverged build
 - [x] **Basis curve** support (e.g., 1M vs 3M SOFR basis) — via `TenorBasisSwap` inside the joint solver
 - [x] **Cross-currency graph** — `CrossCurrencyBasisSwap` + `FXForward` inside the joint solver (EUR-USD four-curve build verified)
 - [x] **Jacobian of discount factors w.r.t. input rates** via autodiff (free with JAX, verified in tests)
@@ -911,14 +922,14 @@ These are foundational pieces that block almost everything else. They should be 
 
 **Approach:** Root-finding via `optimistix.root_find` on the system of bootstrapping equations. Each instrument (deposit, swap) provides one equation. The curve is a pytree — autodiff gives the Jacobian for free.
 
-**Status:** MC-Curves-2 shipped — the joint multi-curve Newton solver `valax.curves.bootstrap_curve_graph` and its declarative `CurveSpec` interface live in `valax/curves/bootstrap_graph.py`. For the narrative rationale (post-2008 forces, why sequential bootstrap breaks down on tenor-basis and cross-currency quotes, and how the joint solve unlocks the implicit-adjoint quote-Jacobian), see [`guide/why-multicurve.md`](guide/why-multicurve.md). Eleven quote-type pytrees (`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`, `IborSwapRate`, `MoneyMarketFuture`, `TenorBasisSwap`, `FXForward`, `FXSwap`, `CrossCurrencyBasisSwap`, `TurnInstrument`) live in `valax/curves/instruments.py`. Tenor-basis and cross-currency joint solves are verified end-to-end in `tests/test_curves/test_bootstrap_graph.py`. MC-Curves-2b completed the migration: `bootstrap_multi_curve` is retained for one deprecation cycle but now translates its two-tier input into `CurveSpec`s and calls the joint solver (the sequential internals are deleted), and `MultiCurveSet` is a view over `CurveGraph` — see `tests/test_curves/test_multi_curve.py`. `quote_jacobian` exposes the implicit-adjoint quote-sensitivity Jacobian.
+**Status:** MC-Curves-2 shipped — the joint multi-curve Newton solver `valax.curves.bootstrap_curve_graph` and its declarative `CurveSpec` interface live in `valax/curves/bootstrap_graph.py`. For the narrative rationale (post-2008 forces, why sequential bootstrap breaks down on tenor-basis and cross-currency quotes, and how the joint solve unlocks the implicit-adjoint quote-Jacobian), see [`guide/why-multicurve.md`](guide/why-multicurve.md). Eleven quote-type pytrees (`DepositRate`, `FRA`, `SwapRate`, `OISSwapRate`, `IborSwapRate`, `MoneyMarketFuture`, `TenorBasisSwap`, `FXForward`, `FXSwap`, `CrossCurrencyBasisSwap`, `TurnInstrument`) live in `valax/curves/instruments.py`. Tenor-basis and cross-currency joint solves are verified end-to-end in `tests/test_curves/test_bootstrap_graph.py`. MC-Curves-2b completed the migration: the sequential two-tier internals were deleted, `MultiCurveSet` became a view over `CurveGraph` (see `tests/test_curves/test_multi_curve.py`), and after its deprecation cycle `bootstrap_multi_curve` was removed outright. `quote_jacobian` exposes the implicit-adjoint quote-sensitivity Jacobian.
 
 ### 1.2 Volatility Surface Construction
 
 - [x] **Vol surface object** — `GridVolSurface` with bilinear interpolation on (strike, expiry) grid
 - [x] **SABR smile per expiry** — `SABRVolSurface` with per-expiry SABR calibration and parameter interpolation
 - [x] **SVI parametric fitting** — `SVIVolSurface` with Gatheral's SVI parameterization and LM calibration
-- [x] **Swaption cube** — `SwaptionCube` with `calibrate_swaption_cube` (strike × expiry × tenor), and the curve-aware `calibrate_swaption_cube_from_curves` / `_from_graph` which derive the grid axes and each node's $(S_x, A_d)$ off the curves themselves
+- [x] **Swaption cube** — `SwaptionCube` (strike × expiry × tenor), calibrated by the curve-aware `calibrate_swaption_cube_from_curves` / `_from_graph`, which derive the grid axes and each node's $(S_x, A_d)$ off the curves themselves (one batched level, `swaption_cube_level`; a failed cell is named, e.g. `"5Yx10Y"`), or as a chain level by `swaption_cube_node`. The frozen-forward `calibrate_swaption_cube` has been removed
 - [x] **Declared smile dynamics** — `valax.surfaces.dynamics` plus the `dynamics` / `quote_form` static fields on `SwaptionCube` and `OptionletVolSurface`: sticky strike (default), sticky moneyness, or SABR backbone, with the pair validated for consistency
 - [x] **Swaption premium → vol** — `swaption_implied_normal_vol` / `swaption_premium_residual` in `valax/surfaces/swaption_premium.py`, honouring physical vs cash settlement
 - [x] **Optionlet (caplet) surface** — `OptionletVolSurface` via `build_sabr_caplet_surface`
@@ -981,7 +992,8 @@ New stochastic models that unlock entire product categories.
 - [x] **Cheyette (quasi-Gaussian, 1F/2F)** — state-dependent local vol adds a rate skew; MC + PDE; reduces to Hull-White / G2++ at β=0
 - [ ] **CIR** — square-root diffusion, ensures positive rates
 - [ ] **Vasicek** — Ornstein-Uhlenbeck for rates (allows negative rates)
-- [x] **Calibration to swaption surface** — `calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette`
+- [x] **Calibration to swaption surface** — `calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette` / `calibrate_cheyette_2f`, all thin wrappers over one basket level (`valax.calibration.basket.basket_fit_level`) returning a `CalibrationResult` whose value is a **curve-free** model; per trade off a calibrated cube via `swaption_basket_node` ([§5.6](#unified-calibration-pricing-and-risk))
+- [x] **Jamshidian through `price()`** — `Swaption × HullWhiteModel × "analytic"` is a registered route (`valax/core/adapters.py`) and the auto default for the pair; the G2++ analytic swaption is not yet registered
 - [x] **Multi-curve pricing in the MC and PDE short-rate solvers** (ontology P5.1) — `valax.pricing.multicurve` (`with_discount_curve`, `tenor_basis`, `swap_leg_basis`, `apply_swap_basis`): OIS discounting by re-fitting the exact-fit model to the trade's discount curve, plus a frozen deterministic tenor basis for projection. Wired into every Hull-White and G2++ recipe in `valax/pricing/pde/{hull_white,g2pp}.py` and `valax/pricing/mc/recipes.py`, and reached automatically from an instrument's `discount_id` / `forward_id` through `valax.core.price`. Single-curve prices are unchanged bit-for-bit. See [Multi-Curve Short Rates](theory/multi-curve-short-rate.md)
 - [ ] **Stochastic tenor basis** — a genuine multi-curve HJM / Mercurio extension with its own driver per tenor curve; needed for basis *vega* (basis swaptions, tenor-spread options), which the deterministic overlay prices at zero
 
@@ -1014,7 +1026,7 @@ New stochastic models that unlock entire product categories.
 
 ### 2.4 Stochastic-Local Volatility (SLV)
 
-- [x] **Leverage function** calibration — shipped in `valax/calibration/slv.py` (Guyon-Henry-Labordère particle method with optional kernel-ridge stabilisation, outer fixed-point loop via `n_iterations`).
+- [x] **Leverage function** calibration — shipped in `valax/calibration/slv.py` (Guyon-Henry-Labordère particle method with optional kernel-ridge stabilisation, outer fixed-point loop via `n_iterations`, default 2). Reported as a **fixed-point level** (`problem="fixed_point"`, last increment as residual, `clip_fraction` extra); see [SLV § fixed point](guide/slv.md#how-the-fixed-point-is-reported).
 - [x] **SLV MC simulation** — shipped in `valax/pricing/mc/slv_paths.py` (Andersen-QE variance leg + log-Euler/Milstein log-spot leg, midpoint-in-time leverage query, approximate-correlation QE coupling). Registered with the unified MC dispatcher for `EuropeanOption`, `AsianOption`, `EquityBarrierOption`, `LookbackOption`, `VarianceSwap`.
 - [x] **Particle / kernel regression** — both estimators available via the `method=` kwarg on `calibrate_slv_leverage`.
 
@@ -1044,8 +1056,9 @@ New stochastic models that unlock entire product categories.
       the calibrator has to match. What is left is the fit itself — the
       `RebonatoVol` abcd surface and the correlation parameters against that
       surface (and, for the swap-rate leg, a swaption cube, whose own
-      dual-curve calibration is still open). Expect the Levenberg-Marquardt
-      arity trap documented in the
+      dual-curve calibration is still open). The fit should be a level built
+      with `solve_level` / `basket_fit_level` and `SolverSettings`, as every
+      other calibrator is — see the
       [calibration guide](guide/calibration.md#solvers)
 - [ ] **Dual-curve recipes** — the LMM recipes do not declare
       `discount_curve` / `forward_curve`, so they remain single-curve; see
@@ -1082,6 +1095,7 @@ New instrument types and entire asset classes.
 - [x] **Hull-White PDE** with exercise as a pointwise projection on the value
       function — no regression, so no policy error
 - [x] **Longstaff-Schwartz (LSM)** regression for early exercise on LMM paths — `bermudan_swaption_lsm`
+- [x] **Per-trade Hull-White calibration** — `coterminal_swaptions(bermudan)` + `swaption_basket_node` fit the model to the trade's co-terminal basket off the calibrated cube; the Bermudan then prices through `price(..., method="pde")` with quote risk via `chain_adjoint` (`examples/14_unified_rates_per_trade_model.py`; [§5.6](#unified-calibration-pricing-and-risk))
 - [ ] **American Monte Carlo** with basis function selection (polynomials, neural network regressors)
 - [ ] **Lower/upper bound** estimation (Andersen-Broadie)
 
@@ -1328,7 +1342,7 @@ see the [Scaling Up](scaling/index.md) section for the full design.
 - [ ] **Shape-stable / padded batching** — fixed-shape padding so the JIT cache is reused across differently-sized books
 - [ ] **Multi-device parallelism** — shard the instrument / scenario axis across GPUs/TPUs via `jax.sharding` `Mesh` / `shard_map` (today: single-device XLA + `vmap` only)
 - [ ] **GPU/TPU benchmark suite** — published GPU-vs-CPU throughput (roadmap P5.2)
-- [ ] **Unified market-quote container + quote-space (hedge-space) risk** — one container spanning all rate / FX / vol / credit quotes, with PV differentiated end-to-end through calibration so book Greeks/vega come out as hedge-ratio sensitivities to tradeable quotes. **Container shipped** (ontology P2): `valax.core.MarketState` — keyed `CurveGraph` + vol surfaces + spots + fixings + credit/inflation/FX — together with the unified `valax.core.price(instrument, model, market, method=...)` signature and `valax.core.resolve`. **Curve leg shipped** (P4): `valax.greeks.adjoint.curve_quote_deltas` differentiates PV end-to-end through the curve bootstrap by the implicit function theorem, with `CurveAdjoint` reusing one factorisation across a portfolio. **Volatility leg shipped**: `calibrate_swaption_cube_from_curves` derives each node's forward and annuity from the curves, so `dθ_v/dθ_c` is no longer identically zero, and `valax.greeks.vol_adjoint` (`sabr_slice_level` → `vol_quote_vegas`) gives `λ_v` — vega against vol quotes, plus the `dR_v/dθ_c` curve contribution, both FD-validated. **Fixed inputs shipped**: `valax.greeks.fixed_inputs` reports `p̄` separately, and `valax.market.SnapshotProvenance` labels the resulting vectors. **Quote container and model leg shipped (per underlying)**: `valax.market.QuoteSet` keys every quote and fixed input, and `valax.greeks.quote_risk.chain_adjoint` sweeps curves → vols → model generically (see §5.6). **Still missing:** the *per-trade* model leg (Hull-White on a co-terminal basket, so rates exotics still reach the curves through `fixed_input_adjoints`' recalibrate-then-price route), rates vol levels as chain nodes, and FX and credit quote levels. See the [Audit Conformance Map](architecture/aad-audit-conformance.md) for the requirement-by-requirement status.
+- [ ] **Unified market-quote container + quote-space (hedge-space) risk** — one container spanning all rate / FX / vol / credit quotes, with PV differentiated end-to-end through calibration so book Greeks/vega come out as hedge-ratio sensitivities to tradeable quotes. **Container shipped** (ontology P2): `valax.core.MarketState` — keyed `CurveGraph` + vol surfaces + spots + fixings + credit/inflation/FX — together with the unified `valax.core.price(instrument, model, market, method=...)` signature and `valax.core.resolve`. **Curve leg shipped** (P4): `valax.greeks.adjoint.curve_quote_deltas` differentiates PV end-to-end through the curve bootstrap by the implicit function theorem, with `CurveAdjoint` reusing one factorisation across a portfolio. **Volatility leg shipped**: `calibrate_swaption_cube_from_curves` derives each node's forward and annuity from the curves, so `dθ_v/dθ_c` is no longer identically zero, and `valax.greeks.vol_adjoint` (`sabr_slice_level` → `vol_quote_vegas`) gives `λ_v` — vega against vol quotes, plus the `dR_v/dθ_c` curve contribution, both FD-validated. **Fixed inputs shipped**: `valax.greeks.fixed_inputs` reports `p̄` separately, and `valax.market.SnapshotProvenance` labels the resulting vectors. **Quote container and model leg shipped**: `valax.market.QuoteSet` keys every quote and fixed input, and `valax.greeks.quote_risk.chain_adjoint` sweeps curves → vols → model generically (see §5.6) — per underlying (`price_fit_node`) and per trade (`swaption_basket_node`, Hull-White on a co-terminal basket off the cube), with the rates vol objects as chain nodes (`swaption_cube_node`, `caplet_strip_node` → `optionlet_sabr_node`). **Still missing:** FX and credit quote levels, and the position / portfolio layer that would carry a heterogeneous book through one sweep. See the [Audit Conformance Map](architecture/aad-audit-conformance.md) for the requirement-by-requirement status.
 
 **Why:** the JAX-native design makes book- and business-scale a composition
 problem (`vmap` / `jit` / `grad` stack over pure pytree pricers) rather than a
@@ -1343,20 +1357,28 @@ and the maths in [Calibration Chains](theory/calibration-chains.md).
 
 - [x] **Keyed quote container** — `valax.market.QuoteSet`: identifier-keyed quotes `q` and fixed inputs `p`, differentiable and vmappable
 - [x] **Solver settings + traceable convergence** — `valax.calibration.SolverSettings` / `run_solver` (one solver factory), `CalibrationResult` with a JAX-boolean `converged` flag and eager `check()`
-- [x] **Generic calibration level** — `valax.calibration.level` (`CalibrationLevel`, `LevelInputs`, `level_adjoint`) and `valax.calibration.chain.solve_level` / `explicit_level`
+- [x] **Generic calibration level** — `valax.calibration.level` (`CalibrationLevel`, `LevelInputs`, `level_adjoint`) and the level builders in `valax.calibration.solve`: `solve_level` (one solve), `solve_batched_level` (one independent solve per node in one `vmap`, per-node diagnostics, failures named by label such as `"5Yx10Y"`, `"cap 3Y"`, `"K=3.00%"`; block-diagonal level residual) and `explicit_level` (explicit maps and fixed points), with `stack_slices` / `period_label(s)` helpers
 - [x] **Calibration chains** — `CalibrationNode`, `CalibrationChain`, `calibrate_market` (traceable: `jit` / `grad` / `vmap` over quote scenarios), `calibrate_model` (model as a separate input)
 - [x] **Chain nodes: explicit inputs, curves, SABR smiles, any model through `price`** — `market_inputs_node`, `curve_graph_node`, `sabr_smile_node`, `price_fit_node` (`valax.calibration.nodes`)
 - [x] **Constant-parameter market as a chain** — `MarketState.flat` / `market_inputs_node`; quote risk reproduces textbook Black-Scholes Greeks
 - [x] **Two differentiation paths + reconciliation** — `valax.greeks.quote_risk`: `chain_adjoint` / `quote_risk_adjoint` (explicit IFT sweep, book-linear) and `quote_risk_autodiff` (implicit adjoint through the solves), `reconcile_quote_risk`
 - [x] **Model leg (per underlying)** — `price_fit_node` + `calibrate_model` gives `λ_m`, folded into `chain_adjoint` via `model_levels` (Heston validated against the autodiff path)
 - [x] **Synthetic quote universes** — `valax.market.synthetic.universe`: true multi-curve / equity markets quoted with the library's own residuals and pricers (`valax.curves.par_quote`), Gaussian noise, matching chain nodes, quote scenarios and product samplers; noise-free snapshots recalibrate to the truth
+- [x] **Rates-vol synthetic universe** — `RatesVolSpec` / `RatesVolWorld` / `RatesVolQuoteSet`, `sample_rates_vol_world`, `synthesize_rates_vol_quote_set`, `rates_vol_snapshot`: a true SABR swaption cube (normal vols, shifted normal SABR with β = 0, one ATM level ±5% per cell) and a true caplet strip (piecewise constant per bucket), quoted on the synthetic curves with the matching chain (curves → cube → strip → optionlet SABR). Noise-free quotes recover the curves to ≤ 1e-12, cube α to ≤ 1e-10, ρ / ν to ≤ 1e-8 and the strip to ≤ 1e-12 (`tests/test_calibration/test_rates_vol_nodes.py::TestTruthRecovery`); the optionlet SABR is a smoothing of the strip, not a recoverable truth
 - [x] **End-to-end examples** — `examples/10`–`13` (market tiers, multi-curve book risk, equity smile + Heston + Monte Carlo exotic risk, vmapped quote scenarios with P&L explain), self-checking and run by `tests/test_examples/`
+- [x] **Example 14 — rates per-trade model** — `examples/14_unified_rates_per_trade_model.py`: noisy curves + cube → per-trade Hull-White (batched with `eqx.filter_vmap`) → Bermudans through `price` (PDE) → quote risk by `λ_m` vs autodiff, with the vega profile across each basket; self-checking (total cube vega equals the summed basket profile)
+- [x] **Examples 15–18 — rates vol chain, diagnostics, SLV, per-trade G2++ / Cheyette** — `examples/15_unified_rates_caps_optionlet_chain.py` (curves → `caplet_strip_node` → `optionlet_sabr_node` → caps / floors through `price` → quote risk vs autodiff and full-recalibration FD), `16_unified_calibration_diagnostics.py` (bad quotes named by `check()` / `failed_labels()`, healthy nodes isolated, `condition_alert`, `check_engine` refusing a frozen-y Cheyette fit), `17_unified_slv_fixed_point.py` (leverage fixed point swept over `n_iterations`, LV / Heston / SLV barrier, risk by AD through the unrolled passes vs FD), `18_unified_rates_per_trade_g2pp_cheyette.py` (per-trade G2++ and Cheyette, model risk vs Hull-White); all self-checking and run by `tests/test_examples/`
 - [ ] **Richer synthetic noise** — bid/ask pairs as fit weights, correlated noise across a strip, stale / missing quotes
-- [ ] **Migrate the per-model calibrators** — `calibrate_sabr`, `calibrate_heston`, `calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette*`, `calibrate_slv*`, `strip_caplet_vols` and the cube / surface loops onto `SolverSettings` + `CalibrationResult` (today: string solver selection, three return shapes, unchecked `throw=False` in four places)
-- [ ] **Rates vol levels as chain nodes** — swaption cube and optionlet strip (`calibrate_swaption_cube_from_curves`, `vol_adjoint`) as `CalibrationNode`s
-- [ ] **Per-trade model basket** — Hull-White / G2++ calibrated per trade to a co-terminal basket, batched with `filter_vmap`; requires de-embedding `initial_curve` from the short-rate models
+- [x] **Migrate the per-model calibrators** — every calibrator returns `CalibrationResult` and takes `settings: SolverSettings` (`EXACT_SETTINGS`, `FIT_SETTINGS`; `BASKET_SETTINGS` = BFGS to 1e-12 for Hull-White / G2++, whose closed forms nest a root-find with a non-finite implicit derivative far from the solution; `CHEYETTE_SETTINGS` = BFGS to 1e-10). `calibrate_sabr` / `calibrate_heston` / `calibrate_svi_slice` are `solve_level` wrappers; `calibrate_hull_white` / `calibrate_g2pp` / `calibrate_cheyette*` wrap `basket_fit_level` (curve-free models); the SABR / SVI surface, optionlet surface and swaption cube loops are batched levels (`sabr_batch_level`, `solve_batched_level`, `swaption_cube_level`); `strip_caplet_vols` is solved bucket by bucket but packaged as one lower-triangular root level (`caplet_strip_level`, strike columns batched by `strip_columns_level`); `strip_optionlet_surface` returns the SABR level with the strip as a child; `calibrate_slv*` are fixed-point levels. No string solver selection remains, there is one return type, and the six unchecked `throw=False` solves (Hull-White ×2, G2++ ×2, Cheyette `_run_solver` ×2) plus those in `strip_caplet_vols` / `swaption_implied_normal_vol` and the diagnostics discarded by the surface loops and curve wrappers now report traceable convergence. Migration evidence (old vs new): SABR LM bit-identical, SABR BFGS ≤ 1e-9 in parameters, Heston (COS) bit-identical, Hull-White ≤ 1e-14 relative in price, G2++ ≤ 7e-15, Cheyette frozen-`y` ≤ 1.2e-12 relative in price, caplet strip ≤ 3e-16 in vols, batched surfaces equal to per-slice fits to 1e-12
+- [x] **Curve bootstrap as a calibration level** — `bootstrap_curve_graph` returns the same root level as `curve_graph_node` (labels name each instrument); `CurveBuildDiagnostics` is retired (fitted quotes via `fitted_curve_quotes`, conditioning via `result.condition_number()`), and `quote_jacobian` raises `CalibrationError` on an unconverged build
+- [x] **Engine provenance** — `CalibrationProvenance(method, engine_kind ∈ {exact, discretised, modelling_bias}, config)` is recorded on the result (metadata, not a model field, so models fitted on different engines stack under `vmap`); `check_engine(result, method, config)` refuses a mismatched engine only for `modelling_bias` (frozen-`y` Cheyette, `cheyette_provenance("frozen", cfg)`); exact-`y` Cheyette is `discretised`, Hull-White / G2++ fits are `JAMSHIDIAN_PROVENANCE` (`exact`). `price()` does not consult provenance — the check is an eager opt-in
+- [x] **De-embedded short-rate curves** — `HullWhiteModel`, `G2PPModel`, `CheyetteModel(2F)` carry `initial_curve=None` and a static `curve_id`; `valax.core.binding.curve_requirements` (`singledispatch`, `{field: curve_id}`) is consumed by `bind_model` inside `price()`, which raises if a declared curve field arrives pre-bound (the market is the single source of truth for curve risk); kernels raise when unbound (`require_initial_curve`), `bind_curves` binds explicitly. Projection-curve applicability is the `basis_overlay(model)` dispatch (Hull-White / G2++ yes, Cheyette no — `price()` now raises where it previously priced single-curve silently). Gated by `tests/test_core/test_curve_binding.py`: the model gradient has no curve leaf, the market gradient equals the old embedded-curve delta to 1e-12, curve-free models stack under `filter_vmap`
+- [x] **Rates vol levels as chain nodes** — `swaption_cube_node` (forwards recomputed inside the level from the upstream curves with the pricer's own `swaption_forward_and_annuity`, so `dθ_v/dθ_c ≠ 0` and curve → vol → price is one `chain_adjoint` sweep; shares `swaption_cube_level` with `calibrate_swaption_cube_from_curves`), `caplet_strip_node` (strike-batched strip on the upstream curves) and `optionlet_sabr_node` (SABR per optionlet expiry on the strip, no quotes of its own, so its adjoint flows to the cap quotes and curves). Validated in `tests/test_calibration/test_rates_vol_nodes.py`: adjoint = autodiff on every quote and fixed input (rtol 1e-6), both = full-recalibration FD on curve quotes, vol quotes and the fixed SABR β (rtol 2e-4), finite condition numbers below `ILL_CONDITIONED_THRESHOLD`, a NaN cell named. The frozen-forward cube fit (`dθ_v/dθ_c = 0`) is removed; `valax.greeks.vol_adjoint` (rebuilding levels from fitted objects) remains and is still validated, but the nodes supersede it for chain use
+- [x] **Per-trade model basket** — `coterminal_swaptions(bermudan)` + `swaption_basket_node` (model scope): the model is fitted per trade to the basket's prices implied by the calibrated cube and curves, model prices through `price()` (Jamshidian by default); `λ_m` flows through `chain_adjoint` into the cube and curve levels; zero-valued target-shift fixed inputs report `∂V/∂T_k`, the vega profile across the basket; traced baskets batch under `eqx.filter_vmap`. Validated for **Hull-White** in `tests/test_calibration/test_per_trade_basket.py` (adjoint vs autodiff rtol 1e-6; FD on a curve quote, a cube vol quote, the held-fixed mean reversion and a target shift rtol 5e-4; vmap over two baskets = individual fits to 1e-10; Jamshidian via `price()` matches the PDE). Also validated for **G2++** (multi-curve; σ, η fitted with a, b, ρ fixed, on the co-terminals plus the 1Y-tenor swaption at the first exercise — the co-terminals alone leave the two factors unidentified; priced through the 2-D PDE) and **Cheyette** (single-curve only; σ, β fitted with κ fixed, on the co-terminals plus one off-strike option; frozen-y PDE): adjoint vs autodiff rtol 1e-6, full-recalibration FD on a curve quote, a vol quote, a fixed input and a target shift rtol 5e-4, G2++ `filter_vmap` = individual fits to rtol 1e-7 (`TestG2PPPerTrade`, `TestCheyettePerTrade`; `examples/18_unified_rates_per_trade_g2pp_cheyette.py`)
+- [ ] **Multi-index curve binding** — `ResolvedMarket` carries a single forward curve; instruments touching several indices need a keyed set of curves resolved through the requirements protocol (`curves_touched` / `indices_touched`), and multi-curve / stochastic-basis models one initial curve per modelled index via `curve_requirements` (Phase 4)
+- [ ] **LMM curve de-embedding** — `LMMModel` still embeds its curve; out of scope of the short-rate de-embedding (Phase 4)
 - [ ] **Constrained (KKT) and FX smile levels** — arbitrage-free SVI, the FX delta system
-- [ ] **Every pricer reachable from `price`** — register the rates pricers that bypass it (graph pricers, legs, Hull-White tree), policy-supplied default configs
+- [ ] **Every pricer reachable from `price`** — register the rates pricers that bypass it (graph pricers, legs, Hull-White tree, the G2++ analytic swaption, caps / swaptions off the cube surfaces), policy-supplied default configs (Phase 4)
 - [ ] **Derivative convergence of numerical engines** — PDE / lattice / MC Greeks against exact oracles with documented per-engine tolerances
 - [ ] **Position / portfolio layer** — quantity and trade id, grouping by structure and shape, manual schedule padding, book-level quote risk through one sweep
 

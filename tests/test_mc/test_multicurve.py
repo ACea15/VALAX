@@ -203,7 +203,12 @@ def test_price_forwards_the_resolved_curves(frn, hw, ois, projection):
     market = MarketState(
         curves=CurveGraph(curves={_OIS_ID: ois, _PROJ_ID: projection})
     )
-    unified = price(frn, hw, market, method="mc", config=_CONFIG, key=_KEY)
+    # price() binds the model's curve from the market itself.
+    unbound = HullWhiteModel(
+        mean_reversion=hw.mean_reversion, volatility=hw.volatility,
+        curve_id=_OIS_ID,
+    )
+    unified = price(frn, unbound, market, method="mc", config=_CONFIG, key=_KEY)
     direct = mc_price_dispatch(
         frn, hw, _CONFIG, _KEY,
         discount_curve=ois, forward_curve=projection,
@@ -223,7 +228,11 @@ def test_price_single_curve_market_is_unchanged(frn, hw, ois):
         day_count=frn.day_count,
     )
     market = MarketState.single_curve(ois)
-    unified = price(plain_frn, hw, market, method="mc", config=_CONFIG, key=_KEY)
+    # Unbound and unpinned: price() binds the instrument's discount curve.
+    unbound = HullWhiteModel(
+        mean_reversion=hw.mean_reversion, volatility=hw.volatility,
+    )
+    unified = price(plain_frn, unbound, market, method="mc", config=_CONFIG, key=_KEY)
     direct = mc_price_dispatch(plain_frn, hw, _CONFIG, _KEY)
     assert float(unified.price) == float(direct.price)
 

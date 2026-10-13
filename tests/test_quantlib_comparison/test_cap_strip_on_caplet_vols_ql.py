@@ -101,7 +101,7 @@ def shared_caplet_surface():
     ]
     surface = build_sabr_caplet_surface(
         strikes_per_expiry, vols_per_expiry, forwards, expiries, fixed_beta=0.5,
-    )
+    ).value
 
     # Sample the surface at its nodes and adopt into a QL optionlet structure.
     grid = [
@@ -283,7 +283,7 @@ class TestVALAXStripRepricesQuotesInQL:
         caps = [_annual_cap(n, _STRIP_STRIKE) for n in (1, 2, 3, 4)]
         strip = strip_caplet_vols(
             caps, curve, cap_vols=jnp.array(_TERM_VOLS),
-        )
+        ).value
         strikes = [0.02, _STRIP_STRIKE, 0.04]
         # Adopt the stripped term structure into a QL optionlet structure.
         # The strip is flat across strikes here (one strike column), which is
@@ -308,7 +308,7 @@ class TestVALAXStripRepricesQuotesInQL:
         strip = strip_caplet_vols(
             [_annual_cap(n, _STRIP_STRIKE) for n in (1, 2, 3, 4)],
             curve, cap_vols=jnp.array(_TERM_VOLS),
-        )
+        ).value
         assert len(ql_times) == int(strip.expiries.shape[0])
         for t_ql, t_valax in zip(ql_times, strip.expiries):
             assert float(t_valax) == pytest.approx(t_ql, abs=1e-12)
@@ -369,7 +369,7 @@ class TestVALAXStripRepricesQuotesInQL:
         strip = strip_caplet_vols(
             [_annual_cap(n, _STRIP_STRIKE) for n in (1, 2, 3, 4)],
             _annual_curve(), cap_vols=jnp.full((4,), flat),
-        )
+        ).value
         assert jnp.allclose(strip.vols, flat, atol=1e-10)
         for v in ql_vols:
             assert v == pytest.approx(flat, abs=5e-4)

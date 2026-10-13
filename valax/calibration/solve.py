@@ -1,0 +1,408 @@
+r"""Level builders: the single implementation of "run a calibration".
+
+Every calibration in VALAX — chain node or standalone calibrator
+(``calibrate_sabr``, ``calibrate_hull_white``, ``strip_caplet_vols``, …) —
+packages its solve through one of three builders, so every level reports
+convergence the same way and carries a residual that is, by construction, the
+one the solver used:
+
+* :func:`solve_level` — one solve (``"root"`` or ``"least_squares"``);
+* :func:`solve_batched_level` — one independent solve per node, ``vmap``-ed,
+  reported per node (slice / cube / strip loops);
+* :func:`explicit_level` — no implicit solve (explicit maps, fixed points).
+
+This module depends only on the solver settings, the level and the result
+types — not on ``valax.core`` — so the per-model calibrators, which
+``valax.core`` imports transitively, can use it without an import cycle.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Sequence
+
+import jax
+import jax.numpy as jnp
+from jax.flatten_util import ravel_pytree
+from jaxtyping import Float
+from jax import Array
+
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import (
+    CalibrationDiagnostics,
+    CalibrationProvenance,
+    CalibrationResult,
+    diagnostics_from_solution,
+    explicit_diagnostics,
+)
+from valax.calibration.settings import SolverSettings, run_solver
+
+
+# ── Level builders: the contract every node factory uses ─────────────
+
+
+def solve_level(
+    name: str,
+    problem: str,
+    residual_fn: Callable[[Any, LevelInputs], Float[Array, " n"]],
+    theta0: Any,
+    inputs: LevelInputs,
+    assemble_fn: Callable[[Any, LevelInputs], Any],
+    settings: SolverSettings | None = None,
+    *,
+    labels: Sequence[str] = (),
+    provenance: CalibrationProvenance | None = None,
+) -> CalibrationResult:
+    r"""Solve one calibration level and package it as a result.
+
+    The single implementation of "run a calibration": every solved node
+    routes through here, so every level reports convergence the same way and
+    carries a residual that is, by construction, the one the solver used.
+
+    * ``problem="root"`` — ``residual_fn`` is a square system ``R(theta) = 0``;
+      the level residual is ``R`` itself.
+    * ``problem="least_squares"`` — ``residual_fn`` returns the fit residual
+      vector ``r(theta)`` (weights included); the level residual is the
+      first-order condition :math:`\nabla_\theta \tfrac12\|r\|^2`, which is
+      square, so the implicit function theorem applies with the full Hessian.
+
+    Args:
+        name: Level name for diagnostics.
+        problem: ``"root"`` or ``"least_squares"``.
+        residual_fn: ``(theta, inputs) -> residual vector``.
+        theta0: Initial guess (any pytree of float arrays).
+        inputs: The level's quotes / upstream market / fixed inputs.
+        assemble_fn: ``(theta, inputs) -> calibrated object``.
+        settings: Solver settings. Defaults to :class:`SolverSettings`.
+        labels: Optional node names indexing equal-sized blocks of the fit
+            residual (e.g. one per strip bucket), so a failure is reported by
+            node.
+        provenance: Pricing engine the level was calibrated on, if any.
+
+    Returns:
+        The :class:`~valax.calibration.result.CalibrationResult`.
+
+    Raises:
+        ValueError: If ``problem`` is not ``"root"`` or ``"least_squares"``.
+    """
+    _check_problem("solve_level", problem)
+    settings = SolverSettings() if settings is None else settings
+    solution = run_solver(problem, residual_fn, theta0, inputs, settings)
+    theta = solution.value
+    fit_residuals = residual_fn(theta, inputs)
+
+    return CalibrationResult(
+        value=assemble_fn(theta, inputs),
+        theta=theta,
+        inputs=inputs,
+        diagnostics=diagnostics_from_solution(solution, fit_residuals),
+        residual_fn=_level_residual(problem, residual_fn),
+        assemble_fn=assemble_fn,
+        settings=settings,
+        name=name,
+        labels=tuple(labels),
+        problem=problem,
+        provenance=provenance,
+    )
+
+
+def _check_problem(caller: str, problem: str) -> None:
+    """Reject problem kinds a calibration level cannot be."""
+    if problem not in ("root", "least_squares"):
+        raise ValueError(
+            f"{caller}: problem must be 'root' or 'least_squares', got "
+            f"{problem!r}."
+        )
+
+
+def _level_residual(
+    problem: str,
+    residual_fn: Callable[[Any, Any], Float[Array, " n"]],
+) -> Callable[[Any, Any], Float[Array, " n"]]:
+    """The square level residual of a solved problem.
+
+    ``"root"``: the residual itself. ``"least_squares"``: the first-order
+    condition of the weighted fit, flattened to a vector so every level
+    residual has the same shape contract whatever pytree ``theta`` is.
+    """
+    if problem == "root":
+        return residual_fn
+
+    def level_residual(th: Any, inp: Any) -> Float[Array, " n"]:
+        def half_sse(t: Any) -> Float[Array, ""]:
+            r = residual_fn(t, inp)
+            return 0.5 * jnp.sum(r * r)
+
+        return ravel_pytree(jax.grad(half_sse)(th))[0]
+
+    return level_residual
+
+
+def solve_batched_level(
+    name: str,
+    problem: str,
+    node_residual_fn: Callable[[Any, Any], Float[Array, " n"]],
+    theta0: Any,
+    inputs: LevelInputs,
+    node_inputs_fn: Callable[[LevelInputs], Any],
+    assemble_fn: Callable[[Any, LevelInputs], Any],
+    settings: SolverSettings | None = None,
+    *,
+    labels: Sequence[str],
+    provenance: CalibrationProvenance | None = None,
+    node_solve_fn: Callable[[Any, Any], tuple[Any, CalibrationDiagnostics]]
+    | None = None,
+) -> CalibrationResult:
+    r"""Solve one independent problem per node and package them as one level.
+
+    The shape of every slice / cube / strip loop: smile per expiry, SABR per
+    cube cell, SVI per slice. Each node is solved separately — so a node's
+    failure is *its own* ``converged`` flag and is reported by name — but the
+    solves are ``vmap``-ed (one trace, one compile, whatever the node count)
+    and the nodes form one level for the adjoint: the level residual stacks
+    the per-node residuals (first-order conditions for fits), whose Jacobian
+    in ``theta`` is block-diagonal.
+
+    Per-node inputs are a *function* of the level inputs
+    (``node_inputs_fn``), not a precomputed constant: forwards read from the
+    upstream curves stay differentiable, so the adjoint carries the curve
+    risk of every node.
+
+    Args:
+        name: Level name for diagnostics.
+        problem: ``"root"`` or ``"least_squares"`` (per node).
+        node_residual_fn: ``(theta_i, node_inputs_i) -> residual vector`` of
+            one node.
+        theta0: Initial guesses, every leaf with a leading node axis.
+        inputs: The level's quotes / upstream market / fixed inputs.
+        node_inputs_fn: ``inputs -> pytree`` of per-node inputs, every leaf
+            with a leading node axis.
+        assemble_fn: ``(theta, inputs) -> calibrated object`` (``theta``
+            batched).
+        settings: Solver settings (shared by all nodes).
+        labels: One name per node (e.g. ``"1Yx5Y"``), required so failures
+            are reported by name.
+        provenance: Pricing engine the level was calibrated on, if any.
+        node_solve_fn: Optional ``(theta0_i, node_inputs_i) -> (theta_i,
+            diagnostics_i)`` replacing the default single ``run_solver``
+            call per node — for a node that is itself solved in stages (a
+            sequential cap strip). It must drive ``node_residual_fn`` to
+            zero (or to its least-squares optimum).
+
+    Returns:
+        A :class:`~valax.calibration.result.CalibrationResult` whose
+        diagnostics carry a leading node axis aligned with ``labels``.
+
+    Raises:
+        ValueError: If ``problem`` is unknown or the number of labels does not
+            match the node axis.
+    """
+    _check_problem("solve_batched_level", problem)
+    settings = SolverSettings() if settings is None else settings
+    labels = tuple(labels)
+    n_nodes = jax.tree.leaves(theta0)[0].shape[0]
+    if len(labels) != n_nodes:
+        raise ValueError(
+            f"solve_batched_level({name!r}): {len(labels)} labels for "
+            f"{n_nodes} nodes."
+        )
+    node_inputs = node_inputs_fn(inputs)
+
+    def solve_one(th0: Any, node_in: Any) -> tuple:
+        sol = run_solver(problem, node_residual_fn, th0, node_in, settings)
+        r = node_residual_fn(sol.value, node_in)
+        return sol.value, diagnostics_from_solution(sol, r)
+
+    solve = solve_one if node_solve_fn is None else node_solve_fn
+    theta, diagnostics = jax.vmap(solve)(theta0, node_inputs)
+    node_level = _level_residual(problem, node_residual_fn)
+
+    def level_residual(th: Any, inp: LevelInputs) -> Float[Array, " n"]:
+        return jax.vmap(node_level)(th, node_inputs_fn(inp)).reshape(-1)
+
+    return CalibrationResult(
+        value=assemble_fn(theta, inputs),
+        theta=theta,
+        inputs=inputs,
+        diagnostics=diagnostics,
+        residual_fn=level_residual,
+        assemble_fn=assemble_fn,
+        settings=settings,
+        name=name,
+        labels=labels,
+        problem=problem,
+        provenance=provenance,
+    )
+
+
+def explicit_level(
+    name: str,
+    inputs: LevelInputs,
+    assemble_fn: Callable[[Any, LevelInputs], Any],
+    *,
+    diagnostics: CalibrationDiagnostics | None = None,
+    problem: str = "explicit",
+    settings: SolverSettings | None = None,
+    provenance: CalibrationProvenance | None = None,
+    children: Sequence[CalibrationResult] = (),
+    value: Any = None,
+) -> CalibrationResult:
+    """Package a level with no implicit solve (an explicit map of its inputs).
+
+    Installing a quoted spot, building a flat curve from a quoted rate, or a
+    Dupire transform of an upstream surface are levels whose value is a
+    closed-form function of the inputs. They join the chain like any other
+    level; the adjoint differentiates them by plain reverse-mode AD.
+
+    A fixed-point iteration run for a fixed number of passes (the SLV
+    leverage calibration) is also explicit in this sense — the value is an
+    unrolled, differentiable map of the inputs — but it reports its own
+    convergence: pass ``problem="fixed_point"`` and the
+    :func:`~valax.calibration.result.fixed_point_diagnostics`.
+
+    Args:
+        name: Level name for diagnostics.
+        inputs: The level's quotes / upstream market / fixed inputs.
+        assemble_fn: ``(None, inputs) -> calibrated object``.
+        diagnostics: Convergence report; defaults to trivially converged.
+        problem: ``"explicit"`` or ``"fixed_point"``.
+        settings: Settings recorded on the result (tolerances of a fixed
+            point); defaults to :class:`SolverSettings`.
+        provenance: Pricing engine the level was calibrated on, if any.
+        children: Sub-results checked together with this level.
+        value: Precomputed ``assemble_fn(None, inputs)``, to avoid running an
+            expensive map twice; computed when ``None``.
+
+    Returns:
+        A :class:`~valax.calibration.result.CalibrationResult` with
+        ``theta=None`` and no residual.
+    """
+    return CalibrationResult(
+        value=assemble_fn(None, inputs) if value is None else value,
+        theta=None,
+        inputs=inputs,
+        diagnostics=explicit_diagnostics() if diagnostics is None else diagnostics,
+        residual_fn=None,
+        assemble_fn=assemble_fn,
+        settings=SolverSettings() if settings is None else settings,
+        name=name,
+        problem=problem,
+        provenance=provenance,
+        children=tuple(children),
+    )
+
+
+# ── Helpers shared by the slice / cube / strip loops ─────────────────
+
+
+def stack_slices(
+    strikes_per_node: Sequence[Float[Array, " n_k"]],
+    values_per_node: Sequence[Float[Array, " n_k"]],
+    weights_per_node: Sequence[Float[Array, " n_k"]] | None = None,
+) -> tuple[
+    Float[Array, "n_nodes n_max"],
+    Float[Array, "n_nodes n_max"],
+    Float[Array, "n_nodes n_max"],
+]:
+    """Stack ragged per-node smiles into rectangular arrays for a batched level.
+
+    Short rows are padded by repeating their last strike and quote with
+    **zero weight**, so a padded entry contributes exactly zero to its node's
+    residual and the fit is unchanged. Eager (Python-level shapes).
+
+    Args:
+        strikes_per_node: One strike array per node.
+        values_per_node: One quote array per node, same lengths.
+        weights_per_node: Optional per-node weights; default ones.
+
+    Returns:
+        ``(strikes, values, weights)``, each ``(n_nodes, n_max)``.
+
+    Raises:
+        ValueError: If node counts or row lengths are inconsistent, or a row
+            is empty.
+    """
+    n = len(strikes_per_node)
+    if len(values_per_node) != n or (
+        weights_per_node is not None and len(weights_per_node) != n
+    ):
+        raise ValueError("stack_slices: per-node sequences differ in length.")
+    rows_k, rows_v, rows_w = [], [], []
+    lengths = [int(jnp.shape(k)[0]) for k in strikes_per_node]
+    if n == 0 or min(lengths) == 0:
+        raise ValueError("stack_slices: every node needs at least one quote.")
+    n_max = max(lengths)
+    for i in range(n):
+        k = jnp.asarray(strikes_per_node[i], dtype=jnp.float64)
+        v = jnp.asarray(values_per_node[i], dtype=jnp.float64)
+        if v.shape != k.shape:
+            raise ValueError(
+                f"stack_slices: node {i} has {k.shape[0]} strikes but "
+                f"{v.shape[0]} quotes."
+            )
+        w = (
+            jnp.ones_like(k)
+            if weights_per_node is None
+            else jnp.asarray(weights_per_node[i], dtype=jnp.float64)
+        )
+        pad = n_max - k.shape[0]
+        rows_k.append(jnp.concatenate([k, jnp.full((pad,), k[-1])]))
+        rows_v.append(jnp.concatenate([v, jnp.full((pad,), v[-1])]))
+        rows_w.append(jnp.concatenate([w, jnp.zeros((pad,))]))
+    return jnp.stack(rows_k), jnp.stack(rows_v), jnp.stack(rows_w)
+
+
+def period_label(years: float) -> str:
+    """Human-readable label for a year fraction: ``"3M"``, ``"5Y"``, ``"1.37Y"``.
+
+    Used to name the nodes of a batched level (smile expiries, cube cells,
+    strip buckets) so a failure is reported as ``"5Yx10Y"`` rather than as an
+    array index. Year fractions are snapped to the nearest market tenor, since
+    day counts make a "10Y" swap 10.14 years under Act/360: within half a
+    month below one year, within 3% above. Eager.
+
+    Args:
+        years: Year fraction (a Python or concrete array scalar).
+
+    Returns:
+        The label.
+    """
+    with jax.ensure_compile_time_eval():
+        t = float(years)
+    months = t * 12.0
+    if round(months) < 12 and abs(months - round(months)) <= 0.5 and t > 0:
+        return f"{max(int(round(months)), 1)}M"
+    if round(t) >= 1 and abs(t - round(t)) <= 0.03 * round(t):
+        return f"{int(round(t))}Y"
+    return f"{t:.3g}Y"
+
+
+def period_labels(years: Any, prefix: str = "") -> tuple[str, ...]:
+    """:func:`period_label` of every entry of an axis, never failing a trace.
+
+    When the axis is traced (a caller ``jit``-ed over it), the labels fall
+    back to positional ``"<prefix>#i"`` names: labels are diagnostics and
+    must not make a calibration untraceable.
+
+    Args:
+        years: Year-fraction axis.
+        prefix: Prepended to every label (e.g. ``"cap "``).
+
+    Returns:
+        One label per entry.
+    """
+    n = int(jnp.shape(years)[0])
+    try:
+        with jax.ensure_compile_time_eval():
+            return tuple(prefix + period_label(t) for t in jnp.asarray(years))
+    except jax.errors.ConcretizationTypeError:
+        return tuple(f"{prefix}#{i}" for i in range(n))
+
+
+__all__ = [
+    "explicit_level",
+    "period_label",
+    "period_labels",
+    "solve_batched_level",
+    "solve_level",
+    "stack_slices",
+]

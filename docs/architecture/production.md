@@ -750,7 +750,7 @@ valax/
 │   ├── interpolation.py           ← NEW: log_linear_df, monotone_convex, ...
 │   ├── convexity.py               ← NEW: futures convexity adjustment plug-ins
 │   ├── fixings.py                 ← NEW: FixingHistory, FixingSeries
-│   └── diagnostics.py             ← NEW: CurveBuildDiagnostics, InstrumentFit
+│   └── (diagnostics)              ← shipped as valax.calibration.CalibrationResult
 │
 ├── market/
 │   ├── data.py                    # ← deprecated, becomes thin alias of state.py
@@ -799,8 +799,8 @@ instruments, and the calibration diagnostics.
     since shipped (MC-Curves-1/2/2b).  The canonical maps are
     [`docs/roadmap.md` §1.1](../roadmap.md#11-multi-curve-bootstrapping)
     and the [coverage matrix](../applications/instrument-pricing.md).
-    In particular `bootstrap_multi_curve` is no longer "sequential
-    between curves" — since MC-Curves-2b it delegates to
+    In particular the two-tier sequential multi-curve bootstrap listed
+    below has since been **removed**: every multi-curve build goes through
     `bootstrap_curve_graph`, and `MultiCurveSet` is a view over
     `CurveGraph`.
 
@@ -812,7 +812,7 @@ instruments, and the calibration diagnostics.
 | Sequential single-curve bootstrap           | `bootstrap_sequential`                       | ✅    |
 | Simultaneous single-curve bootstrap (Newton in log-DF) | `bootstrap_simultaneous`            | ✅    |
 | `MultiCurveSet` container                   | `valax/curves/multi_curve.py`                | ⚠ Two-tier only |
-| Dual-curve swap par bootstrap (OIS + tenor) | `bootstrap_multi_curve`                      | ✅ Sequential between curves |
+| Dual-curve swap par bootstrap (OIS + tenor) | two-tier `MultiCurveSet` bootstrap (since removed) | ✅ Sequential between curves |
 | Differentiable through bootstrap (incl. `ImplicitAdjoint`) | `optimistix` integration      | ✅    |
 | Bootstrap diagnostics (RMSE, max error)     | —                                            | ❌    |
 | Money-market futures + convexity adjustment | —                                            | ❌    |
@@ -838,7 +838,7 @@ instruments and *topology* of the solve.
    Production bootstraps need money-market futures (with convexity
    adjustment), OIS swaps, tenor basis swaps, FX swaps / forwards, and
    cross-currency basis swaps.
-2. **Solver topology.** Today's `bootstrap_multi_curve` is *sequential
+2. **Solver topology.** The (then) two-tier multi-curve bootstrap was *sequential
    between curves* — OIS first, then each tenor independently. That
    breaks the moment a single instrument touches two unknown curves
    (tenor basis swap, CCBS).
@@ -963,17 +963,18 @@ register themselves; no central dispatch table.
 ### 11.4 Joint global solver
 
 ```python
-# valax/curves/bootstrap_graph.py  (NEW)
+# valax/curves/bootstrap_graph.py  (shipped signature)
 
 def bootstrap_curve_graph(
     reference_date: Int[Array, ""],
     curve_specs:    Sequence[CurveSpec],
     instruments:    Sequence[BootstrapInstrument],
+    *,
     fixings:        FixingHistory | None = None,
-    solver:         optx.AbstractRootFinder | None = None,
     initial_guess:  Mapping[str, Float[Array, " n"]] | None = None,
-    max_steps:      int = 256,
-) -> tuple[CurveGraph, CurveBuildDiagnostics]:
+    settings:       SolverSettings | None = None,   # default EXACT_SETTINGS (Newton)
+    name:           str = "curve_graph",
+) -> CalibrationResult:                             # .value is the CurveGraph
     """Solve for every curve in the graph in one Newton iteration.
 
     The solver concatenates per-curve log-DFs into a single state
@@ -1028,89 +1029,42 @@ shipped variants:
 
 ### 11.6 Calibration diagnostics
 
-**Shipped shape (MC-Curves-2 + MC-Curves-3 diagnostics extension).**
-`CurveBuildDiagnostics` is a flat, JAX-pytree-valid `eqx.Module`:
+**Shipped shape.** `bootstrap_curve_graph` returns the library-wide
+[`CalibrationResult`](../api/calibration.md#valax.calibration.result.CalibrationResult)
+(the same return type as every other calibrator); the desk diagnostics map
+onto it as follows:
 
-```python
-class CurveBuildDiagnostics(eqx.Module):
-    """Per-curve and per-instrument repricing diagnostics."""
-
-    # Convergence health
-    residuals:                  Float[Array, " n_instruments"]
-    max_abs_residual:           Float[Array, ""]
-    rmse:                       Float[Array, ""]
-    n_steps:                    Int[Array, ""]
-    converged:                  bool = eqx.field(static=True)
-
-    # Per-instrument fit (in each quote's native units)
-    fitted_quotes:              Float[Array, " n_instruments"]
-    quoted_values:              Float[Array, " n_instruments"]
-
-    # Curve well-posedness
-    jacobian_condition_number:  Float[Array, ""]
-```
-
-Field semantics (`valax/curves/bootstrap_graph.py`):
-
-| Field | What it tells you |
-|---|---|
-| `residuals` | Per-instrument residual at the solution; the "raw" solver output. Zero at convergence. |
-| `max_abs_residual` | Scalar `max(|residuals|)`. Quick single-number convergence check. |
-| `rmse` | `sqrt(mean(residuals**2))`. Smoother convergence indicator. |
-| `n_steps` | Newton iterations consumed (`-1` if the solver did not populate stats). |
-| `converged` | Bool flag from `optimistix`. |
-| `fitted_quotes` | Per-instrument quote value implied by the calibrated graph, in each instrument's native units (`.rate` / `.spread` / `.futures_rate` / `.quoted_forward` / `.far_rate` / `.jump_size`). |
-| `quoted_values` | Per-instrument input quote scalars extracted through the same dispatch. Equals `fitted_quotes` up to solver tolerance at convergence. |
-| `jacobian_condition_number` | 2-norm condition number of `d(residuals) / d(log_dfs)` at the solution. Values well above ~1e10 flag ill-posed pillar placement or redundant constraints. Values close to 1 indicate a perfectly-anchored diagonal system (e.g. a REF-anchored deposit strip). |
+| Diagnostic | Where it lives | What it tells you |
+|---|---|---|
+| Per-instrument residuals | `result.diagnostics.residuals` | Residual at the solution; zero at convergence. |
+| `max_abs_residual`, `rmse` | `result.diagnostics.*` | Single-number convergence checks. |
+| Newton iterations | `result.diagnostics.n_steps` | `-1` if the solver did not populate stats. |
+| Converged flag | `result.diagnostics.converged` / `result.converged` | A **traceable** JAX boolean, so a failed build is visible inside `jit` / `vmap`; `result.check()` raises `CalibrationError` eagerly, naming the failing quote via `result.labels` (`"<i>:<Type>"`). |
+| Quoted values | `result.inputs.quotes` | Per-instrument input quote scalars, in solver order. |
+| Fitted quotes | `valax.curves.fitted_curve_quotes(instruments, graph, reference_date)` | Quote value implied by the calibrated graph, in each instrument's native units (`.rate` / `.spread` / `.futures_rate` / `.quoted_forward` / `.far_rate` / `.jump_size`). Equals the quoted value up to solver tolerance at convergence. |
+| Jacobian condition number | `result.condition_number()` | 2-norm condition number of `d(residuals) / d(log_dfs)` at the solution. Values well above ~1e10 flag ill-posed pillar placement or redundant constraints; values close to 1 indicate a perfectly-anchored diagonal system (e.g. a REF-anchored deposit strip). |
 
 **Native-quote-unit fit identity.** Because every VALAX quote-type
 residual is *linear* in its primary quote scalar (deposit rate,
 swap rate, basis spread, futures rate, quoted forward, FX far rate,
-turn jump size), the Newton correction
+turn jump size), the fitted quote (`par_quote`, the quote that zeroes the
+instrument's residual on the calibrated graph) is *exact*, not first-order.
 
-$$
-\mathrm{fitted}_i \;=\; \mathrm{quoted}_i \;-\; \frac{\mathrm{residuals}_i}{\partial\, r_i / \partial\, q_i}
-$$
+**Trader / audit workflow.** `fitted − quoted` gives the per-instrument fit
+error in quote units (e.g. rate points for IRS; basis points for tenor basis;
+FX units for FXForward), which is what appears on desk sign-off sheets.
+`result.condition_number()` flags builds where a marginal change in one quote
+would produce an outsized move in another curve — the numerical proxy for
+"the pillar grid isn't aligned with the instrument set".
 
-is *exact*, not first-order. The slope
-$\partial\, r_i / \partial\, q_i$ is computed by `jax.grad` on the
-instrument's own `residual` method — see
-`_fitted_quote(...)` in `bootstrap_graph.py`.
-
-**Trader / audit workflow.** `fitted_quotes − quoted_values` gives
-the per-instrument fit error in quote units (e.g. rate points for
-IRS; basis points for tenor basis; FX units for FXForward), which is
-what appears on desk sign-off sheets. `jacobian_condition_number`
-flags builds where a marginal change in one quote would produce an
-outsized move in another curve — the numerical proxy for "the pillar
-grid isn't aligned with the instrument set".
-
----
-
-**Historical spec (pre-MC-Curves-3 design intent — kept for
-reference).** The original design targeted per-curve dictionaries
-plus a list of dataclass rows:
-
-```python
-# Historical (pre-shipped) design shape:
-class CurveBuildDiagnostics(eqx.Module):
-    rmse_per_curve:        dict[str, float]
-    max_error_per_curve:   dict[str, float]
-    fitted_vs_quoted:      list[InstrumentFit]   # one per input instrument
-    n_iter:                int
-    converged:             bool
-    jacobian_condition:    float
-    elapsed_ms:            float
-```
-
-The shipped design chose flat `Float[Array, " n_instruments"]`
-vectors over per-curve `dict[str, float]` because (a) the joint solve
-concatenates residuals into a single flat state anyway, so the flat
-representation avoids an unnecessary partitioning step; (b) all
-fields are pytree-clean `jax.Array` leaves and therefore fully
-differentiable / vmap-able / scan-able. Per-curve views can be
-recovered downstream by partitioning on instrument `curves_touched`
-if a report needs them.
+**Design history.** The original design targeted a dedicated curve
+diagnostics container with per-curve dictionaries (`rmse_per_curve`,
+`fitted_vs_quoted` rows, `elapsed_ms`); a first shipped version used a flat
+curve-specific pytree. Both were superseded by the generic
+`CalibrationResult`, whose flat `jax.Array` leaves are differentiable /
+vmap-able / scan-able and are shared by every calibration level. Per-curve
+views can be recovered downstream by partitioning on instrument
+`curves_touched` if a report needs them.
 
 ### 11.7 Interpolation variants
 
@@ -1229,8 +1183,8 @@ solver:
 
 The build dispatches a single call to `bootstrap_curve_graph` with
 all four `CurveSpec`s and the full instrument list. One Newton solve
-returns all four calibrated curves plus a `CurveBuildDiagnostics`
-object covering every input quote. The result is partitioned by
+returns all four calibrated curves as one `CalibrationResult` whose
+diagnostics cover every input quote. The result is partitioned by
 identifier prefix into `MarketState.discount_curves` (`*.OIS`) and
 `MarketState.forward_curves` (`*.3M`, `*.6M`).
 
@@ -1415,13 +1369,14 @@ in risk, calibration, surfaces and the curve build — see
 - `bootstrap_curve_graph` driving one Newton solve over the
   concatenated log-DF state vector (§11.4).
 - Quote-sensitivity Jacobian helper `quote_jacobian` (§11.9).
-- Replace `bootstrap_multi_curve` internals with a graph call that
-  solves a two-curve subgraph; the public function keeps its
+- Replace the two-tier multi-curve bootstrap's internals with a graph
+  call that solves a two-curve subgraph; the public function keeps its
   signature for one minor release with a deprecation warning.
-  *(Shipped in MC-Curves-2b: the two-tier input is translated into
+  *(Shipped in MC-Curves-2b: the two-tier input was translated into
   `CurveSpec`s + graph instruments — forward-leg `SwapRate` quotes
   become dual-curve `IborSwapRate` residuals — and `MultiCurveSet`
-  became a view over `CurveGraph` via `from_graph` / `to_graph`.)*
+  became a view over `CurveGraph` via `from_graph` / `to_graph`. The
+  two-tier entry point has since been removed.)*
 - Tests: USD 3M (futures + IBOR swap) reproduces today's dual-curve
   result; cross-currency basis swap closes the EURUSD curve graph
   to micro-bps; gradients flow through `bootstrap_curve_graph` via
@@ -1432,8 +1387,9 @@ in risk, calibration, surfaces and the curve build — see
 #### MC-Curves-3 — Diagnostics, interpolation variants, fixings hookup
 *Estimated effort: ~1.5 weeks*
 
-- `CurveBuildDiagnostics` pytree with per-instrument fitted-vs-quoted,
-  RMSE, max error, Newton steps, Jacobian condition number.
+- Build diagnostics with per-instrument fitted-vs-quoted, RMSE, max
+  error, Newton steps, Jacobian condition number *(shipped; now carried
+  by the generic `CalibrationResult` — see §11.6)*.
 - Pluggable interpolation: `log_linear_df` (default), `linear_zero`,
   `monotone_convex` (Hagan-West), optionally `tension_spline`.
 - `FixingHistory` plumbed through to all relevant instrument

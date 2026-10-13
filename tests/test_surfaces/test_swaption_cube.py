@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import pytest
 
+from valax.calibration import CalibrationError
 from valax.curves.discount import DiscountCurve
 from valax.curves.graph import CurveGraph
 from valax.dates.daycounts import ymd_to_ordinal, year_fraction
@@ -22,7 +23,6 @@ from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_normal_implied_vo
 from valax.pricing.analytic.swaptions import swaption_forward_and_annuity
 from valax.surfaces import (
     SwaptionCube,
-    calibrate_swaption_cube,
     calibrate_swaption_cube_from_curves,
     calibrate_swaption_cube_from_graph,
     swaption_node_coordinates,
@@ -76,42 +76,54 @@ class TestInterpolation:
         assert abs(float(m.alpha) - 0.30) < 1e-12
 
 
+def _curve_grid(expiry_years=(1, 2, 5), tenor_years=(2, 10), zero=0.03):
+    """Curve, node grid, axes and curve-derived forwards of a test cube."""
+    ref = ymd_to_ordinal(2025, 1, 1)
+    curve = TestCurveAwareCalibration._curve(ref, zero=zero)
+    nodes = TestCurveAwareCalibration._nodes(expiry_years, tenor_years)
+    expiries, tenors = swaption_node_coordinates(nodes, curve)
+    forwards, _ = swaption_node_forwards_and_annuities(nodes, curve)
+    return curve, nodes, expiries, tenors, forwards
+
+
 class TestLognormalCalibration:
     def test_node_round_trip(self):
         """Fit per-node SABR smiles generated from known models; recover vols."""
-        forward = 100.0
-        strikes = jnp.array([80.0, 90.0, 100.0, 110.0, 120.0])
+        curve, nodes, expiries, tenors, forwards = _curve_grid()
+        offsets = jnp.array([-0.01, -0.005, 0.0, 0.005, 0.01])
 
         def truth(i, j):
             return SABRModel(
-                alpha=jnp.array(0.28 + 0.01 * i + 0.02 * j),
+                alpha=jnp.array(0.028 + 0.001 * i + 0.002 * j),
                 beta=jnp.array(0.5),
                 rho=jnp.array(-0.3),
                 nu=jnp.array(0.35 + 0.05 * j),
             )
 
-        strikes_per_node = [[strikes for _ in range(2)] for _ in range(3)]
+        strikes = [[forwards[i, j] + offsets for j in range(2)] for i in range(3)]
         market = [
             [
-                jax.vmap(lambda K: sabr_implied_vol(truth(i, j), jnp.array(forward), K, EXPIRIES[i]))(strikes)
+                jax.vmap(lambda K: sabr_implied_vol(
+                    truth(i, j), forwards[i, j], K, expiries[i]))(strikes[i][j])
                 for j in range(2)
             ]
             for i in range(3)
         ]
-        forwards = jnp.full((3, 2), forward)
-
-        cube = calibrate_swaption_cube(
-            strikes_per_node, market, forwards, EXPIRIES, TENORS,
-            fixed_beta=jnp.array(0.5),
+        res = calibrate_swaption_cube_from_curves(
+            nodes, strikes, market, curve, fixed_beta=jnp.array(0.5),
         )
+        res.check()
+        cube = res.value
+        assert res.labels == ("1Yx2Y", "1Yx10Y", "2Yx2Y", "2Yx10Y", "5Yx2Y", "5Yx10Y")
+        assert res.diagnostics.converged.shape == (6,)
 
         max_err = 0.0
         for i in range(3):
             for j in range(2):
-                for k in range(strikes.shape[0]):
-                    got = cube(strikes[k], EXPIRIES[i], TENORS[j])
-                    max_err = max(max_err, abs(float(got - market[i][j][k])))
-        assert max_err < 1e-3, f"max node vol error {max_err}"
+                got = jax.vmap(lambda K: cube(K, expiries[i], tenors[j]))(strikes[i][j])
+                max_err = max(max_err, float(jnp.max(jnp.abs(got - market[i][j]))))
+                assert abs(float(cube.alphas[i, j] - truth(i, j).alpha)) < 1e-6
+        assert max_err < 1e-8, f"max node vol error {max_err}"
 
 
 class TestNormalCalibration:
@@ -122,9 +134,9 @@ class TestNormalCalibration:
         were silently fit with the lognormal formula (see
         examples/pitfalls/01_sabr_vol_convention_mismatch.py).
         """
-        forward = 0.025
+        curve, nodes, expiries, tenors, forwards = _curve_grid()
         shift = 0.03
-        strikes = jnp.array([0.015, 0.02, 0.025, 0.03, 0.035])
+        offsets = jnp.array([-0.01, -0.005, 0.0, 0.005, 0.01])
         vol_fn = functools.partial(sabr_normal_implied_vol, shift=jnp.asarray(shift))
 
         def truth(i, j):
@@ -135,29 +147,76 @@ class TestNormalCalibration:
                 nu=jnp.array(0.3 + 0.05 * j),
             )
 
-        strikes_per_node = [[strikes for _ in range(2)] for _ in range(3)]
+        strikes = [[forwards[i, j] + offsets for j in range(2)] for i in range(3)]
         market = [
             [
-                jax.vmap(lambda K: vol_fn(truth(i, j), jnp.array(forward), K, EXPIRIES[i]))(strikes)
+                jax.vmap(lambda K: vol_fn(
+                    truth(i, j), forwards[i, j], K, expiries[i]))(strikes[i][j])
                 for j in range(2)
             ]
             for i in range(3)
         ]
-        forwards = jnp.full((3, 2), forward)
-
-        cube = calibrate_swaption_cube(
-            strikes_per_node, market, forwards, EXPIRIES, TENORS,
+        cube = calibrate_swaption_cube_from_curves(
+            nodes, strikes, market, curve,
             is_normal=True, shift=shift, fixed_beta=jnp.array(0.0),
-        )
+        ).check().value
         assert cube.is_normal is True
 
         max_err = 0.0
         for i in range(3):
             for j in range(2):
-                for k in range(strikes.shape[0]):
-                    got = cube(strikes[k], EXPIRIES[i], TENORS[j])
-                    max_err = max(max_err, abs(float(got - market[i][j][k])))
-        assert max_err < 1e-6, f"max node vol error {max_err}"
+                got = jax.vmap(lambda K: cube(K, expiries[i], tenors[j]))(strikes[i][j])
+                max_err = max(max_err, float(jnp.max(jnp.abs(got - market[i][j]))))
+        assert max_err < 1e-8, f"max node vol error {max_err}"
+
+
+class TestFailureReporting:
+    """Anti-vacuity: one unfittable node is reported by its label."""
+
+    def test_bad_node_is_named(self):
+        curve, nodes, expiries, _, forwards = _curve_grid()
+        offsets = jnp.array([-0.01, -0.005, 0.0, 0.005, 0.01])
+        truth = SABRModel(alpha=jnp.array(0.03), beta=jnp.array(0.5),
+                          rho=jnp.array(-0.3), nu=jnp.array(0.4))
+        strikes = [[forwards[i, j] + offsets for j in range(2)] for i in range(3)]
+        market = [
+            [jax.vmap(lambda K: sabr_implied_vol(
+                truth, forwards[i, j], K, expiries[i]))(strikes[i][j])
+             for j in range(2)]
+            for i in range(3)
+        ]
+        # Corrupt the 2Yx10Y smile: a NaN quote cannot be fitted.
+        market[1][1] = market[1][1].at[2].set(jnp.nan)
+        res = calibrate_swaption_cube_from_curves(
+            nodes, strikes, market, curve, fixed_beta=jnp.array(0.5),
+        )
+        assert res.failed_labels() == ("2Yx10Y",)
+        with pytest.raises(CalibrationError, match="2Yx10Y"):
+            res.check()
+        # Every other node still converged on its own.
+        assert int(jnp.sum(res.diagnostics.converged)) == 5
+
+    def test_vmaps_over_quote_scenarios(self):
+        curve, nodes, expiries, _, forwards = _curve_grid((1,), (2, 10))
+        offsets = jnp.array([-0.01, 0.0, 0.01])
+        truth = SABRModel(alpha=jnp.array(0.03), beta=jnp.array(0.5),
+                          rho=jnp.array(-0.3), nu=jnp.array(0.4))
+        strikes = [[forwards[0, j] + offsets for j in range(2)]]
+        base = jnp.stack([
+            jax.vmap(lambda K: sabr_implied_vol(
+                truth, forwards[0, j], K, expiries[0]))(strikes[0][j])
+            for j in range(2)
+        ])
+
+        def alphas(vols):
+            return calibrate_swaption_cube_from_curves(
+                nodes, strikes, [[vols[0], vols[1]]], curve,
+                fixed_beta=jnp.array(0.5),
+            ).value.alphas
+
+        out = jax.vmap(alphas)(jnp.stack([base, base * 1.01]))
+        assert out.shape == (2, 1, 2)
+        assert float(jnp.max(jnp.abs(out[0] - truth.alpha))) < 1e-6
 
 
 class TestQuotingConvention:
@@ -327,7 +386,7 @@ class TestCurveAwareCalibration:
         cube = calibrate_swaption_cube_from_curves(
             nodes, quoted, vols, curve,
             quote_form=quote_form, fixed_beta=jnp.array(0.5),
-        )
+        ).value
 
         # The cube recorded the curve-derived anchors verbatim.
         assert float(jnp.max(jnp.abs(cube.forwards - forwards))) == 0.0
@@ -354,7 +413,7 @@ class TestCurveAwareCalibration:
         cube = calibrate_swaption_cube_from_curves(
             nodes, quoted, vols, curve,
             quote_form="atm_offset", fixed_beta=jnp.array(0.5),
-        )
+        ).value
         assert cube.quote_form == "atm_offset"
         assert cube.dynamics == "sticky_moneyness"
 
@@ -364,7 +423,7 @@ class TestCurveAwareCalibration:
             nodes,
             [[forwards[i, j] + offsets for j in range(2)] for i in range(2)],
             vols, curve, fixed_beta=jnp.array(0.5),
-        )
+        ).value
         assert abs_cube.dynamics == "sticky_strike"
 
     def test_backbone_must_be_asked_for_explicitly(self):
@@ -379,7 +438,7 @@ class TestCurveAwareCalibration:
         cube = calibrate_swaption_cube_from_curves(
             nodes, abs_strikes, vols, curve,
             dynamics="sabr_backbone", fixed_beta=jnp.array(0.5),
-        )
+        ).value
         assert cube.dynamics == "sabr_backbone"
         # Self-consistency: at F == F0 the backbone reproduces the quote, which
         # is exactly what the curve-aware fit buys.
@@ -417,7 +476,7 @@ class TestCurveAwareCalibration:
             cube = calibrate_swaption_cube_from_curves(
                 nodes, abs_strikes, vols, c, fixed_beta=jnp.array(0.5),
                 dynamics="sabr_backbone",
-            )
+            ).value
             return cube(
                 query, cube.expiries[0], cube.tenors[0],
                 forward=cube.forwards[0, 0],
@@ -443,7 +502,7 @@ class TestCurveAwareCalibration:
         abs_strikes, vols = self._synthetic_quotes(f_dual, expiries, offsets)
         cube = calibrate_swaption_cube_from_curves(
             nodes, abs_strikes, vols, disc, proj, fixed_beta=jnp.array(0.5),
-        )
+        ).value
         assert float(jnp.max(jnp.abs(cube.forwards - f_dual))) == 0.0
 
     def test_graph_entry_point_agrees_with_the_curve_one(self):
@@ -458,11 +517,11 @@ class TestCurveAwareCalibration:
 
         a = calibrate_swaption_cube_from_curves(
             nodes, abs_strikes, vols, disc, fixed_beta=jnp.array(0.5)
-        )
+        ).value
         b = calibrate_swaption_cube_from_graph(
             nodes, abs_strikes, vols, graph, "USD.SOFR.OIS",
             fixed_beta=jnp.array(0.5),
-        )
+        ).value
         assert float(jnp.max(jnp.abs(a.alphas - b.alphas))) == 0.0
         assert float(jnp.max(jnp.abs(a.forwards - b.forwards))) == 0.0
 

@@ -72,6 +72,19 @@ class SolverSettings(eqx.Module):
     learning_rate: float = eqx.field(static=True, default=1e-3)
 
 
+#: Default settings of an exact (square) level: Newton to 1e-10.
+EXACT_SETTINGS = SolverSettings(method="newton", rtol=1e-10, atol=1e-10)
+
+#: Default settings of a least-squares level: Levenberg-Marquardt to 1e-8.
+#: Looser than :data:`EXACT_SETTINGS` on purpose: a fit's residual does not
+#: vanish, and price-based fits (Fourier / numerical pricers) have a noise
+#: floor near 1e-10 that a tighter step tolerance cannot get under — the
+#: solver would report non-convergence at a perfectly good optimum.
+FIT_SETTINGS = SolverSettings(
+    method="levenberg_marquardt", rtol=1e-8, atol=1e-8, max_steps=512
+)
+
+
 def resolve_method(settings: SolverSettings, problem: str) -> str:
     """Resolve ``settings.method`` against a problem kind.
 
@@ -177,6 +190,8 @@ def run_solver(
 
 
 __all__ = [
+    "EXACT_SETTINGS",
+    "FIT_SETTINGS",
     "PROBLEMS",
     "SolverSettings",
     "make_solver",

@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from valax.models.sabr import SABRModel
 from valax.instruments.options import EuropeanOption
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_price
+from valax.calibration import SolverSettings
 from valax.calibration.sabr import calibrate_sabr
 
 # ============================================================================
@@ -156,11 +157,16 @@ for i in range(len(cal_strikes)):
     print(f"{float(cal_strikes[i]):8.1f} {float(market_vols[i])*100:12.2f}")
 
 # %% Calibrate SABR — fix beta=0.5, fit alpha/rho/nu
-fitted, sol = calibrate_sabr(
+# The calibrator returns a CalibrationResult: the model is ``.value``, and
+# ``.diagnostics`` reports convergence (``.check()`` raises on failure).
+result = calibrate_sabr(
     cal_strikes, market_vols, forward, expiry,
     fixed_beta=jnp.array(0.5),
-    solver="levenberg_marquardt",
-)
+).check()
+print(f"converged={bool(result.diagnostics.converged)}  "
+      f"steps={int(result.diagnostics.n_steps)}  "
+      f"rmse={float(result.diagnostics.rmse):.2e}")
+fitted = result.value
 
 print(f"\n--- Calibration Results (Levenberg-Marquardt) ---")
 print(f"  alpha: true={float(true_model.alpha):.4f}  fitted={float(fitted.alpha):.4f}")
@@ -176,22 +182,22 @@ fitted_vols = jax.vmap(
 max_error = float(jnp.max(jnp.abs(fitted_vols - market_vols)))
 print(f"\nMax vol error: {max_error*10000:.2f} bps")
 
-# %% Calibrate with BFGS for comparison
-fitted_bfgs, _ = calibrate_sabr(
+# %% Calibrate with BFGS for comparison — the algorithm is a settings change
+fitted_bfgs = calibrate_sabr(
     cal_strikes, market_vols, forward, expiry,
     fixed_beta=jnp.array(0.5),
-    solver="bfgs",
-)
+    settings=SolverSettings(method="bfgs", rtol=1e-8, atol=1e-8),
+).value
 print(f"\nBFGS result:  alpha={float(fitted_bfgs.alpha):.4f}  "
       f"rho={float(fitted_bfgs.rho):.4f}  nu={float(fitted_bfgs.nu):.4f}")
 
 # %% Weighted calibration — emphasize ATM strikes
 weights = jnp.exp(-0.5 * ((cal_strikes - forward) / 10.0) ** 2)
-fitted_w, _ = calibrate_sabr(
+fitted_w = calibrate_sabr(
     cal_strikes, market_vols, forward, expiry,
     fixed_beta=jnp.array(0.5),
     weights=weights,
-)
+).value
 
 # Compare ATM fit quality
 atm_idx = jnp.argmin(jnp.abs(cal_strikes - forward))

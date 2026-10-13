@@ -159,7 +159,8 @@ $\partial V / \partial F_0$ — the term that chains the volatility layer back
 into the curve layer (spec A-3). The second is non-zero only because the forward
 is a genuine input to the fit, which is what
 [`calibrate_swaption_cube_from_curves`](surfaces.md#swaption-cube-rates)
-arranged; on the caller-supplied-forward route it is structurally zero.
+arranges (the cube is only ever calibrated from the curves); with a frozen
+forward it would be structurally zero.
 
 ::: valax.greeks.vol_adjoint
 

@@ -54,7 +54,11 @@ from valax.models.g2pp import (
     g2pp_bond_price,
     g2pp_market_df,
 )
-from valax.pricing.multicurve import apply_swap_basis, swap_leg_basis
+from valax.models.short_rate import require_initial_curve
+from valax.pricing.multicurve import (
+    apply_swap_basis,
+    model_swap_leg_basis,
+)
 
 # Number of Gauss-Hermite quadrature nodes for the outer 1-D integral.  The
 # G2++ swaption integrand is smooth and near-Gaussian, so 64 nodes reprice to
@@ -210,7 +214,7 @@ def g2pp_swaption_price(
     References:
         Brigo & Mercurio (2006), *Interest Rate Models*, §4.2.4 (eq. 4.31).
     """
-    curve: DiscountCurve = model.initial_curve
+    curve: DiscountCurve = require_initial_curve(model)
     ref = curve.reference_date
     day_count = swaption.day_count
 
@@ -224,8 +228,8 @@ def g2pp_swaption_price(
 
     # Frozen tenor basis: single-curve returns None, a trace-time branch that
     # leaves `float_start = 1.0` and the cash flows untouched.
-    basis = swap_leg_basis(
-        curve, forward_curve, swaption.expiry_date, swaption.fixed_dates
+    basis = model_swap_leg_basis(
+        model, forward_curve, swaption.expiry_date, swaption.fixed_dates
     )
     float_start, cashflows = apply_swap_basis(cashflows, basis)
 

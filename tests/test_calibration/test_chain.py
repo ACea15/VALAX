@@ -98,8 +98,9 @@ class TestCurveLevel:
         """The traceable node solves the same system as bootstrap_curve_graph."""
         chain, quotes = dual_curve_chain()
         cm = calibrate_market(chain, quotes, strict=True)
-        graph, diag = bootstrap_curve_graph(REF, dc_specs(), dc_instruments())
-        assert diag.converged
+        built = bootstrap_curve_graph(REF, dc_specs(), dc_instruments())
+        assert bool(built.converged)
+        graph = built.value
         for cid in (OIS, P3M):
             np.testing.assert_allclose(
                 cm.market.curves[cid].discount_factors,

@@ -13,11 +13,10 @@ Model prices come from the Brigo-Mercurio semi-analytic integral
 (:func:`valax.pricing.analytic.g2pp_swaptions.g2pp_swaption_price`), which is
 implicitly differentiable, so the least-squares Jacobian is exact autodiff.
 
-The default solver is a line-searched ``optimistix.BFGS`` minimiser of the sum
-of squares.  As with :func:`valax.calibration.calibrate_hull_white`, the
-residual closes over a *sequence* of instrument pytrees, which trips
-``optimistix`` 0.1.0's Levenberg-Marquardt (``List arity mismatch``); BFGS is
-damped and robust from a distant start, so it is preferred.
+The default solver is a line-searched BFGS
+(:data:`~valax.calibration.basket.BASKET_SETTINGS`): damped and robust from a
+distant start. Any least-squares method can be selected through
+``settings``.
 
 References:
     Brigo & Mercurio (2006), *Interest Rate Models*, ch. 4 (§4.2).
@@ -30,16 +29,16 @@ from collections.abc import Sequence
 
 import equinox as eqx
 import jax.numpy as jnp
-import optimistix
 from jaxtyping import Float
 from jax import Array
 
-from valax.calibration.transforms import (
-    G2PP_TRANSFORMS,
-    TransformSpec,
-    model_to_unconstrained,
-    unconstrained_to_model,
-)
+from valax.calibration.basket import BASKET_SETTINGS, basket_fit_level
+from valax.calibration.hull_white import JAMSHIDIAN_PROVENANCE
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationResult
+from valax.calibration.settings import SolverSettings
+from valax.calibration.transforms import G2PP_TRANSFORMS
+from valax.pricing.multicurve import with_discount_curve
 from valax.curves.discount import DiscountCurve
 from valax.instruments.rates import Swaption
 from valax.models.g2pp import G2PPModel
@@ -71,57 +70,31 @@ def g2pp_swaption_prices(
     )
 
 
-def _g2pp_price_residuals(
-    raw_params: dict[str, Float[Array, ""]],
-    args: tuple,
-) -> Float[Array, " n_quotes"]:
-    """Weighted price residuals, in the optimistix ``(y, args)`` form.
-
-    Residuals are scaled by the market price by default: swaption prices across
-    an expiry/tenor grid span more than an order of magnitude, so absolute
-    residuals would let the longest-dated quotes dominate the fit.
-    """
-    (
-        transforms, template, swaptions, market_prices, weights, scale,
-        forward_curve,
-    ) = args
-    model = unconstrained_to_model(raw_params, transforms, template)
-    return (
-        weights
-        * (g2pp_swaption_prices(model, swaptions, forward_curve) - market_prices)
-        / scale
-    )
-
-
-def _g2pp_sse(
-    raw_params: dict[str, Float[Array, ""]],
-    args: tuple,
-) -> Float[Array, ""]:
-    """Scalar objective for gradient-based minimisers."""
-    return jnp.sum(_g2pp_price_residuals(raw_params, args) ** 2)
-
-
 def calibrate_g2pp(
     swaptions: Sequence[Swaption],
     market_prices: Float[Array, " n_quotes"],
     curve: DiscountCurve,
+    *,
     initial_guess: G2PPModel | None = None,
     fixed_params: dict[str, Float[Array, ""]] | None = None,
     weights: Float[Array, " n_quotes"] | None = None,
     relative: bool = True,
-    solver: str = "bfgs",
-    max_steps: int = 512,
+    settings: SolverSettings | None = None,
     forward_curve: DiscountCurve | None = None,
     curve_id: str | None = None,
-) -> tuple[G2PPModel, optimistix.Solution]:
+    name: str = "g2pp",
+) -> CalibrationResult:
     r"""Fit G2++ :math:`(a, b, \sigma, \eta, \rho)` to a swaption surface.
 
-    **Single- and dual-curve.** By default this is the single-curve fit it
-    always was, bit-for-bit.  Passing ``forward_curve`` makes ``curve`` the
+    A weighted least-squares level (:func:`~valax.calibration.basket.basket_fit_level`)
+    on Brigo-Mercurio prices: the quotes are the target prices, the curves
+    the upstream input, and any ``fixed_params`` held-fixed inputs whose
+    sensitivities are reported.
+
+    **Single- and dual-curve.** Passing ``forward_curve`` makes ``curve`` the
     *discount* (e.g. OIS) curve and projects the underlying swaps' floating
     legs off the projection curve through the frozen deterministic tenor-basis
-    overlay, matching the MC/PDE engines.  Multi-curve is an upgrade, not a
-    replacement.
+    overlay, matching the MC/PDE engines.
 
     Args:
         swaptions: Swaption contracts, one per market quote.
@@ -129,8 +102,7 @@ def calibrate_g2pp(
             :func:`valax.calibration.swaption_prices_from_vols` to convert
             quoted volatilities.
         curve: Initial discount curve; G2++ is exact-fitted to it, so it is
-            *not* a calibration degree of freedom.  With ``forward_curve`` set
-            this is the *discount* (e.g. OIS) curve.
+            *not* a calibration degree of freedom.
         initial_guess: Starting model.  Defaults to
             :math:`a = 0.5, b = 0.1, \sigma = 0.01, \eta = 0.008,
             \rho = -0.7` (well-separated mean reversions to avoid the
@@ -142,45 +114,32 @@ def calibrate_g2pp(
             surface alone.
         weights: Per-quote residual weights.  Default: uniform.
         relative: Divide each residual by its market price (default).
-        solver: ``"bfgs"`` (default) or ``"gauss_newton"``.
-
-            ``"bfgs"`` minimises the sum of squares with a line search, so it
-            is damped and converges from essentially any starting point.
-            ``"gauss_newton"`` converges quadratically near the solution but is
-            undamped; prefer it only with a good initial guess.
-
-            ``"levenberg_marquardt"`` is deliberately **not** offered: as in
-            :func:`valax.calibration.calibrate_hull_white`, the residual closes
-            over a sequence of instrument pytrees, which trips ``optimistix``
-            0.1.0's Levenberg-Marquardt with a ``List arity mismatch``.
-        max_steps: Maximum optimiser iterations.
+        settings: Solver settings; defaults to
+            :data:`~valax.calibration.basket.BASKET_SETTINGS` (BFGS to 1e-12,
+            here with a 512-step budget).
         forward_curve: Optional projection curve for the underlying swaps'
-            floating legs, applied through the frozen deterministic tenor-basis
-            overlay.  ``None`` (the default) is the single-curve fit,
-            bit-for-bit as before.  Convert your target vols with the same
-            curve pair — see
-            :func:`valax.calibration.swaption_prices_from_vols`.
+            floating legs.  ``None`` (the default) is the single-curve fit.
+            Convert your target vols with the same curve pair.
         curve_id: Optional identifier of the discount curve in the
             :class:`~valax.core.market_state.MarketState` it came from,
-            recorded on the fitted model so the linkage is explicit and
-            :meth:`~valax.models.g2pp.G2PPModel.with_market_curve` can re-bind
-            it under a shocked market.
+            recorded on the fitted model.
+        name: Level name used in diagnostics.
 
     Returns:
-        Tuple of the fitted model and the ``optimistix`` solution carrying
-        convergence diagnostics.
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`~valax.models.g2pp.G2PPModel` is ``result.value`` —
+        curve-free (``initial_curve=None``; see :func:`calibrate_hull_white`).
 
     Raises:
-        ValueError: If ``solver`` is not recognised, if a ``fixed_params`` key
-            is not a G2++ parameter, or if the number of quotes does not match
-            the number of swaptions.
+        ValueError: If a ``fixed_params`` key is not a G2++ parameter, or the
+            number of quotes does not match the number of swaptions.
     """
+    swaptions = tuple(swaptions)
     if len(swaptions) != market_prices.shape[0]:
         raise ValueError(
             f"Got {len(swaptions)} swaptions but "
             f"{market_prices.shape[0]} market prices."
         )
-
     if initial_guess is None:
         initial_guess = G2PPModel(
             mean_reversion_x=jnp.asarray(0.5),
@@ -188,57 +147,32 @@ def calibrate_g2pp(
             volatility_x=jnp.asarray(0.01),
             volatility_y=jnp.asarray(0.008),
             correlation=jnp.asarray(-0.7),
-            initial_curve=curve,
         )
-    else:
-        initial_guess = eqx.tree_at(
-            lambda m: m.initial_curve, initial_guess, curve
-        )
-
-    # ``curve_id`` is a static field, so it is not a pytree leaf and
-    # ``eqx.tree_at`` cannot reach it; rebuild the frozen module instead.
-    if curve_id is not None:
-        initial_guess = dataclasses.replace(initial_guess, curve_id=curve_id)
-
-    transforms: dict[str, TransformSpec] = dict(G2PP_TRANSFORMS)
-    if fixed_params is not None:
-        for name, value in fixed_params.items():
-            if name not in G2PP_TRANSFORMS:
-                raise ValueError(f"Unknown G2++ parameter: {name!r}")
-            initial_guess = eqx.tree_at(
-                lambda m, n=name: getattr(m, n),
-                initial_guess,
-                jnp.asarray(value),
-            )
-            del transforms[name]
-
-    if weights is None:
-        weights = jnp.ones_like(market_prices)
-
-    if relative:
-        scale = jnp.maximum(jnp.abs(market_prices), 1e-8)
-    else:
-        scale = jnp.ones_like(market_prices)
-
-    y0 = model_to_unconstrained(initial_guess, transforms)
-    args = (
-        transforms, initial_guess, tuple(swaptions), market_prices, weights, scale,
-        forward_curve,
+    initial_guess = dataclasses.replace(
+        initial_guess, initial_curve=None,
+        curve_id=initial_guess.curve_id if curve_id is None else curve_id,
     )
+    if settings is None:
+        settings = dataclasses.replace(BASKET_SETTINGS, max_steps=512)
 
-    if solver == "bfgs":
-        opt = optimistix.BFGS(rtol=1e-12, atol=1e-12)
-        sol = optimistix.minimise(
-            _g2pp_sse, opt, y0, args=args, max_steps=max_steps, throw=False,
-        )
-    elif solver == "gauss_newton":
-        opt = optimistix.GaussNewton(rtol=1e-10, atol=1e-10)
-        sol = optimistix.least_squares(
-            _g2pp_price_residuals, opt, y0, args=args, max_steps=max_steps,
-            throw=False,
-        )
-    else:
-        raise ValueError(f"Unknown solver: {solver!r}")
+    def bind(model: G2PPModel, inp: LevelInputs) -> G2PPModel:
+        return with_discount_curve(model, inp.upstream[0])
 
-    fitted = unconstrained_to_model(sol.value, transforms, initial_guess)
-    return fitted, sol
+    def prices(model: G2PPModel, inp: LevelInputs) -> Float[Array, " n"]:
+        return g2pp_swaption_prices(model, swaptions, inp.upstream[1])
+
+    return basket_fit_level(
+        name,
+        quotes=market_prices,
+        upstream=(curve, forward_curve),
+        initial_guess=initial_guess,
+        transforms=G2PP_TRANSFORMS,
+        prices_fn=prices,
+        bind_fn=bind,
+        fixed_params=fixed_params,
+        weights=weights,
+        relative=relative,
+        settings=settings,
+        provenance=JAMSHIDIAN_PROVENANCE,
+        model_label="G2++",
+    )

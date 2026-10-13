@@ -96,13 +96,13 @@ def calibration_setup(request):
 class TestSABRCalibrationAgreement:
 
     def _fit_valax(self, setup):
-        fit, _ = calibrate_sabr(
+        fit = calibrate_sabr(
             strikes=setup["strikes"],
             market_vols=setup["smile_noisy"],
             forward=jnp.array(FORWARD),
             expiry=jnp.array(EXPIRY),
             fixed_beta=setup["truth"].beta,
-        )
+        ).value
         return fit
 
     def _fit_ql(self, setup):

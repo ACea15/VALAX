@@ -12,6 +12,8 @@ Two families are registered:
 * **Model-driven** — the closed forms and the tree: Black-Scholes and
   Heston-COS European, Black-Scholes digital, and the binomial American.
   The model supplies vol / rate / dividend; the market supplies spot.
+* **Short-rate closed forms** — the European swaption under Hull-White
+  (Jamshidian); the model's curve is bound from the market by ``price``.
 * **Model-free** (``model=None``) — instruments priced by curve
   discounting alone: fixed-rate bonds, vanilla and OIS swaps, FRNs.
   These take their discount curve (and optional projection curve) from
@@ -38,14 +40,16 @@ from valax.instruments.options import (
     DigitalOption,
     EuropeanOption,
 )
-from valax.instruments.rates import InterestRateSwap, OISSwap
+from valax.instruments.rates import InterestRateSwap, OISSwap, Swaption
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
+from valax.models.hull_white import HullWhiteModel
 from valax.pricing.analytic.black_scholes import black_scholes_price
 from valax.pricing.analytic.bonds import fixed_rate_bond_price
 from valax.pricing.analytic.digital import digital_option_price
 from valax.pricing.analytic.floating import floating_rate_bond_price, ois_swap_price
 from valax.pricing.analytic.heston import heston_cos_price
+from valax.pricing.analytic.hull_white_swaptions import hw_swaption_price
 from valax.pricing.analytic.swaptions import swap_price
 from valax.pricing.lattice.binomial import BinomialConfig, binomial_price
 
@@ -216,6 +220,28 @@ def _floating_rate_bond(
     )
 
 
+# ── Short-rate closed forms ──────────────────────────────────────────
+
+
+@register_pricer(Swaption, HullWhiteModel, "analytic")
+def _swaption_hw_analytic(
+    *, instrument, model, market, resolved, config, key,
+) -> PricingResult:
+    """European swaption under Hull-White: Jamshidian's decomposition.
+
+    ``price`` has already bound the model's ``initial_curve`` (the discount
+    curve the model is exact-fitted to); the projection curve, if the
+    instrument names one, enters through the frozen tenor-basis overlay.
+    Exact, so it is the default engine — and the one per-trade basket
+    calibrations price their basket with.
+    """
+    del market, config, key
+    return PricingResult(
+        price=hw_swaption_price(instrument, model, resolved.forward_curve),
+        method="analytic",
+    )
+
+
 # ── ``method="auto"`` policy (Q2) ────────────────────────────────────
 #
 # Only pairs whose default differs from the priority order, or whose
@@ -230,3 +256,4 @@ set_auto_method(FixedRateBond, type(None), "analytic")
 set_auto_method(InterestRateSwap, type(None), "analytic")
 set_auto_method(OISSwap, type(None), "analytic")
 set_auto_method(FloatingRateBond, type(None), "analytic")
+set_auto_method(Swaption, HullWhiteModel, "analytic")

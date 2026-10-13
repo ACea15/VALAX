@@ -116,21 +116,26 @@ graph via `optimistix.ImplicitAdjoint`.
 
 ::: valax.curves.bootstrap_curve_graph
 
-`CurveBuildDiagnostics` records both convergence health (`residuals`,
-`max_abs_residual`, `rmse`, `n_steps`, `converged`) and curve
-well-posedness (`jacobian_condition_number`), plus a per-instrument fit
-table (`fitted_quotes` vs `quoted_values`) expressed in each
-instrument's *native quote units* — e.g. rate for `SwapRate`, spread
+`bootstrap_curve_graph` returns a
+[`CalibrationResult`](calibration.md#valax.calibration.result.CalibrationResult)
+whose `.value` is the `CurveGraph`. Convergence health lives in
+`result.diagnostics` (`residuals`, `max_abs_residual`, `rmse`, `n_steps`,
+and a traceable `converged`; `result.check()` raises `CalibrationError`),
+curve well-posedness in `result.condition_number()` (the 2-norm condition
+number of $J = \partial\mathrm{residuals} / \partial\log(\mathrm{DFs})$ at
+the solution; values well above ~1e10 flag ill-posed pillar placement or
+redundant constraints), and `result.labels` names each instrument
+(`"<i>:<Type>"`, from `curve_instrument_labels`). The per-instrument fit
+table compares `result.inputs.quotes` with `fitted_curve_quotes(...)`, both
+in each instrument's *native quote units* — e.g. rate for `SwapRate`, spread
 for `TenorBasisSwap`, `futures_rate` for `MoneyMarketFuture`,
-`quoted_forward` for `FXForward`, `far_rate` for `FXSwap`, `jump_size`
-for `TurnInstrument`. At Newton convergence `fitted_quotes ≈
-quoted_values` to solver tolerance; departures indicate an
-under-determined or ill-conditioned build. The condition number is the
-2-norm of $J^{-1}\|J\|$ where $J = \partial\mathrm{residuals} /
-\partial\log(\mathrm{DFs})$ at the solution; values well above ~1e10
-flag ill-posed pillar placement or redundant constraints.
+`quoted_forward` for `FXForward`, `far_rate` for `FXSwap`, `jump_size` for
+`TurnInstrument`. At convergence they agree to solver tolerance; departures
+indicate an under-determined or ill-conditioned build.
 
-::: valax.curves.CurveBuildDiagnostics
+::: valax.curves.fitted_curve_quotes
+
+::: valax.curves.curve_instrument_labels
 
 `quote_jacobian` is a convenience wrapper around `jax.jacrev` over
 `bootstrap_curve_graph`. Rows are laid out per curve in the order of
@@ -242,26 +247,25 @@ measure the response to a far-rate bump.
 
 ## Multi-curve set
 
-Legacy single-currency `MultiCurveSet` (OIS discount + tenor-keyed
-forwards) plus its bootstrap. Superseded by the joint
-[`bootstrap_curve_graph`](#joint-multi-curve-solver) for new callers;
-still supported for existing code paths.
+Single-currency `MultiCurveSet` (OIS discount + tenor-keyed forwards) is a
+**two-tier view over a `CurveGraph`** — `from_graph` / `to_graph` convert
+between the shapes without copying or re-solving. Build the graph with the
+joint [`bootstrap_curve_graph`](#joint-multi-curve-solver) and wrap it:
 
-Since MC-Curves-2b `MultiCurveSet` is a **two-tier view over a
-`CurveGraph`** — `from_graph` / `to_graph` convert between the shapes
-without copying or re-solving — and `bootstrap_multi_curve` is a thin
-wrapper that solves every curve in **one** joint Newton iteration
-(so `jax.grad` flows through the build via `ImplicitAdjoint`).
+```python
+graph = bootstrap_curve_graph(ref, specs, instruments).check().value
+mcs = MultiCurveSet.from_graph(graph, discount_id="USD.SOFR.OIS",
+                               forward_ids={"3M": "USD.SOFR.3M"})
+```
 
 ::: valax.curves.MultiCurveSet
-
-::: valax.curves.bootstrap_multi_curve
 
 ## Single-curve bootstrap (legacy)
 
 Sequential and simultaneous bootstrap for the single-curve
-`("_default_",)` graph. New callers should prefer
-[`bootstrap_curve_graph`](#joint-multi-curve-solver).
+`("_default_",)` graph. `bootstrap_simultaneous` returns a
+`CalibrationResult` whose `.value` is the `DiscountCurve`. New callers
+should prefer [`bootstrap_curve_graph`](#joint-multi-curve-solver).
 
 ::: valax.curves.bootstrap_sequential
 

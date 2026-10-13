@@ -106,9 +106,9 @@ from valax.pricing.mc.dispatch import (
 )
 from valax.pricing.multicurve import (
     apply_swap_basis,
+    model_swap_leg_basis,
+    model_tenor_basis,
     require_single_curve,
-    swap_leg_basis,
-    tenor_basis,
     with_discount_curve,
 )
 from valax.pricing.mc.lmm_paths import generate_lmm_paths
@@ -988,8 +988,8 @@ def _floating_bond_hw(
     prev_dates, accrual_end = floating_accrual_periods(instrument)
     taus = year_fraction(prev_dates, accrual_end, day_count)
     spread_amounts = instrument.spread * face * taus          # (n_pay,)
-    basis = tenor_basis(
-        model.initial_curve, forward_curve, prev_dates, instrument.payment_dates
+    basis = model_tenor_basis(
+        model, forward_curve, prev_dates, instrument.payment_dates
     )
 
     t_settle = year_fraction(ref, instrument.settlement_date, day_count)
@@ -1339,8 +1339,8 @@ def _floating_bond_g2pp(
     prev_dates, accrual_end = floating_accrual_periods(instrument)
     taus = year_fraction(prev_dates, accrual_end, day_count)
     spread_amounts = instrument.spread * face * taus
-    basis = tenor_basis(
-        model.initial_curve, forward_curve, prev_dates, instrument.payment_dates
+    basis = model_tenor_basis(
+        model, forward_curve, prev_dates, instrument.payment_dates
     )
 
     t_settle = year_fraction(ref, instrument.settlement_date, day_count)
@@ -1415,8 +1415,8 @@ def _swaption_g2pp(
     cashflows = cashflows.at[-1].add(1.0)
     float_start, cashflows = apply_swap_basis(
         cashflows,
-        swap_leg_basis(
-            model.initial_curve,
+        model_swap_leg_basis(
+            model,
             forward_curve,
             instrument.expiry_date,
             instrument.fixed_dates,

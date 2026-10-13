@@ -1,49 +1,30 @@
-"""Heston model calibration to option prices or implied vols.
+"""Heston model calibration to option prices.
 
-Requires a semi-analytic Heston pricer (not yet implemented) or a
-Monte Carlo pricer passed as `pricing_fn`. The pricing function is
-injected to decouple the calibration machinery from the pricing engine.
+The pricing function is injected (a Fourier pricer such as
+:func:`valax.pricing.analytic.heston.cos_pricer`, Monte Carlo, or a neural
+surrogate) so the calibration machinery is decoupled from the pricing engine.
+For a calibration through the :func:`~valax.core.pricing.price` registry,
+bound to a calibrated market, use
+:func:`~valax.calibration.nodes.price_fit_node` instead.
 """
 
 from typing import Callable
 
 import jax
 import jax.numpy as jnp
-import equinox as eqx
-import optimistix
-import optax
 from jaxtyping import Float
 from jax import Array
 
-from valax.models.heston import HestonModel
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationProvenance, CalibrationResult
+from valax.calibration.settings import FIT_SETTINGS, SolverSettings
+from valax.calibration.solve import solve_level
 from valax.calibration.transforms import (
     HESTON_TRANSFORMS,
     model_to_unconstrained,
     unconstrained_to_model,
 )
-
-
-def _heston_price_residuals(
-    raw_params: dict[str, Float[Array, ""]],
-    args: tuple,
-) -> Float[Array, " n"]:
-    """Residuals in price space for Heston calibration."""
-    (transforms, template, pricing_fn,
-     strikes, market_prices, spot, rate, dividend, expiry, weights) = args
-    model = unconstrained_to_model(raw_params, transforms, template)
-    model_prices = jax.vmap(
-        lambda K: pricing_fn(model, K, spot, rate, dividend, expiry)
-    )(strikes)
-    return weights * (model_prices - market_prices)
-
-
-def _heston_price_sse(
-    raw_params: dict[str, Float[Array, ""]],
-    args: tuple,
-) -> Float[Array, ""]:
-    """Scalar SSE loss for Heston calibration."""
-    residuals = _heston_price_residuals(raw_params, args)
-    return jnp.sum(residuals ** 2)
+from valax.models.heston import HestonModel
 
 
 def _default_heston_guess(
@@ -70,12 +51,19 @@ def calibrate_heston(
     dividend: Float[Array, ""],
     expiry: Float[Array, ""],
     pricing_fn: Callable,
+    *,
     initial_guess: HestonModel | None = None,
     weights: Float[Array, " n"] | None = None,
-    solver: str = "levenberg_marquardt",
-    max_steps: int = 512,
-) -> tuple[HestonModel, optimistix.Solution]:
+    settings: SolverSettings | None = None,
+    provenance: CalibrationProvenance | None = None,
+    name: str = "heston",
+) -> CalibrationResult:
     """Calibrate Heston parameters to option prices.
+
+    A weighted least-squares level on ``w * (pricing_fn(...) - price)``. The
+    quotes are the market prices; spot, rate, dividend, expiry, strikes and
+    weights are held-fixed inputs, so the level adjoint reports their
+    sensitivities alongside the quote ones.
 
     Args:
         strikes: Option strikes.
@@ -89,45 +77,65 @@ def calibrate_heston(
             Can be a semi-analytic pricer, Monte Carlo, or a neural surrogate.
         initial_guess: Starting HestonModel. If None, uses a heuristic.
         weights: Per-strike weights. Default: uniform.
-        solver: ``"levenberg_marquardt"`` (default), ``"bfgs"``, or
-            ``"optax_adam"``.
-        max_steps: Maximum optimizer iterations.
+        settings: Solver settings; defaults to
+            :data:`~valax.calibration.settings.FIT_SETTINGS`.
+        provenance: The engine ``pricing_fn`` implements, recorded on the
+            result (e.g. ``CalibrationProvenance("cos", "discretised")``).
+        name: Level name used in diagnostics.
 
     Returns:
-        (fitted_model, solution) — the fitted HestonModel and the
-        optimistix Solution with convergence diagnostics.
-    """
-    if initial_guess is None:
-        initial_guess = _default_heston_guess(rate, dividend)
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`~valax.models.heston.HestonModel` is ``result.value``.
 
+    Raises:
+        ValueError: If ``settings.method`` is not a least-squares method.
+    """
+    settings = FIT_SETTINGS if settings is None else settings
+    strikes = jnp.asarray(strikes, dtype=jnp.float64)
+    inputs = LevelInputs(
+        quotes=jnp.asarray(market_prices, dtype=jnp.float64),
+        fixed={
+            "spot": jnp.asarray(spot, dtype=jnp.float64),
+            "rate": jnp.asarray(rate, dtype=jnp.float64),
+            "dividend": jnp.asarray(dividend, dtype=jnp.float64),
+            "expiry": jnp.asarray(expiry, dtype=jnp.float64),
+            "strikes": strikes,
+            "weights": jnp.ones_like(strikes) if weights is None
+            else jnp.asarray(weights, dtype=jnp.float64),
+        },
+    )
+    if initial_guess is None:
+        initial_guess = _default_heston_guess(
+            inputs.fixed["rate"], inputs.fixed["dividend"]
+        )
     transforms = dict(HESTON_TRANSFORMS)
 
-    if weights is None:
-        weights = jnp.ones_like(strikes)
+    def assemble(theta: dict, inp: LevelInputs) -> HestonModel:
+        fx = inp.fixed
+        template = HestonModel(
+            v0=initial_guess.v0, kappa=initial_guess.kappa,
+            theta=initial_guess.theta, xi=initial_guess.xi,
+            rho=initial_guess.rho, rate=fx["rate"], dividend=fx["dividend"],
+        )
+        return unconstrained_to_model(theta, transforms, template)
 
-    y0 = model_to_unconstrained(initial_guess, transforms)
-    args = (transforms, initial_guess, pricing_fn,
-            strikes, market_prices, spot, rate, dividend, expiry, weights)
+    def residual(theta: dict, inp: LevelInputs) -> Float[Array, " n"]:
+        model = assemble(theta, inp)
+        fx = inp.fixed
+        model_prices = jax.vmap(
+            lambda k: pricing_fn(
+                model, k, fx["spot"], fx["rate"], fx["dividend"], fx["expiry"]
+            )
+        )(fx["strikes"])
+        return fx["weights"] * (model_prices - inp.quotes)
 
-    if solver == "levenberg_marquardt":
-        opt = optimistix.LevenbergMarquardt(rtol=1e-8, atol=1e-8)
-        sol = optimistix.least_squares(
-            _heston_price_residuals, opt, y0, args=args, max_steps=max_steps,
-        )
-    elif solver == "bfgs":
-        opt = optimistix.BFGS(rtol=1e-8, atol=1e-8)
-        sol = optimistix.minimise(
-            _heston_price_sse, opt, y0, args=args, max_steps=max_steps,
-        )
-    elif solver == "optax_adam":
-        opt = optimistix.OptaxMinimiser(
-            optax.adam(1e-3), rtol=1e-6, atol=1e-6,
-        )
-        sol = optimistix.minimise(
-            _heston_price_sse, opt, y0, args=args, max_steps=max_steps,
-        )
-    else:
-        raise ValueError(f"Unknown solver: {solver!r}")
+    theta0 = jax.lax.stop_gradient(
+        model_to_unconstrained(initial_guess, transforms)
+    )
+    return solve_level(
+        name, "least_squares", residual, theta0, inputs, assemble, settings,
+        provenance=provenance,
+    )
 
-    fitted_model = unconstrained_to_model(sol.value, transforms, initial_guess)
-    return fitted_model, sol
+
+__all__ = ["calibrate_heston"]

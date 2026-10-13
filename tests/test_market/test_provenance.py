@@ -208,7 +208,7 @@ class TestProvenanceIsNotDifferentiated:
         every snapshot by definition. The separation is the point, so
         it is pinned.
         """
-        graph, _ = bootstrap_curve_graph(REF, [spec], instruments)
+        graph = bootstrap_curve_graph(REF, [spec], instruments).value
         market = MarketState(curves=graph)
         assert not hasattr(market, "provenance")
 
@@ -220,7 +220,7 @@ class TestProvenanceIsNotDifferentiated:
         The practical statement of Q-5: pairing the record with the
         market for reporting must not change what ``jax.grad`` sees.
         """
-        graph, _ = bootstrap_curve_graph(REF, [spec], instruments)
+        graph = bootstrap_curve_graph(REF, [spec], instruments).value
         market = MarketState(curves=graph)
         alone = jax.tree_util.tree_leaves(market)
         paired = jax.tree_util.tree_leaves((market, provenance))
@@ -236,8 +236,9 @@ class TestLabellingQuoteAdjoints:
 
     @pytest.fixture(scope="class")
     def quote_deltas(self, spec, instruments):
-        graph, diagnostics = bootstrap_curve_graph(REF, [spec], instruments)
-        assert diagnostics.converged
+        res = bootstrap_curve_graph(REF, [spec], instruments)
+        assert bool(res.converged)
+        graph = res.value
         market = MarketState(curves=graph)
         trade = InterestRateSwap(
             start_date=REF,
@@ -292,8 +293,9 @@ class TestLabellingQuoteAdjoints:
         )}
         new_ids = tuple(ids[id(obj)] for obj in reordered)
 
-        graph, diagnostics = bootstrap_curve_graph(REF, [spec], reordered)
-        assert diagnostics.converged
+        res = bootstrap_curve_graph(REF, [spec], reordered)
+        assert bool(res.converged)
+        graph = res.value
         market = MarketState(curves=graph)
         trade = InterestRateSwap(
             start_date=REF,

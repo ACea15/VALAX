@@ -143,6 +143,32 @@ Three properties worth knowing:
   book of mixed expiries uses different rates — correct per trade, but not
   a term-structure model.
 
+### Curve fields: exact-fit short-rate models
+
+Hull–White, G2++ and Cheyette (1F/2F) are bound to a whole *curve*, not a
+scalar. Their `initial_curve` field defaults to `None` and the static
+`curve_id` optionally pins which market curve fills it (else the
+instrument's discount curve). `curve_requirements` declares the
+`{model_field: curve_id}` contract per model type (a `singledispatch`
+extension point); `price()` fills every declared field from the
+`MarketState` and **refuses a model that arrives pre-bound** (`ValueError`),
+so the market is the single source of truth for curve risk. Calibrators
+return curve-free models for exactly this reason.
+
+```python
+hw = calibrate_hull_white(swaptions, prices, curve).check().value  # curve-free
+pv = price(bermudan, hw, market)                # binds initial_curve from market
+
+# Kernel-level calls (hw_bond_price, hw_swaption_price, PDE/MC recipes,
+# tree builders) need a bound model:
+bound = bind_curves(hw, curve)                  # or bind_curves(hw, market, trade)
+pv_kernel = hw_swaption_price(swaption, bound)
+```
+
+::: valax.core.binding.curve_requirements
+
+::: valax.core.binding.bind_curves
+
 ::: valax.core.binding.bind_model
 
 ::: valax.core.binding.project_rate

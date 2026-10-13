@@ -187,15 +187,17 @@ def test_g2pp_swaption_no_curves_equals_model_curve(g2pp, payer):
     assert float(explicit.price) == float(plain.price)
 
 
-# ── 2. Discounting: the model is re-fitted to the discount curve ──────
+# ── 2. Discounting: an unbound model is fitted to the discount curve ──
 
 
 def test_hw_bond_honours_a_distinct_discount_curve(hw, projection, ref_date):
     """An option-free bond must reprice off whatever curve it discounts on.
 
-    The bond carries no model risk, so this isolates the re-fitting step: the
-    PDE price on ``projection`` has to match the analytic curve price on
-    ``projection``, not the one on the model's embedded OIS curve.
+    The bond carries no model risk, so this isolates the binding step: an
+    *unbound* model handed ``discount_curve=projection`` is fitted to it, and
+    the PDE price has to match the analytic curve price on ``projection``,
+    not the one on the OIS curve the bound ``hw`` fixture carries.  (A bound
+    model's curve is the truth and is never re-fitted.)
     """
     bond = FixedRateBond(
         payment_dates=generate_schedule(2025, 1, 1, 2030, 1, 1, frequency=2).payment_dates,
@@ -204,7 +206,10 @@ def test_hw_bond_honours_a_distinct_discount_curve(hw, projection, ref_date):
         face_value=jnp.array(100.0),
         frequency=2,
     )
-    result = pde_price_dispatch(bond, hw, _CONFIG, discount_curve=projection)
+    unbound = HullWhiteModel(
+        mean_reversion=hw.mean_reversion, volatility=hw.volatility,
+    )
+    result = pde_price_dispatch(bond, unbound, _CONFIG, discount_curve=projection)
     expected = float(fixed_rate_bond_price(bond, projection))
     assert float(result.price) == pytest.approx(expected, abs=1e-4)
 

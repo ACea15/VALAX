@@ -70,12 +70,16 @@ References:
 
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
-import optimistix as optx
 from jaxtyping import Float
 from jax import Array
 
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationResult
+from valax.calibration.settings import SolverSettings
+from valax.calibration.solve import solve_level
 from valax.curves.discount import DiscountCurve
 from valax.curves.graph import CurveGraph
 from valax.dates.daycounts import year_fraction
@@ -286,14 +290,15 @@ def swaption_implied_normal_vol(
     freq: int | None = None,
     settlement_date: Float[Array, ""] | None = None,
     initial_vol: Float[Array, ""] | float | None = None,
-    rtol: float = 1e-12,
-    atol: float = 1e-12,
-    max_steps: int = 100,
-) -> Float[Array, ""]:
+    settings: SolverSettings | None = None,
+    name: str = "swaption_implied_normal_vol",
+) -> CalibrationResult:
     r"""Normal (Bachelier) volatility implied by a quoted swaption premium.
 
-    Solves :func:`swaption_premium_residual` for :math:`\sigma_N` with a scalar
-    ``optimistix.Newton``. The solve is implicitly differentiated, so
+    Solves :func:`swaption_premium_residual` for :math:`\sigma_N` as a scalar
+    root level (Newton by default). The premium is the level's quote and the
+    curves its upstream input, so the level adjoint and the solve's implicit
+    differentiation both give
 
     * ``jax.grad`` w.r.t. ``premium`` gives the reciprocal vega, and
     * ``jax.grad`` w.r.t. the curves' pillars gives the curve sensitivity of
@@ -328,20 +333,35 @@ def swaption_implied_normal_vol(
             schedule when omitted.
         settlement_date: Cash-settlement date; defaults to the expiry.
         initial_vol: Override for the first Newton iterate.
-        rtol: Relative tolerance of the root-find.
-        atol: Absolute tolerance of the root-find.
-        max_steps: Maximum Newton steps.
+        settings: Solver settings; defaults to :data:`INVERSION_SETTINGS`
+            (Newton to 1e-12, 100 steps).
+        name: Level name used in diagnostics.
 
     Returns:
-        The normal volatility that reprices ``premium``.
+        The :class:`~valax.calibration.result.CalibrationResult`; the normal
+        volatility that reprices ``premium`` is ``result.value``.
 
     Raises:
         ValueError: If ``settlement`` is not in :data:`SETTLEMENTS`.
     """
-    forward, numeraire, expiry = swaption_forward_and_numeraire(
-        swaption, curve, forward_curve,
-        settlement=settlement, freq=freq, settlement_date=settlement_date,
+    settings = INVERSION_SETTINGS if settings is None else settings
+    if settlement == "cash" and freq is None:
+        # A convention, resolved once pre-trace: inside the solve the
+        # schedule is closure-converted into traced arguments.
+        freq = _infer_freq(swaption)
+
+    def anchors(inputs: LevelInputs):
+        disc, fwd = inputs.upstream
+        return swaption_forward_and_numeraire(
+            swaption, disc, fwd,
+            settlement=settlement, freq=freq, settlement_date=settlement_date,
+        )
+
+    inputs = LevelInputs(
+        quotes=jnp.asarray(premium, dtype=jnp.float64),
+        upstream=(curve, forward_curve),
     )
+    forward, numeraire, expiry = anchors(inputs)
 
     if initial_vol is not None:
         guess = jnp.asarray(initial_vol, dtype=float)
@@ -356,20 +376,19 @@ def swaption_implied_normal_vol(
             _MIN_VOL_GUESS,
         )
 
-    def residual(sigma: Float[Array, ""], _: None) -> Float[Array, ""]:
-        model = swaption_bachelier_from_forward(
-            swaption, forward, numeraire, sigma, expiry
-        )
-        return model - premium
+    def residual(sigma: Float[Array, ""], inp: LevelInputs) -> Float[Array, " 1"]:
+        fwd, num, t = anchors(inp)
+        model = swaption_bachelier_from_forward(swaption, fwd, num, sigma, t)
+        return jnp.reshape(model - inp.quotes, (1,))
 
-    sol = optx.root_find(
-        residual,
-        optx.Newton(rtol=rtol, atol=atol),
-        guess,
-        max_steps=max_steps,
-        throw=False,
+    return solve_level(
+        name, "root",
+        lambda th, inp: residual(th[0], inp),
+        jnp.reshape(jax.lax.stop_gradient(guess), (1,)),
+        inputs,
+        lambda th, _inp: th[0],
+        settings,
     )
-    return sol.value
 
 
 def swaption_implied_normal_vol_from_graph(
@@ -379,7 +398,7 @@ def swaption_implied_normal_vol_from_graph(
     discount_id: str,
     forward_id: str | None = None,
     **kwargs: Any,
-) -> Float[Array, ""]:
+) -> CalibrationResult:
     """:func:`swaption_implied_normal_vol` resolved on a curve graph.
 
     Args:
@@ -391,7 +410,8 @@ def swaption_implied_normal_vol_from_graph(
         **kwargs: Forwarded to :func:`swaption_implied_normal_vol`.
 
     Returns:
-        The normal volatility that reprices ``premium``.
+        The :class:`~valax.calibration.result.CalibrationResult` of the
+        inversion.
     """
     discount_curve = graph[discount_id]
     forward_curve = None if forward_id is None else graph[forward_id]
@@ -400,7 +420,14 @@ def swaption_implied_normal_vol_from_graph(
     )
 
 
+#: Default settings of the premium → vol inversion: Newton to 1e-12.
+INVERSION_SETTINGS = SolverSettings(
+    method="newton", rtol=1e-12, atol=1e-12, max_steps=100
+)
+
+
 __all__ = [
+    "INVERSION_SETTINGS",
     "SETTLEMENTS",
     "swaption_forward_and_numeraire",
     "swaption_implied_normal_vol",

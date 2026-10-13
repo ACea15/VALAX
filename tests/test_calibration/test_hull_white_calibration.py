@@ -16,11 +16,19 @@ import equinox as eqx
 import jax.numpy as jnp
 import pytest
 
+from valax.calibration import (
+    JAMSHIDIAN_PROVENANCE,
+    CalibrationError,
+    CalibrationResult,
+    SolverSettings,
+    check_engine,
+)
 from valax.calibration.hull_white import (
     calibrate_hull_white,
     hw_swaption_prices,
     swaption_prices_from_vols,
 )
+from valax.core.binding import bind_curves
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.instruments.rates import Swaption
@@ -98,9 +106,9 @@ def synthetic_prices(true_model, swaptions):
 # ── Round-trip recovery ───────────────────────────────────────────────
 
 class TestSyntheticRoundTrip:
-    @pytest.mark.parametrize("solver", ["gauss_newton", "bfgs"])
+    @pytest.mark.parametrize("method", ["gauss_newton", "bfgs"])
     def test_recovers_both_parameters(
-        self, swaptions, synthetic_prices, curve, solver
+        self, swaptions, synthetic_prices, curve, method
     ):
         """Both solvers must return to the generating (a, sigma)."""
         start = HullWhiteModel(
@@ -108,15 +116,18 @@ class TestSyntheticRoundTrip:
             volatility=jnp.asarray(0.008),
             initial_curve=curve,
         )
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             swaptions, synthetic_prices, curve,
-            initial_guess=start, solver=solver,
-        )
+            initial_guess=start,
+            settings=SolverSettings(method=method, rtol=1e-12, atol=1e-12),
+        ).value
         assert float(fitted.mean_reversion) == pytest.approx(_TRUE_A, rel=1e-5)
         assert float(fitted.volatility) == pytest.approx(_TRUE_SIGMA, rel=1e-5)
 
     def test_residuals_vanish(self, swaptions, synthetic_prices, curve):
-        fitted, _ = calibrate_hull_white(swaptions, synthetic_prices, curve)
+        fitted = bind_curves(
+            calibrate_hull_white(swaptions, synthetic_prices, curve).value, curve
+        )
         residual = hw_swaption_prices(fitted, swaptions) - synthetic_prices
         # Prices are O(1e4); 1e-6 absolute is ~1e-10 relative.
         assert float(jnp.max(jnp.abs(residual))) < 1e-6
@@ -125,10 +136,10 @@ class TestSyntheticRoundTrip:
         self, swaptions, synthetic_prices, curve
     ):
         """The recommended desk workflow: fix `a`, fit `sigma`."""
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             swaptions, synthetic_prices, curve,
             fixed_mean_reversion=jnp.asarray(_TRUE_A),
-        )
+        ).value
         assert float(fitted.mean_reversion) == pytest.approx(_TRUE_A, rel=1e-12)
         assert float(fitted.volatility) == pytest.approx(_TRUE_SIGMA, rel=1e-5)
 
@@ -144,9 +155,9 @@ class TestSyntheticRoundTrip:
             volatility=jnp.asarray(s0),
             initial_curve=curve,
         )
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             swaptions, synthetic_prices, curve, initial_guess=guess
-        )
+        ).value
         assert float(fitted.mean_reversion) == pytest.approx(_TRUE_A, rel=1e-4)
         assert float(fitted.volatility) == pytest.approx(_TRUE_SIGMA, rel=1e-4)
 
@@ -159,9 +170,9 @@ class TestSyntheticRoundTrip:
             volatility=jnp.asarray(0.0001),
             initial_curve=curve,
         )
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             swaptions, synthetic_prices, curve, initial_guess=guess
-        )
+        ).value
         assert float(fitted.mean_reversion) > 0.0
         assert float(fitted.volatility) > 0.0
 
@@ -182,22 +193,22 @@ class TestOneFactorLimits:
         market_vols = jnp.full((len(swaptions),), 0.25)
         market_prices = swaption_prices_from_vols(swaptions, curve, market_vols)
 
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             swaptions, market_prices, curve,
             fixed_mean_reversion=jnp.asarray(0.05),
-        )
-        rel = (hw_swaption_prices(fitted, swaptions) - market_prices) / market_prices
+        ).value
+        rel = (
+            hw_swaption_prices(bind_curves(fitted, curve), swaptions) - market_prices
+        ) / market_prices
         rms = float(jnp.sqrt(jnp.mean(rel ** 2)))
         assert 0.01 < rms < 0.5, f"expected a visible but bounded misfit, got {rms}"
 
     def test_curve_is_not_a_calibration_degree_of_freedom(
         self, swaptions, synthetic_prices, curve
     ):
-        """The fitted model keeps the supplied curve verbatim (exact-fit)."""
-        fitted, _ = calibrate_hull_white(swaptions, synthetic_prices, curve)
-        assert jnp.allclose(
-            fitted.initial_curve.discount_factors, curve.discount_factors
-        )
+        """The fitted model is curve-free: the curve is market data, not a DOF."""
+        fitted = calibrate_hull_white(swaptions, synthetic_prices, curve).value
+        assert fitted.initial_curve is None
 
 
 # ── API contract ──────────────────────────────────────────────────────
@@ -208,10 +219,34 @@ class TestAPI:
             calibrate_hull_white(swaptions, jnp.ones(3), curve)
 
     def test_rejects_unknown_solver(self, swaptions, synthetic_prices, curve):
-        with pytest.raises(ValueError, match="Unknown solver"):
+        with pytest.raises(ValueError, match="not available"):
             calibrate_hull_white(
-                swaptions, synthetic_prices, curve, solver="nelder_mead"
+                swaptions, synthetic_prices, curve,
+                settings=SolverSettings(method="nelder_mead"),
             )
+
+    def test_result_contract_and_provenance(
+        self, curve, swaptions, synthetic_prices
+    ):
+        res = calibrate_hull_white(swaptions, synthetic_prices, curve).check()
+        assert isinstance(res, CalibrationResult)
+        assert res.provenance == JAMSHIDIAN_PROVENANCE
+        assert res.provenance.engine_kind == "exact"
+        # Exact engine: the parameters are portable to any engine.
+        assert check_engine(res, "pde") is res
+
+    def test_unconvergeable_fit_is_reported(
+        self, curve, swaptions, synthetic_prices
+    ):
+        """Anti-vacuity: the calibrator used to return an unconverged BFGS
+        solution unchecked (``throw=False``); now the failure is reported."""
+        res = calibrate_hull_white(
+            swaptions, synthetic_prices, curve,
+            settings=SolverSettings(method="bfgs", max_steps=2),
+        )
+        assert not bool(res.converged)
+        with pytest.raises(CalibrationError, match="hull_white"):
+            res.check()
 
     def test_vols_to_prices_roundtrip(self, swaptions, curve):
         """`swaption_prices_from_vols` must agree with the Black-76 pricer."""

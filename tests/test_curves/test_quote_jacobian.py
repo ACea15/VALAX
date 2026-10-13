@@ -107,9 +107,9 @@ class TestFiniteDifferenceAgreement:
                     )
                     for i in range(n)
                 ]
-                graph, _ = bootstrap_curve_graph(
+                graph = bootstrap_curve_graph(
                     REF, [spec], bumped_deps,
-                )
+                ).value
                 dfs = np.asarray(graph["USD.SOFR.OIS"].discount_factors[1:])
                 if sgn == +1:
                     plus = dfs
@@ -150,7 +150,7 @@ class TestBySwitch:
         spec, deps, _ = _deposit_strip()
         J_log = np.asarray(quote_jacobian(REF, [spec], deps, by="log_df"))
         J_df = np.asarray(quote_jacobian(REF, [spec], deps, by="df"))
-        graph, _ = bootstrap_curve_graph(REF, [spec], deps)
+        graph = bootstrap_curve_graph(REF, [spec], deps).value
         pillar_dfs = np.asarray(graph["USD.SOFR.OIS"].discount_factors[1:])
         assert np.allclose(
             J_df, pillar_dfs[:, None] * J_log, rtol=1e-8, atol=1e-12,
@@ -193,13 +193,13 @@ def _fd_column(build_instruments, base_rate, k_col_pillar_count, eps=1e-6):
     equal to ``d(DF_pillar) / d(rate)`` per pillar.
     """
     specs_p, insts_p = build_instruments(base_rate + eps)
-    graph_p, _ = bootstrap_curve_graph(REF, specs_p, insts_p)
+    graph_p = bootstrap_curve_graph(REF, specs_p, insts_p).value
     dfs_p = jnp.concatenate(
         [graph_p[s.curve_id].discount_factors[1:] for s in specs_p]
     )
 
     specs_m, insts_m = build_instruments(base_rate - eps)
-    graph_m, _ = bootstrap_curve_graph(REF, specs_m, insts_m)
+    graph_m = bootstrap_curve_graph(REF, specs_m, insts_m).value
     dfs_m = jnp.concatenate(
         [graph_m[s.curve_id].discount_factors[1:] for s in specs_m]
     )

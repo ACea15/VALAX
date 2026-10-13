@@ -497,15 +497,14 @@ class TestShadowedShockGuard:
         """Hull-White reads the market curve, so its shocks are not shadowed.
 
         Verified behaviourally as well as structurally: the HW price moves
-        under a curve shock *without* ``with_market_curve`` being called,
-        because the recipe takes ``discount_curve`` from the market. The
-        embedded ``initial_curve`` is vestigial in the price path.
+        under a curve shock because the model is curve-free and ``price()``
+        binds its ``initial_curve`` from the (shocked) market.
         """
         state = MarketState(
             curves=CurveGraph(curves={"_default_": flat_curve}),
         )
-        hw = HullWhiteModel.from_market(
-            state, mean_reversion=jnp.array(0.03), volatility=jnp.array(0.01),
+        hw = HullWhiteModel(
+            mean_reversion=jnp.array(0.03), volatility=jnp.array(0.01),
         )
         bonds = FixedRateBond(
             payment_dates=jnp.tile(PILLARS[1:3], (2, 1)),

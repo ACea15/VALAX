@@ -19,10 +19,18 @@ SVI is popular for equity surfaces because:
 import jax
 import jax.numpy as jnp
 import equinox as eqx
-import optimistix
 from jaxtyping import Float
 from jax import Array
 
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationResult
+from valax.calibration.settings import FIT_SETTINGS, SolverSettings
+from valax.calibration.solve import (
+    period_labels,
+    solve_batched_level,
+    solve_level,
+    stack_slices,
+)
 from valax.calibration.transforms import (
     TransformSpec,
     positive,
@@ -201,16 +209,67 @@ class SVIVolSurface(eqx.Module):
         return jnp.maximum(w, 1e-10)
 
 
+def _svi_guess(
+    market_vols: Float[Array, " n"],
+    expiry: Float[Array, ""],
+) -> SVISlice:
+    """Heuristic SVI seed: flat at the median total variance."""
+    atm_var = jnp.median(market_vols) ** 2 * expiry
+    return SVISlice(
+        a=atm_var,
+        b=jnp.array(0.1),
+        rho=jnp.array(-0.2),
+        m=jnp.array(0.0),
+        sigma=jnp.array(0.1),
+    )
+
+
+def _svi_assemble(theta: dict, _inputs: LevelInputs) -> SVISlice:
+    """Unconstrained parameters -> :class:`SVISlice`."""
+    template = SVISlice(
+        a=jnp.asarray(0.0), b=jnp.asarray(0.0), rho=jnp.asarray(0.0),
+        m=jnp.asarray(0.0), sigma=jnp.asarray(0.0),
+    )
+    return unconstrained_to_model(theta, SVI_TRANSFORMS, template)
+
+
+def svi_slice_residual(theta: dict, inputs: LevelInputs) -> Float[Array, " n"]:
+    """Weighted vol residual of one SVI slice.
+
+    ``inputs.quotes`` are the market vols; ``inputs.fixed`` carries
+    ``forward``, ``expiry``, ``strikes`` and ``weights``.
+
+    Args:
+        theta: Unconstrained SVI parameters.
+        inputs: The slice's level inputs.
+
+    Returns:
+        ``weights * (svi_vol - market_vol)``.
+    """
+    params = _svi_assemble(theta, inputs)
+    fx = inputs.fixed
+    model_vols = jax.vmap(
+        lambda k: svi_implied_vol(params, fx["forward"], k, fx["expiry"])
+    )(fx["strikes"])
+    return fx["weights"] * (model_vols - inputs.quotes)
+
+
 def calibrate_svi_slice(
     strikes: Float[Array, " n"],
     market_vols: Float[Array, " n"],
     forward: Float[Array, ""],
     expiry: Float[Array, ""],
+    *,
     initial_guess: SVISlice | None = None,
     weights: Float[Array, " n"] | None = None,
-    max_steps: int = 256,
-) -> tuple[SVISlice, optimistix.Solution]:
+    settings: SolverSettings | None = None,
+    name: str = "svi",
+) -> CalibrationResult:
     """Calibrate SVI parameters to a single smile.
+
+    A weighted least-squares level in implied-vol space (unconstrained raw
+    SVI parameters, see ``SVI_TRANSFORMS``). Non-arbitrage constraints are
+    not imposed here.
 
     Args:
         strikes: Strike grid.
@@ -219,41 +278,35 @@ def calibrate_svi_slice(
         expiry: Time to expiry.
         initial_guess: Starting SVI parameters. If None, uses heuristic.
         weights: Per-strike weights.
-        max_steps: Max optimizer iterations.
+        settings: Solver settings; defaults to
+            :data:`~valax.calibration.settings.FIT_SETTINGS`.
+        name: Level name used in diagnostics.
 
     Returns:
-        (fitted_params, solution).
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`SVISlice` is ``result.value``.
     """
-    if weights is None:
-        weights = jnp.ones_like(strikes)
-
+    settings = FIT_SETTINGS if settings is None else settings
+    strikes = jnp.asarray(strikes, dtype=jnp.float64)
+    inputs = LevelInputs(
+        quotes=jnp.asarray(market_vols, dtype=jnp.float64),
+        fixed={
+            "forward": jnp.asarray(forward, dtype=jnp.float64),
+            "expiry": jnp.asarray(expiry, dtype=jnp.float64),
+            "strikes": strikes,
+            "weights": jnp.ones_like(strikes) if weights is None
+            else jnp.asarray(weights, dtype=jnp.float64),
+        },
+    )
     if initial_guess is None:
-        atm_var = jnp.median(market_vols) ** 2 * expiry
-        initial_guess = SVISlice(
-            a=atm_var,
-            b=jnp.array(0.1),
-            rho=jnp.array(-0.2),
-            m=jnp.array(0.0),
-            sigma=jnp.array(0.1),
-        )
-
-    transforms = dict(SVI_TRANSFORMS)
-    y0 = model_to_unconstrained(initial_guess, transforms)
-
-    def residuals(raw_params, args):
-        transforms_, template, fwd, exp, ks, mkt_vols, ws = args
-        params = unconstrained_to_model(raw_params, transforms_, template)
-        model_vols = jax.vmap(
-            lambda K: svi_implied_vol(params, fwd, K, exp)
-        )(ks)
-        return ws * (model_vols - mkt_vols)
-
-    args = (transforms, initial_guess, forward, expiry, strikes, market_vols, weights)
-    opt = optimistix.LevenbergMarquardt(rtol=1e-8, atol=1e-8)
-    sol = optimistix.least_squares(residuals, opt, y0, args=args, max_steps=max_steps)
-
-    fitted = unconstrained_to_model(sol.value, transforms, initial_guess)
-    return fitted, sol
+        initial_guess = _svi_guess(inputs.quotes, inputs.fixed["expiry"])
+    theta0 = jax.lax.stop_gradient(
+        model_to_unconstrained(initial_guess, SVI_TRANSFORMS)
+    )
+    return solve_level(
+        name, "least_squares", svi_slice_residual, theta0, inputs,
+        _svi_assemble, settings,
+    )
 
 
 def calibrate_svi_surface(
@@ -261,43 +314,64 @@ def calibrate_svi_surface(
     market_vols_per_expiry: list[Float[Array, " n_k"]],
     forwards: Float[Array, " n_expiries"],
     expiries: Float[Array, " n_expiries"],
-    max_steps: int = 256,
-) -> SVIVolSurface:
+    *,
+    weights_per_expiry: list[Float[Array, " n_k"]] | None = None,
+    settings: SolverSettings | None = None,
+    name: str = "svi_surface",
+) -> CalibrationResult:
     """Calibrate an SVI surface by fitting each expiry slice independently.
+
+    One batched level (:func:`~valax.calibration.solve.solve_batched_level`):
+    the slices are solved separately but in one ``vmap``, each reports its
+    own convergence, and a failed slice is named by expiry in
+    ``result.check()``. Ragged strike grids are padded with zero-weight
+    entries (:func:`~valax.calibration.solve.stack_slices`).
 
     Args:
         strikes_per_expiry: List of strike arrays, one per expiry.
         market_vols_per_expiry: List of observed vol arrays, one per expiry.
         forwards: Forward price at each expiry.
         expiries: Expiry grid (year fractions).
-        max_steps: Max iterations per slice.
+        weights_per_expiry: Optional per-strike weights, one array per expiry.
+        settings: Solver settings shared by every slice; defaults to
+            :data:`~valax.calibration.settings.FIT_SETTINGS`.
+        name: Level name used in diagnostics.
 
     Returns:
-        A fitted ``SVIVolSurface``.
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`SVIVolSurface` is ``result.value``.
     """
-    n = len(expiries)
-    a_list, b_list, rho_list, m_list, sigma_list = [], [], [], [], []
+    settings = FIT_SETTINGS if settings is None else settings
+    strikes, vols, weights = stack_slices(
+        strikes_per_expiry, market_vols_per_expiry, weights_per_expiry
+    )
+    expiries = jnp.asarray(expiries, dtype=jnp.float64)
+    forwards = jnp.asarray(forwards, dtype=jnp.float64)
+    inputs = LevelInputs(
+        quotes=vols,
+        fixed={
+            "forward": forwards, "expiry": expiries,
+            "strikes": strikes, "weights": weights,
+        },
+    )
 
-    for i in range(n):
-        params, _ = calibrate_svi_slice(
-            strikes=strikes_per_expiry[i],
-            market_vols=market_vols_per_expiry[i],
-            forward=forwards[i],
-            expiry=expiries[i],
-            max_steps=max_steps,
+    def node_inputs(inp: LevelInputs) -> LevelInputs:
+        return inp
+
+    def assemble(theta: dict, inp: LevelInputs) -> SVIVolSurface:
+        p = jax.vmap(lambda t: _svi_assemble(t, inp))(theta)
+        return SVIVolSurface(
+            expiries=inp.fixed["expiry"], forwards=inp.fixed["forward"],
+            a_vec=p.a, b_vec=p.b, rho_vec=p.rho, m_vec=p.m, sigma_vec=p.sigma,
         )
-        a_list.append(params.a)
-        b_list.append(params.b)
-        rho_list.append(params.rho)
-        m_list.append(params.m)
-        sigma_list.append(params.sigma)
 
-    return SVIVolSurface(
-        expiries=expiries,
-        forwards=forwards,
-        a_vec=jnp.stack(a_list),
-        b_vec=jnp.stack(b_list),
-        rho_vec=jnp.stack(rho_list),
-        m_vec=jnp.stack(m_list),
-        sigma_vec=jnp.stack(sigma_list),
+    theta0 = jax.lax.stop_gradient(
+        jax.vmap(
+            lambda v, t: model_to_unconstrained(_svi_guess(v, t), SVI_TRANSFORMS)
+        )(vols, expiries)
+    )
+    return solve_batched_level(
+        name, "least_squares", svi_slice_residual, theta0, inputs,
+        node_inputs, assemble, settings,
+        labels=period_labels(expiries),
     )

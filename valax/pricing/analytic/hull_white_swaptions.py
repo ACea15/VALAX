@@ -65,7 +65,11 @@ from valax.models.hull_white import (
     hw_instantaneous_forward,
     hw_market_df,
 )
-from valax.pricing.multicurve import apply_swap_basis, swap_leg_basis
+from valax.models.short_rate import require_initial_curve
+from valax.pricing.multicurve import (
+    apply_swap_basis,
+    model_swap_leg_basis,
+)
 
 # Floor for the zero-coupon-bond option volatility.  At zero time-to-expiry or
 # zero model volatility the option is worth its intrinsic value; clamping keeps
@@ -247,7 +251,7 @@ def hw_swaption_price(
         decomposition.  The dual-curve price is validated against the
         independent PDE recipe in ``tests/test_pricing/test_dual_curve_swaptions.py``.
     """
-    curve: DiscountCurve = model.initial_curve
+    curve: DiscountCurve = require_initial_curve(model)
     ref = curve.reference_date
     day_count = swaption.day_count
 
@@ -261,8 +265,8 @@ def hw_swaption_price(
 
     # Frozen tenor basis: single-curve returns None, a trace-time branch that
     # leaves `float_start = 1.0` and the cash flows untouched.
-    basis = swap_leg_basis(
-        curve, forward_curve, swaption.expiry_date, swaption.fixed_dates
+    basis = model_swap_leg_basis(
+        model, forward_curve, swaption.expiry_date, swaption.fixed_dates
     )
     float_start, cashflows = apply_swap_basis(cashflows, basis)
 

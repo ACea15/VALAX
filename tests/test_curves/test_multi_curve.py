@@ -1,37 +1,32 @@
 """Tests for the MultiCurveSet view over CurveGraph (MC-Curves-2b).
 
-``bootstrap_multi_curve`` is deprecated but must keep working for the
-deprecation cycle.  Since MC-Curves-2b its internals are a thin wrapper
-over :func:`valax.curves.bootstrap_curve_graph`, so these tests pin:
+The two-tier set is built with :func:`valax.curves.bootstrap_curve_graph`
+and viewed through :meth:`MultiCurveSet.from_graph`.  These tests pin:
 
-1. the dual-curve calibration target is unchanged (every input quote
-   reprices on the curves it was quoted against);
-2. the wrapper agrees with the equivalent hand-written joint-solver
-   build to solver tolerance;
-3. :class:`MultiCurveSet` round-trips through :class:`CurveGraph`;
-4. gradients now flow through the build — something the old sequential
-   pipeline could not deliver on the swap legs.
+1. the dual-curve calibration target (every input quote reprices on the
+   curves it was quoted against);
+2. :class:`MultiCurveSet` round-trips through :class:`CurveGraph`;
+3. gradients flow through the joint build on the swap legs.
 """
 
 import jax
 import jax.numpy as jnp
-import pytest
 
 from valax.curves.bootstrap_graph import bootstrap_curve_graph
-from valax.curves.discount import DiscountCurve
 from valax.curves.graph import CurveGraph, CurveSpec
 from valax.curves.instruments import DepositRate, IborSwapRate, SwapRate
 from valax.curves.multi_curve import (
     MultiCurveSet,
     _LEGACY_DISCOUNT_ID,
     _legacy_forward_id,
-    bootstrap_multi_curve,
 )
 from valax.dates.daycounts import ymd_to_ordinal, year_fraction
 
 
 REF = ymd_to_ordinal(2025, 1, 1)
 DC = "act_365"
+OIS_ID = "USD.SOFR.OIS"
+FWD_ID = "USD.SOFR.3M"
 
 
 def _deposit(y, m, d, rate):
@@ -71,15 +66,54 @@ def _legacy_inputs():
     return discount_instruments, forward_instruments
 
 
+def _graph_instruments(disc, fwd_insts):
+    """Retarget the two-tier quotes onto the joint ``CurveGraph`` system.
+
+    Discount quotes touch the OIS curve only; forward-leg deposits touch
+    the projection curve only; forward-leg swaps become dual-curve
+    (OIS-discounted) IBOR swaps.
+    """
+    instruments = [_retarget(i, (OIS_ID,)) for i in disc]
+    for inst in fwd_insts:
+        if isinstance(inst, DepositRate):
+            instruments.append(_retarget(inst, (FWD_ID,)))
+        else:
+            instruments.append(_as_ibor(inst, OIS_ID, FWD_ID))
+    return instruments
+
+
+def _specs(disc, fwd_insts):
+    def pillars(insts):
+        return jnp.sort(
+            jnp.stack(
+                [jnp.asarray(_maturity(i), dtype=jnp.int32) for i in insts]
+            )
+        )
+
+    return [
+        CurveSpec(
+            curve_id=OIS_ID, currency="USD",
+            pillar_dates=pillars(disc), day_count=DC,
+        ),
+        CurveSpec(
+            curve_id=FWD_ID, currency="USD",
+            pillar_dates=pillars(fwd_insts), day_count=DC,
+        ),
+    ]
+
+
+def _build_graph(disc, fwd_insts):
+    return bootstrap_curve_graph(
+        REF, _specs(disc, fwd_insts), _graph_instruments(disc, fwd_insts)
+    )
+
+
 def _build():
     disc, fwd = _legacy_inputs()
-    with pytest.warns(DeprecationWarning):
-        return bootstrap_multi_curve(
-            reference_date=REF,
-            discount_instruments=disc,
-            forward_instruments=fwd,
-            day_count=DC,
-        )
+    res = _build_graph(disc, fwd["3M"])
+    assert bool(res.converged)
+    assert float(res.diagnostics.max_abs_residual) < 1e-10
+    return MultiCurveSet.from_graph(res.value, OIS_ID, {"3M": FWD_ID})
 
 
 # ── Calibration target is unchanged ──────────────────────────────────
@@ -136,68 +170,7 @@ def _empty_fixings():
     return empty_fixing_history()
 
 
-# ── Equivalence with an explicit joint-solver build ──────────────────
-
-class TestJointSolverEquivalence:
-    def test_matches_hand_written_graph_build(self):
-        """The wrapper equals the explicit bootstrap_curve_graph build."""
-        disc, fwd = _legacy_inputs()
-        mcs = _build()
-
-        ois_id = "USD.SOFR.OIS"
-        fwd_id = "USD.SOFR.3M"
-        ois_pillars = jnp.sort(
-            jnp.stack(
-                [
-                    jnp.asarray(_maturity(i), dtype=jnp.int32)
-                    for i in disc
-                ]
-            )
-        )
-        fwd_pillars = jnp.sort(
-            jnp.stack(
-                [
-                    jnp.asarray(_maturity(i), dtype=jnp.int32)
-                    for i in fwd["3M"]
-                ]
-            )
-        )
-
-        instruments = [_retarget(i, (ois_id,)) for i in disc]
-        for inst in fwd["3M"]:
-            if isinstance(inst, DepositRate):
-                instruments.append(_retarget(inst, (fwd_id,)))
-            else:
-                instruments.append(_as_ibor(inst, ois_id, fwd_id))
-
-        graph, diag = bootstrap_curve_graph(
-            REF,
-            [
-                CurveSpec(
-                    curve_id=ois_id, currency="USD",
-                    pillar_dates=ois_pillars, day_count=DC,
-                ),
-                CurveSpec(
-                    curve_id=fwd_id, currency="USD",
-                    pillar_dates=fwd_pillars, day_count=DC,
-                ),
-            ],
-            instruments,
-        )
-        assert diag.converged
-        assert float(diag.max_abs_residual) < 1e-10
-
-        assert jnp.allclose(
-            mcs.discount_curve.discount_factors,
-            graph[ois_id].discount_factors,
-            atol=1e-12,
-        )
-        assert jnp.allclose(
-            mcs.forward_curves["3M"].discount_factors,
-            graph[fwd_id].discount_factors,
-            atol=1e-12,
-        )
-
+# ── Helpers for the joint-solver build ─────────────────────────────
 
 def _maturity(inst):
     return inst.end_date if isinstance(inst, DepositRate) else inst.fixed_dates[-1]
@@ -269,22 +242,6 @@ class TestGraphView:
             pillar_dates=jnp.array([ymd_to_ordinal(2026, 1, 1)], jnp.int32),
         )
 
-    def test_build_with_free_form_tenor_label(self):
-        disc, _ = _legacy_inputs()
-        with pytest.warns(DeprecationWarning):
-            mcs = bootstrap_multi_curve(
-                reference_date=REF,
-                discount_instruments=disc,
-                forward_instruments={
-                    "three_month": [_deposit(2025, 4, 1, 0.045)],
-                },
-                day_count=DC,
-            )
-        assert "three_month" in mcs.forward_curves
-        assert isinstance(
-            mcs.forward_curves["three_month"], DiscountCurve
-        )
-
 
 # ── Differentiability (new in MC-Curves-2b) ──────────────────────────
 
@@ -292,9 +249,8 @@ class TestGradients:
     def test_grad_flows_through_swap_quote(self):
         """jax.grad w.r.t. a forward-leg swap rate is finite and nonzero.
 
-        The sequential pipeline's ``optx.root_find`` on packed swap data
-        never exposed this cleanly; the joint solver's ImplicitAdjoint
-        does.
+        The joint solver's ImplicitAdjoint differentiates through the
+        dual-curve build.
         """
         disc, fwd = _legacy_inputs()
 
@@ -306,35 +262,10 @@ class TestGradients:
                 rate=rate,
                 day_count=insts[1].day_count,
             )
-            mcs = bootstrap_multi_curve(
-                reference_date=REF,
-                discount_instruments=disc,
-                forward_instruments={"3M": insts},
-                day_count=DC,
-            )
+            graph = _build_graph(disc, insts).value
+            mcs = MultiCurveSet.from_graph(graph, OIS_ID, {"3M": FWD_ID})
             return mcs.forward_curves["3M"](ymd_to_ordinal(2027, 1, 1))
 
-        with pytest.warns(DeprecationWarning):
-            grad = jax.grad(forward_df)(jnp.array(0.047))
+        grad = jax.grad(forward_df)(jnp.array(0.047))
         assert jnp.isfinite(grad)
         assert float(grad) < 0.0  # DF falls as the projected rate rises
-
-
-# ── Validation ───────────────────────────────────────────────────────
-
-class TestValidation:
-    def test_unsupported_instrument_raises(self):
-        from valax.curves.instruments import MoneyMarketFuture
-
-        future = MoneyMarketFuture(
-            start_date=REF,
-            end_date=ymd_to_ordinal(2025, 4, 1),
-            futures_rate=jnp.array(0.04),
-        )
-        with pytest.warns(DeprecationWarning):
-            with pytest.raises(TypeError, match="DepositRate, FRA, and SwapRate"):
-                bootstrap_multi_curve(
-                    reference_date=REF,
-                    discount_instruments=[future],
-                    forward_instruments={},
-                )

@@ -118,8 +118,11 @@ of zero-coupon bond options — no lattice, no simulation. This is the pricer
 that makes Hull–White calibratable; see
 [Jamshidian Decomposition](../theory/hull-white-swaptions.md).
 
-The discount curve is taken from `model.initial_curve`, so prices are
-automatically consistent with the curve the model was exact-fitted to.
+Discounting uses the model's `initial_curve`, which
+[`price`](core.md#the-unified-signature) binds from the `MarketState` (this
+is the auto-default `"analytic"` route for `Swaption` × `HullWhiteModel`);
+called directly as a kernel, the model must be bound first with
+[`bind_curves`](core.md#valax.core.binding.bind_curves).
 
 ::: valax.pricing.analytic.hw_swaption_price
 
@@ -135,7 +138,8 @@ the price is an exact **one-dimensional integral** over the first factor with a
 Jamshidian-style critical boundary on the second, evaluated by Gauss–Hermite
 quadrature. See [G2++: Two-Factor Gaussian](../theory/g2pp.md#3-european-swaptions-brigomercurio-integral).
 
-Discounting is taken from `model.initial_curve`. The `forward_curve` argument on
+Discounting uses the model's `initial_curve`, bound from the market by
+`price` (or explicitly with `bind_curves` for a kernel call). The `forward_curve` argument on
 this *analytic* pricer is reserved for a future extension and must be `None`;
 for a dual-curve G2++ swaption today, use the PDE or MC recipe, which implement
 the deterministic tenor basis of
@@ -595,12 +599,21 @@ the caplet/cap/floor and two-factor callable/puttable recipes cheap to add.
 Hull–White and G2++ are exact-fit-to-*one*-curve models, so multi-curve pricing
 (OIS discounting with a distinct projection curve) needs a modelling decision
 rather than plumbing. `valax.pricing.multicurve` holds that decision once: the
-discount curve is honoured by **re-fitting** the model to it, and projection by
-a **frozen multiplicative tenor basis** read off the two curves. Both are
-supplied to the recipes as the optional `discount_curve` / `forward_curve`
-market arguments, automatically from an instrument's `discount_id` /
-`forward_id` selectors when going through
-[`price`](core.md#the-unified-signature).
+discount curve is the model's `initial_curve`, **bound from the market** by
+[`price`](core.md#the-unified-signature) (see
+[curve fields](core.md#curve-fields-exact-fit-short-rate-models));
+`with_discount_curve` only fills a model that arrives *unbound* (a recipe
+called directly with `discount_curve=...`) and never re-fits a bound one.
+Projection uses a **frozen multiplicative tenor basis** read off the two
+curves, supplied as the optional `forward_curve` market argument
+(automatically from an instrument's `forward_id` selector under `price`).
+
+Whether the overlay applies is a property of the **model type**, declared once
+by `basis_overlay`: Hull–White and G2++ use it; Cheyette does not, and
+`model_tenor_basis` / `model_swap_leg_basis` raise when handed a distinct
+projection curve for such a model — so `price()` now refuses a trade whose
+resolved projection curve the recipe/model cannot use, instead of silently
+pricing it single-curve.
 
 `None` is the single-curve case throughout, and is a *trace-time* branch rather
 than a multiplication by one, so single-curve prices are unchanged
@@ -608,6 +621,12 @@ bit-for-bit. See [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md)
 for the derivation and the limits of the approximation (no basis volatility).
 
 ::: valax.pricing.multicurve.with_discount_curve
+
+::: valax.pricing.multicurve.basis_overlay
+
+::: valax.pricing.multicurve.model_tenor_basis
+
+::: valax.pricing.multicurve.model_swap_leg_basis
 
 ::: valax.pricing.multicurve.tenor_basis
 

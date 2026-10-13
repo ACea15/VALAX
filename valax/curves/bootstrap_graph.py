@@ -45,11 +45,10 @@ for the status of the wider multi-curve workstream.
 
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import equinox as eqx
 import jax.numpy as jnp
-import optimistix as optx
 from jaxtyping import Float, Int
 from jax import Array
 
@@ -62,68 +61,6 @@ from valax.curves.discount import (
 from valax.curves.fixings import FixingHistory, empty_fixing_history
 from valax.curves.graph import CurveGraph, CurveSpec
 from valax.dates.daycounts import year_fraction
-
-
-# ── Diagnostics container ────────────────────────────────────────────
-
-
-class CurveBuildDiagnostics(eqx.Module):
-    """Per-curve and per-instrument repricing diagnostics.
-
-    Returned alongside the calibrated :class:`CurveGraph` by
-    :func:`bootstrap_curve_graph`.  Production-grade diagnostics
-    covering both convergence health (``residuals``,
-    ``max_abs_residual``, ``rmse``, ``n_steps``, ``converged``) and
-    curve well-posedness (``jacobian_condition_number``), plus a
-    per-instrument fit table in the quote's native units
-    (``fitted_quotes``, ``quoted_values``) for desk sign-off.
-
-    The relationship
-    ``fitted_quotes[i] = quoted_values[i] - residuals[i] / slope[i]``
-    with ``slope[i] = d(inst.residual)/d(quote)`` at the calibrated
-    graph is exact for every VALAX quote type — each residual is
-    linear in its primary quote scalar (rate / spread /
-    futures_rate / quoted_forward / far_rate / jump_size).  Hence
-    ``fitted_quotes - quoted_values`` is exactly the quote-unit
-    fit error, expressed in the same units the desk trades
-    (e.g. rate points, basis points).
-
-    Attributes:
-        residuals: Final per-instrument residuals (shape
-            ``(n_instruments,)``).  Zero at convergence.
-        max_abs_residual: Scalar ``max(|residuals|)`` — a quick
-            single-number convergence check.
-        rmse: Root-mean-square of ``residuals`` — a smoother
-            convergence indicator than ``max_abs_residual``.
-        n_steps: Number of Newton iterations consumed
-            (``jnp.asarray(-1)`` if the solver did not populate stats).
-        converged: Boolean flag reported by the underlying
-            ``optimistix`` solver.
-        fitted_quotes: Per-instrument quote value implied by the
-            calibrated graph (shape ``(n_instruments,)``), in each
-            instrument's native quote units.  Equals
-            ``quoted_values`` up to Newton tolerance at convergence.
-        quoted_values: Per-instrument input quote scalars extracted
-            via :data:`_QUOTE_FIELD` (shape ``(n_instruments,)``).
-        jacobian_condition_number: 2-norm condition number of the
-            residual Jacobian ``d(residuals)/d(log_dfs)`` at the
-            solution.  A large value flags an ill-posed curve build —
-            typically caused by pillars placed too close together or an
-            instrument that constrains an already-anchored region.  Pass
-            it to :func:`valax.greeks.adjoint.condition_alert` to test it
-            against the shared
-            :data:`~valax.greeks.adjoint.ILL_CONDITIONED_THRESHOLD`
-            rather than against a locally restated number.
-    """
-
-    residuals: Float[Array, " n_instruments"]
-    max_abs_residual: Float[Array, ""]
-    rmse: Float[Array, ""]
-    n_steps: Int[Array, ""]
-    fitted_quotes: Float[Array, " n_instruments"]
-    quoted_values: Float[Array, " n_instruments"]
-    jacobian_condition_number: Float[Array, ""]
-    converged: bool = eqx.field(static=True)
 
 
 # ── Internals ────────────────────────────────────────────────────────
@@ -397,10 +334,10 @@ def bootstrap_curve_graph(
     instruments: Sequence[BootstrapInstrument],
     *,
     fixings: FixingHistory | None = None,
-    solver: optx.AbstractRootFinder | None = None,
     initial_guess: Mapping[str, Float[Array, " n"]] | None = None,
-    max_steps: int = 256,
-) -> tuple[CurveGraph, CurveBuildDiagnostics]:
+    settings: Any = None,
+    name: str = "curve_graph",
+) -> Any:
     """Jointly bootstrap every curve in the graph in one Newton solve.
 
     The solver concatenates the per-curve log-DFs into a single flat
@@ -410,20 +347,24 @@ def bootstrap_curve_graph(
     via :meth:`BootstrapInstrument.residual`.  The system is
     well-determined when ``len(instruments) == sum(spec.pillar_dates.shape[0])``.
 
-    Because ``optimistix.root_find`` defaults to
-    ``optimistix.ImplicitAdjoint``, ``jax.grad`` of any downstream
-    function of the returned graph w.r.t. an input quote rate costs
-    one linear solve — independent of Newton iteration count.  This
-    is what :func:`quote_jacobian` exploits.
+    The build is a calibration level like any other (see
+    :func:`valax.calibration.solve.solve_level`): the quotes embedded in the
+    instruments are the level's quotes, the residual is
+    :func:`curve_residual_fn` — the *same* residual
+    :func:`valax.calibration.nodes.curve_graph_node` solves — and the result
+    carries the level, so its adjoint is the curve leg of quote-space risk.
+    Validation is eager; the solve itself is traceable, so ``jax.grad`` of a
+    downstream function of the graph w.r.t. an input quote costs one linear
+    solve (``optimistix``'s implicit adjoint) independent of the Newton
+    iteration count — which is what :func:`quote_jacobian` exploits.
 
-    .. note::
+    Desk diagnostics map onto the result as follows:
 
-       This function is **not jittable by design**: it validates the
-       system shape eagerly, and materialises Python-level diagnostics
-       (e.g. the concrete ``converged`` flag) that require leaving the
-       trace.  Curve building is a one-shot operation, not a JIT-hot
-       path — build the graph once, then JIT the pricing functions
-       that consume it.
+    * convergence, residuals, ``rmse``, ``n_steps`` — ``result.diagnostics``
+      (``converged`` is a traceable JAX boolean; ``result.check()`` raises);
+    * Jacobian condition number — ``result.condition_number()``;
+    * quoted values — ``result.inputs.quotes``;
+    * fitted quotes in native units — :func:`fitted_curve_quotes`.
 
     Args:
         reference_date: Valuation date as an integer ordinal scalar.
@@ -436,18 +377,19 @@ def bootstrap_curve_graph(
         fixings: Optional :class:`FixingHistory` for
             partially-seasoned float legs.  Defaults to an empty
             registry.
-        solver: An ``optimistix.AbstractRootFinder``.  Defaults to
-            :class:`optimistix.Newton` at tolerance 1e-10.
         initial_guess: Optional per-curve initial log-DF vectors keyed
             by ``curve_id``.  Missing curves fall back to a flat 4%
             guess.
-        max_steps: Maximum Newton iterations.
+        settings: :class:`~valax.calibration.settings.SolverSettings`;
+            defaults to :data:`~valax.calibration.settings.EXACT_SETTINGS`
+            (Newton to 1e-10).
+        name: Level name used in diagnostics.
 
     Returns:
-        A pair ``(graph, diagnostics)`` where ``graph`` is the
-        calibrated :class:`CurveGraph` and ``diagnostics`` is a
-        :class:`CurveBuildDiagnostics` recording final residuals,
-        iteration count, and the converged flag.
+        The :class:`~valax.calibration.result.CalibrationResult`; the
+        calibrated :class:`CurveGraph` is ``result.value``. Its labels name
+        each instrument (``"<i>:<Type>"``) so a failed build points at a
+        quote.
 
     Raises:
         ValueError: If the residual system is not square, or if an
@@ -465,106 +407,86 @@ def bootstrap_curve_graph(
         ...     rate=jnp.array(0.05),
         ...     curves_touched=("USD.SOFR.OIS",),
         ... )
-        >>> graph, diag = bootstrap_curve_graph(ref, [spec], [dep])
-        >>> bool(diag.max_abs_residual < 1e-10)
-        True
+        >>> result = bootstrap_curve_graph(ref, [spec], [dep]).check()
+        >>> graph = result.value
 
     References:
         * ``docs/architecture/production.md`` §11.4 for the design
           spec.
-        * ``docs/roadmap.md`` ("Multi-Curve Framework — What Ships,
-          What's Left") for the workstream status.
         * ``docs/theory.md`` §3.7, §3.8 for the no-arbitrage identities
           that each instrument's residual encodes.
     """
-    _validate_square(curve_specs, instruments)
-    _validate_curves_touched(curve_specs, instruments)
+    # Lazy: valax.calibration imports the pricing stack, which imports
+    # valax.curves.
+    from valax.calibration.level import LevelInputs
+    from valax.calibration.settings import EXACT_SETTINGS
+    from valax.calibration.solve import solve_level
 
-    if fixings is None:
-        fixings = empty_fixing_history()
-
-    if solver is None:
-        solver = optx.Newton(rtol=1e-10, atol=1e-10)
-
+    validate_curve_system(curve_specs, instruments)
+    specs = tuple(curve_specs)
+    insts = tuple(instruments)
     ref_i32 = jnp.asarray(reference_date, dtype=jnp.int32)
-    offsets = _spec_offsets(curve_specs)
+    residual = curve_residual_fn(ref_i32, specs, insts, fixings=fixings)
 
-    x0 = _pack_initial_guess(initial_guess, ref_i32, curve_specs)
+    def residual_fn(theta: Float[Array, " n"], inputs: Any) -> Float[Array, " n"]:
+        return residual(theta, inputs.quotes)
 
-    # Materialise Python-static context that the residual function needs.
-    # ``optimistix`` traces ``residual_fn`` with concrete ``args``, so we
-    # pass everything the trace needs; curve_specs and instruments enter
-    # as closed-over Python objects (they are static / pytree-valid).
-    def residual_fn(
-        log_dfs: Float[Array, " n_total"],
-        args,
-    ) -> Float[Array, " n_instruments"]:
-        ref_inner, fixings_inner = args
-        return _graph_residual(
-            log_dfs,
-            curve_specs,
-            offsets,
-            instruments,
-            fixings_inner,
-            ref_inner,
-        )
+    def assemble(theta: Float[Array, " n"], _inputs: Any) -> CurveGraph:
+        return curve_graph_from_log_dfs(theta, specs, ref_i32)
 
-    args = (ref_i32, fixings)
-
-    sol = optx.root_find(
+    return solve_level(
+        name,
+        "root",
         residual_fn,
-        solver,
-        x0,
-        args=args,
-        max_steps=max_steps,
-        throw=False,  # let the caller inspect diagnostics on non-convergence
+        initial_log_dfs(ref_i32, specs, initial_guess),
+        LevelInputs(quotes=curve_quote_vector(insts)),
+        assemble,
+        EXACT_SETTINGS if settings is None else settings,
+        labels=curve_instrument_labels(insts),
     )
 
-    graph = _build_graph_from_log_dfs(
-        sol.value, curve_specs, offsets, ref_i32
-    )
 
-    final_residuals = residual_fn(sol.value, args)
-    max_abs = jnp.max(jnp.abs(final_residuals))
-    rmse = jnp.sqrt(jnp.mean(final_residuals ** 2))
-    # ``sol.stats`` shape varies by solver; expose iteration count if present.
-    n_steps_val = sol.stats.get("num_steps", jnp.asarray(-1))
-    converged = bool(sol.result == optx.RESULTS.successful)
+def curve_instrument_labels(
+    instruments: Sequence[BootstrapInstrument],
+) -> tuple[str, ...]:
+    """Node labels of a curve build: ``"<index>:<InstrumentType>"``.
 
-    # Per-instrument fitted-vs-quoted diagnostic (in each quote's native
-    # units).  Computed in a Python loop rather than a vmap because each
-    # instrument type has different pytree structure — vmap would need
-    # per-type stacking that isn't worth the complexity for a one-shot
-    # post-solve diagnostic.
-    quoted_values = jnp.stack(
-        [_extract_quote_rate(inst) for inst in instruments]
-    )
-    fitted_quotes = jnp.stack(
-        [
-            _fitted_quote(inst, graph, fixings, ref_i32, final_residuals[i])
-            for i, inst in enumerate(instruments)
-        ]
-    )
+    Args:
+        instruments: Bootstrap quotes, in residual order.
 
-    # Jacobian condition number of the residual system at the solution.
-    # Uses ``jax.jacrev`` rather than ``jax.jacfwd`` to match the
-    # implicit-adjoint solve path that ``optimistix`` uses internally.
-    import jax  # local import: one-shot post-solve diagnostic
-    residual_jac = jax.jacrev(residual_fn)(sol.value, args)
-    jacobian_cond = jnp.linalg.cond(residual_jac)
+    Returns:
+        One label per instrument.
+    """
+    return tuple(f"{i}:{type(inst).__name__}" for i, inst in enumerate(instruments))
 
-    diagnostics = CurveBuildDiagnostics(
-        residuals=final_residuals,
-        max_abs_residual=max_abs,
-        rmse=rmse,
-        n_steps=jnp.asarray(n_steps_val, dtype=jnp.int32),
-        fitted_quotes=fitted_quotes,
-        quoted_values=quoted_values,
-        jacobian_condition_number=jacobian_cond,
-        converged=converged,
-    )
 
-    return graph, diagnostics
+def fitted_curve_quotes(
+    instruments: Sequence[BootstrapInstrument],
+    graph: CurveGraph,
+    reference_date: Int[Array, ""],
+    *,
+    fixings: FixingHistory | None = None,
+) -> Float[Array, " n_instruments"]:
+    """Per-instrument quote implied by a calibrated graph, in native units.
+
+    The desk sign-off table of a curve build: ``fitted - quoted`` is the
+    fit error in the units the desk trades (rate points, basis points).
+    Each entry is :func:`par_quote` — exact for every VALAX quote type,
+    whose residual is linear in its primary quote.
+
+    Args:
+        instruments: Bootstrap quotes.
+        graph: Calibrated graph (e.g. ``bootstrap_curve_graph(...).value``).
+        reference_date: Valuation date ordinal.
+        fixings: Optional realised-fixings registry.
+
+    Returns:
+        Fitted quote per instrument, in instrument order.
+    """
+    return jnp.stack([
+        par_quote(inst, graph, reference_date, fixings=fixings)
+        for inst in instruments
+    ])
 
 
 # ── Residual / state accessors for adjoint differentiation ───────────
@@ -793,12 +715,13 @@ def quote_jacobian(
     *,
     by: str = "log_df",
     fixings: FixingHistory | None = None,
-    solver: optx.AbstractRootFinder | None = None,
-    max_steps: int = 256,
+    settings: Any = None,
 ) -> Float[Array, "n_outputs n_quotes"]:
     """Jacobian of calibrated curve outputs w.r.t. input quote rates.
 
     Runs :func:`bootstrap_curve_graph` inside a ``jax.jacrev`` closure
+    (and checks the build's convergence flag, carried out as auxiliary
+    output, before returning)
     over the primary quote scalar of every instrument.  Uses the
     implicit-adjoint pass through the Newton solve so the cost is
     ``O(n_quotes)`` reverse-mode sweeps rather than ``O(newton_iters)``
@@ -821,8 +744,7 @@ def quote_jacobian(
             which representation of the calibrated pillar values to
             differentiate.
         fixings: Optional realised-fixings registry.
-        solver: Root finder; defaults to :class:`optimistix.Newton`.
-        max_steps: Maximum Newton iterations.
+        settings: Solver settings forwarded to :func:`bootstrap_curve_graph`.
 
     Returns:
         A Jacobian of shape ``(n_pillars_total, n_quotes)`` where
@@ -831,6 +753,9 @@ def quote_jacobian(
     Raises:
         ValueError: For unsupported ``by`` values or upstream from
             :func:`bootstrap_curve_graph`.
+        CalibrationError: If the curve build did not converge — the
+            implicit-function Jacobian of an unconverged build is
+            meaningless, so it is never returned silently.
     """
     if by not in ("log_df", "df", "zero_rate"):
         raise ValueError(
@@ -848,14 +773,14 @@ def quote_jacobian(
             _replace_quote_rate(inst, quote_vec[k])
             for k, inst in enumerate(instruments_tuple)
         ]
-        graph, _ = bootstrap_curve_graph(
+        result = bootstrap_curve_graph(
             reference_date,
             curve_specs,
             rebuilt,
             fixings=fixings,
-            solver=solver,
-            max_steps=max_steps,
+            settings=settings,
         )
+        graph = result.value
         out_chunks: list[Float[Array, " n"]] = []
         for spec in curve_specs:
             curve = graph[spec.curve_id]
@@ -875,7 +800,16 @@ def quote_jacobian(
                         ]
                     )
                 )
-        return jnp.concatenate(out_chunks)
+        return jnp.concatenate(out_chunks), result.converged
 
     import jax  # local import: quote_jacobian is a build-time helper
-    return jax.jacrev(calibrate_and_extract)(quotes)
+    from valax.calibration.result import CalibrationError
+
+    jacobian, converged = jax.jacrev(calibrate_and_extract, has_aux=True)(quotes)
+    if not bool(converged):
+        raise CalibrationError(
+            "quote_jacobian: the curve build did not converge; its "
+            "implicit-function Jacobian is meaningless. Inspect "
+            "bootstrap_curve_graph(...).diagnostics."
+        )
+    return jacobian

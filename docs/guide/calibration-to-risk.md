@@ -14,7 +14,9 @@ The maths is on [Calibration Chains](../theory/calibration-chains.md) and the
 design on [Calibration, Pricing & Risk Architecture](../architecture/calibration-pricing-risk.md).
 Runnable end-to-end versions on synthetic quotes generated from a known true
 market are `examples/10_unified_market_tiers.py` to
-`examples/13_unified_quote_scenarios.py`; the quote generator is described in
+`examples/13_unified_quote_scenarios.py`, and
+`examples/14_unified_rates_per_trade_model.py` for the rates per-trade
+workflow below; the quote generator is described in
 [Synthetic market data](synthetic_market.md#synthetic-quote-universes).
 Every snippet below is JIT-safe: the calibration is traceable, so
 `eqx.filter_jit`, `jax.grad` and `jax.vmap` all apply.
@@ -163,6 +165,121 @@ The same factory with an `install_fn` (e.g.
 `valax.calibration.install_surface("SPX.VOL")`) calibrates a **market**
 object instead — a premium-to-vol quote conversion, or a model-implied
 surface — and joins the chain like any other level.
+
+## Rates — per-trade model calibration
+
+A rates exotic calibrates its model **per trade**, to a basket chosen by the
+trade, off a market that is calibrated once: curves → swaption cube (on the
+curve-implied forwards) → Hull-White fitted to the trade's co-terminal
+swaptions → Bermudan priced through `price` → quote risk by one sweep.
+
+- The vol levels are chain nodes on the upstream curves: `swaption_cube_node`
+  recomputes each cell's forward and annuity from the curves, so the cube
+  carries curve risk; `caplet_strip_node` → `optionlet_sabr_node` does the
+  same for caps. Every cell / bucket is its own fit and a failure is named
+  (`"5Yx10Y"`); see [Calibration § Solvers](calibration.md#solvers).
+- `swaption_basket_node` is a model-scope level: targets are the basket
+  swaptions priced off the calibrated cube and curves, model prices go through
+  `price` (Jamshidian for Hull-White), and the fitted model is curve-free —
+  `price` binds its curve from the market.
+- Zero-valued **target shifts**, one fixed input per basket instrument, report
+  `∂V/∂T_k`: the trade's vega profile across its basket.
+
+```python
+import valax
+from valax.calibration import coterminal_swaptions, positive, swaption_basket_node
+from valax.instruments.rates import BermudanSwaption
+from valax.market import (
+    RatesVolSpec, RatesWorldSpec, SeedRegistry, default_config, rates_vol_snapshot,
+)
+from valax.models.hull_white import HullWhiteModel
+from valax.pricing.pde.config import PDEConfig
+
+# 1. A synthetic rates market: curves + a SABR swaption cube, noisy quotes.
+vol_spec = RatesVolSpec(expiry_years=(1, 2, 5), tenor_years=(2, 5), cap_years=(1,))
+snap, world = rates_vol_snapshot(
+    SeedRegistry(master_seed=7, library_version=valax.__version__),
+    default_config(), RatesWorldSpec(pillar_years=(1, 2, 3, 5, 7, 10)), vol_spec,
+    bp_noise=0.5, vol_bp_noise=0.5,
+)
+chain = CalibrationChain(nodes=snap.chain.nodes[:2])   # curves -> cube
+quotes = snap.quotes.select(chain.quote_keys)
+
+# 2. The trade and its basket: a 2Y-into-5Y Bermudan payer, co-terminals.
+ref = int(world.rates.reference_date)
+trade = BermudanSwaption(
+    exercise_dates=jnp.array([ref + 365 * k for k in (2, 3, 4)], jnp.int32),
+    fixed_dates=jnp.array([ref + 365 * k for k in range(3, 8)], jnp.int32),
+    strike=jnp.asarray(0.03), notional=jnp.asarray(1.0),
+    day_count=world.rates.day_count,
+    discount_id=world.discount_id, forward_id=world.forward_id,
+)
+basket = coterminal_swaptions(trade)
+targets = tuple(f"HW.TARGET.{i}" for i in range(len(basket)))
+hw = swaption_basket_node(
+    "hw", template=HullWhiteModel(mean_reversion=jnp.asarray(0.03),
+                                  volatility=jnp.asarray(0.008)),
+    basket=basket, cube_id=vol_spec.cube_id,
+    transforms={"volatility": positive()},
+    fixed_fields={"mean_reversion": "HW.MEAN_REVERSION"},
+    target_keys=targets,                     # zero shifts -> vega profile
+)
+fixed = snap.fixed.merge(QuoteSet.from_dict(
+    {"HW.MEAN_REVERSION": 0.03, **{k: 0.0 for k in targets}}))
+
+# 3. Market once, model per trade, Bermudan through price().
+calibrated = calibrate_market(chain, quotes, fixed, strict=True)
+fit = calibrate_model(hw, quotes, calibrated.market, fixed, strict=True)
+pde = PDEConfig(n_spot=100, n_time=60)
+pv = price(trade, fit.value, calibrated.market, method="pde", config=pde).price
+
+# 4. Quote risk: the model level's λ_m swept through the cube and the curves.
+risk = quote_risk_adjoint(trade, None, calibrated, model_result=fit,
+                          method="pde", config=pde)
+check = quote_risk_autodiff(trade, None, chain, quotes, fixed, model_node=hw,
+                            method="pde", config=pde)
+assert reconcile_quote_risk(risk, check, rtol=1e-6, atol=1e-10).ok
+profile = [risk.fixed[k] for k in targets]   # ∂V/∂T_k across the basket
+risk.fixed["HW.MEAN_REVERSION"]              # held-fixed mean reversion
+```
+
+`quote_risk_adjoint(..., model_result=fit)` is `chain_adjoint` with the model
+level in `model_levels`: it solves the basket level's transposed system for
+`λ_m`, then hands the upstream cotangent to the cube level and the curve level,
+so `risk.quotes` holds both the trade's vega to every cube quote and its delta
+to every curve quote (including the curve paths through the basket's targets).
+
+**Many trades.** Baskets may be traced, so same-shaped per-trade baskets
+calibrate in one compiled program; the curve-free fitted models stack:
+
+```python
+import equinox as eqx
+import jax
+
+hw_template = HullWhiteModel(mean_reversion=jnp.asarray(0.03),
+                             volatility=jnp.asarray(0.008))
+
+def fit_one(basket):
+    node = swaption_basket_node(
+        "hw", template=hw_template, basket=basket, cube_id=vol_spec.cube_id,
+        transforms={"volatility": positive()},
+        fixed_fields={"mean_reversion": "HW.MEAN_REVERSION"}, target_keys=targets,
+    )
+    return node.calibrate(QuoteSet(), calibrated.market, fixed)
+
+trades = [trade, eqx.tree_at(lambda t: t.strike, trade, jnp.asarray(0.035))]
+baskets = [coterminal_swaptions(t) for t in trades]       # same shapes
+stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *baskets)
+batch = eqx.filter_vmap(fit_one)(stacked)
+batch.diagnostics.converged                                # one flag per trade
+```
+
+Example 14 runs the whole workflow self-checking, including the identity that
+the total cube vega equals the summed basket profile. The maths of the
+per-trade level and the target-shift trick is
+[Calibration Chains § I.10](../theory/calibration-chains.md#i10-per-trade-model-levels-and-the-vega-profile);
+the design decisions are
+[D11–D12](../architecture/calibration-pricing-risk.md#3-decisions).
 
 ## Book risk in one sweep
 

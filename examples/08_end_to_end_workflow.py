@@ -82,13 +82,13 @@ def main() -> None:
 
     # ── Stage 3: calibration (smile-residual check, NOT param recovery)
     header("STAGE 3 — SABR calibration to noisy smile")
-    sabr_fit, sol = calibrate_sabr(
+    sabr_fit = calibrate_sabr(
         strikes=strikes,
         market_vols=smile_noisy,
         forward=F,
         expiry=T,
         fixed_beta=sabr_truth.beta,  # beta is conventionally fixed
-    )
+    ).value
     smile_fitted = jax.vmap(
         lambda K: sabr_implied_vol(sabr_fit, F, K, T)
     )(strikes)

@@ -11,9 +11,12 @@ import equinox as eqx
 from jaxtyping import Float
 from jax import Array
 
+from valax.calibration.result import CalibrationResult
+from valax.calibration.sabr import sabr_batch_level, stacked_sabr_inputs
+from valax.calibration.settings import SolverSettings
+from valax.calibration.solve import period_labels
 from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol
-from valax.calibration.sabr import calibrate_sabr
 
 
 class SABRVolSurface(eqx.Module):
@@ -89,11 +92,18 @@ def calibrate_sabr_surface(
     market_vols_per_expiry: list[Float[Array, " n_k"]],
     forwards: Float[Array, " n_expiries"],
     expiries: Float[Array, " n_expiries"],
+    *,
     fixed_beta: Float[Array, ""] | None = None,
-    solver: str = "levenberg_marquardt",
-    max_steps: int = 256,
-) -> SABRVolSurface:
+    weights_per_expiry: list[Float[Array, " n_k"]] | None = None,
+    settings: SolverSettings | None = None,
+    name: str = "sabr_surface",
+) -> CalibrationResult:
     """Calibrate a SABR surface by fitting each expiry slice independently.
+
+    One batched level (:func:`~valax.calibration.sabr.sabr_batch_level`):
+    every slice is its own least-squares fit with its own convergence flag,
+    solved together in one ``vmap``, and a failed slice is named by expiry in
+    ``result.check()``.
 
     Args:
         strikes_per_expiry: List of strike arrays, one per expiry.
@@ -101,38 +111,34 @@ def calibrate_sabr_surface(
         forwards: Forward price at each expiry.
         expiries: Expiry grid (year fractions).
         fixed_beta: If provided, beta is fixed across all slices.
-        solver: Optimizer for each slice.
-        max_steps: Max iterations per slice.
+        weights_per_expiry: Optional per-strike weights, one array per expiry.
+        settings: Per-slice solver settings; defaults to
+            :data:`~valax.calibration.settings.FIT_SETTINGS`.
+        name: Level name used in diagnostics.
 
     Returns:
-        A fitted ``SABRVolSurface``.
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`SABRVolSurface` is ``result.value``.
     """
-    n = len(expiries)
-    alphas = []
-    betas = []
-    rhos = []
-    nus = []
+    expiries = jnp.asarray(expiries, dtype=jnp.float64)
+    inputs = stacked_sabr_inputs(
+        strikes_per_expiry, market_vols_per_expiry, forwards, expiries,
+        weights_per_node=weights_per_expiry, fixed_beta=fixed_beta,
+    )
 
-    for i in range(n):
-        model, _ = calibrate_sabr(
-            strikes=strikes_per_expiry[i],
-            market_vols=market_vols_per_expiry[i],
-            forward=forwards[i],
-            expiry=expiries[i],
-            fixed_beta=fixed_beta,
-            solver=solver,
-            max_steps=max_steps,
+    def value_fn(models: SABRModel, nodes, _inputs) -> SABRVolSurface:
+        return SABRVolSurface(
+            expiries=nodes.fixed["expiry"],
+            forwards=nodes.fixed["forward"],
+            alphas=models.alpha,
+            betas=models.beta,
+            rhos=models.rho,
+            nus=models.nu,
         )
-        alphas.append(model.alpha)
-        betas.append(model.beta)
-        rhos.append(model.rho)
-        nus.append(model.nu)
 
-    return SABRVolSurface(
-        expiries=expiries,
-        forwards=forwards,
-        alphas=jnp.stack(alphas),
-        betas=jnp.stack(betas),
-        rhos=jnp.stack(rhos),
-        nus=jnp.stack(nus),
+    return sabr_batch_level(
+        name, inputs, lambda inp: inp, value_fn,
+        labels=period_labels(expiries),
+        fit_beta=fixed_beta is None,
+        settings=settings,
     )

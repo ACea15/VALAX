@@ -212,7 +212,7 @@ def curve_adjoint(
         condition number evaluated at the solution.
 
     Examples:
-        >>> graph, diag = bootstrap_curve_graph(ref, specs, quotes)
+        >>> graph = bootstrap_curve_graph(ref, specs, quotes).check().value
         >>> adj = curve_adjoint(graph, ref, specs, quotes)
         >>> condition_alert(adj.jacobian_condition_number) is None
         True

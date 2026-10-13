@@ -27,14 +27,12 @@ invisible at a single (ATM) strike.
 decorrelation-sensitive instrument (e.g. a CMS-spread option) is needed to pin
 :math:`\rho` beyond the ATM surface.
 
-Solver
-------
-The default is a line-searched ``optimistix.BFGS`` minimiser of the sum of
-squares. As with :func:`~valax.calibration.calibrate_g2pp`, the residual closes
-over a *sequence* of instrument pytrees, which trips ``optimistix`` 0.1.0's
-Levenberg-Marquardt (``List arity mismatch``); BFGS is damped and robust from a
-distant start, so it is preferred. Because the PDE sits inside the optimiser
-loop, use a moderate grid and a small instrument set.
+Solver and provenance
+---------------------
+The default is a line-searched BFGS (:data:`CHEYETTE_SETTINGS`), damped and
+robust from a distant start. Because the PDE sits inside the optimiser loop,
+use a moderate grid and a small instrument set. Each result records its engine
+(:func:`cheyette_provenance`): frozen-``y`` parameters are engine-bound.
 
 References:
     Andersen, L. & Piterbarg, V. (2010), *Interest Rate Modeling*, ch. 13.
@@ -42,25 +40,27 @@ References:
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from typing import Any
 
 import equinox as eqx
 import jax.numpy as jnp
-import optimistix
 from jaxtyping import Float
 from jax import Array
 
+from valax.calibration.basket import basket_fit_level
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationProvenance, CalibrationResult
+from valax.calibration.settings import SolverSettings
 from valax.calibration.transforms import (
     CHEYETTE_2F_TRANSFORMS,
     CHEYETTE_TRANSFORMS,
     TransformSpec,
-    model_to_unconstrained,
-    unconstrained_to_model,
 )
 from valax.curves.discount import DiscountCurve
 from valax.models.cheyette import CheyetteModel, CheyetteModel2F
-from valax.pricing.multicurve import require_single_curve
+from valax.pricing.multicurve import require_single_curve, with_discount_curve
 from valax.pricing.pde import PDEConfig, PDEConfig2D, Scheme, pde_price_dispatch
 from valax.pricing.pde.cheyette import cheyette_exact_price
 
@@ -109,67 +109,111 @@ def cheyette_pde_prices(
     )
 
 
-def _cheyette_price_residuals(
-    raw_params: dict[str, Float[Array, ""]],
-    args: tuple,
-) -> Float[Array, " n_quotes"]:
-    """Weighted relative price residuals, in the optimistix ``(y, args)`` form."""
-    transforms, template, instruments, market_prices, weights, scale, engine, config = args
-    model = unconstrained_to_model(raw_params, transforms, template)
-    prices = cheyette_pde_prices(model, instruments, engine, config)
-    return weights * (prices - market_prices) / scale
+def cheyette_provenance(
+    engine: str, config: PDEConfig | PDEConfig2D
+) -> CalibrationProvenance:
+    """Provenance of a Cheyette fit on ``engine``.
 
+    Frozen-``y`` replaces the stochastic accumulator by its deterministic
+    limit — a **modelling** bias that does not converge away under grid
+    refinement — so its parameters are only valid on that engine
+    (:func:`~valax.calibration.result.check_engine` refuses another).
+    Exact-``y`` carries only discretisation bias.
 
-def _cheyette_sse(
-    raw_params: dict[str, Float[Array, ""]],
-    args: tuple,
-) -> Float[Array, ""]:
-    """Scalar objective for gradient-based minimisers."""
-    return jnp.sum(_cheyette_price_residuals(raw_params, args) ** 2)
+    Args:
+        engine: ``"frozen"`` or ``"exact"``.
+        config: The PDE grid the fit was priced on.
 
-
-def _run_solver(solver: str, y0, args, max_steps: int):
-    """Dispatch to the requested optimistix solver (shared 1F / 2F)."""
-    if solver == "bfgs":
-        opt = optimistix.BFGS(rtol=1e-10, atol=1e-10)
-        return optimistix.minimise(
-            _cheyette_sse, opt, y0, args=args, max_steps=max_steps, throw=False
+    Returns:
+        The :class:`~valax.calibration.result.CalibrationProvenance`.
+    """
+    if engine == "exact":
+        return CalibrationProvenance(
+            method="cheyette_exact_y", engine_kind="discretised", config=config
         )
-    if solver == "gauss_newton":
-        opt = optimistix.GaussNewton(rtol=1e-8, atol=1e-8)
-        return optimistix.least_squares(
-            _cheyette_price_residuals,
-            opt,
-            y0,
-            args=args,
-            max_steps=max_steps,
-            throw=False,
-        )
-    raise ValueError(f"Unknown solver: {solver!r}")
+    return CalibrationProvenance(
+        method="pde", engine_kind="modelling_bias", config=config
+    )
+
+
+def _cheyette_fit(
+    name: str,
+    instruments: tuple,
+    market_prices: Float[Array, " n_quotes"],
+    curve: DiscountCurve,
+    initial_guess: Any,
+    transforms: dict[str, TransformSpec],
+    fixed_params: dict | None,
+    weights: Float[Array, " n_quotes"] | None,
+    relative: bool,
+    settings: SolverSettings | None,
+    engine: str,
+    config: PDEConfig | PDEConfig2D,
+    model_label: str,
+) -> CalibrationResult:
+    """Shared 1F / 2F body: a basket fit on the Cheyette PDE."""
+
+    initial_guess = dataclasses.replace(initial_guess, initial_curve=None)
+
+    def bind(model: Any, inp: LevelInputs) -> Any:
+        return with_discount_curve(model, inp.upstream)
+
+    def prices(model: Any, _inp: LevelInputs) -> Float[Array, " n"]:
+        return cheyette_pde_prices(model, instruments, engine, config)
+
+    return basket_fit_level(
+        name,
+        quotes=market_prices,
+        upstream=curve,
+        initial_guess=initial_guess,
+        transforms=transforms,
+        prices_fn=prices,
+        bind_fn=bind,
+        fixed_params=fixed_params,
+        weights=weights,
+        relative=relative,
+        settings=CHEYETTE_SETTINGS if settings is None else settings,
+        provenance=cheyette_provenance(engine, config),
+        model_label=model_label,
+    )
+
+
+#: Default settings of a PDE-in-the-loop Cheyette fit: BFGS to 1e-10
+#: (looser than the closed-form fits: the PDE has a discretisation floor).
+CHEYETTE_SETTINGS = SolverSettings(
+    method="bfgs", rtol=1e-10, atol=1e-10, max_steps=256
+)
 
 
 def calibrate_cheyette(
     instruments: Sequence[Any],
     market_prices: Float[Array, " n_quotes"],
     curve: DiscountCurve,
+    *,
     initial_guess: CheyetteModel | None = None,
     fixed_params: dict[str, Float[Array, ""]] | None = None,
     weights: Float[Array, " n_quotes"] | None = None,
     relative: bool = True,
-    solver: str = "bfgs",
+    settings: SolverSettings | None = None,
     engine: str = "frozen",
     config: PDEConfig | PDEConfig2D | None = None,
-    max_steps: int = 256,
     forward_curve: DiscountCurve | None = None,
-) -> tuple[CheyetteModel, optimistix.Solution]:
+    name: str = "cheyette",
+) -> CalibrationResult:
     r"""Fit one-factor Cheyette :math:`(\kappa, \sigma, \beta)` through the PDE.
+
+    A weighted least-squares level
+    (:func:`~valax.calibration.basket.basket_fit_level`) priced on the PDE.
+    The result records the engine as provenance: a ``"frozen"`` fit carries
+    a modelling bias, so its parameters are engine-bound
+    (:func:`~valax.calibration.result.check_engine` refuses to price them on
+    another engine or grid); an ``"exact"`` fit only a discretisation bias.
 
     **Single-curve only.** The Cheyette PDE engine has no discount/projection
     split (unlike the Hull-White and G2++ recipes), so ``curve`` both discounts
     and projects.  Passing a distinct ``forward_curve`` *raises* rather than
     being silently dropped — a dual-curve fit that quietly ignored the
-    projection curve would be a wrong calibration with no signal.  Dual-curve
-    Cheyette is tracked on the roadmap.
+    projection curve would be a wrong calibration with no signal.
 
     Args:
         instruments: Calibration instruments, one per market quote (e.g.
@@ -184,26 +228,26 @@ def calibrate_cheyette(
             pins :math:`\kappa` and fits :math:`(\sigma, \beta)`.
         weights: Per-quote residual weights. Default: uniform.
         relative: Divide each residual by its market price (default).
-        solver: ``"bfgs"`` (default) or ``"gauss_newton"``.
-            ``"levenberg_marquardt"`` is deliberately not offered (the residual
-            closes over a sequence of instrument pytrees, tripping
-            ``optimistix`` 0.1.0's LM with a ``List arity mismatch``).
+        settings: Solver settings; defaults to :data:`CHEYETTE_SETTINGS`
+            (BFGS to 1e-10).
         engine: ``"frozen"`` (default; the fast frozen-``y`` production PDE) or
             ``"exact"`` (the bias-free exact-``y`` 2-D PDE — more expensive per
-            solve, but removes the frozen-``y`` skew bias). Only one factor
-            supports ``"exact"``.
+            solve, but removes the frozen-``y`` skew bias).
         config: PDE grid configuration. Defaults to a moderate mesh matching the
             chosen engine (:class:`~valax.pricing.pde.PDEConfig` for ``frozen``,
             :class:`~valax.pricing.pde.PDEConfig2D` for ``exact``).
-        max_steps: Maximum optimiser iterations.
+        forward_curve: Must be ``None`` or ``curve`` (single-curve only).
+        name: Level name used in diagnostics.
 
     Returns:
-        Tuple of the fitted model and the ``optimistix`` solution.
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`~valax.models.cheyette.CheyetteModel` is ``result.value``.
 
     Raises:
-        ValueError: If ``solver`` or ``engine`` is not recognised, if a
-            ``fixed_params`` key is not a Cheyette parameter, or if the number
-            of quotes does not match the number of instruments.
+        ValueError: If ``engine`` is not recognised, if a ``fixed_params`` key
+            is not a Cheyette parameter, if the number of quotes does not
+            match the number of instruments, or if a distinct
+            ``forward_curve`` is passed.
     """
     if len(instruments) != market_prices.shape[0]:
         raise ValueError(
@@ -213,79 +257,44 @@ def calibrate_cheyette(
     if engine not in ("frozen", "exact"):
         raise ValueError(f"Unknown engine: {engine!r} (use 'frozen' or 'exact').")
     require_single_curve(curve, forward_curve, "Cheyette calibration")
-
     if config is None:
         config = (
             _DEFAULT_CONFIG_EXACT_1F if engine == "exact"
             else _DEFAULT_CONFIG_FROZEN_1F
         )
-
     if initial_guess is None:
         initial_guess = CheyetteModel(
             mean_reversion=jnp.asarray(0.05),
             volatility=jnp.asarray(0.01),
             skew=jnp.asarray(0.0),
-            initial_curve=curve,
         )
-    else:
-        initial_guess = eqx.tree_at(
-            lambda m: m.initial_curve, initial_guess, curve
-        )
-
-    transforms: dict[str, TransformSpec] = dict(CHEYETTE_TRANSFORMS)
-    if fixed_params is not None:
-        for name, value in fixed_params.items():
-            if name not in CHEYETTE_TRANSFORMS:
-                raise ValueError(f"Unknown Cheyette parameter: {name!r}")
-            initial_guess = eqx.tree_at(
-                lambda m, n=name: getattr(m, n),
-                initial_guess,
-                jnp.asarray(value),
-            )
-            del transforms[name]
-
-    if weights is None:
-        weights = jnp.ones_like(market_prices)
-    scale = (
-        jnp.maximum(jnp.abs(market_prices), 1e-8)
-        if relative
-        else jnp.ones_like(market_prices)
+    return _cheyette_fit(
+        name, tuple(instruments), market_prices, curve, initial_guess,
+        CHEYETTE_TRANSFORMS, fixed_params, weights, relative, settings,
+        engine, config, "Cheyette",
     )
-
-    y0 = model_to_unconstrained(initial_guess, transforms)
-    args = (
-        transforms,
-        initial_guess,
-        tuple(instruments),
-        market_prices,
-        weights,
-        scale,
-        engine,
-        config,
-    )
-    sol = _run_solver(solver, y0, args, max_steps)
-    fitted = unconstrained_to_model(sol.value, transforms, initial_guess)
-    return fitted, sol
 
 
 def calibrate_cheyette_2f(
     instruments: Sequence[Any],
     market_prices: Float[Array, " n_quotes"],
     curve: DiscountCurve,
+    *,
     initial_guess: CheyetteModel2F | None = None,
     fixed_params: dict[str, Float[Array, ""]] | None = None,
     weights: Float[Array, " n_quotes"] | None = None,
     relative: bool = True,
-    solver: str = "bfgs",
+    settings: SolverSettings | None = None,
     config: PDEConfig2D | None = None,
-    max_steps: int = 256,
     forward_curve: DiscountCurve | None = None,
-) -> tuple[CheyetteModel2F, optimistix.Solution]:
+    name: str = "cheyette_2f",
+) -> CalibrationResult:
     r"""Fit two-factor Cheyette through the frozen-``y`` 2-D ADI PDE.
 
     Two factors are always calibrated on the **frozen-``y``** engine — the
     exact-``y`` two-factor PDE is 5-D and not tractable in a calibration loop
-    (see ``docs/research-ideas.md``).
+    (see ``docs/research-ideas.md``) — so the result's provenance is always
+    engine-bound (modelling bias).
 
     **Single-curve only**, for the same reason as
     :func:`calibrate_cheyette`: a distinct ``forward_curve`` raises rather than
@@ -303,30 +312,29 @@ def calibrate_cheyette_2f(
             fixed. The recommended workflow pins :math:`\kappa_1, \kappa_2`.
         weights: Per-quote residual weights. Default: uniform.
         relative: Divide each residual by its market price (default).
-        solver: ``"bfgs"`` (default) or ``"gauss_newton"``.
+        settings: Solver settings; defaults to :data:`CHEYETTE_SETTINGS`.
         config: 2-D PDE grid configuration. Defaults to a moderate Craig-Sneyd
             mesh.
-        max_steps: Maximum optimiser iterations.
+        forward_curve: Must be ``None`` or ``curve`` (single-curve only).
+        name: Level name used in diagnostics.
 
     Returns:
-        Tuple of the fitted model and the ``optimistix`` solution.
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`~valax.models.cheyette.CheyetteModel2F` is ``result.value``.
 
     Raises:
-        ValueError: If ``solver`` is not recognised, if a ``fixed_params`` key
-            is not a Cheyette parameter, or if the number of quotes does not
-            match the number of instruments.
+        ValueError: If a ``fixed_params`` key is not a Cheyette parameter, if
+            the number of quotes does not match the number of instruments, or
+            if a distinct ``forward_curve`` is passed.
     """
     if len(instruments) != market_prices.shape[0]:
         raise ValueError(
             f"Got {len(instruments)} instruments but "
             f"{market_prices.shape[0]} market prices."
         )
-
     require_single_curve(curve, forward_curve, "Cheyette 2F calibration")
-
     if config is None:
         config = _DEFAULT_CONFIG_FROZEN_2F
-
     if initial_guess is None:
         initial_guess = CheyetteModel2F(
             mean_reversion_1=jnp.asarray(0.5),
@@ -336,44 +344,9 @@ def calibrate_cheyette_2f(
             skew_1=jnp.asarray(0.0),
             skew_2=jnp.asarray(0.0),
             correlation=jnp.asarray(-0.7),
-            initial_curve=curve,
         )
-    else:
-        initial_guess = eqx.tree_at(
-            lambda m: m.initial_curve, initial_guess, curve
-        )
-
-    transforms: dict[str, TransformSpec] = dict(CHEYETTE_2F_TRANSFORMS)
-    if fixed_params is not None:
-        for name, value in fixed_params.items():
-            if name not in CHEYETTE_2F_TRANSFORMS:
-                raise ValueError(f"Unknown Cheyette parameter: {name!r}")
-            initial_guess = eqx.tree_at(
-                lambda m, n=name: getattr(m, n),
-                initial_guess,
-                jnp.asarray(value),
-            )
-            del transforms[name]
-
-    if weights is None:
-        weights = jnp.ones_like(market_prices)
-    scale = (
-        jnp.maximum(jnp.abs(market_prices), 1e-8)
-        if relative
-        else jnp.ones_like(market_prices)
+    return _cheyette_fit(
+        name, tuple(instruments), market_prices, curve, initial_guess,
+        CHEYETTE_2F_TRANSFORMS, fixed_params, weights, relative, settings,
+        "frozen", config, "Cheyette",
     )
-
-    y0 = model_to_unconstrained(initial_guess, transforms)
-    args = (
-        transforms,
-        initial_guess,
-        tuple(instruments),
-        market_prices,
-        weights,
-        scale,
-        "frozen",
-        config,
-    )
-    sol = _run_solver(solver, y0, args, max_steps)
-    fitted = unconstrained_to_model(sol.value, transforms, initial_guess)
-    return fitted, sol

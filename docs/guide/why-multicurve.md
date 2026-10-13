@@ -106,9 +106,8 @@ shock mechanics themselves live in
 
 ## Why sequential bootstrap breaks down
 
-The pre-MC-Curves-2 code (`bootstrap_multi_curve`, now deprecated and,
-since MC-Curves-2b, re-implemented over the joint solver) proceeded in a
-fixed order:
+A sequential multi-curve bootstrap (what VALAX did before MC-Curves-2, and
+what many libraries still do) proceeds in a fixed order:
 
 ```
 Step 1: Bootstrap OIS from OIS instruments               (one-curve solve)
@@ -244,16 +243,17 @@ tenor-basis and every cross-currency trade a desk carries.
   with alphabet-validated identifiers.
 - [`bootstrap_curve_graph`](../api/curves.md#valax.curves.bootstrap_curve_graph) —
   joint Newton solve, `optimistix.Newton` + `ImplicitAdjoint`.
-- [`CurveBuildDiagnostics`](../api/curves.md#valax.curves.CurveBuildDiagnostics) —
-  residuals, iteration count, converged flag.
+- Build diagnostics — the solver returns a
+  [`CalibrationResult`](../api/calibration.md#valax.calibration.result.CalibrationResult)
+  (residuals, iteration count, traceable converged flag, condition number,
+  per-instrument labels), with the native-unit fit table from
+  [`fitted_curve_quotes`](../api/curves.md#valax.curves.fitted_curve_quotes).
 - [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian) — implicit-adjoint
   quote-sensitivity matrix in three parametrisations
   (`log_df` / `df` / `zero_rate`).
-- `bootstrap_multi_curve` retained one deprecation cycle with a
-  `DeprecationWarning`; both it (MC-Curves-2b) and
-  `bootstrap_simultaneous` are now thin wrappers over the joint
-  solver, and `MultiCurveSet` is a view over `CurveGraph`
-  (`from_graph` / `to_graph`).
+- `bootstrap_simultaneous` is a thin wrapper over the joint solver, and
+  `MultiCurveSet` is a view over `CurveGraph` (`from_graph` / `to_graph`);
+  there is no separate sequential multi-curve bootstrap.
 - Curve-identifier alphabet frozen as
   `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]` (see
   [`production.md` §11.3](../architecture/production.md#113-curve-graph-data-model)).

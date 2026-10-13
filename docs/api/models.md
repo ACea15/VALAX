@@ -139,7 +139,22 @@ for callables, puttables, Bermudan swaptions, and IR exotics:
     [`valax.pricing.lattice`](pricing.md#callable-puttable-bonds) for
     trinomial-tree backward induction.
 
+!!! note "Curve-free models, curve bound at pricing time"
+    Hull–White, G2++ and Cheyette (1F/2F) carry
+    `initial_curve: DiscountCurve | None = None` and a static
+    `curve_id: str | None = None`. Construct them **without** a curve for
+    `valax.price(...)`, which binds `initial_curve` from the `MarketState`
+    (the curve `curve_id`, else the instrument's discount curve) and refuses
+    a pre-bound model. Calibrators return curve-free models. Kernel-level
+    functions (`hw_bond_price`, `hw_swaption_price`, PDE/MC recipes called
+    directly, tree builders) need a bound model — bind with
+    [`bind_curves`](core.md#valax.core.binding.bind_curves); an unbound
+    model raises through `require_initial_curve`. See
+    [API → Core § Curve fields](core.md#curve-fields-exact-fit-short-rate-models).
+
 ::: valax.models.HullWhiteModel
+
+::: valax.models.short_rate.require_initial_curve
 
 ### Analytics
 

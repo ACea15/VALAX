@@ -44,6 +44,19 @@ A fully-specified model is returned **unchanged** — same object, not a
 copy — so constant-mode prices are bit-identical to the pre-binding
 behaviour.
 
+Curve fields
+------------
+Exact-fit short-rate models (Hull-White, G2++, Cheyette) are bound to a whole
+*curve*, not a scalar. Which model fields are curves, and which market curve
+fills each, is declared by :func:`curve_requirements` — a ``singledispatch``
+on the model type, the extension point for future multi-curve and
+stochastic-basis models (a discount curve plus one initial curve per modelled
+index, each a keyed field). :func:`bind_model` fills every declared field from
+the ``MarketState`` and **refuses a field that arrives pre-bound**: the market
+is the single source of truth for curve risk, so a curve embedded in a model
+would both shadow the market curve and leak curve sensitivity into the model
+gradient. Kernel-level callers bind explicitly with :func:`bind_curves`.
+
 Note:
     A constant-rate model with a *projected* rate is still a constant-rate
     model.  Projecting at each trade's own maturity makes its discount
@@ -53,7 +66,8 @@ Note:
     ``PRICING_ONTOLOGY.md`` § 3.1.
 """
 
-from typing import Any
+import functools
+from typing import Any, Mapping
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -62,6 +76,9 @@ from jax import Array
 
 from valax.curves.discount import DiscountCurve, zero_rate
 from valax.dates.daycounts import ordinal_from_year_fraction, year_fraction
+from valax.models.cheyette import CheyetteModel, CheyetteModel2F
+from valax.models.g2pp import G2PPModel
+from valax.models.hull_white import HullWhiteModel
 from valax.surfaces.leverage import LeverageGrid
 from valax.surfaces.swaption_cube import SwaptionCube
 
@@ -219,6 +236,99 @@ def sample_vol(
     return jnp.asarray(surface(strike, horizon))
 
 
+# ── Curve fields ─────────────────────────────────────────────────────
+
+
+@functools.singledispatch
+def curve_requirements(model: Any, instrument: Any) -> dict[str, str]:
+    """Curve-valued model fields bound from the market, and their curve ids.
+
+    The binding contract of curve-driven models: ``{model_field: curve_id}``.
+    :func:`bind_model` fills each listed field with ``market.curve(curve_id)``
+    at pricing time. Models with no curve fields (the default) return ``{}``.
+
+    Register a new model type with ``@curve_requirements.register``; a model
+    driven by several curves (one per index) returns one entry per field.
+
+    Args:
+        model: A model pytree.
+        instrument: The instrument being priced (supplies the default curve,
+            e.g. its ``discount_id``), or ``None``.
+
+    Returns:
+        ``{field_name: curve_id}``.
+    """
+    return {}
+
+
+def _exact_fit_requirements(model: Any, instrument: Any) -> dict[str, str]:
+    """Short-rate models: the initial curve is the pinned id, else discount."""
+    from valax.core.resolve import discount_id_of
+
+    return {"initial_curve": model.curve_id or discount_id_of(instrument)}
+
+
+for _cls in (HullWhiteModel, G2PPModel, CheyetteModel, CheyetteModel2F):
+    curve_requirements.register(_cls, _exact_fit_requirements)
+
+
+def bind_curves(
+    model: Any,
+    source: Any,
+    instrument: Any = None,
+) -> Any:
+    """Bind a model's declared curve fields explicitly (kernel-level use).
+
+    :func:`valax.core.pricing.price` binds curves itself; use this to call a
+    kernel (``hw_bond_price``, ``hw_swaption_price``, a PDE builder) on a
+    curve-free model, e.g. a calibration result's ``value``. Unlike
+    :func:`bind_model`, an already-bound field is overwritten.
+
+    Args:
+        model: A model pytree.
+        source: A ``MarketState`` (fields are looked up by the ids
+            :func:`curve_requirements` declares) or a single
+            :class:`~valax.curves.discount.DiscountCurve` (bound into every
+            declared field — the single-curve case).
+        instrument: Instrument supplying default curve ids, or ``None``.
+
+    Returns:
+        The model with every declared curve field bound.
+    """
+    for field, curve_id in curve_requirements(model, instrument).items():
+        curve = source if isinstance(source, DiscountCurve) else source.curve(curve_id)
+        model = eqx.tree_at(
+            lambda m, _f=field: getattr(m, _f), model, curve,
+            is_leaf=lambda x: x is None,
+        )
+    return model
+
+
+def _bind_curve_fields(model: Any, instrument: Any, market: Any) -> Any:
+    """Fill declared curve fields from ``market``; refuse pre-bound ones."""
+    requirements = curve_requirements(model, instrument)
+    for field, curve_id in requirements.items():
+        if getattr(model, field) is not None:
+            raise ValueError(
+                f"{type(model).__name__}.{field} arrived pre-bound to a "
+                f"curve. price() binds it from the MarketState (curve "
+                f"{curve_id!r}) so the market is the single source of truth "
+                f"for curve risk; construct the model with {field}=None (and "
+                f"set curve_id to pin a curve other than the instrument's "
+                f"discount curve)."
+            )
+        if market is None:
+            raise ValueError(
+                f"{type(model).__name__} needs curve {curve_id!r} bound but no "
+                f"MarketState was given."
+            )
+        model = eqx.tree_at(
+            lambda m, _f=field: getattr(m, _f), model, market.curve(curve_id),
+            is_leaf=lambda x: x is None,
+        )
+    return model
+
+
 # ── Binding ──────────────────────────────────────────────────────────
 
 
@@ -265,7 +375,9 @@ def _bound_value(
     return sample_vol(resolved.surface, jnp.asarray(strike), horizon)
 
 
-def bind_model(model: Any, instrument: Any, resolved: Any) -> Any:
+def bind_model(
+    model: Any, instrument: Any, resolved: Any, market: Any = None
+) -> Any:
     """Fill a model's ``None`` parameters from the resolved market.
 
     Called once by :func:`valax.core.pricing.price`, between ``resolve``
@@ -283,16 +395,20 @@ def bind_model(model: Any, instrument: Any, resolved: Any) -> Any:
             horizon and, for ``vol``, the strike.
         resolved: The :class:`~valax.core.resolve.ResolvedMarket` for this
             ``(instrument, model, market)`` triple.
+        market: The :class:`~valax.core.market_state.MarketState`, from which
+            the curve fields declared by :func:`curve_requirements` are bound.
 
     Returns:
         The model with every bindable parameter concrete.
 
     Raises:
         ValueError: If a parameter is ``None`` and the market cannot
-            supply it, or if the instrument exposes no usable horizon.
+            supply it, if the instrument exposes no usable horizon, or if a
+            declared curve field arrives pre-bound.
     """
     if model is None:
         return model
+    model = _bind_curve_fields(model, instrument, market)
 
     pending = [
         field for field in BINDABLE_FIELDS

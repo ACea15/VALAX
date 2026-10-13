@@ -82,10 +82,10 @@ as chain nodes today is tracked on the
 
 | Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|
-| [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR) | single forward per period | ✅ |
-| [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR) | strip of independent caplets | ✅ |
+| [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | single forward per period | ✅ |
+| [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | strip of independent caplets | ✅ |
 | [Interest-rate swap](#interest-rate-swap) | Analytic | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
-| [Swaption](#swaption) | Analytic · MC · PDE | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube; `calibrate_swaption_cube` for exogenous forwards) · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)) | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
+| [Swaption](#swaption) | Analytic · MC · PDE (Hull-White analytic = Jamshidian, reachable through `price()` and its auto default) | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube); as a chain: `swaption_cube_node` on the upstream curves · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)); per trade off the cube: `swaption_basket_node` | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
 | [CMS swap](#cms-swap) | Analytic | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
 | [CMS-spread swap](#cms-spread-swap) | MC · PDE | G2++ · Cheyette-2F | HW → swaption surface | 2-factor decorrelation (steepener / flattener) | ✅ |
 | [CMS cap / floor](#cms-cap-floor) | Analytic | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |
@@ -96,7 +96,7 @@ as chain nodes today is tracked on the
 | [Tenor basis swap](#tenor-basis-swap) | Analytic | n-a (curves) | curve bootstrap · `TenorBasisSwap` quote | one projection curve per leg | ✅ |
 | [Cross-currency swap](#cross-currency-swap) | Analytic | n-a (curves + FX spot) | joint curve bootstrap | telescoping under CIP | ✅ |
 | [Total return swap](#total-return-swap) | Analytic | n-a (curves) | curve bootstrap | self-financing asset | ✅ |
-| [Bermudan swaption](#bermudan-swaption) | MC · PDE | Hull-White · G2++ · Cheyette · LMM | HW→surface / LMM | early exercise | ✅ |
+| [Bermudan swaption](#bermudan-swaption) | MC · PDE | Hull-White · G2++ · Cheyette · LMM | per trade (Hull-White, G2++; Cheyette single-curve): `coterminal_swaptions` + `swaption_basket_node` off the calibrated cube, priced through `price(..., method="pde")` with quote risk via `chain_adjoint` ([how-to](../guide/calibration-to-risk.md#rates-per-trade-model-calibration)); LMM uncalibrated | early exercise | ✅ |
 
 ### Bonds & fixed income
 

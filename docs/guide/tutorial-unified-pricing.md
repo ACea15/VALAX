@@ -23,7 +23,7 @@ them.
 | [4](#4-no-model-needed-curve-discounted-trades) | Curve-discounted trades | `model=None` |
 | [5](#5-selectors-single-curve-for-free-multi-curve-on-purpose) | Selectors and resolution | `discount_id`, `forward_id`, `resolve` |
 | [6](#6-many-assets-one-market) | Keyed spots and surfaces | `underlying_id`, surface alphabet |
-| [7](#7-models-that-reference-the-market) | Binding a model to a market curve | `from_market`, `with_market_curve` |
+| [7](#7-models-that-reference-the-market) | Binding a model to a market curve | `curve_id`, `bind_curves` |
 | [8](#8-sensitivities-through-the-same-call) | Market / model / contract greeks | `market_greeks`, `curve_pillar_deltas` |
 | [9](#9-building-the-market-from-quotes) | Quotes → curves → `MarketState` | `bootstrap_curve_graph` |
 | [10](#10-extending-register-your-own-pricer) | Registering a new pricer | `register_pricer`, `set_auto_method` |
@@ -365,27 +365,36 @@ consistency rule is worth stating plainly:
 > A model is only valid paired with the `MarketState` it was calibrated
 > against (or a scenario-shocked version reusing the same ids).
 
-Short-rate models therefore record the curve they are bound to, and can be
-built from — and re-bound to — a market:
+Exact-fit short-rate models (Hull–White, G2++, Cheyette) are fitted to a whole
+curve — but that curve is **market data, not a model parameter**. The model is
+built curve-free (`initial_curve=None`, the default), optionally naming the
+curve it must be fitted to with the static `curve_id`, and `price` binds it
+from the `MarketState` on every call:
 
 ```python
-hw = HullWhiteModel.from_market(
-    graph_market,
+hw = HullWhiteModel(
     mean_reversion=jnp.array(0.10),
     volatility=jnp.array(0.01),
-    curve_id="USD.SOFR.OIS",
+    curve_id="USD.SOFR.OIS",     # else: the instrument's discount curve
 )
-hw.curve_id                  # 'USD.SOFR.OIS'
+hw.initial_curve             # None — price() binds it from the market
 
 shocked = MarketState(curves=CurveGraph(curves={
     "USD.SOFR.OIS": flat_curve(0.04), "USD.SOFR.3M": flat_curve(0.045),
 }))
-hw_shocked = hw.with_market_curve(shocked)   # same params, re-fitted curve
+# Same model object, re-fitted to whichever market it is priced against.
 ```
 
-`from_market` records the linkage; `with_market_curve` re-binds under a shocked
-market while preserving the intrinsic parameters (mean reversion, vol). That is
-the pattern for scenario repricing: shock the `MarketState`, re-bind, reprice.
+Because the curve is bound at pricing time, scenario repricing is just
+"shock the `MarketState`, reprice" — the intrinsic parameters (mean reversion,
+vol) stay put, and curve risk is reported once, on the market. `price` refuses
+a model that arrives with `initial_curve` already set (`ValueError`), since an
+embedded curve would shadow the market's. Calibrators
+([`calibrate_hull_white`](../api/calibration.md#valax.calibration.calibrate_hull_white)
+and friends) return curve-free models for the same reason. To call a pricing
+*kernel* directly (`hw_swaption_price`, a PDE builder, a tree), bind
+explicitly with
+[`bind_curves(model, curve_or_market)`](../api/core.md#valax.core.binding.bind_curves).
 
 The selectors of stage 5 carry all the way into the MC and PDE engines. A
 payer swaption on the graph market, discounting OIS and projecting 3M:
@@ -408,7 +417,15 @@ float(price(payer, hw, graph_market, method="pde", config=cfg).price)
 
 # …the same trade with no selectors, on a single-curve market:
 # 167,187.75
+
+auto_method(payer, hw)                         # 'analytic' — Jamshidian
+float(price(payer, hw, graph_market).price)    # 309,663.13
+float(price(payer, hw, shocked, method="pde", config=cfg).price)
+# 695,398.12   — same model, bound to the shocked curves
 ```
+
+European `Swaption` × `HullWhiteModel` defaults to the closed-form Jamshidian
+route; the PDE agrees to the grid's discretisation error.
 
 The dual-curve price *exceeds* both single-curve legs here: with projection
 above OIS, the trade keeps the higher OIS discount factors **and** gains the
@@ -421,8 +438,12 @@ sanity-check habit: predict the sign of a basis change before you run it.)
     curve, project off the forward curve, treat the basis as a deterministic
     spread. A basis swaption or tenor-spread option is therefore worth **zero**
     under this overlay, and the CMS-spread recipes *reject* a distinct
-    projection curve rather than silently ignore it. Cheyette and LMM recipes
-    remain single-curve. The modelling choice and its limits are derived in
+    projection curve rather than silently ignore it. Whether the overlay
+    applies is declared per model type
+    ([`basis_overlay`](../api/pricing.md#valax.pricing.multicurve.basis_overlay)):
+    Cheyette and LMM recipes remain single-curve, and `price` **raises** when a
+    trade resolves a distinct projection curve that the recipe/model cannot
+    use. The modelling choice and its limits are derived in
     [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md); the engine
     recipes are in [PDE](pde.md) and [Monte Carlo](monte-carlo.md).
 
@@ -563,8 +584,9 @@ quotes = [
              rate=jnp.array(0.0320), curves_touched=("USD.SOFR.OIS",)),
 ]
 
-graph, diag = bootstrap_curve_graph(REF, [spec], quotes)
-bool(diag.converged), float(diag.max_abs_residual)   # (True, 2.8e-17)
+build = bootstrap_curve_graph(REF, [spec], quotes)   # a CalibrationResult
+bool(build.converged), float(build.diagnostics.max_abs_residual)   # (True, 2.8e-17)
+graph = build.check().value                           # the CurveGraph
 
 market = MarketState(curves=graph)
 
@@ -707,6 +729,8 @@ available.
 | Named a curve the market lacks | `KeyError: Curve 'USD.SOFR.OIS' not in MarketState (available: ['_default_']).` |
 | Equity trade on a rates-only market | `ValueError: Black-Scholes pricing needs a spot: the MarketState carries none for this instrument's underlying. …` |
 | Unregistered `(instrument, model)` pair | `ValueError: No pricer registered for (…)` + every registered triple |
+| Short-rate model built with `initial_curve=curve` | `ValueError: HullWhiteModel.initial_curve arrived pre-bound to a curve. price() binds it from the MarketState …` — drop `initial_curve` (set `curve_id` to pin a curve) |
+| Distinct projection curve on a model without the basis overlay (e.g. Cheyette) | `ValueError: CheyetteModel does not price a projection curve distinct from its discount curve …` |
 
 Two more that are quieter but worth knowing:
 

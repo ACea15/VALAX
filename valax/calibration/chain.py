@@ -7,14 +7,14 @@ The calibration stack is a sequence of **levels**, each solving
 
     quotes q, fixed inputs p
         │
-        ▼  level 1a   curves (OIS, projection, basis)          ┐
+        ▼  level 1a   curves (OIS, projection, basis)           ┐
         ▼  level 1b   vol objects (SABR / SVI smiles, cubes)    │ market scope:
         ▼  …          spots, dividends, flat inputs             ┘ shared, once per snapshot
     MarketState ─────────────────────────────────────────────────┐
         ▼  level 2    pricing model fitted to a basket           │ model scope:
     model ───────────────────────────────────────────────────────┤ per basket / underlying
-        ▼                                                         │
-    price(instrument, model, market)  ◄───────────────────────────┘
+        ▼                                                        │
+    price(instrument, model, market)  ◄──────────────────────────┘
 
 Two scopes, one contract. A :class:`CalibrationNode` is the same object whether
 it calibrates a piece of the market (``install_fn`` puts the value into a
@@ -46,135 +46,18 @@ import dataclasses
 from typing import Any, Callable, Sequence
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
-from jax.flatten_util import ravel_pytree
-from jaxtyping import Float
-from jax import Array
 
 from valax.calibration.level import LevelInputs
-from valax.calibration.result import (
-    CalibrationResult,
-    diagnostics_from_solution,
-    explicit_diagnostics,
+from valax.calibration.result import CalibrationResult
+from valax.calibration.solve import (
+    explicit_level,
+    solve_batched_level,
+    solve_level,
 )
-from valax.calibration.settings import SolverSettings, run_solver
 from valax.core.market_state import MarketState
 from valax.curves.graph import CurveGraph
 from valax.market.quotes import QuoteSet
-
-
-# ── Level builders: the contract every node factory uses ─────────────
-
-
-def solve_level(
-    name: str,
-    problem: str,
-    residual_fn: Callable[[Any, LevelInputs], Float[Array, " n"]],
-    theta0: Any,
-    inputs: LevelInputs,
-    assemble_fn: Callable[[Any, LevelInputs], Any],
-    settings: SolverSettings | None = None,
-) -> CalibrationResult:
-    r"""Solve one calibration level and package it as a result.
-
-    The single implementation of "run a calibration": every solved node
-    routes through here, so every level reports convergence the same way and
-    carries a residual that is, by construction, the one the solver used.
-
-    * ``problem="root"`` — ``residual_fn`` is a square system ``R(theta) = 0``;
-      the level residual is ``R`` itself.
-    * ``problem="least_squares"`` — ``residual_fn`` returns the fit residual
-      vector ``r(theta)`` (weights included); the level residual is the
-      first-order condition :math:`\nabla_\theta \tfrac12\|r\|^2`, which is
-      square, so the implicit function theorem applies with the full Hessian.
-
-    Args:
-        name: Level name for diagnostics.
-        problem: ``"root"`` or ``"least_squares"``.
-        residual_fn: ``(theta, inputs) -> residual vector``.
-        theta0: Initial guess (any pytree of float arrays).
-        inputs: The level's quotes / upstream market / fixed inputs.
-        assemble_fn: ``(theta, inputs) -> calibrated object``.
-        settings: Solver settings. Defaults to :class:`SolverSettings`.
-
-    Returns:
-        The :class:`~valax.calibration.result.CalibrationResult`.
-
-    Raises:
-        ValueError: If ``problem`` is not ``"root"`` or ``"least_squares"``.
-    """
-    if problem not in ("root", "least_squares"):
-        raise ValueError(
-            f"solve_level: problem must be 'root' or 'least_squares', got "
-            f"{problem!r}."
-        )
-    settings = SolverSettings() if settings is None else settings
-    solution = run_solver(problem, residual_fn, theta0, inputs, settings)
-    theta = solution.value
-    fit_residuals = residual_fn(theta, inputs)
-
-    if problem == "root":
-        level_residual = residual_fn
-    else:
-
-        def level_residual(th: Any, inp: LevelInputs) -> Any:
-            """First-order condition of the weighted least-squares fit.
-
-            Flattened to a vector so every level residual has the same
-            shape contract, whatever pytree ``theta`` is.
-            """
-
-            def half_sse(t: Any) -> Float[Array, ""]:
-                r = residual_fn(t, inp)
-                return 0.5 * jnp.sum(r * r)
-
-            return ravel_pytree(jax.grad(half_sse)(th))[0]
-
-    return CalibrationResult(
-        value=assemble_fn(theta, inputs),
-        theta=theta,
-        inputs=inputs,
-        diagnostics=diagnostics_from_solution(solution, fit_residuals),
-        residual_fn=level_residual,
-        assemble_fn=assemble_fn,
-        settings=settings,
-        name=name,
-    )
-
-
-def explicit_level(
-    name: str,
-    inputs: LevelInputs,
-    assemble_fn: Callable[[Any, LevelInputs], Any],
-) -> CalibrationResult:
-    """Package a level with no solve (an explicit map from its inputs).
-
-    Installing a quoted spot, building a flat curve from a quoted rate, or a
-    Dupire transform of an upstream surface are levels whose value is a
-    closed-form function of the inputs. They join the chain like any other
-    level; the adjoint differentiates them by plain reverse-mode AD.
-
-    Args:
-        name: Level name for diagnostics.
-        inputs: The level's quotes / upstream market / fixed inputs.
-        assemble_fn: ``(None, inputs) -> calibrated object``.
-
-    Returns:
-        A :class:`~valax.calibration.result.CalibrationResult` with
-        ``theta=None`` and no residual.
-    """
-    return CalibrationResult(
-        value=assemble_fn(None, inputs),
-        theta=None,
-        inputs=inputs,
-        diagnostics=explicit_diagnostics(),
-        residual_fn=None,
-        assemble_fn=assemble_fn,
-        settings=SolverSettings(),
-        name=name,
-    )
-
 
 # ── Market installation helpers ──────────────────────────────────────
 
@@ -237,9 +120,7 @@ def install_market_fields(market: MarketState, fields: dict) -> MarketState:
         if not entries:
             continue
         if slot == "curves":
-            updates["curves"] = CurveGraph(
-                curves={**market.curves.curves, **entries}
-            )
+            updates["curves"] = CurveGraph(curves={**market.curves.curves, **entries})
         else:
             updates[slot] = {**getattr(market, slot), **entries}
     if "spots" in updates and market.asset_ids:
@@ -273,9 +154,7 @@ class CalibrationNode(eqx.Module):
     name: str = eqx.field(static=True)
     quote_keys: tuple[str, ...] = eqx.field(static=True)
     fixed_keys: tuple[str, ...] = eqx.field(static=True)
-    calibrate_fn: Callable[[LevelInputs], CalibrationResult] = eqx.field(
-        static=True
-    )
+    calibrate_fn: Callable[[LevelInputs], CalibrationResult] = eqx.field(static=True)
     install_fn: Callable[[MarketState, Any], MarketState] | None = eqx.field(
         static=True, default=None
     )
@@ -390,7 +269,7 @@ class CalibratedMarket(eqx.Module):
     @property
     def converged(self) -> Any:
         """Traceable ``all(converged)`` across every level."""
-        flags = [jnp.all(r.diagnostics.converged) for r in self.results]
+        flags = [r.converged for r in self.results]
         return jnp.all(jnp.stack(flags)) if flags else jnp.asarray(True)
 
     def result(self, name: str) -> CalibrationResult:
@@ -523,5 +402,6 @@ __all__ = [
     "install_curves",
     "install_market_fields",
     "install_surface",
+    "solve_batched_level",
     "solve_level",
 ]

@@ -23,15 +23,16 @@ from valax.curves.instruments import (
 )
 from valax.curves.bootstrap import bootstrap_sequential, bootstrap_simultaneous
 from valax.curves.bootstrap_graph import (
-    CurveBuildDiagnostics,
     bootstrap_curve_graph,
+    curve_instrument_labels,
     curve_quote_vector,
     curve_residual_fn,
+    fitted_curve_quotes,
     log_dfs_from_graph,
     par_quote,
     quote_jacobian,
 )
-from valax.curves.multi_curve import MultiCurveSet, bootstrap_multi_curve
+from valax.curves.multi_curve import MultiCurveSet
 from valax.curves.inflation import (
     InflationCurve,
     forward_cpi,

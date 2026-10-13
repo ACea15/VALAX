@@ -89,13 +89,13 @@ class TestSABRSmileResidual:
             jnp.sqrt(jnp.mean((smile_noisy - smile_clean) ** 2))
         )
 
-        sabr_fit, sol = calibrate_sabr(
+        sabr_fit = calibrate_sabr(
             strikes=self.STRIKES,
             market_vols=smile_noisy,
             forward=self.FORWARD,
             expiry=self.EXPIRY,
             fixed_beta=sabr_truth.beta,
-        )
+        ).value
 
         smile_fit = jax.vmap(
             lambda K: sabr_implied_vol(sabr_fit, self.FORWARD, K, self.EXPIRY)
@@ -114,13 +114,13 @@ class TestSABRSmileResidual:
             seed_registry, sabr_truth, self.FORWARD, self.EXPIRY,
             self.STRIKES, vol_bp_noise=0.0,
         )
-        sabr_fit, _ = calibrate_sabr(
+        sabr_fit = calibrate_sabr(
             strikes=self.STRIKES,
             market_vols=smile,
             forward=self.FORWARD,
             expiry=self.EXPIRY,
             fixed_beta=sabr_truth.beta,
-        )
+        ).value
         smile_fit = jax.vmap(
             lambda K: sabr_implied_vol(sabr_fit, self.FORWARD, K, self.EXPIRY)
         )(self.STRIKES)

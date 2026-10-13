@@ -128,8 +128,8 @@ from valax.pricing.pde.config import PDEConfig
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.grids import Grid1D, centred_state_grid, read_off_1d
 from valax.pricing.multicurve import (
-    swap_leg_basis,
-    tenor_basis,
+    model_swap_leg_basis,
+    model_tenor_basis,
     with_discount_curve,
 )
 from valax.pricing.pde.rates_payoffs import (
@@ -506,8 +506,8 @@ def _swaption_hw(
             default) projects off the discount curve — the single-curve case.
     """
     model = with_discount_curve(model, discount_curve)
-    basis = swap_leg_basis(
-        model.initial_curve,
+    basis = model_swap_leg_basis(
+            model,
         forward_curve,
         instrument.expiry_date,
         instrument.fixed_dates,
@@ -571,8 +571,8 @@ def _caplet_hw(
     horizon = year_fraction(reference_date, instrument.fixing_date, day_count)
     end_time = year_fraction(reference_date, instrument.end_date, day_count)
     tau = year_fraction(instrument.start_date, instrument.end_date, day_count)
-    basis = tenor_basis(
-        model.initial_curve,
+    basis = model_tenor_basis(
+        model,
         forward_curve,
         instrument.start_date,
         instrument.end_date,
@@ -615,8 +615,8 @@ def _cap_hw(
         reference_date, instrument.fixing_dates[-1], day_count
     )
     dt = horizon / config.n_time
-    basis = tenor_basis(
-        model.initial_curve,
+    basis = model_tenor_basis(
+        model,
         forward_curve,
         instrument.start_dates,
         instrument.end_dates,
@@ -683,8 +683,8 @@ def _bermudan_swaption_hw(
     # Each exercise enters a different (shorter) tail swap, so each needs its
     # own basis strip over that tail's accrual periods.
     bases = [
-        swap_leg_basis(
-            model.initial_curve,
+        model_swap_leg_basis(
+            model,
             forward_curve,
             instrument.exercise_dates[e],
             instrument.fixed_dates[e:],

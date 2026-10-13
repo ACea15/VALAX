@@ -11,6 +11,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+from valax.calibration import CalibrationError, level_adjoint
+
 from valax.curves.discount import DiscountCurve
 from valax.curves.graph import CurveGraph
 from valax.dates.daycounts import ymd_to_ordinal, year_fraction
@@ -137,7 +139,7 @@ class TestRoundTrip:
         assert float(premium) > 0.0
         back = swaption_implied_normal_vol(
             s, premium, curve, settlement=settlement
-        )
+        ).value
         assert float(back) == pytest.approx(float(vol), rel=ROUNDTRIP_RTOL)
 
     def test_residual_is_zero_at_the_solution(self, curve):
@@ -145,7 +147,7 @@ class TestRoundTrip:
         premium = swaption_premium_from_normal_vol(
             s, jnp.array(0.0075), curve
         )
-        vol = swaption_implied_normal_vol(s, premium, curve)
+        vol = swaption_implied_normal_vol(s, premium, curve).value
         r = swaption_premium_residual(vol, s, premium, curve)
         assert abs(float(r)) < 1e-6  # currency units on a 1 mm notional
 
@@ -160,7 +162,7 @@ class TestRoundTrip:
         s = _swaption()
         vol = jnp.array(0.0075)
         premium = swaption_premium_from_normal_vol(s, vol, curve, proj_curve)
-        back = swaption_implied_normal_vol(s, premium, curve, proj_curve)
+        back = swaption_implied_normal_vol(s, premium, curve, proj_curve).value
         assert float(back) == pytest.approx(float(vol), rel=ROUNDTRIP_RTOL)
 
     def test_the_basis_changes_the_vol_a_premium_implies(
@@ -171,22 +173,22 @@ class TestRoundTrip:
         premium = swaption_premium_from_normal_vol(
             s, jnp.array(0.0075), curve, proj_curve
         )
-        single = swaption_implied_normal_vol(s, premium, curve)
-        dual = swaption_implied_normal_vol(s, premium, curve, proj_curve)
+        single = swaption_implied_normal_vol(s, premium, curve).value
+        dual = swaption_implied_normal_vol(s, premium, curve, proj_curve).value
         assert abs(float(single) - float(dual)) > 1e-5
 
     def test_cash_and_physical_imply_different_vols(self, curve):
         s = _swaption()
         premium = swaption_premium_from_normal_vol(s, jnp.array(0.0075), curve)
-        phys = swaption_implied_normal_vol(s, premium, curve)
-        cash = swaption_implied_normal_vol(s, premium, curve, settlement="cash")
+        phys = swaption_implied_normal_vol(s, premium, curve).value
+        cash = swaption_implied_normal_vol(s, premium, curve, settlement="cash").value
         assert abs(float(phys) - float(cash)) > 1e-5
 
     def test_initial_vol_override_reaches_the_same_root(self, curve):
         s = _swaption()
         premium = swaption_premium_from_normal_vol(s, jnp.array(0.0075), curve)
-        a = swaption_implied_normal_vol(s, premium, curve)
-        b = swaption_implied_normal_vol(s, premium, curve, initial_vol=0.05)
+        a = swaption_implied_normal_vol(s, premium, curve).value
+        b = swaption_implied_normal_vol(s, premium, curve, initial_vol=0.05).value
         assert float(b) == pytest.approx(float(a), rel=1e-9)
 
     def test_graph_entry_point_agrees(self, curve, proj_curve):
@@ -195,10 +197,10 @@ class TestRoundTrip:
             "USD.SOFR.OIS": curve, "USD.TERM.3M": proj_curve,
         })
         premium = swaption_premium_from_normal_vol(s, jnp.array(0.0075), curve, proj_curve)
-        a = swaption_implied_normal_vol(s, premium, curve, proj_curve)
+        a = swaption_implied_normal_vol(s, premium, curve, proj_curve).value
         b = swaption_implied_normal_vol_from_graph(
             s, premium, graph, "USD.SOFR.OIS", "USD.TERM.3M"
-        )
+        ).value
         assert float(a) == float(b)
 
 
@@ -225,7 +227,7 @@ class TestGradients:
             c = eqx.tree_at(lambda x: x.discount_factors, curve, dfs)
             return swaption_implied_normal_vol(
                 s, premium, c, settlement=settlement
-            )
+            ).value
 
         g = jax.grad(vol_of_dfs)(curve.discount_factors)
         assert jnp.all(jnp.isfinite(g))
@@ -245,7 +247,7 @@ class TestGradients:
 
         def vol_of_proj(dfs):
             p = eqx.tree_at(lambda x: x.discount_factors, proj_curve, dfs)
-            return swaption_implied_normal_vol(s, premium, curve, p)
+            return swaption_implied_normal_vol(s, premium, curve, p).value
 
         g = jax.grad(vol_of_proj)(proj_curve.discount_factors)
         assert jnp.all(jnp.isfinite(g))
@@ -257,7 +259,7 @@ class TestGradients:
         premium = swaption_premium_from_normal_vol(s, vol, curve)
 
         dvol_dq = jax.grad(
-            lambda q: swaption_implied_normal_vol(s, q, curve)
+            lambda q: swaption_implied_normal_vol(s, q, curve).value
         )(premium)
         vega = jax.grad(
             lambda v: swaption_premium_from_normal_vol(s, v, curve)
@@ -269,7 +271,9 @@ class TestJit:
     def test_round_trip_is_jittable(self, curve):
         s = _swaption()
         premium = swaption_premium_from_normal_vol(s, jnp.array(0.0075), curve)
-        vol = eqx.filter_jit(swaption_implied_normal_vol)(s, premium, curve)
+        res = eqx.filter_jit(swaption_implied_normal_vol)(s, premium, curve)
+        assert bool(res.converged)
+        vol = res.value
         assert jnp.isfinite(vol)
         assert float(vol) == pytest.approx(0.0075, rel=ROUNDTRIP_RTOL)
 
@@ -281,7 +285,7 @@ class TestJit:
         vol = eqx.filter_jit(
             lambda sw, q, c: swaption_implied_normal_vol(
                 sw, q, c, settlement="cash", freq=1
-            )
+            ).value
         )(s, premium, curve)
         assert float(vol) == pytest.approx(0.0075, rel=ROUNDTRIP_RTOL)
 
@@ -297,3 +301,28 @@ class TestJit:
                     sw, q, c, settlement="cash"
                 )
             )(s, premium, curve)
+
+
+class TestInversionLevel:
+    def test_unreachable_premium_is_reported(self, curve):
+        """Anti-vacuity: a premium below intrinsic has no implied vol."""
+        s = _swaption()
+        premium = swaption_premium_from_normal_vol(s, jnp.array(0.0075), curve)
+        res = swaption_implied_normal_vol(s, -premium, curve)
+        assert not bool(res.converged)
+        with pytest.raises(CalibrationError, match="swaption_implied_normal_vol"):
+            res.check()
+
+    def test_level_adjoint_matches_autodiff(self, curve):
+        s = _swaption()
+        premium = swaption_premium_from_normal_vol(s, jnp.array(0.0075), curve)
+        res = swaption_implied_normal_vol(s, premium, curve).check()
+        adj = level_adjoint(res.level, jnp.array([1.0]))
+        g_q, g_c = eqx.filter_grad(
+            lambda qc: swaption_implied_normal_vol(s, qc[0], qc[1]).value,
+        )((premium, curve))
+        assert float(adj.inputs_bar.quotes) == pytest.approx(float(g_q), rel=1e-8)
+        assert jnp.allclose(
+            adj.inputs_bar.upstream[0].discount_factors,
+            g_c.discount_factors, rtol=1e-7, atol=1e-12,
+        )

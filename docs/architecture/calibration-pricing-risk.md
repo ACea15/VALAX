@@ -50,12 +50,16 @@ The consequences are the design:
 | Quotes ``q`` and fixed inputs ``p`` | `QuoteSet` (keyed, differentiable, vmappable) | `valax.market.quotes` |
 | Calibrated market | `MarketState` (`flat`, `single_curve`, keyed multi-curve) | `valax.core.market_state` |
 | One level | `CalibrationLevel`, `LevelInputs(quotes, upstream, fixed)` | `valax.calibration.level` |
-| Solver choice and tolerances | `SolverSettings`, `run_solver` | `valax.calibration.settings` |
-| Result of a calibration | `CalibrationResult` (value, level, traceable diagnostics, `check()`) | `valax.calibration.result` |
+| Solver choice and tolerances | `SolverSettings`, `run_solver`; defaults `EXACT_SETTINGS`, `FIT_SETTINGS`, `BASKET_SETTINGS`, `CHEYETTE_SETTINGS` | `valax.calibration.settings`, `.basket`, `.cheyette` |
+| Result of a calibration | `CalibrationResult` (value, theta, inputs, `residual_fn`, `assemble_fn`, traceable diagnostics, `labels`, `problem`, `provenance`, `children`; `check()`, `failed_labels()`, `condition_number()`, `converged`) | `valax.calibration.result` |
+| Level builders | `solve_level` (one solve), `solve_batched_level` (one solve per node, `vmap`-ed), `explicit_level` (explicit maps, fixed points); `stack_slices`, `period_label(s)` | `valax.calibration.solve` |
+| Model-to-basket fit | `basket_fit_level` (behind every short-rate calibrator) | `valax.calibration.basket` |
+| Engine provenance | `CalibrationProvenance`, `check_engine` | `valax.calibration.result` |
 | Calibration step | `CalibrationNode` (market scope: `install_fn`; model scope: none) | `valax.calibration.chain` |
 | Market calibration | `CalibrationChain`, `calibrate_market` → `CalibratedMarket` | `valax.calibration.chain` |
 | Model calibration | `calibrate_model(node, q, market, p)` | `valax.calibration.chain` |
-| Node factories | `market_inputs_node`, `curve_graph_node`, `sabr_smile_node`, `price_fit_node` | `valax.calibration.nodes` |
+| Node factories | `market_inputs_node`, `curve_graph_node`, `sabr_smile_node`, `swaption_cube_node`, `caplet_strip_node`, `optionlet_sabr_node`, `price_fit_node`, `swaption_basket_node` (+ `coterminal_swaptions`) | `valax.calibration.nodes` |
+| Curve binding | `curve_requirements`, `bind_model`, `bind_curves`; `basis_overlay` | `valax.core.binding`, `valax.pricing.multicurve` |
 | Pricing | `price(instrument, model, market, method=, config=)` | `valax.core.pricing` |
 | Quote risk (adjoint) | `chain_adjoint`, `quote_risk_adjoint` | `valax.greeks.quote_risk` |
 | Quote risk (autodiff) | `quote_risk_autodiff`, `reconcile_quote_risk` | `valax.greeks.quote_risk` |
@@ -88,11 +92,24 @@ JAX boolean on `CalibrationResult.diagnostics.converged`, so it survives
 `jit` and `vmap`; `result.check()` / `calibrate_market(..., strict=True)` raise
 eagerly. Exact levels default to Newton at ``1e-10``; least-squares levels to
 Levenberg-Marquardt at ``1e-8`` (price-based fits have a noise floor a tighter
-tolerance cannot get under).
+tolerance cannot get under). The short-rate basket fits default to
+line-searched BFGS (`BASKET_SETTINGS`, ``1e-12`` for the closed-form
+Hull-White / G2++ engines; `CHEYETTE_SETTINGS`, ``1e-10`` on the PDE): the
+Jamshidian and Brigo-Mercurio swaption formulas nest a root-find whose own
+implicit derivative is non-finite far from the solution, where an undamped LM
+step can land, and BFGS's line search keeps the iterates where the pricer is
+defined. No calibrator selects a solver by string or builds one itself, and
+none discards `optimistix`'s failure flag.
 
 **D4 — The level is emitted by the calibrator.** A level's residual is the
 function the solver drove to zero, packaged with its solution by
-`solve_level`; nothing rebuilds a residual for the adjoint.
+`solve_level` / `solve_batched_level`; nothing rebuilds a residual for the
+adjoint. This holds for the standalone calibrators too (`calibrate_sabr`,
+`calibrate_hull_white`, `strip_caplet_vols`, `bootstrap_curve_graph`, …):
+each is a thin wrapper over a level builder and returns the same
+`CalibrationResult` a chain node does — `bootstrap_curve_graph` *is* the
+root level of `curve_graph_node`, `calibrate_swaption_cube_from_curves`
+shares `swaption_cube_level` with `swaption_cube_node`.
 
 **D5 — No `custom_vjp`.** Calibrations are differentiated by the implicit
 function theorem (explicitly, or through `optimistix`), pricers by plain AD.
@@ -103,14 +120,107 @@ factories check shapes, squareness and key counts eagerly; the calibration
 itself is traceable, so a whole chain can be `jit`-ed, differentiated and
 `vmap`-ed over quote scenarios.
 
+**D7 — Loops of independent fits are one batched, labelled level.** A smile
+per expiry, SABR per cube cell, SVI per slice and a strip per strike column
+are solved by `solve_batched_level`: one independent solve per node inside a
+single `vmap` (one trace, one compile whatever the node count), with
+per-node diagnostics aligned to `labels`. A failure is therefore *named*
+(`"5Yx10Y"`, `"2Y"`, `"cap 3Y"`, `"K=3.00%"`) by `failed_labels()` and in
+the `check()` error, instead of collapsing to one flag for the grid. For the
+adjoint the nodes are still one level: its residual stacks the per-node
+residuals (first-order conditions for fits), so `dR/dθ` is block-diagonal and
+`condition_number()` is taken over all blocks. Per-node inputs are a function
+of the level inputs, so forwards read from upstream curves stay
+differentiable. A sequentially bootstrapped node (the cap strip, one bucket
+after another, each with its own flag) supplies its own `node_solve_fn` but is
+still packaged as one lower-triangular root level (`caplet_strip_level`).
+Ragged grids are padded by `stack_slices` with zero weight, so padding
+contributes and receives nothing.
+
+**D8 — Composite calibrations are one result with children.** A calibration
+built from sub-calibrations returns the outer level with the inner results
+in `children`: `calibrate_slv` returns the leverage level with the Heston fit
+as `children[0]`; `strip_optionlet_surface` returns the SABR level with the
+strip as its child. `converged` and `check()` cover every child, so a caller
+checks one object, and each child keeps its own level for the adjoint.
+
+**D9 — A Monte Carlo fixed point is an explicit level differentiated by
+plain AD, never by the IFT.** The SLV leverage `L_{k+1} = G(L_k)` is computed
+by `n_iterations` unrolled passes, each re-simulating the particle swarm with
+fresh randomness. There is no residual the solver drives to zero — the
+increment never falls below the Monte Carlo noise floor — so there is no
+`R(θ) = 0` at which the implicit function theorem could be applied, and
+pretending otherwise would differentiate a fiction. `calibrate_slv_leverage`
+therefore returns an explicit level (`theta=None`, `problem="fixed_point"`):
+its value is a differentiable map of the inputs (Heston model, target surface,
+spot) and its risk is reverse-mode AD through the passes. Convergence is still
+reported, by `fixed_point_diagnostics`: the residual is the last increment
+`L_K − L_{K−1}`, `converged` is `max|ΔL| ≤ settings.atol` with `atol`
+(`SLV_SETTINGS`, `5e-2`) set deliberately above the noise floor
+(≈ `1/√n_paths` relative), `n_iterations=1` is always reported not converged
+(it measures only the distance from the `L ≡ 1` warm start, hence the default
+of 2), and the share of grid cells clipped to `[L_min, L_max]` is reported in
+`diagnostics.extras["clip_fraction"]` without deciding convergence. Recipe:
+[SLV § fixed point](../guide/slv.md#how-the-fixed-point-is-reported); maths:
+[Calibration Chains § I.8](../theory/calibration-chains.md#i8-fixed-point-levels).
+
+**D10 — Engine provenance is recorded on the result and enforced only where
+it carries a modelling bias.** Model parameters belong to the model when the
+calibration engine is exact (Jamshidian) or approximate only by a
+discretisation that converges away; when the engine has a *modelling* bias
+(frozen-`y` Cheyette replaces the stochastic accumulator by its deterministic
+limit) the parameters are valid on that engine only. Each result records
+`CalibrationProvenance(method, engine_kind, config)` with `engine_kind` ∈
+{`exact`, `discretised`, `modelling_bias`} — as result metadata, not a model
+field, so models fitted on different engines have one type, stack under
+`vmap`, and the engine is not a grouping axis of the book. `check_engine(result,
+method, config)` refuses a mismatched engine only for `modelling_bias`
+(`cheyette_provenance("frozen", cfg)`); for `exact` (`JAMSHIDIAN_PROVENANCE`,
+Hull-White / G2++) and `discretised` (`cheyette_provenance("exact", cfg)`) it is
+audit metadata. `price()` does not consult provenance: the check is an eager,
+explicit opt-in before pricing.
+
+**D11 — Curves are bound to models by the market, through one declared
+requirement.** Exact-fit short-rate models (Hull-White, G2++, Cheyette 1F/2F)
+carry `initial_curve=None` and a static `curve_id`; their calibrators return
+curve-free models. `curve_requirements(model, instrument) -> {field: curve_id}`
+(a `singledispatch`) declares which fields are curves and which market curve
+fills each — `model.curve_id` or else the instrument's discount curve — and
+`bind_model` inside `price()` fills them from the `MarketState`. `price()`
+**raises** if a declared field arrives pre-bound: the market is the single
+source of truth for curve risk, and an embedded curve would both shadow the
+market and leak curve sensitivity into the model gradient. Kernels raise if
+unbound (`require_initial_curve`); `bind_curves(model, curve_or_market)` binds
+explicitly for kernel use. Whether a model may price a projection curve distinct
+from its discount curve is the `basis_overlay(model)` dispatch (Hull-White /
+G2++ yes, Cheyette no), so a trade that resolves a projection curve its model
+cannot accept raises instead of being priced single-curve. The requirements
+protocol is the extension point for multi-curve and stochastic-basis models
+(one initial curve per modelled index); a keyed set of forward curves in
+`ResolvedMarket` is still open (roadmap §5.6).
+
+**D12 — A per-trade model is a model-scope level read off the calibrated
+market.** `swaption_basket_node` fits a model to one trade's basket (e.g.
+`coterminal_swaptions(bermudan)`): targets are the basket swaptions priced off
+the calibrated cube and curves, model prices go through `price()` (Jamshidian
+for Hull-White), and the level's only inputs are the market and its fixed
+inputs. So `chain_adjoint` with `model_levels` pushes the trade's `λ_m` into
+the cube level and the curve level and on to the quotes. Zero-valued **target
+shifts** `s_k` (one fixed input per basket instrument) make
+`p̄_k = ∂V/∂T_k` — the vega profile across the basket — fall out of the same
+sweep, checkable by bumping the shift. Baskets may be traced, so same-shaped
+per-trade baskets calibrate in one `eqx.filter_vmap`; the curve-free models
+(D11) are what makes the result stackable.
+
 ## 4. Extending the framework
 
 | To add… | You provide | It then works with |
 | --- | --- | --- |
 | **Instrument** | An `eqx.Module` (data only, static selectors such as `discount_id`) and `@register_pricer` adapters | `price`, both risk paths, `price_fit_node` baskets |
-| **Model** | An `eqx.Module` with no embedded market objects (fields left `None` are bound from the market) plus pricers | `price`, `price_fit_node` calibration at either scope |
-| **Numerical method** | A config class and pricers registered under the method name | `price(..., method=...)`, calibration through `price_fit_node(method=...)` |
-| **Calibration level** | A node factory: residual ``(θ, inputs) → vector``, `assemble` ``(θ, inputs) → object``, `install` ``(market, object) → market`` (or none), routed through `solve_level` / `explicit_level` | `calibrate_market`, both risk paths, diagnostics, conditioning |
+| **Model** | An `eqx.Module` with no embedded market objects (scalar fields left `None` are bound from the market; curve fields declared by registering `curve_requirements` and left `None`) plus pricers; a `basis_overlay` registration if it prices a distinct projection curve by the deterministic overlay | `price`, `price_fit_node` / `swaption_basket_node` calibration at either scope, stacking under `vmap` |
+| **Numerical method** | A config class and pricers registered under the method name; a `CalibrationProvenance` for fits on it (`engine_kind="modelling_bias"` if its parameters are engine-bound) | `price(..., method=...)`, calibration through `price_fit_node(method=...)`, `check_engine` |
+| **Calibration level** | A node factory: residual ``(θ, inputs) → vector``, `assemble` ``(θ, inputs) → object``, `install` ``(market, object) → market`` (or none), routed through `solve_level` (one solve), `solve_batched_level` (one solve per labelled node) or `explicit_level` (explicit map or fixed point), with a `SolverSettings` default | `calibrate_market`, both risk paths, diagnostics, named failures, conditioning |
+| **Standalone calibrator** | A thin wrapper building the same level as its node (e.g. `calibrate_sabr` → `solve_level`, `calibrate_hull_white` → `basket_fit_level`) and returning its `CalibrationResult` | `.check()`, `.converged` under `jit` / `vmap`, `level_adjoint` |
 | **Risk factor** | A quote key and the node that consumes it (for a new market slot: an installer and a `MarketState` field) | quote risk keyed by that identifier |
 
 A new level needs **no adjoint code**: `solve_level` packages the residual,
@@ -142,8 +252,14 @@ deliberately unconvergeable fit is reported (see
 ## 6. Open work
 
 Tracked on the [roadmap](../roadmap.md#unified-calibration-pricing-and-risk):
-migrating the per-model calibrators onto `CalibrationResult` and
-`SolverSettings`; swaption-cube, optionlet and SVI levels as chain nodes;
-per-trade Hull-White basket calibration; reaching every pricer through
-`price`; derivative convergence of the numerical engines; the position /
-portfolio layer.
+richer synthetic quote noise; constrained (KKT) SVI and FX smile levels;
+credit and FX quote levels; reaching every pricer through `price` (the
+remaining rates pricers including the G2++ analytic swaption and the
+Hull-White tree, caps / swaptions off the cube surfaces, default configs); a
+keyed set of forward curves in `ResolvedMarket` for multi-index instruments
+(D11); derivative convergence of the numerical engines; the position /
+portfolio layer. Hull-White, G2++ (multi-curve, 2-D PDE basket) and
+Cheyette (single-curve, frozen-y PDE basket) are all validated per trade
+through the same `swaption_basket_node`; G2++ needs a basket beyond the
+co-terminals to identify both factors (see
+[examples](../examples.md#per-trade-g2-and-cheyette)).

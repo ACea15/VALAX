@@ -22,8 +22,6 @@ mechanics and the
 for the derivation and the chosen default.
 """
 
-import functools
-
 import jax.numpy as jnp
 import equinox as eqx
 from jaxtyping import Float
@@ -31,7 +29,14 @@ from jax import Array
 
 from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_normal_implied_vol
-from valax.calibration.sabr import calibrate_sabr
+from valax.calibration.result import CalibrationResult
+from valax.calibration.sabr import (
+    sabr_batch_level,
+    sabr_vol_fn,
+    stacked_sabr_inputs,
+)
+from valax.calibration.settings import SolverSettings
+from valax.calibration.solve import period_labels
 from valax.surfaces.dynamics import resolve_smile_query, validate_smile_dynamics
 
 
@@ -170,20 +175,23 @@ def build_sabr_caplet_surface(
     market_vols_per_expiry: list[Float[Array, " n_k"]],
     forwards: Float[Array, " n_expiries"],
     expiries: Float[Array, " n_expiries"],
+    *,
     is_normal: bool = False,
     shift: Float[Array, ""] = 0.0,
     fixed_beta: Float[Array, ""] | None = None,
-    solver: str = "levenberg_marquardt",
-    max_steps: int = 256,
+    weights_per_expiry: list[Float[Array, " n_k"]] | None = None,
+    settings: SolverSettings | None = None,
     dynamics: str = "sticky_strike",
     quote_form: str = "absolute_strike",
-) -> OptionletVolSurface:
-    """Strip a caplet vol surface by SABR-calibrating each expiry slice.
+    name: str = "optionlet_surface",
+) -> CalibrationResult:
+    """Fit a caplet vol surface by SABR-calibrating each expiry slice.
 
     The convention-aware analogue of
-    :func:`valax.surfaces.sabr_surface.calibrate_sabr_surface`: it fits one SABR
-    smile per optionlet expiry (single-instrument least-squares, so it never
-    triggers the ``optimistix`` sequence-arity trap) and stacks the parameters.
+    :func:`valax.surfaces.sabr_surface.calibrate_sabr_surface`: one SABR smile
+    per optionlet expiry, solved as one batched level
+    (:func:`~valax.calibration.sabr.sabr_batch_level`) so a failed slice is
+    named by expiry in ``result.check()``.
 
     Args:
         strikes_per_expiry: List of strike arrays, one per expiry.
@@ -197,52 +205,49 @@ def build_sabr_caplet_surface(
         shift: Displacement for the normal expansion (used only when
             ``is_normal`` is True).
         fixed_beta: If provided, beta is fixed across all slices.
-        solver: Per-slice optimizer (see :func:`calibrate_sabr`).
-        max_steps: Max iterations per slice.
+        weights_per_expiry: Optional per-strike weights, one array per expiry.
+        settings: Per-slice solver settings; defaults to
+            :data:`~valax.calibration.settings.FIT_SETTINGS`.
         dynamics: Smile-dynamics convention recorded on the returned surface;
             see :class:`OptionletVolSurface`. Defaults to ``"sticky_strike"``.
         quote_form: Quote form recorded on the returned surface. Defaults to
             ``"absolute_strike"``, matching the absolute
             ``strikes_per_expiry`` this routine fits.
+        name: Level name used in diagnostics.
 
     Returns:
-        A fitted :class:`OptionletVolSurface`.
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`OptionletVolSurface` is ``result.value``.
 
     Raises:
         ValueError: If ``dynamics`` and ``quote_form`` are inconsistent.
     """
-    if is_normal:
-        vol_fn = functools.partial(sabr_normal_implied_vol, shift=jnp.asarray(shift))
-    else:
-        vol_fn = sabr_implied_vol
+    validate_smile_dynamics("OptionletVolSurface", dynamics, quote_form)
+    expiries = jnp.asarray(expiries, dtype=jnp.float64)
+    inputs = stacked_sabr_inputs(
+        strikes_per_expiry, market_vols_per_expiry, forwards, expiries,
+        weights_per_node=weights_per_expiry, fixed_beta=fixed_beta,
+    )
 
-    alphas, betas, rhos, nus = [], [], [], []
-    for i in range(len(expiries)):
-        model, _ = calibrate_sabr(
-            strikes=strikes_per_expiry[i],
-            market_vols=market_vols_per_expiry[i],
-            forward=forwards[i],
-            expiry=expiries[i],
-            fixed_beta=fixed_beta,
-            solver=solver,
-            max_steps=max_steps,
-            vol_fn=vol_fn,
+    def value_fn(models: SABRModel, nodes, _inputs) -> OptionletVolSurface:
+        return OptionletVolSurface(
+            expiries=nodes.fixed["expiry"],
+            forwards=nodes.fixed["forward"],
+            alphas=models.alpha,
+            betas=models.beta,
+            rhos=models.rho,
+            nus=models.nu,
+            shift=jnp.asarray(shift),
             is_normal=is_normal,
+            dynamics=dynamics,
+            quote_form=quote_form,
         )
-        alphas.append(model.alpha)
-        betas.append(model.beta)
-        rhos.append(model.rho)
-        nus.append(model.nu)
 
-    return OptionletVolSurface(
-        expiries=expiries,
-        forwards=forwards,
-        alphas=jnp.stack(alphas),
-        betas=jnp.stack(betas),
-        rhos=jnp.stack(rhos),
-        nus=jnp.stack(nus),
-        shift=jnp.asarray(shift),
+    return sabr_batch_level(
+        name, inputs, lambda inp: inp, value_fn,
+        labels=period_labels(expiries),
+        fit_beta=fixed_beta is None,
+        vol_fn=sabr_vol_fn(is_normal, shift),
         is_normal=is_normal,
-        dynamics=dynamics,
-        quote_form=quote_form,
+        settings=settings,
     )

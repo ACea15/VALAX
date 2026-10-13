@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import equinox as eqx
 import pytest
 
+from valax.calibration import CalibrationError, LevelInputs
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.instruments.rates import Cap
@@ -24,6 +25,7 @@ from valax.surfaces.caplet_stripping import (
     optionlet_expiries,
     optionlet_forwards,
     strip_caplet_vols,
+    strip_columns_level,
     strip_optionlet_surface,
 )
 
@@ -120,7 +122,7 @@ class TestExactRepricing:
     """
 
     def test_reprices_every_quoted_cap_single_curve(self, caps, curve):
-        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         for i, cap in enumerate(caps):
             target = cap_price_black76(cap, curve, QUOTES[i])
             got = cap_price_from_strip(cap, strip, curve)
@@ -131,7 +133,7 @@ class TestExactRepricing:
     ):
         strip = strip_caplet_vols(
             caps, curve, cap_vols=QUOTES, forward_curve=forward_curve,
-        )
+        ).value
         for i, cap in enumerate(caps):
             target = cap_price_black76(cap, curve, QUOTES[i], forward_curve)
             got = cap_price_from_strip(cap, strip, curve, forward_curve)
@@ -142,16 +144,16 @@ class TestExactRepricing:
             cap_price_black76(cap, curve, QUOTES[i])
             for i, cap in enumerate(caps)
         ])
-        from_vols = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        from_vols = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         from_premiums = strip_caplet_vols(
             caps, curve, cap_premiums=premiums,
-        )
+        ).value
         assert jnp.allclose(from_vols.vols, from_premiums.vols, atol=1e-10)
 
     def test_floor_strip_reprices(self, curve):
         floors = [_cap(n, 0.035, is_cap=False) for n in (4, 8, 12)]
         quotes = jnp.array([0.30, 0.33, 0.35])
-        strip = strip_caplet_vols(floors, curve, cap_vols=quotes)
+        strip = strip_caplet_vols(floors, curve, cap_vols=quotes).value
         for i, floor in enumerate(floors):
             target = cap_price_black76(floor, curve, quotes[i])
             got = cap_price_from_strip(floor, strip, curve)
@@ -163,7 +165,7 @@ class TestExactRepricing:
 
 class TestStrippedShape:
     def test_one_vol_per_optionlet(self, caps, curve):
-        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         assert strip.vols.shape == (16,)
         assert strip.expiries.shape == (16,)
         assert strip.forwards.shape == (16,)
@@ -171,11 +173,11 @@ class TestStrippedShape:
 
     def test_flat_quotes_give_flat_strip(self, caps, curve):
         flat = jnp.full((4,), 0.32)
-        strip = strip_caplet_vols(caps, curve, cap_vols=flat)
+        strip = strip_caplet_vols(caps, curve, cap_vols=flat).value
         assert jnp.allclose(strip.vols, 0.32, atol=1e-10)
 
     def test_constant_within_bucket(self, caps, curve):
-        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         for lo, hi in zip((0,) + strip.bucket_ends[:-1], strip.bucket_ends):
             bucket = strip.vols[lo:hi]
             assert jnp.allclose(bucket, bucket[0], atol=1e-12)
@@ -186,12 +188,12 @@ class TestStrippedShape:
         # A rising flat-vol term structure implies forward (optionlet)
         # vols above the flat quote at the long end — the same convexity
         # relation as forward rates versus zero rates.
-        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         assert float(strip.vols[-1]) > float(QUOTES[-1])
         assert float(strip.vols[0]) == pytest.approx(float(QUOTES[0]), abs=1e-9)
 
     def test_strike_is_carried(self, caps, curve):
-        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         assert float(strip.strike) == pytest.approx(0.035)
 
 
@@ -210,10 +212,10 @@ class TestDualCurve:
         assert float(jnp.mean(dual - single)) == pytest.approx(0.004, abs=5e-4)
 
     def test_basis_moves_the_stripped_vols(self, caps, curve, forward_curve):
-        single = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        single = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         dual = strip_caplet_vols(
             caps, curve, cap_vols=QUOTES, forward_curve=forward_curve,
-        )
+        ).value
         # The quotes are identical; only the basis changed. A stripper that
         # ignored the projection curve would return the same numbers.
         assert not jnp.allclose(single.vols, dual.vols, atol=1e-6)
@@ -227,7 +229,7 @@ class TestDualCurve:
             )
             strip = strip_caplet_vols(
                 caps, curve, cap_vols=QUOTES, forward_curve=fwd,
-            )
+            ).value
             return strip.vols[-1]
 
         g = jax.grad(long_vol)(forward_curve.discount_factors)
@@ -245,7 +247,7 @@ class TestNormalBranch:
         quotes = jnp.array([0.0060, 0.0070, 0.0075])
         strip = strip_caplet_vols(
             caps, curve, cap_vols=quotes, is_normal=True,
-        )
+        ).value
         assert strip.is_normal
         assert jnp.all(strip.vols > 0.0)
         for i, cap in enumerate(caps):
@@ -258,7 +260,7 @@ class TestNormalBranch:
         caps = [_cap(n, 0.0) for n in (4, 8)]
         strip = strip_caplet_vols(
             caps, curve, cap_vols=jnp.full((2,), 0.0055), is_normal=True,
-        )
+        ).value
         assert jnp.allclose(strip.vols, 0.0055, atol=1e-10)
 
 
@@ -267,7 +269,7 @@ class TestNormalBranch:
 
 class TestCapletVolCurveLookup:
     def test_piecewise_constant_picks_the_bucket(self, caps, curve):
-        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         # Read at the quoted expiries themselves.
         assert jnp.allclose(strip(strip.expiries), strip.vols, atol=1e-12)
         # Just inside a bucket resolves to that bucket's vol.
@@ -275,7 +277,7 @@ class TestCapletVolCurveLookup:
         assert float(strip(mid)) == pytest.approx(float(strip.vols[5]))
 
     def test_flat_extrapolation_beyond_the_strip(self, caps, curve):
-        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES)
+        strip = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
         assert float(strip(jnp.asarray(50.0))) == pytest.approx(
             float(strip.vols[-1])
         )
@@ -283,7 +285,7 @@ class TestCapletVolCurveLookup:
     def test_linear_mode_interpolates(self, caps, curve):
         strip = strip_caplet_vols(
             caps, curve, cap_vols=QUOTES, interp="linear",
-        )
+        ).value
         mid = 0.5 * (strip.expiries[4] + strip.expiries[5])
         lo, hi = float(strip.vols[4]), float(strip.vols[5])
         assert float(strip(mid)) == pytest.approx(0.5 * (lo + hi), rel=1e-9)
@@ -306,13 +308,13 @@ class TestJaxContract:
     def test_filter_jit(self, caps, curve):
         @eqx.filter_jit
         def run(quotes):
-            return strip_caplet_vols(caps, curve, cap_vols=quotes).vols
+            return strip_caplet_vols(caps, curve, cap_vols=quotes).value.vols
 
         vols = run(QUOTES)
         assert vols.shape == (16,)
         assert jnp.all(jnp.isfinite(vols))
         assert jnp.allclose(
-            vols, strip_caplet_vols(caps, curve, cap_vols=QUOTES).vols,
+            vols, strip_caplet_vols(caps, curve, cap_vols=QUOTES).value.vols,
             atol=1e-10,
         )
 
@@ -321,7 +323,7 @@ class TestJaxContract:
         # long-end optionlet vol rises when the long cap quote rises.
         def long_vol(bump):
             quotes = QUOTES.at[-1].add(bump)
-            return strip_caplet_vols(caps, curve, cap_vols=quotes).vols[-1]
+            return strip_caplet_vols(caps, curve, cap_vols=quotes).value.vols[-1]
 
         g = jax.grad(long_vol)(jnp.asarray(0.0))
         assert jnp.isfinite(g)
@@ -332,7 +334,7 @@ class TestJaxContract:
     ):
         def first_vol(bump):
             quotes = QUOTES.at[-1].add(bump)
-            return strip_caplet_vols(caps, curve, cap_vols=quotes).vols[0]
+            return strip_caplet_vols(caps, curve, cap_vols=quotes).value.vols[0]
 
         g = jax.grad(first_vol)(jnp.asarray(0.0))
         assert float(jnp.abs(g)) < 1e-8
@@ -420,7 +422,7 @@ class TestOptionletSurface:
         surface = strip_optionlet_surface(
             caps, strikes, quote_matrix, curve,
             forward_curve=forward_curve,
-        )
+        ).value
         assert surface.expiries.shape == (12,)
         assert surface.alphas.shape == (12,)
         vol = surface(jnp.asarray(0.035), surface.expiries[6])
@@ -433,7 +435,7 @@ class TestOptionletSurface:
         surface = strip_optionlet_surface(
             caps, strikes, quote_matrix, curve,
             forward_curve=forward_curve,
-        )
+        ).value
         expected = optionlet_forwards(caps[-1], curve, forward_curve)
         assert jnp.allclose(surface.forwards, expected, atol=1e-12)
 
@@ -441,7 +443,7 @@ class TestOptionletSurface:
         self, curve, strikes, quote_matrix,
     ):
         caps = [_cap(n, 0.035) for n in (4, 8, 12)]
-        surface = strip_optionlet_surface(caps, strikes, quote_matrix, curve)
+        surface = strip_optionlet_surface(caps, strikes, quote_matrix, curve).value
         assert jnp.allclose(
             surface.expiries, optionlet_expiries(caps[-1], curve), atol=1e-12,
         )
@@ -450,14 +452,14 @@ class TestOptionletSurface:
         self, curve, strikes, quote_matrix,
     ):
         caps = [_cap(n, 0.035) for n in (4, 8, 12)]
-        surface = strip_optionlet_surface(caps, strikes, quote_matrix, curve)
+        surface = strip_optionlet_surface(caps, strikes, quote_matrix, curve).value
         columns = [
             strip_caplet_vols(
                 [eqx.tree_at(lambda c: c.strike, cap, strikes[k])
                  for cap in caps],
                 curve,
                 cap_vols=quote_matrix[k],
-            ).vols
+            ).value.vols
             for k in range(strikes.shape[0])
         ]
         stripped = jnp.stack(columns)  # (n_strikes, n_optionlets)
@@ -472,3 +474,62 @@ class TestOptionletSurface:
             strip_optionlet_surface(
                 caps, strikes, jnp.zeros((3, 5)) + 0.3, curve,
             )
+
+
+# ── The strip as a calibration level ─────────────────────────────────
+
+
+class TestStripLevel:
+    """The strip reports like every other level: labelled, checkable."""
+
+    def test_result_contract(self, caps, curve, forward_curve):
+        res = strip_caplet_vols(
+            caps, curve, cap_vols=QUOTES, forward_curve=forward_curve
+        ).check(max_residual=1e-12)
+        assert res.problem == "root"
+        assert res.labels == ("cap 1Y", "cap 2Y", "cap 3Y", "cap 4Y")
+        assert bool(res.converged)
+        # The level residual is the per-cap price error per unit notional.
+        assert res.diagnostics.residuals.shape == (4, 1)
+        assert float(res.condition_number()) < 1e3
+
+    def test_impossible_bucket_is_named(self, caps, curve):
+        """Anti-vacuity: a premium below the shorter cap's has no root."""
+        good = strip_caplet_vols(caps, curve, cap_vols=QUOTES).value
+        prem = jnp.stack([cap_price_from_strip(c, good, curve) for c in caps])
+        prem = prem.at[2].set(0.9 * prem[1])
+        res = strip_caplet_vols(caps, curve, cap_premiums=prem)
+        assert not bool(res.converged)
+        assert "cap 3Y" in res.failed_labels()
+        assert "cap 1Y" not in res.failed_labels()
+        with pytest.raises(CalibrationError, match="cap 3Y"):
+            res.check()
+
+    def test_strike_columns_equal_per_strike_strips(self, curve, forward_curve):
+        caps3 = [_cap(n, 0.035) for n in (4, 8, 12)]
+        strikes = jnp.array([0.025, 0.035, 0.045])
+        quotes = jnp.array([[0.33, 0.35, 0.36], [0.30, 0.32, 0.33],
+                            [0.29, 0.31, 0.32]])
+        cols = strip_columns_level(
+            "cols", caps3,
+            LevelInputs(quotes=quotes, upstream=(curve, forward_curve)),
+            lambda up: up, strikes=strikes,
+        ).check()
+        assert cols.labels == ("K=2.50%", "K=3.50%", "K=4.50%")
+        for k in range(3):
+            one = strip_caplet_vols(
+                [eqx.tree_at(lambda c: c.strike, cap, strikes[k]) for cap in caps3],
+                curve, cap_vols=quotes[k], forward_curve=forward_curve,
+            ).value
+            assert float(jnp.max(jnp.abs(cols.value.vols[k] - one.vols))) < 1e-12
+
+    def test_surface_carries_the_strip_as_a_child(self, curve):
+        caps3 = [_cap(n, 0.035) for n in (4, 8, 12)]
+        strikes = jnp.array([0.02, 0.03, 0.04, 0.05])
+        quotes = jnp.array([[0.36, 0.37, 0.38], [0.32, 0.33, 0.34],
+                            [0.30, 0.31, 0.32], [0.31, 0.32, 0.33]])
+        res = strip_optionlet_surface(caps3, strikes, quotes, curve)
+        assert len(res.children) == 1
+        assert res.children[0].name == "optionlet_surface.strip"
+        assert res.children[0].diagnostics.converged.shape == (4, 3)
+        res.check()

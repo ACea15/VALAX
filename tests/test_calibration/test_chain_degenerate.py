@@ -129,7 +129,7 @@ class TestSingleCurveLimit:
 
         spec = CurveSpec(curve_id="_default_", currency="USD",
                          pillar_dates=SC_PILLARS, day_count="act_365")
-        graph, _ = bootstrap_curve_graph(REF, [spec], sc_instruments())
+        graph = bootstrap_curve_graph(REF, [spec], sc_instruments()).value
         adj = curve_adjoint(graph, REF, [spec], sc_instruments())
         legacy = curve_quote_deltas(_sc_bond(), None, MarketState(curves=graph), adjoint=adj)
         np.testing.assert_allclose(
@@ -144,7 +144,7 @@ class TestSingleCurveLimit:
         chain, quotes = dual_curve_chain()
         risk = quote_risk_adjoint(swap, None, calibrate_market(chain, quotes))
 
-        graph, _ = bootstrap_curve_graph(REF, dc_specs(), dc_instruments())
+        graph = bootstrap_curve_graph(REF, dc_specs(), dc_instruments()).value
         adj = curve_adjoint(graph, REF, dc_specs(), dc_instruments())
         legacy = curve_quote_deltas(swap, None, MarketState(curves=graph), adjoint=adj)
         np.testing.assert_allclose(

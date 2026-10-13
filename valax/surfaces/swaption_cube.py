@@ -29,10 +29,10 @@ expiry x strike and feeds equity Dupire/SLV consumers); the surface is left
 untouched.
 """
 
-import functools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import equinox as eqx
 from jaxtyping import Float
@@ -45,7 +45,11 @@ from valax.instruments.rates import Swaption
 from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol, sabr_normal_implied_vol
 from valax.pricing.analytic.swaptions import swaption_forward_and_annuity
-from valax.calibration.sabr import calibrate_sabr
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationResult
+from valax.calibration.sabr import sabr_batch_level, sabr_vol_fn
+from valax.calibration.settings import SolverSettings
+from valax.calibration.solve import period_label, stack_slices
 from valax.surfaces._interp import bilinear_2d
 from valax.surfaces.dynamics import (
     default_dynamics_for,
@@ -238,110 +242,6 @@ class SwaptionCube(eqx.Module):
         return sabr_implied_vol(model, anchor, strike_eff, expiry)
 
 
-def calibrate_swaption_cube(
-    strikes_per_node: list[list[Float[Array, " n_k"]]],
-    market_vols_per_node: list[list[Float[Array, " n_k"]]],
-    forwards: Float[Array, "n_expiries n_tenors"],
-    expiries: Float[Array, " n_expiries"],
-    tenors: Float[Array, " n_tenors"],
-    is_normal: bool = False,
-    shift: Float[Array, ""] = 0.0,
-    fixed_beta: Float[Array, ""] | None = None,
-    solver: str = "levenberg_marquardt",
-    max_steps: int = 256,
-    dynamics: str = "sticky_strike",
-    quote_form: str = "absolute_strike",
-) -> SwaptionCube:
-    """Calibrate a swaption cube by fitting each (expiry, tenor) slice.
-
-    Loops the rectangular grid, calling :func:`calibrate_sabr` per node in the
-    requested quoting convention, and stacks the fitted parameters into
-    ``(n_expiries, n_tenors)`` grids. Fitting one smile slice at a time keeps
-    each call a single-instrument least-squares problem, avoiding the
-    ``optimistix`` Levenberg-Marquardt ``List arity mismatch`` that arises when
-    a residual closes over a sequence of instrument pytrees.
-
-    Both quoting conventions calibrate to machine precision on self-consistent
-    data. The ``is_normal`` flag must match the convention of the input quotes:
-    fitting normal-quoted vols with the lognormal formula (or vice versa) is a
-    model/convention mismatch that will not converge -- see
-    ``examples/pitfalls/01_sabr_vol_convention_mismatch.py``.
-
-    Args:
-        strikes_per_node: Nested list ``[i][j]`` of strike arrays for expiry
-            ``i`` and tenor ``j``.
-        market_vols_per_node: Nested list ``[i][j]`` of observed vol arrays,
-            matching ``strikes_per_node``, in the ``is_normal`` convention.
-        forwards: Forward par swap rate at each node -- caller-supplied, and
-            recorded on the cube as the forward each node was fitted at.
-        expiries: Expiry grid (year fractions).
-        tenors: Tenor grid (years).
-        is_normal: Calibrate against normal (Bachelier) quotes if True, else
-            lognormal (Black-76).
-        shift: Displacement for the normal expansion (used only when
-            ``is_normal`` is True).
-        fixed_beta: If provided, beta is fixed across all nodes.
-        solver: Per-slice optimizer (see :func:`calibrate_sabr`).
-        max_steps: Max iterations per slice.
-        dynamics: Smile-dynamics convention recorded on the returned cube; see
-            :class:`SwaptionCube`. Defaults to ``"sticky_strike"``.
-        quote_form: Quote form recorded on the returned cube; see
-            :class:`SwaptionCube`. Defaults to ``"absolute_strike"``, matching
-            the absolute ``strikes_per_node`` this routine fits.
-
-    Returns:
-        A fitted :class:`SwaptionCube`.
-
-    Raises:
-        ValueError: If ``dynamics`` and ``quote_form`` are inconsistent.
-    """
-    n_e = len(expiries)
-    n_t = len(tenors)
-
-    if is_normal:
-        vol_fn = functools.partial(sabr_normal_implied_vol, shift=jnp.asarray(shift))
-    else:
-        vol_fn = sabr_implied_vol
-
-    alpha_rows, beta_rows, rho_rows, nu_rows = [], [], [], []
-    for i in range(n_e):
-        alphas, betas, rhos, nus = [], [], [], []
-        for j in range(n_t):
-            model, _ = calibrate_sabr(
-                strikes=strikes_per_node[i][j],
-                market_vols=market_vols_per_node[i][j],
-                forward=forwards[i, j],
-                expiry=expiries[i],
-                fixed_beta=fixed_beta,
-                solver=solver,
-                max_steps=max_steps,
-                vol_fn=vol_fn,
-                is_normal=is_normal,
-            )
-            alphas.append(model.alpha)
-            betas.append(model.beta)
-            rhos.append(model.rho)
-            nus.append(model.nu)
-        alpha_rows.append(jnp.stack(alphas))
-        beta_rows.append(jnp.stack(betas))
-        rho_rows.append(jnp.stack(rhos))
-        nu_rows.append(jnp.stack(nus))
-
-    return SwaptionCube(
-        expiries=expiries,
-        tenors=tenors,
-        forwards=forwards,
-        alphas=jnp.stack(alpha_rows),
-        betas=jnp.stack(beta_rows),
-        rhos=jnp.stack(rho_rows),
-        nus=jnp.stack(nu_rows),
-        shift=jnp.asarray(shift),
-        is_normal=is_normal,
-        dynamics=dynamics,
-        quote_form=quote_form,
-    )
-
-
 # ── Curve-aware calibration ───────────────────────────────────────────
 
 def _validate_node_grid(swaptions: Sequence[Sequence[Swaption]]) -> None:
@@ -478,6 +378,148 @@ def swaption_node_forwards_and_annuities(
     return jnp.stack(forward_rows), jnp.stack(annuity_rows)
 
 
+def swaption_node_labels(
+    expiries: Float[Array, " n_expiries"],
+    tenors: Float[Array, " n_tenors"],
+) -> tuple[str, ...]:
+    """Row-major ``"<expiry>x<tenor>"`` labels of a cube's nodes (eager).
+
+    Args:
+        expiries: Expiry axis (year fractions).
+        tenors: Tenor axis (years).
+
+    Returns:
+        One label per node, e.g. ``("1Yx5Y", "1Yx10Y", ...)``.
+    """
+    try:
+        return tuple(
+            f"{period_label(e)}x{period_label(t)}"
+            for e in expiries for t in tenors
+        )
+    except jax.errors.ConcretizationTypeError:
+        n = int(jnp.shape(expiries)[0]) * int(jnp.shape(tenors)[0])
+        return tuple(f"node#{i}" for i in range(n))
+
+
+def swaption_cube_level(
+    name: str,
+    swaptions: Sequence[Sequence[Swaption]],
+    inputs: LevelInputs,
+    curves_fn: Callable[[Any], tuple[DiscountCurve, DiscountCurve | None]],
+    *,
+    strikes: Float[Array, "n_nodes n_k"],
+    weights: Float[Array, "n_nodes n_k"],
+    vols_fn: Callable[[LevelInputs], Float[Array, "n_nodes n_k"]],
+    beta_fn: Callable[[LevelInputs], Float[Array, ""]] | None,
+    expiries: Float[Array, " n_expiries"],
+    tenors: Float[Array, " n_tenors"],
+    quote_form: str = "absolute_strike",
+    dynamics: str | None = None,
+    is_normal: bool = False,
+    shift: Float[Array, ""] = 0.0,
+    settings: SolverSettings | None = None,
+) -> CalibrationResult:
+    r"""A swaption cube as one batched calibration level on upstream curves.
+
+    The single implementation of the curve-aware cube fit, shared by
+    :func:`calibrate_swaption_cube_from_curves` and the chain node
+    :func:`valax.calibration.nodes.swaption_cube_node`. Each node's forward
+    par swap rate is recomputed *inside* the level from the curves
+    ``curves_fn(inputs.upstream)`` returns, with the pricer's own
+    :func:`~valax.pricing.analytic.swaptions.swaption_forward_and_annuity`, so
+    the fitted parameters are differentiable functions of the curve pillars
+    (:math:`\partial\theta_v/\partial\theta_c \neq 0`) and the IFT adjoint
+    of the level carries curve risk as well as vega. Each node is fitted
+    independently and reported by its ``"<expiry>x<tenor>"`` label.
+
+    Args:
+        name: Level name used in diagnostics.
+        swaptions: Nested ``[i][j]`` representative swaptions (schedules).
+        inputs: The level's inputs as stored on the result (and
+            differentiated by the adjoint): quotes, upstream and fixed
+            inputs in whatever container the caller uses (raw arrays for
+            :func:`calibrate_swaption_cube_from_curves`, a
+            :class:`~valax.market.quotes.QuoteSet` and a ``MarketState`` for
+            the chain node).
+        curves_fn: ``upstream -> (discount_curve, forward_curve | None)``.
+        strikes: Strike grid per node in row-major node order — absolute,
+            or offsets to each node's forward under ``"atm_offset"``.
+            Conventions, not quotes: held constant.
+        weights: Per-quote weights (zero on padding).
+        vols_fn: ``inputs -> (n_nodes, m)`` quoted vols.
+        beta_fn: ``inputs -> beta`` for a held-fixed beta (reported as a
+            fixed-input sensitivity), or ``None`` to calibrate beta per node.
+        expiries: Expiry axis (see :func:`swaption_node_coordinates`).
+        tenors: Tenor axis.
+        quote_form: ``"absolute_strike"`` or ``"atm_offset"``.
+        dynamics: Smile dynamics recorded on the cube (default implied by
+            ``quote_form``).
+        is_normal: Normal (Bachelier) quotes if True, else lognormal.
+        shift: Displacement of the normal expansion.
+        settings: Per-node solver settings.
+
+    Returns:
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`SwaptionCube` is ``result.value``.
+
+    Raises:
+        ValueError: If ``dynamics`` and ``quote_form`` contradict each other.
+    """
+    _validate_node_grid(swaptions)
+    if dynamics is None:
+        dynamics = default_dynamics_for(quote_form)
+    validate_smile_dynamics("SwaptionCube", dynamics, quote_form)
+    n_e, n_t = len(swaptions), len(swaptions[0])
+    expiries = jnp.asarray(expiries, dtype=jnp.float64)
+    tenors = jnp.asarray(tenors, dtype=jnp.float64)
+    node_expiries = jnp.repeat(expiries, n_t)
+
+    strikes = jnp.asarray(strikes, dtype=jnp.float64)
+    weights = jnp.asarray(weights, dtype=jnp.float64)
+    fit_beta = beta_fn is None
+
+    def node_inputs(inp: LevelInputs) -> LevelInputs:
+        curve, forward_curve = curves_fn(inp.upstream)
+        forwards, _ = swaption_node_forwards_and_annuities(
+            swaptions, curve, forward_curve
+        )
+        fwd = forwards.reshape(-1)
+        k = fwd[:, None] + strikes if quote_form == "atm_offset" else strikes
+        fixed = {
+            "forward": fwd,
+            "expiry": node_expiries,
+            "strikes": k,
+            "weights": weights,
+        }
+        if not fit_beta:
+            fixed["beta"] = jnp.broadcast_to(beta_fn(inp), fwd.shape)
+        return LevelInputs(quotes=vols_fn(inp), fixed=fixed)
+
+    def value_fn(models: SABRModel, nodes: LevelInputs, _inp) -> SwaptionCube:
+        return SwaptionCube(
+            expiries=expiries,
+            tenors=tenors,
+            forwards=nodes.fixed["forward"].reshape(n_e, n_t),
+            alphas=models.alpha.reshape(n_e, n_t),
+            betas=models.beta.reshape(n_e, n_t),
+            rhos=models.rho.reshape(n_e, n_t),
+            nus=models.nu.reshape(n_e, n_t),
+            shift=jnp.asarray(shift),
+            is_normal=is_normal,
+            dynamics=dynamics,
+            quote_form=quote_form,
+        )
+
+    return sabr_batch_level(
+        name, inputs, node_inputs, value_fn,
+        labels=swaption_node_labels(expiries, tenors),
+        fit_beta=fit_beta,
+        vol_fn=sabr_vol_fn(is_normal, shift),
+        is_normal=is_normal,
+        settings=settings,
+    )
+
+
 def calibrate_swaption_cube_from_curves(
     swaptions: Sequence[Sequence[Swaption]],
     strikes_per_node: Sequence[Sequence[Float[Array, " n_k"]]],
@@ -490,22 +532,21 @@ def calibrate_swaption_cube_from_curves(
     is_normal: bool = False,
     shift: Float[Array, ""] = 0.0,
     fixed_beta: Float[Array, ""] | None = None,
-    solver: str = "levenberg_marquardt",
-    max_steps: int = 256,
-) -> SwaptionCube:
+    weights_per_node: Sequence[Sequence[Float[Array, " n_k"]]] | None = None,
+    settings: SolverSettings | None = None,
+    name: str = "swaption_cube",
+) -> CalibrationResult:
     r"""Calibrate a swaption cube with the forwards derived from the curves.
 
-    The curve-aware counterpart of :func:`calibrate_swaption_cube`, which takes
-    a caller-supplied ``forwards`` array. That array is where the dual-curve
-    chain used to break: a forward handed in from outside is a constant as far
-    as the fit is concerned, so :math:`\partial\theta_v/\partial\theta_c = 0`
-    and no curve risk could ever reach the volatility layer. Here the grid axes
-    *and* the at-the-money anchors come from the node schedules and the curves
-    themselves, computed by the same
+    The grid axes *and* the at-the-money anchors come from the node schedules
+    and the curves themselves, computed by the same
     :func:`~valax.pricing.analytic.swaptions.swaption_forward_and_annuity` the
     pricer uses -- so the fitted parameters are differentiable functions of the
-    curve pillars, and a node reprices exactly because its grid coordinate is
-    the one the pricer will ask for.
+    curve pillars (:math:`\partial\theta_v/\partial\theta_c \neq 0`), and a
+    node reprices exactly because its grid coordinate is the one the pricer
+    will ask for. (A cube fitted on caller-supplied forwards, the retired
+    ``calibrate_swaption_cube``, froze those forwards as constants and so
+    severed the curve → vol chain.)
 
     This is also the prerequisite for ``dynamics="sabr_backbone"``: that
     convention only reproduces the calibrated market vol at a node when
@@ -517,11 +558,16 @@ def calibrate_swaption_cube_from_curves(
     matrices are usually quoted; the offsets are converted to absolute strikes
     per node using that node's derived :math:`F_0`.
 
+    One batched level (:func:`swaption_cube_level`): every node is its own
+    SABR fit with its own convergence flag, and ``result.check()`` names a
+    failed node as ``"<expiry>x<tenor>"``. Ragged strike grids are padded with
+    zero-weight entries.
+
     Args:
         swaptions: Nested sequence ``[i][j]`` of representative swaptions, one
-            per ``(expiry, tenor)`` node. Only the schedule, day count and
-            (for the premium routes) notional are read -- the ``strike`` field
-            is ignored, since the smile spans many strikes per node.
+            per ``(expiry, tenor)`` node. Only the schedule and day count are
+            read -- the ``strike`` field is ignored, since the smile spans
+            many strikes per node.
         strikes_per_node: Nested sequence ``[i][j]`` of strike arrays. Absolute
             rates when ``quote_form="absolute_strike"``, offsets to that node's
             forward when ``quote_form="atm_offset"``.
@@ -542,13 +588,15 @@ def calibrate_swaption_cube_from_curves(
         shift: Displacement for the normal expansion (used only when
             ``is_normal`` is True).
         fixed_beta: If provided, beta is fixed across all nodes.
-        solver: Per-slice optimizer (see
-            :func:`valax.calibration.sabr.calibrate_sabr`).
-        max_steps: Max iterations per slice.
+        weights_per_node: Optional nested ``[i][j]`` per-strike weights.
+        settings: Per-node solver settings; defaults to
+            :data:`~valax.calibration.settings.FIT_SETTINGS`.
+        name: Level name used in diagnostics.
 
     Returns:
-        A fitted :class:`SwaptionCube` whose ``forwards``, ``expiries`` and
-        ``tenors`` are all curve- and schedule-derived.
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`SwaptionCube` (``forwards``, ``expiries`` and ``tenors`` all
+        curve- and schedule-derived) is ``result.value``.
 
     Raises:
         ValueError: If the node grid is not rectangular or its axes are
@@ -558,50 +606,37 @@ def calibrate_swaption_cube_from_curves(
     """
     _validate_node_grid(swaptions)
     n_e, n_t = len(swaptions), len(swaptions[0])
-    for name, grid in (
-        ("strikes_per_node", strikes_per_node),
-        ("market_vols_per_node", market_vols_per_node),
-    ):
+    grids = [("strikes_per_node", strikes_per_node),
+             ("market_vols_per_node", market_vols_per_node)]
+    if weights_per_node is not None:
+        grids.append(("weights_per_node", weights_per_node))
+    for label, grid in grids:
         if len(grid) != n_e or any(len(row) != n_t for row in grid):
             raise ValueError(
-                f"{name} must match the swaption node grid's shape "
+                f"{label} must match the swaption node grid's shape "
                 f"({n_e}, {n_t})."
             )
-
-    if dynamics is None:
-        dynamics = default_dynamics_for(quote_form)
-    validate_smile_dynamics("SwaptionCube", dynamics, quote_form)
-
     expiries, tenors = swaption_node_coordinates(swaptions, curve)
-    forwards, _ = swaption_node_forwards_and_annuities(
-        swaptions, curve, forward_curve
+    strikes, vols, weights = stack_slices(
+        [k for row in strikes_per_node for k in row],
+        [v for row in market_vols_per_node for v in row],
+        None if weights_per_node is None
+        else [w for row in weights_per_node for w in row],
     )
-
-    if quote_form == "atm_offset":
-        absolute_strikes = [
-            [forwards[i, j] + jnp.asarray(strikes_per_node[i][j])
-             for j in range(n_t)]
-            for i in range(n_e)
-        ]
-    else:
-        absolute_strikes = [
-            [jnp.asarray(strikes_per_node[i][j]) for j in range(n_t)]
-            for i in range(n_e)
-        ]
-
-    return calibrate_swaption_cube(
-        strikes_per_node=absolute_strikes,
-        market_vols_per_node=market_vols_per_node,
-        forwards=forwards,
-        expiries=expiries,
-        tenors=tenors,
-        is_normal=is_normal,
-        shift=shift,
-        fixed_beta=fixed_beta,
-        solver=solver,
-        max_steps=max_steps,
-        dynamics=dynamics,
-        quote_form=quote_form,
+    fixed = None
+    if fixed_beta is not None:
+        fixed = {"beta": jnp.asarray(fixed_beta, dtype=jnp.float64)}
+    inputs = LevelInputs(
+        quotes=vols, upstream=(curve, forward_curve), fixed=fixed
+    )
+    return swaption_cube_level(
+        name, swaptions, inputs, lambda up: up,
+        strikes=strikes, weights=weights,
+        vols_fn=lambda inp: inp.quotes,
+        beta_fn=None if fixed_beta is None else (lambda inp: inp.fixed["beta"]),
+        expiries=expiries, tenors=tenors, quote_form=quote_form,
+        dynamics=dynamics, is_normal=is_normal, shift=shift,
+        settings=settings,
     )
 
 
@@ -613,7 +648,7 @@ def calibrate_swaption_cube_from_graph(
     discount_id: str,
     forward_id: str | None = None,
     **kwargs: Any,
-) -> SwaptionCube:
+) -> CalibrationResult:
     """:func:`calibrate_swaption_cube_from_curves` resolved on a curve graph.
 
     The dual-curve entry point: the discounting and projection curves are
@@ -631,7 +666,7 @@ def calibrate_swaption_cube_from_graph(
         **kwargs: Forwarded to :func:`calibrate_swaption_cube_from_curves`.
 
     Returns:
-        A fitted :class:`SwaptionCube`.
+        The :class:`~valax.calibration.result.CalibrationResult` of the cube.
     """
     discount_curve = graph[discount_id]
     forward_curve = None if forward_id is None else graph[forward_id]

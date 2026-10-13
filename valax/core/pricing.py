@@ -409,6 +409,20 @@ def _price_via_legacy(
             f"{_format_available()}"
         )
     market_args = _recipe_market_args(recipe, resolved)
+    if (
+        resolved.forward_curve is not None
+        and resolved.forward_curve is not resolved.discount_curve
+        and "forward_curve" not in market_args
+    ):
+        # The trade names a projection curve the recipe cannot consume:
+        # pricing it single-curve would be a wrong price with no signal.
+        raise ValueError(
+            f"The {method} recipe for ({type(instrument).__name__}, "
+            f"{type(model).__name__}) does not accept a projection curve, but "
+            f"the instrument resolves one distinct from its discount curve. "
+            f"Drop the instrument's forward_id to price it single-curve, or "
+            f"use a model / method that supports the projection curve."
+        )
     # The dispatchers look the recipe up by *exact* type, so a selector
     # subclass (§_instrument_bases) is routed to the base class's recipe
     # directly.  Same call the dispatcher would make — it only adds the
@@ -516,7 +530,7 @@ def price(
     # fully-specified model is returned unchanged, which is what keeps
     # constant-mode prices bit-identical.  ``bind_model`` preserves the
     # model's class, so dispatch below is unaffected.
-    model = bind_model(model, instrument, resolved)
+    model = bind_model(model, instrument, resolved, market)
 
     adapter = None
     for cls in _instrument_bases(type(instrument)):

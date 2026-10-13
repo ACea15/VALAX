@@ -82,6 +82,7 @@ from jax import Array
 
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import year_fraction
+from valax.models.short_rate import require_initial_curve
 
 
 class CheyetteModel(eqx.Module):
@@ -96,13 +97,18 @@ class CheyetteModel(eqx.Module):
             :math:`\sigma_r(t, x) = \sigma (1 + \beta x)`.  ``0`` recovers
             the Gaussian (Hull-White) model.
         initial_curve: Initial discount curve :math:`P^M(0, t)`, fitted
-            exactly by construction.
+            exactly by construction. ``None`` (the default) leaves the model
+            unbound: :func:`valax.core.pricing.price` binds it from the
+            market (see :mod:`valax.models.short_rate`).
+        curve_id: Market id of the curve to bind, or ``None`` to use the
+            instrument's discount curve. Static.
     """
 
     mean_reversion: Float[Array, ""]
     volatility: Float[Array, ""]
     skew: Float[Array, ""]
-    initial_curve: DiscountCurve
+    initial_curve: DiscountCurve | None = None
+    curve_id: str | None = eqx.field(static=True, default=None)
 
 
 class CheyetteModel2F(eqx.Module):
@@ -136,7 +142,11 @@ class CheyetteModel2F(eqx.Module):
         correlation: Instantaneous correlation :math:`\rho \in (-1, 1)`
             between the two driving Brownian motions.
         initial_curve: Initial discount curve :math:`P^M(0, t)`, fitted
-            exactly by construction.
+            exactly by construction. ``None`` (the default) leaves the model
+            unbound: :func:`valax.core.pricing.price` binds it from the
+            market (see :mod:`valax.models.short_rate`).
+        curve_id: Market id of the curve to bind, or ``None`` to use the
+            instrument's discount curve. Static.
     """
 
     mean_reversion_1: Float[Array, ""]
@@ -146,7 +156,8 @@ class CheyetteModel2F(eqx.Module):
     skew_1: Float[Array, ""]
     skew_2: Float[Array, ""]
     correlation: Float[Array, ""]
-    initial_curve: DiscountCurve
+    initial_curve: DiscountCurve | None = None
+    curve_id: str | None = eqx.field(static=True, default=None)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -207,7 +218,7 @@ def _log_df_at_time(
     t: Float[Array, ""],
 ) -> Float[Array, ""]:
     r"""Log discount factor :math:`\ln P^M(0, t)` at year-fraction *t*."""
-    times, log_dfs = _log_df_grid(model.initial_curve)
+    times, log_dfs = _log_df_grid(require_initial_curve(model))
     return jnp.interp(t, times, log_dfs)
 
 
@@ -216,7 +227,7 @@ def _market_df(
     t: Float[Array, "..."],
 ) -> Float[Array, "..."]:
     r"""Market discount factor :math:`P^M(0, t)` at year-fraction *t*."""
-    times, log_dfs = _log_df_grid(model.initial_curve)
+    times, log_dfs = _log_df_grid(require_initial_curve(model))
     return jnp.exp(jnp.interp(t, times, log_dfs))
 
 

@@ -5,8 +5,8 @@ PDE rates recipes lean on for their discount/projection split, so they are
 pinned down here independently of any solver:
 
 - :func:`with_discount_curve` must be a *no-op* for ``None`` (that is the
-  single-curve non-regression guarantee) and re-fit an exact-fit model
-  otherwise.
+  single-curve non-regression guarantee), bind an *unbound* exact-fit model
+  otherwise, and never re-fit an already-bound one.
 - :func:`tenor_basis` must return ``None`` — not an array of ones — when the
   two curves coincide, and otherwise the ratio of the curves'
   simply-compounded growth factors.
@@ -81,20 +81,29 @@ def test_with_discount_curve_is_identity_for_none(ois):
     assert with_discount_curve(model, None) is model
 
 
-def test_with_discount_curve_rebinds(ois, projection):
+def test_with_discount_curve_binds_an_unbound_model(projection):
+    model = HullWhiteModel(
+        mean_reversion=jnp.asarray(0.1),
+        volatility=jnp.asarray(0.01),
+    )
+    bound = with_discount_curve(model, projection)
+    assert jnp.array_equal(
+        bound.initial_curve.discount_factors, projection.discount_factors
+    )
+    # Intrinsic parameters are untouched.
+    assert bound.mean_reversion == model.mean_reversion
+    assert bound.volatility == model.volatility
+
+
+def test_with_discount_curve_never_refits_a_bound_model(ois, projection):
+    """A bound model's curve is the truth: a different curve is ignored."""
     model = HullWhiteModel(
         mean_reversion=jnp.asarray(0.1),
         volatility=jnp.asarray(0.01),
         initial_curve=ois,
     )
-    rebound = with_discount_curve(model, projection)
-    assert jnp.array_equal(
-        rebound.initial_curve.discount_factors, projection.discount_factors
-    )
-    # Intrinsic parameters are untouched.
-    assert rebound.mean_reversion == model.mean_reversion
-    assert rebound.volatility == model.volatility
-    # Re-binding a model to the curve it already carries is a no-op, which is
+    assert with_discount_curve(model, projection) is model
+    # Binding a model to the curve it already carries is a no-op, which is
     # what keeps the `is`-checks in `tenor_basis` meaningful downstream.
     assert with_discount_curve(model, ois) is model
 

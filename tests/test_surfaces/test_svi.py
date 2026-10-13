@@ -124,7 +124,7 @@ class TestSVICalibration:
         )(strikes)
 
         # Calibrate
-        fitted, sol = calibrate_svi_slice(strikes, market_vols, forward, expiry)
+        fitted = calibrate_svi_slice(strikes, market_vols, forward, expiry).value
 
         # Check fitted vols match
         fitted_vols = jax.vmap(

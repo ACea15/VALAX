@@ -68,7 +68,8 @@ module implements.
 
 from __future__ import annotations
 
-from typing import TypeVar
+import functools
+from typing import Any, TypeVar
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -76,6 +77,9 @@ from jaxtyping import Float, Int
 from jax import Array
 
 from valax.curves.discount import DiscountCurve
+from valax.models.g2pp import G2PPModel
+from valax.models.hull_white import HullWhiteModel
+from valax.models.short_rate import require_initial_curve
 
 #: Any exact-fit short-rate model carrying an ``initial_curve`` field
 #: (``HullWhiteModel``, ``G2PPModel``, ``CheyetteModel``, …).
@@ -84,6 +88,9 @@ ExactFitModel = TypeVar("ExactFitModel")
 
 __all__ = [
     "with_discount_curve",
+    "basis_overlay",
+    "model_tenor_basis",
+    "model_swap_leg_basis",
     "tenor_basis",
     "swap_leg_basis",
     "apply_swap_basis",
@@ -95,44 +102,140 @@ def with_discount_curve(
     model: ExactFitModel,
     discount_curve: DiscountCurve | None,
 ) -> ExactFitModel:
-    """Re-fit an exact-fit short-rate model to a trade's discount curve.
+    """Bind an *unbound* exact-fit short-rate model to a discount curve.
 
     The model's ``initial_curve`` *is* its discount curve: the exact-fit
-    shift (:math:`\\alpha` for Hull-White, :math:`\\varphi` for G2++) is
-    built so that the model reprices it.  Honouring an instrument's
-    ``discount_id`` therefore means re-binding that field — the same
-    operation :meth:`~valax.models.hull_white.HullWhiteModel.with_market_curve`
-    performs from a :class:`~valax.core.market_state.MarketState`, expressed
-    here against an already-resolved curve.
+    shift (:math:`\alpha` for Hull-White, :math:`\varphi` for G2++) is
+    built so that the model reprices it. :func:`valax.core.pricing.price`
+    binds that field from the ``MarketState`` before any recipe runs (see
+    :func:`valax.core.binding.curve_requirements`), and a bound model's curve
+    is then the truth — this function never re-fits it. It only fills a model
+    that arrives unbound, which is how a recipe called directly (outside
+    ``price``) with ``discount_curve=...`` prices a curve-free model.
 
     Args:
         model: A model pytree carrying an ``initial_curve`` field.
-        discount_curve: The trade's resolved discount curve, or ``None``
-            to leave the model untouched.
+        discount_curve: The trade's resolved discount curve, or ``None``.
 
     Returns:
-        ``model`` unchanged when ``discount_curve`` is ``None`` or is
-        already the model's own curve (so a single-curve call is
-        bit-for-bit unaffected, and the curve object's *identity* is
-        preserved for the ``is``-checks in :func:`tenor_basis`), otherwise
-        a copy fitted to ``discount_curve``.
+        ``model`` unchanged when it is already bound or ``discount_curve`` is
+        ``None``; otherwise a copy bound to ``discount_curve``.
 
     Raises:
         AttributeError: If ``model`` has no ``initial_curve`` field, i.e.
             it is not an exact-fit short-rate model.
     """
-    if discount_curve is None:
-        return model
     if not hasattr(model, "initial_curve"):
         raise AttributeError(
             f"{type(model).__name__} has no `initial_curve`, so it cannot be "
-            f"re-fitted to a resolved discount curve.  Only exact-fit "
-            f"short-rate models (Hull-White, G2++, Cheyette) support the "
+            f"bound to a resolved discount curve.  Only exact-fit short-rate "
+            f"models (Hull-White, G2++, Cheyette) support the "
             f"discount/projection split."
         )
-    if discount_curve is model.initial_curve:
+    if discount_curve is None or model.initial_curve is not None:
         return model
-    return eqx.tree_at(lambda m: m.initial_curve, model, discount_curve)
+    return eqx.tree_at(
+        lambda m: m.initial_curve, model, discount_curve,
+        is_leaf=lambda x: x is None,
+    )
+
+
+@functools.singledispatch
+def basis_overlay(model: Any) -> bool:
+    """Whether a model type prices a distinct projection curve by the overlay.
+
+    The deterministic tenor-basis overlay of this module is a modelling
+    *assumption* (frozen multiplicative basis), so whether it applies is a
+    property of the model type, declared here once — not a decision each
+    recipe hard-wires. Hull-White and G2++ use it; other models (Cheyette
+    today) reject a distinct projection curve through
+    :func:`model_tenor_basis` / :func:`model_swap_leg_basis`. A future
+    stochastic-basis model registers ``False`` and projects off its own
+    index curves instead.
+
+    Args:
+        model: A short-rate model.
+
+    Returns:
+        ``True`` if the overlay applies.
+    """
+    return False
+
+
+@basis_overlay.register(HullWhiteModel)
+@basis_overlay.register(G2PPModel)
+def _(model: Any) -> bool:
+    return True
+
+
+def _check_overlay(model: Any, forward_curve: DiscountCurve | None) -> DiscountCurve | None:
+    """The model's discount curve, or raise if a projection curve is unusable."""
+    curve = require_initial_curve(model)
+    if forward_curve is None or forward_curve is curve:
+        return None
+    if not basis_overlay(model):
+        raise ValueError(
+            f"{type(model).__name__} does not price a projection curve "
+            f"distinct from its discount curve (no deterministic tenor-basis "
+            f"overlay is registered for it; see "
+            f"valax.pricing.multicurve.basis_overlay). Price the trade "
+            f"single-curve or with a model that supports the overlay."
+        )
+    return curve
+
+
+def model_tenor_basis(
+    model: Any,
+    forward_curve: DiscountCurve | None,
+    start_dates: Int[Array, "..."],
+    end_dates: Int[Array, "..."],
+) -> Float[Array, "..."] | None:
+    """:func:`tenor_basis` for a bound model, gated on :func:`basis_overlay`.
+
+    Args:
+        model: A bound short-rate model (its ``initial_curve`` discounts).
+        forward_curve: The projection curve, or ``None``.
+        start_dates: Accrual-period start dates.
+        end_dates: Accrual-period end dates.
+
+    Returns:
+        ``None`` for single-curve projection, else the per-period basis.
+
+    Raises:
+        ValueError: If the model is unbound, or a distinct projection curve
+            is given to a model type without the overlay.
+    """
+    curve = _check_overlay(model, forward_curve)
+    if curve is None:
+        return None
+    return tenor_basis(curve, forward_curve, start_dates, end_dates)
+
+
+def model_swap_leg_basis(
+    model: Any,
+    forward_curve: DiscountCurve | None,
+    start_date: Int[Array, ""],
+    payment_dates: Int[Array, " n_cf"],
+) -> Float[Array, " n_cf"] | None:
+    """:func:`swap_leg_basis` for a bound model, gated on :func:`basis_overlay`.
+
+    Args:
+        model: A bound short-rate model (its ``initial_curve`` discounts).
+        forward_curve: The projection curve, or ``None``.
+        start_date: Swap effective / exercise date.
+        payment_dates: Leg payment dates.
+
+    Returns:
+        ``None`` for single-curve projection, else the per-period basis.
+
+    Raises:
+        ValueError: If the model is unbound, or a distinct projection curve
+            is given to a model type without the overlay.
+    """
+    curve = _check_overlay(model, forward_curve)
+    if curve is None:
+        return None
+    return swap_leg_basis(curve, forward_curve, start_date, payment_dates)
 
 
 def tenor_basis(

@@ -12,12 +12,15 @@ Coverage:
 * ``jax.grad`` flows through :func:`bootstrap_curve_graph` via
   ``optimistix.ImplicitAdjoint`` (finite, non-zero gradients).
 * Input validation errors (square-system, unknown curve id).
-* Extended :class:`CurveBuildDiagnostics` fields (``rmse``,
-  ``fitted_quotes``, ``quoted_values``, ``jacobian_condition_number``)
-  are populated correctly and satisfy their invariants on a
-  well-posed fixture.
+* The returned :class:`~valax.calibration.CalibrationResult` carries
+  diagnostics (``residuals``, ``rmse``, ``max_abs_residual``), the
+  quoted values (``inputs.quotes``), a condition number, and per-instrument
+  labels; :func:`fitted_curve_quotes` gives the fitted quotes.  All are
+  populated correctly and satisfy their invariants on a well-posed
+  fixture.
 """
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
@@ -34,8 +37,11 @@ from valax.curves import (
     TenorBasisSwap,
     bootstrap_curve_graph,
     bootstrap_simultaneous,
+    curve_instrument_labels,
     empty_fixing_history,
+    fitted_curve_quotes,
 )
+from valax.calibration import CalibrationResult
 from valax.dates.daycounts import ymd_to_ordinal
 
 
@@ -99,7 +105,7 @@ class TestSingleCurveDegeneracy:
             )
             for i, r in enumerate([0.045, 0.048, 0.050])
         ]
-        curve_ref = bootstrap_simultaneous(REF, pillars, deps_default)
+        curve_ref = bootstrap_simultaneous(REF, pillars, deps_default).value
 
         # Same instruments, explicit curve id, joint solver.
         deps_joint = [
@@ -114,9 +120,11 @@ class TestSingleCurveDegeneracy:
             curve_id="USD.SOFR.OIS", currency="USD",
             pillar_dates=pillars, day_count="act_365",
         )
-        graph, diag = bootstrap_curve_graph(REF, [spec], deps_joint)
+        res = bootstrap_curve_graph(REF, [spec], deps_joint)
+        graph = res.value
+        diag = res.diagnostics
 
-        assert diag.converged
+        assert bool(res.converged)
         assert float(diag.max_abs_residual) < 1e-12
         # Extended diagnostics contract: shapes align with instruments,
         # RMSE ≤ max_abs_residual, condition number finite and ≥ 1.
@@ -126,10 +134,12 @@ class TestSingleCurveDegeneracy:
         # ``exp(log_df) * (1 + r*τ) == 1``), giving a perfectly
         # conditioned identity system.
         assert diag.residuals.shape == (len(deps_joint),)
-        assert diag.fitted_quotes.shape == diag.quoted_values.shape == diag.residuals.shape
+        fitted = fitted_curve_quotes(deps_joint, graph, REF)
+        assert fitted.shape == res.inputs.quotes.shape == diag.residuals.shape
         assert float(diag.rmse) <= float(diag.max_abs_residual) + 1e-15
-        assert bool(jnp.isfinite(diag.jacobian_condition_number))
-        assert float(diag.jacobian_condition_number) >= 1.0 - 1e-10
+        cond = res.condition_number()
+        assert bool(jnp.isfinite(cond))
+        assert float(cond) >= 1.0 - 1e-10
 
         joint_curve = graph["USD.SOFR.OIS"]
         for p in pillars:
@@ -149,9 +159,8 @@ class TestDualCurve:
     The OIS side is anchored by two deposits (single-curve residuals).
     The 3M-projection side is anchored by two IBOR par swaps, each
     of which is a *dual-curve* residual involving both curves
-    simultaneously — this is the case ``bootstrap_multi_curve``'s
-    sequential dual-curve pipeline can also handle but the joint
-    solver generalises.
+    simultaneously — the case a sequential dual-curve pipeline can
+    also handle but the joint solver generalises.
     """
 
     def test_joint_dual_curve_closes(self):
@@ -217,12 +226,13 @@ class TestDualCurve:
         )
 
         instruments = ois_deps + [ibor_1y, ibor_2y]
-        graph, diag = bootstrap_curve_graph(
+        res = bootstrap_curve_graph(
             REF, [disc_spec, fwd_spec], instruments,
         )
+        graph = res.value
 
-        assert diag.converged
-        assert float(diag.max_abs_residual) < 1e-10
+        assert bool(res.converged)
+        assert float(res.diagnostics.max_abs_residual) < 1e-10
 
         # OIS-leg residuals of the deposits alone must be zero exactly
         # (their residual depends only on the OIS curve).
@@ -242,8 +252,8 @@ class TestDualCurve:
 class TestTenorBasisJointSolve:
     """A tenor-basis swap simultaneously constrains two forward curves.
 
-    This case is *unreachable* by the sequential dual-curve
-    ``bootstrap_multi_curve`` — the basis-swap residual is a joint
+    This case is *unreachable* by a sequential dual-curve
+    pipeline — the basis-swap residual is a joint
     constraint on the 3M and 6M forward curves with the OIS curve
     fixed.  Adding a :class:`TenorBasisSwap` anchor lets the joint
     solver strip a second forward tenor.
@@ -344,12 +354,13 @@ class TestTenorBasisJointSolve:
         )
 
         instruments = ois_deps + [ibor_1y_3m, ibor_2y_3m, basis_2y]
-        graph, diag = bootstrap_curve_graph(
+        res = bootstrap_curve_graph(
             REF, [disc_spec, fwd_3m_spec, fwd_6m_spec], instruments,
         )
+        graph = res.value
 
-        assert diag.converged
-        assert float(diag.max_abs_residual) < 1e-10
+        assert bool(res.converged)
+        assert float(res.diagnostics.max_abs_residual) < 1e-10
         assert {"USD.SOFR.OIS", "USD.SOFR.3M", "USD.SOFR.6M"} == set(graph.keys())
         # Each curve must have distinct DFs at maturity (otherwise the
         # basis anchor has collapsed).
@@ -482,10 +493,11 @@ class TestCrossCurrencyJointSolve:
         instruments = usd_ois_deps + eur_ois_deps + [usd_ibor_2y, ccbs_2y]
         assert len(instruments) == sum(int(s.pillar_dates.shape[0]) for s in specs)
 
-        graph, diag = bootstrap_curve_graph(REF, specs, instruments)
+        res = bootstrap_curve_graph(REF, specs, instruments)
+        graph = res.value
 
-        assert diag.converged
-        assert float(diag.max_abs_residual) < 1e-10
+        assert bool(res.converged)
+        assert float(res.diagnostics.max_abs_residual) < 1e-10
         assert set(graph.keys()) == {
             "USD.SOFR.OIS", "USD.SOFR.3M", "EUR.ESTR.OIS", "EUR.EURIBOR.6M",
         }
@@ -514,7 +526,7 @@ class TestGradientFlow:
                 rate=r, day_count="act_365",
                 curves_touched=("USD.SOFR.OIS",),
             )
-            g, _ = bootstrap_curve_graph(REF, [spec], [dep])
+            g = bootstrap_curve_graph(REF, [spec], [dep]).value
             return g["USD.SOFR.OIS"](pillars[0])
 
         g = jax.grad(price)(jnp.array(0.05))
@@ -579,10 +591,10 @@ class TestGradientFlow:
 
         def price(r2y):
             ib2 = eqx.tree_at(lambda x: x.rate, ibor_2y_template, r2y)
-            g, _ = bootstrap_curve_graph(
+            g = bootstrap_curve_graph(
                 REF, [disc_spec, fwd_spec],
                 ois_deps + [ibor_1y, ib2],
-            )
+            ).value
             return g["USD.SOFR.3M"](fwd_pillars[1])
 
         g = jax.grad(price)(jnp.array(0.047))
@@ -630,17 +642,17 @@ class TestValidation:
             bootstrap_curve_graph(REF, [spec], [dep])
 
 
-# ── Extended CurveBuildDiagnostics ───────────────────────────────────
+# ── CalibrationResult diagnostics ────────────────────────────────────
 
 
 class TestExtendedDiagnostics:
-    """Verify the MC-Curves-3 diagnostics extensions.
+    """Verify the diagnostics carried by the curve-build result.
 
     The build in this class uses a small mixed-quote-type fixture so
     every supported quote-scalar shape (``.rate`` and ``.futures_rate``)
-    is exercised through the ``fitted_quotes`` / ``quoted_values``
+    is exercised through the :func:`fitted_curve_quotes` / ``inputs.quotes``
     dispatch.  For the corresponding cross-currency / basis / spread
-    coverage of ``fitted_quotes``, see ``test_quote_jacobian.py``.
+    coverage of the fitted quotes, see ``test_quote_jacobian.py``.
     """
 
     @staticmethod
@@ -667,80 +679,112 @@ class TestExtendedDiagnostics:
         )
         return [spec], [dep, fut]
 
+    def test_returns_a_root_calibration_result(self):
+        specs, insts = self._mixed_single_curve_build()
+        res = bootstrap_curve_graph(REF, specs, insts)
+        assert isinstance(res, CalibrationResult)
+        assert res.problem == "root"
+        assert res.labels == curve_instrument_labels(insts)
+        assert res.labels == ("0:DepositRate", "1:MoneyMarketFuture")
+
     def test_all_fields_populated(self):
         specs, insts = self._mixed_single_curve_build()
-        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        res = bootstrap_curve_graph(REF, specs, insts)
+        diag = res.diagnostics
+        fitted = fitted_curve_quotes(insts, res.value, REF)
+        cond = res.condition_number()
 
         # Shape / dtype contracts.
         assert diag.residuals.shape == (2,)
-        assert diag.fitted_quotes.shape == (2,)
-        assert diag.quoted_values.shape == (2,)
+        assert fitted.shape == (2,)
+        assert res.inputs.quotes.shape == (2,)
         assert diag.rmse.shape == ()
-        assert diag.jacobian_condition_number.shape == ()
+        assert cond.shape == ()
         assert diag.max_abs_residual.shape == ()
 
         # Finiteness.
         assert bool(jnp.all(jnp.isfinite(diag.residuals)))
-        assert bool(jnp.all(jnp.isfinite(diag.fitted_quotes)))
-        assert bool(jnp.all(jnp.isfinite(diag.quoted_values)))
+        assert bool(jnp.all(jnp.isfinite(fitted)))
+        assert bool(jnp.all(jnp.isfinite(res.inputs.quotes)))
         assert bool(jnp.isfinite(diag.rmse))
-        assert bool(jnp.isfinite(diag.jacobian_condition_number))
+        assert bool(jnp.isfinite(cond))
 
     def test_rmse_bounded_by_max_abs_residual(self):
         specs, insts = self._mixed_single_curve_build()
-        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        diag = bootstrap_curve_graph(REF, specs, insts).diagnostics
         # RMSE ≤ max_abs_residual by definition (Cauchy-Schwarz).
         assert float(diag.rmse) <= float(diag.max_abs_residual) + 1e-15
 
     def test_quoted_values_match_dispatch_table(self):
         specs, insts = self._mixed_single_curve_build()
-        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        quotes = bootstrap_curve_graph(REF, specs, insts).inputs.quotes
         # Deposit uses .rate, future uses .futures_rate.
-        assert float(diag.quoted_values[0]) == pytest.approx(0.045)
-        assert float(diag.quoted_values[1]) == pytest.approx(0.048)
+        assert float(quotes[0]) == pytest.approx(0.045)
+        assert float(quotes[1]) == pytest.approx(0.048)
 
     @pytest.mark.audit
     def test_fitted_quotes_near_quoted_at_convergence(self):
         specs, insts = self._mixed_single_curve_build()
-        _, diag = bootstrap_curve_graph(REF, specs, insts)
-        assert diag.converged
+        res = bootstrap_curve_graph(REF, specs, insts)
+        assert bool(res.converged)
         # At Newton convergence the fitted and quoted values agree to
         # tolerance in each instrument's native quote units.  The
         # deposit / futures residuals are ~O(DF × τ × Δr), so the
         # quote-unit fit is scaled by ~1/(DF × τ).  For a ~1-year build
         # DF ~ 0.95, τ ~ 1.0 → 1e-10 residual → ~1e-10 quote-unit fit.
-        diff = jnp.abs(diag.fitted_quotes - diag.quoted_values)
+        fitted = fitted_curve_quotes(insts, res.value, REF)
+        diff = jnp.abs(fitted - res.inputs.quotes)
         assert float(jnp.max(diff)) < 1e-8
 
     def test_jacobian_condition_number_positive_and_finite(self):
         specs, insts = self._mixed_single_curve_build()
-        _, diag = bootstrap_curve_graph(REF, specs, insts)
+        cond = bootstrap_curve_graph(REF, specs, insts).condition_number()
         # 2×2 residual Jacobian is well conditioned for this fixture
         # (deposit anchors T0, future anchors T1 — near-diagonal).
         # cond == 1.0 is legitimate for perfectly-anchored diagonal
         # systems; the acceptance criterion is that the value is
         # finite and ≥ 1 (with a small floating-point tolerance),
         # and bounded well below the ill-posed regime.
-        assert bool(jnp.isfinite(diag.jacobian_condition_number))
-        assert float(diag.jacobian_condition_number) >= 1.0 - 1e-10
+        assert bool(jnp.isfinite(cond))
+        assert float(cond) >= 1.0 - 1e-10
         # Sanity: for a well-posed 2-pillar single-curve build the
         # condition number should be modest (< 1e6).
-        assert float(diag.jacobian_condition_number) < 1e6
+        assert float(cond) < 1e6
 
-    def test_residuals_and_diagnostics_pytree_valid(self):
-        """The extended `CurveBuildDiagnostics` must round-trip through
-        JAX's pytree machinery (needed for scan / cond / grad through
-        the diagnostics returned to callers).
+    def test_result_pytree_valid(self):
+        """The result must round-trip through JAX's pytree machinery
+        (needed for scan / cond / grad through the result returned to
+        callers).
         """
-        import jax
         specs, insts = self._mixed_single_curve_build()
-        _, diag = bootstrap_curve_graph(REF, specs, insts)
-        leaves, treedef = jax.tree.flatten(diag)
-        assert len(leaves) >= 7  # 7 array-valued fields
+        res = bootstrap_curve_graph(REF, specs, insts)
+        leaves, treedef = jax.tree.flatten(res)
         rebuilt = jax.tree.unflatten(treedef, leaves)
-        # Reconstructed object still behaves like a CurveBuildDiagnostics.
-        assert rebuilt.converged == diag.converged
-        assert float(rebuilt.max_abs_residual) == float(diag.max_abs_residual)
+        assert isinstance(rebuilt, CalibrationResult)
+        assert bool(rebuilt.converged) == bool(res.converged)
+        assert float(rebuilt.diagnostics.max_abs_residual) == float(
+            res.diagnostics.max_abs_residual
+        )
+
+    def test_build_is_jittable(self):
+        """Validation is eager, but the solve itself traces."""
+        specs, insts = self._mixed_single_curve_build()
+        eager = bootstrap_curve_graph(REF, specs, insts)
+
+        @jax.jit
+        def build(quotes):
+            rebuilt = [
+                eqx.tree_at(lambda x: x.rate, insts[0], quotes[0]),
+                eqx.tree_at(lambda x: x.futures_rate, insts[1], quotes[1]),
+            ]
+            res = bootstrap_curve_graph(REF, specs, rebuilt)
+            return res.value["USD.SOFR.3M"].discount_factors, res.converged
+
+        dfs, converged = build(eager.inputs.quotes)
+        assert bool(converged)
+        assert jnp.allclose(
+            dfs, eager.value["USD.SOFR.3M"].discount_factors, rtol=1e-12
+        )
 
 
 # ── Ensure MoneyMarketFuture is imported for the diagnostics fixture ─

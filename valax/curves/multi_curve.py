@@ -10,44 +10,30 @@ multi-curve Newton solver:
 and :class:`MultiCurveSet` is a two-tier *view* over the resulting
 :class:`~valax.curves.graph.CurveGraph` (see :meth:`MultiCurveSet.from_graph`
 and :meth:`MultiCurveSet.to_graph`).  The sequential OIS-then-tenor
-pipeline that used to live here is gone; every curve in the set is now
-solved in one Newton iteration, which also means ``jax.grad`` flows
-through the build via ``optimistix.ImplicitAdjoint``.
+pipeline that used to live here is gone.
 
-.. deprecated:: MC-Curves-2
-    :func:`bootstrap_multi_curve` and :class:`MultiCurveSet` are
-    superseded by
-    :func:`valax.curves.bootstrap_graph.bootstrap_curve_graph` and
-    :class:`~valax.curves.graph.CurveGraph`.  The joint solver handles
-    every quote type (tenor-basis, cross-currency, futures, …) that the
-    two-tier container cannot express.  A ``DeprecationWarning`` is
-    emitted on every :func:`bootstrap_multi_curve` call; the function is
-    kept for the deprecation cycle so existing user code continues to
-    work.
+The two-tier ``bootstrap_multi_curve`` builder has been removed: build with
+:func:`valax.curves.bootstrap_graph.bootstrap_curve_graph` (which handles
+every quote type — tenor-basis, cross-currency, futures, … — that the
+two-tier container cannot express) and take a :class:`MultiCurveSet` view of
+the resulting graph with :meth:`MultiCurveSet.from_graph` if a two-tier shape
+is convenient.
 """
 
-import dataclasses
-import warnings
-
-import jax.numpy as jnp
 import equinox as eqx
-import optimistix as optx
-from jaxtyping import Int
-from jax import Array
 
 from valax.curves.discount import DiscountCurve
-from valax.curves.graph import CurveGraph, CurveSpec, _CURVE_ID_RE
-from valax.curves.instruments import DepositRate, FRA, IborSwapRate, SwapRate
+from valax.curves.graph import CurveGraph, _CURVE_ID_RE
 
 
 # ── Synthetic curve identifiers for the legacy two-tier build ────────
 
 #: Currency prefix used for the synthetic curve ids the legacy wrapper
 #: feeds to the joint solver.  ``XXX`` is the ISO-4217 code for "no
-#: currency", which is honest: :func:`bootstrap_multi_curve` carries no
-#: currency information in its signature.  The ids never leak to the
-#: caller — :class:`MultiCurveSet` is keyed by the user's own tenor
-#: labels.
+#: currency", which is honest: a two-tier view carries no currency
+#: information.  :class:`MultiCurveSet` is keyed by the user's own tenor
+#: labels; these ids only appear when it is exported with
+#: :meth:`MultiCurveSet.to_graph`.
 _LEGACY_PREFIX = "XXX.LEGACY"
 
 #: Discount (OIS) leg of the legacy two-tier build.
@@ -160,247 +146,3 @@ class MultiCurveSet(eqx.Module):
             )
             curves[curve_id] = curve
         return CurveGraph(curves=curves)
-
-
-def bootstrap_multi_curve(
-    reference_date: Int[Array, ""],
-    discount_instruments: list,
-    forward_instruments: dict[str, list],
-    day_count: str = "act_365",
-    solver: optx.AbstractRootFinder | None = None,
-    max_steps: int = 256,
-) -> MultiCurveSet:
-    """Build a multi-curve set from market quotes.
-
-    Since MC-Curves-2b this is a thin wrapper over the joint solver
-    :func:`valax.curves.bootstrap_graph.bootstrap_curve_graph`: the OIS
-    curve and every forward curve are solved **simultaneously** in one
-    Newton iteration rather than sequentially.  The calibration target
-    is unchanged, so the curves are the same to solver tolerance:
-
-    * ``discount_instruments`` price on the discount curve alone
-      (single-curve residuals).
-    * Deposits and FRAs in ``forward_instruments`` price on their own
-      forward curve (their DF relationship is independent of the
-      discount curve).
-    * Swaps in ``forward_instruments`` use the dual-curve par condition
-
-      .. math::
-          \\sum_i \\left(\\frac{DF_{\\text{fwd}}(T_{i-1})}{DF_{\\text{fwd}}(T_i)}
-          - 1\\right) DF_{\\text{ois}}(T_i)
-          = r \\sum_i \\tau_i\\, DF_{\\text{ois}}(T_i)
-
-      which is exactly :class:`~valax.curves.instruments.IborSwapRate`
-      with the floating schedule set equal to the fixed schedule; the
-      wrapper performs that translation for you.
-
-    Each instrument contributes exactly one pillar: ``end_date`` for
-    deposits and FRAs, ``fixed_dates[-1]`` for swaps.
-
-    Args:
-        reference_date: Valuation date (ordinal).
-        discount_instruments: Instruments for the OIS discount curve.
-        forward_instruments: Dict mapping tenor label to instrument list
-            for each forward curve.
-        day_count: Day count convention for the output curves.
-        solver: Root finder for the joint Newton solve.
-        max_steps: Maximum solver iterations.
-
-    Returns:
-        A ``MultiCurveSet`` with the discount curve and all forward curves.
-
-    Raises:
-        TypeError: If an instrument is not a
-            :class:`~valax.curves.instruments.DepositRate`,
-            :class:`~valax.curves.instruments.FRA`, or
-            :class:`~valax.curves.instruments.SwapRate`.
-
-    .. deprecated:: MC-Curves-2
-        Use :func:`valax.curves.bootstrap_graph.bootstrap_curve_graph`
-        instead.  The joint solver handles tenor-basis, futures,
-        cross-currency, and every other quote type from MC-Curves-1 that
-        this two-tier container cannot name, and returns a
-        :class:`~valax.curves.bootstrap_graph.CurveBuildDiagnostics`
-        report alongside the curves.
-    """
-    warnings.warn(
-        "bootstrap_multi_curve is deprecated (MC-Curves-2): use "
-        "valax.curves.bootstrap_curve_graph for multi-curve builds. "
-        "The joint solver handles tenor-basis, futures, cross-currency, "
-        "and every other quote type this two-tier wrapper cannot.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-    # Deferred import breaks a would-be cycle
-    # (bootstrap_graph → bootstrap_proto → graph → discount → daycounts).
-    from valax.curves.bootstrap_graph import bootstrap_curve_graph
-
-    ref_i32 = jnp.asarray(reference_date, dtype=jnp.int32)
-
-    specs: list[CurveSpec] = []
-    graph_instruments: list = []
-
-    # ── Discount (OIS) leg: single-curve residuals ───────────────────
-    disc_pillars, disc_insts = _retarget_single_curve(
-        discount_instruments, _LEGACY_DISCOUNT_ID,
-    )
-    specs.append(
-        CurveSpec(
-            curve_id=_LEGACY_DISCOUNT_ID,
-            currency="XXX",
-            pillar_dates=disc_pillars,
-            day_count=day_count,
-        )
-    )
-    graph_instruments.extend(disc_insts)
-
-    # ── Forward legs: deposits/FRAs single-curve, swaps dual-curve ───
-    forward_ids: dict[str, str] = {}
-    for position, (tenor, instruments) in enumerate(
-        forward_instruments.items()
-    ):
-        curve_id = _legacy_forward_id(tenor, position)
-        forward_ids[tenor] = curve_id
-        fwd_pillars, fwd_insts = _retarget_forward_curve(
-            instruments, _LEGACY_DISCOUNT_ID, curve_id,
-        )
-        specs.append(
-            CurveSpec(
-                curve_id=curve_id,
-                currency="XXX",
-                pillar_dates=fwd_pillars,
-                day_count=day_count,
-            )
-        )
-        graph_instruments.extend(fwd_insts)
-
-    graph, _ = bootstrap_curve_graph(
-        ref_i32,
-        specs,
-        graph_instruments,
-        solver=solver,
-        max_steps=max_steps,
-    )
-
-    return MultiCurveSet.from_graph(graph, _LEGACY_DISCOUNT_ID, forward_ids)
-
-
-# ── Legacy-instrument → graph-instrument translation ─────────────────
-
-
-def _pillar_date(inst) -> Int[Array, ""]:
-    """Ordinal date of the single pillar this quote determines.
-
-    Raises:
-        TypeError: For quote types the legacy two-tier build never
-            supported.
-    """
-    if isinstance(inst, (DepositRate, FRA)):
-        return inst.end_date
-    if isinstance(inst, SwapRate):
-        return inst.fixed_dates[-1]
-    raise TypeError(
-        f"bootstrap_multi_curve supports DepositRate, FRA, and SwapRate "
-        f"only.  Got {type(inst).__name__}.  Use bootstrap_curve_graph "
-        f"for the full MC-Curves-1 quote set."
-    )
-
-
-def _sorted_pillars(instruments: list) -> Int[Array, " n"]:
-    """Sorted pillar dates implied by ``instruments`` (one each)."""
-    if not instruments:
-        return jnp.zeros((0,), dtype=jnp.int32)
-    pillars = jnp.stack(
-        [jnp.asarray(_pillar_date(i), dtype=jnp.int32) for i in instruments]
-    )
-    return jnp.sort(pillars)
-
-
-def _retarget_single_curve(
-    instruments: list,
-    curve_id: str,
-) -> tuple[Int[Array, " n"], list]:
-    """Point every quote at ``curve_id`` with single-curve residuals.
-
-    ``_sorted_pillars`` has already rejected unsupported quote types, so
-    every instrument here is a
-    :class:`DepositRate` / :class:`FRA` / :class:`SwapRate`.
-    """
-    pillars = _sorted_pillars(instruments)
-    retargeted = [_with_curves_touched(inst, (curve_id,)) for inst in instruments]
-    return pillars, retargeted
-
-
-def _with_curves_touched(inst, curves_touched: tuple):
-    """Copy ``inst`` with a new static ``curves_touched`` tuple.
-
-    ``curves_touched`` is an ``eqx.field(static=True)``, i.e. part of the
-    pytree *structure* rather than a leaf, so ``eqx.tree_at`` cannot
-    reach it.  Equinox modules are frozen dataclasses, so
-    :func:`dataclasses.replace` is the supported way to rebuild one with
-    a different static field.
-    """
-    return dataclasses.replace(inst, curves_touched=curves_touched)
-
-
-def _retarget_forward_curve(
-    instruments: list,
-    discount_id: str,
-    forward_id: str,
-) -> tuple[Int[Array, " n"], list]:
-    """Translate a legacy forward-curve instrument list for the graph.
-
-    Deposits and FRAs keep their single-curve residual on the forward
-    curve.  Swaps become :class:`IborSwapRate` quotes discounting on
-    ``discount_id`` and projecting on ``forward_id``, with the floating
-    schedule set equal to the fixed schedule — the exact dual-curve par
-    condition the sequential pipeline solved.
-    """
-    pillars = _sorted_pillars(instruments)
-    translated: list = []
-    for inst in instruments:
-        if isinstance(inst, (DepositRate, FRA)):
-            translated.append(_with_curves_touched(inst, (forward_id,)))
-        elif isinstance(inst, SwapRate):
-            translated.append(
-                _as_dual_curve_swap(inst, discount_id, forward_id)
-            )
-        else:
-            raise TypeError(
-                f"bootstrap_multi_curve supports DepositRate, FRA, and "
-                f"SwapRate only.  Got {type(inst).__name__}.  Use "
-                f"bootstrap_curve_graph for the full MC-Curves-1 quote set."
-            )
-    return pillars, translated
-
-
-def _as_dual_curve_swap(
-    swap: SwapRate,
-    discount_id: str,
-    forward_id: str,
-) -> IborSwapRate:
-    """Reinterpret a legacy :class:`SwapRate` as a dual-curve quote.
-
-    The legacy sequential pipeline read a ``SwapRate`` on a forward leg
-    as "fixed leg discounted on OIS, floating leg projected off the
-    tenor curve and discounted on OIS", with the floating schedule
-    equal to the fixed schedule.  That is precisely an
-    :class:`IborSwapRate` whose ``float_dates == fixed_dates`` and whose
-    fixing dates are the period starts.  The ``index_id`` is left at the
-    ``"IBOR"`` sentinel, which is absent from the empty fixing history
-    the wrapper uses, so every coupon is curve-projected.
-    """
-    fixing_dates = jnp.concatenate(
-        [swap.start_date[None], swap.fixed_dates[:-1]]
-    )
-    return IborSwapRate(
-        start_date=swap.start_date,
-        fixed_dates=swap.fixed_dates,
-        float_dates=swap.fixed_dates,
-        fixing_dates=fixing_dates,
-        rate=swap.rate,
-        fixed_day_count=swap.day_count,
-        float_day_count=swap.day_count,
-        curves_touched=(discount_id, forward_id),
-    )

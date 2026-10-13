@@ -139,15 +139,20 @@ stochastic-basis construction requires a multi-curve HJM / Mercurio-style
 extension with its own driver per tenor curve; it is catalogued in
 [Research Ideas](../research-ideas.md) and deliberately out of scope here.
 
-## 4. Discounting: re-fitting rather than re-weighting
+## 4. Discounting: binding rather than re-weighting
 
 The second half of "multi-curve" is *which* curve a trade discounts on. For an
 exact-fit short-rate model that is not an overlay at all — the model's
 `initial_curve` **is** its discount curve, because $\alpha$ / $\varphi$ is
-constructed to reproduce it. Honouring an instrument's `discount_id` therefore
-means re-fitting the model to that curve, which is what
-`valax.pricing.multicurve.with_discount_curve` does (the price-time analogue of
-`HullWhiteModel.with_market_curve`).
+constructed to reproduce it. The curve is therefore market data the model is
+*bound to*, not one of its parameters: models (including every calibrator's
+output) are curve-free, and `valax.price` binds `initial_curve` from the
+`MarketState` — the curve `model.curve_id` if set, else the instrument's
+`discount_id` — via `valax.core.binding.curve_requirements`, refusing a model
+that arrives pre-bound. Kernel-level callers bind explicitly with
+`valax.core.binding.bind_curves`; a recipe called directly fills an *unbound*
+model from its `discount_curve` argument
+(`valax.pricing.multicurve.with_discount_curve`) and never re-fits a bound one.
 
 The calibrated dynamics — mean reversion, volatility, correlation — are
 intrinsic and carry over unchanged. Note the consistency invariant of the
@@ -177,6 +182,16 @@ strip, so a distinct projection curve would be silently dropped. They raise
 instead: a wrong price with no signal is the one outcome worse than an
 unsupported feature. The Cheyette calibrators refuse for the same reason —
 their PDE engine has no discount/projection split to honour.
+
+Whether the deterministic overlay applies is declared **per model type** by
+`valax.pricing.multicurve.basis_overlay` (Hull–White and G2++: yes; Cheyette:
+no), and the recipes read the per-period basis through
+`model_tenor_basis` / `model_swap_leg_basis`, which raise for a model type
+without the overlay. Consequently `valax.price` raises whenever a trade
+resolves a distinct projection curve that the recipe/model cannot use —
+previously such a trade could be priced single-curve without a signal. A
+future stochastic-basis model registers `basis_overlay = False` and projects
+off its own index curves instead.
 
 ### 5.1 Why the closed forms extend so cheaply
 

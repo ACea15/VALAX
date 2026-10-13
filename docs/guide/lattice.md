@@ -109,7 +109,7 @@ delta = jax.grad(lambda s: binomial_price(
 
 The Hull-White one-factor model is the standard short-rate model for pricing bonds with embedded optionality. VALAX provides:
 
-1. **`HullWhiteModel`** — an `equinox.Module` pytree carrying the mean-reversion speed $a$, short-rate volatility $\sigma$, and the initial discount curve $P^M(0,t)$.
+1. **`HullWhiteModel`** — an `equinox.Module` pytree carrying the mean-reversion speed $a$, short-rate volatility $\sigma$, and the initial discount curve $P^M(0,t)$ it is exact-fitted to. The curve is market data: `valax.price` binds it from the `MarketState` (and refuses a pre-bound model), while the kernel-level functions below need a bound model — build it with `initial_curve=curve` or `bind_curves(model, curve)` (see [API → Core § Curve fields](../api/core.md#curve-fields-exact-fit-short-rate-models)).
 2. **Analytic zero-coupon bond prices** — $P(t,T \mid r) = A(t,T)\,e^{-B(t,T)\,r}$ with exact-fit to the initial curve via the Brigo-Mercurio $A(t,T)$ formula.
 3. **Trinomial tree** — a recombining tree for backward induction, with Arrow-Debreu forward propagation to calibrate $\alpha(t_i)$ at each step and match market discount factors exactly.
 4. **Callable and puttable bond pricing** — backward induction with exercise decisions: `callable_bond_price` (issuer calls when continuation > call price, reducing holder value) and `puttable_bond_price` (holder puts when continuation < put price, increasing holder value). Call and put prices are quoted clean while the continuation value is dirty, so the obstacle carries accrued interest; see [Dates and Conventions](dates-and-conventions.md#accrued-interest-clean-and-dirty).
@@ -121,11 +121,13 @@ import jax.numpy as jnp
 from valax.models import HullWhiteModel
 from valax.models.hull_white import hw_bond_price, hw_B, _instantaneous_forward
 
+from valax.core.binding import bind_curves
+
 model = HullWhiteModel(
     mean_reversion=jnp.array(0.10),
     volatility=jnp.array(0.01),
-    initial_curve=curve,   # a DiscountCurve
-)
+)                                    # curve-free: what valax.price expects
+model = bind_curves(model, curve)    # bound to a DiscountCurve for kernel calls
 
 # Analytic ZCB price: recovers the initial curve at t=0
 f0 = _instantaneous_forward(model, jnp.array(0.0))

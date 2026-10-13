@@ -55,6 +55,7 @@ from valax.curves.discount import DiscountCurve
 from valax.dates.accrual import bond_accrued_interest, dirty_from_clean
 from valax.instruments.bonds import FixedRateBond
 from valax.models.hull_white import HullWhiteModel
+from valax.models.short_rate import require_initial_curve
 from valax.pricing.analytic.bonds import fixed_rate_bond_price
 from valax.pricing.pde.dispatch import pde_price_dispatch
 from valax.risk.shocks import parallel_shift
@@ -126,15 +127,15 @@ def _shifted_model(
 ) -> HullWhiteModel:
     """Hull-White model with its initial curve parallel-shifted by ``spread``.
 
-    Rebuilds the model rather than mutating it: the mean-reversion and
-    volatility are carried through unchanged, and only the initial curve is
-    replaced, so the exact-fit :math:`\\alpha(t)` picks up a pure constant
-    ``spread`` with the :math:`x`-dynamics untouched.
+    Only the (bound) initial curve is replaced — the mean-reversion,
+    volatility and ``curve_id`` are carried through unchanged — so the
+    exact-fit :math:`\\alpha(t)` picks up a pure constant ``spread`` with the
+    :math:`x`-dynamics untouched.
     """
-    return HullWhiteModel(
-        mean_reversion=model.mean_reversion,
-        volatility=model.volatility,
-        initial_curve=parallel_shift(model.initial_curve, spread),
+    return eqx.tree_at(
+        lambda m: m.initial_curve,
+        model,
+        parallel_shift(require_initial_curve(model), spread),
     )
 
 

@@ -160,8 +160,9 @@ finds \(\bar y(x)\) with an `optimistix` Newton root-find at each node. Because
 the root-find is implicitly differentiable, `jax.grad` flows through the
 boundary without unrolling the iterations.
 
-Discounting comes from `model.initial_curve`, so prices are automatically
-consistent with the exact-fitted curve.
+Discounting comes from the model's `initial_curve` — bound from the
+`MarketState` by `valax.price` (or explicitly with `bind_curves` for a kernel
+call) — so prices are automatically consistent with the exact-fitted curve.
 
 !!! note "Not the decorrelation payoff"
     A *single* ATM swaption's value **rises** with \(\rho\) (the factors
@@ -226,11 +227,16 @@ this sensitivity at all.
 
 G2++ has five free parameters, so it is fitted jointly to an ATM /
 co-terminal swaption surface with `calibrate_g2pp`, using the semi-analytic
-integral of §3 (implicitly differentiable — exact autodiff Jacobian). The
-default solver is a line-searched `optimistix.BFGS` minimiser of the sum of
-squares; as for Hull–White, Levenberg–Marquardt is deliberately not offered
-because the residual closes over a *sequence* of instrument pytrees, which
-trips `optimistix` 0.1.0.
+integral of §3 (implicitly differentiable — exact autodiff Jacobian). It
+returns a `CalibrationResult` whose `.value` is a curve-free `G2PPModel`
+(`valax.price` binds the market curve at pricing time). The default settings
+([`BASKET_SETTINGS`](../api/calibration.md#valax.calibration.basket.BASKET_SETTINGS))
+are a line-searched BFGS minimiser of the sum of squares, as for Hull–White:
+the Brigo–Mercurio pricer nests a root-find (the critical boundary
+\(\bar y(x)\)) whose implicit derivative is non-finite far from the solution,
+where an undamped Levenberg–Marquardt step can land; BFGS's line search keeps
+the iterates where the pricer is defined. Levenberg–Marquardt is still
+available via `settings=SolverSettings(method="levenberg_marquardt", ...)`.
 
 !!! note "Weak identification and degenerate basins"
     The two mean reversions \(a, b\) are only weakly pinned by an ATM surface

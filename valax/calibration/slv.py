@@ -26,7 +26,9 @@ an **outer fixed-point iteration** (``n_iterations``): each outer
 iteration re-simulates the swarm from ``t=0`` using the leverage built
 on the previous pass, then rebuilds the grid. ``n_iterations=1``
 recovers the standard one-shot particle method; ``n_iterations >= 2``
-trades MC budget for improved self-consistency.
+(the default is 2) trades MC budget for improved self-consistency and is
+what makes convergence *measurable*: the result reports the last increment
+``L_K - L_{K-1}`` as a fixed-point level (see :func:`calibrate_slv_leverage`).
 
 Two conditional-expectation estimators are exposed via ``method=``:
 
@@ -63,6 +65,7 @@ References:
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Callable, Literal
 
 import jax
@@ -70,6 +73,10 @@ import jax.numpy as jnp
 from jax import Array
 from jaxtyping import Float
 
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationResult, fixed_point_diagnostics
+from valax.calibration.settings import SolverSettings
+from valax.calibration.solve import explicit_level
 from valax.models.heston import HestonModel
 from valax.pricing.analytic.dupire import dupire_local_vol
 from valax.surfaces.leverage import LeverageGrid
@@ -204,7 +211,15 @@ def _propagate_one_step(
 # ─────────────────────────────────────────────────────────────────────
 
 
-def calibrate_slv_leverage(
+#: Default settings of the SLV leverage fixed point. Only ``atol`` is read: the
+#: convergence tolerance on ``max|L_K - L_{K-1}|`` between the last two outer
+#: passes. Each pass re-simulates the swarm with fresh randomness, so the
+#: increment never falls below the Monte Carlo noise of the leverage estimate
+#: (roughly ``1/sqrt(n_paths)`` relative); set ``atol`` above that floor.
+SLV_SETTINGS = SolverSettings(atol=5e-2, rtol=0.0)
+
+
+def _leverage_fixed_point(
     heston: HestonModel,
     surface: Any,
     spot: Float[Array, ""],
@@ -213,67 +228,19 @@ def calibrate_slv_leverage(
     n_paths: int,
     key: jax.Array,
     *,
-    method: EstimatorName = "particle",
-    n_iterations: int = 1,
-    bandwidth: Float[Array, ""] | Callable | None = None,
-    ridge: float = 1e-3,
-    L_max: float = 5.0,
-    L_min: float = 0.05,
-) -> LeverageGrid:
-    """Calibrate the SLV leverage function ``L(k, t)``.
-
-    Args:
-        heston: Pass-1 calibrated ``HestonModel``.
-        surface: Implied-vol surface with ``total_variance(k, T)`` —
-            the Dupire target.
-        spot: Spot at calibration date ``S_0``.
-        log_moneyness_grid: Output grid in ``k = log(K/F(T))``. Must
-            be sorted ascending. The grid is the leverage's eventual
-            ``log_moneyness_grid``.
-        time_grid: Output grid in time (year fractions). Must be sorted
-            ascending; ``time_grid[0]`` should be > 0 (Dupire is
-            singular at 0).
-        n_paths: Particle count.
-        key: PRNG key.
-        method: ``"particle"`` (no regularisation, ``ridge`` ignored)
-            or ``"kernel"`` (Tikhonov ridge of size ``ridge``).
-        n_iterations: Outer fixed-point iterations.
-
-            * ``1``: classical one-shot particle method.
-            * ``> 1``: re-simulate the swarm with the latest leverage
-              grid and rebuild. Use 2–3 for tighter self-consistency.
-        bandwidth: Gaussian-kernel bandwidth. ``None`` (default) →
-            Silverman's rule per slice. Scalar or callable
-            ``(t, k_particles) -> h`` to override.
-        ridge: Ridge regulariser for ``method="kernel"``. Ignored when
-            ``method="particle"``.
-        L_max: Upper clip on ``L`` to prevent runaway values when the
-            kernel density is degenerate in a region with strong skew.
-        L_min: Lower clip on ``L`` (same rationale as ``L_max``).
-
-    Returns:
-        A :class:`LeverageGrid` ``L`` of shape
-        ``(len(time_grid), len(log_moneyness_grid))``.
-    """
+    method: str,
+    n_iterations: int,
+    bandwidth: Float[Array, ""] | Callable | None,
+    ridge: float,
+    L_max: float,
+    L_min: float,
+) -> tuple[Float[Array, "n_t n_k"], Float[Array, "n_t n_k"], Float[Array, ""]]:
+    """Run the outer fixed point; return ``(L_K, L_{K-1}, clip_fraction)``."""
     # Import locally to avoid an import cycle (slv_paths imports SLVModel,
     # which conceptually sits "below" calibration).
     from valax.pricing.mc.slv_paths import _qe_variance_step_factory
 
-    if method not in ("particle", "kernel"):
-        raise ValueError(
-            f"calibrate_slv_leverage: method must be 'particle' or "
-            f"'kernel', got {method!r}"
-        )
-    if n_iterations < 1:
-        raise ValueError(
-            f"n_iterations must be >= 1, got {n_iterations}"
-        )
-
     ridge_eff = jnp.asarray(ridge if method == "kernel" else 0.0)
-
-    spot = jnp.asarray(spot)
-    log_moneyness_grid = jnp.asarray(log_moneyness_grid)
-    time_grid = jnp.asarray(time_grid)
     n_t = time_grid.shape[0]
     n_k = log_moneyness_grid.shape[0]
 
@@ -302,6 +269,8 @@ def calibrate_slv_leverage(
     # Warm-start at L ≡ 1 (Heston limit). Subsequent outer iterations
     # re-simulate with the previous iteration's leverage grid.
     L_values = jnp.ones((n_t, n_k), dtype=spot.dtype)
+    L_previous = L_values
+    clipped = jnp.zeros((n_t, n_k), dtype=bool)
 
     for outer in range(n_iterations):
         outer_key = jax.random.fold_in(key, outer)
@@ -320,7 +289,7 @@ def calibrate_slv_leverage(
             values=L_values,
         )
 
-        new_rows = []
+        new_rows, clip_rows = [], []
         for i in range(n_t):
             t_i = time_grid[i]
             dt_i = t_i - t_prev
@@ -353,20 +322,157 @@ def calibrate_slv_leverage(
 
             # L²(k, t_i) = σ²_Dupire(k, t_i) / Ê[V | k].
             ev_safe = jnp.maximum(ev_given_k, 1e-12)
-            L_row = jnp.sqrt(
+            L_raw = jnp.sqrt(
                 jnp.maximum(sigma2_loc_target[i] / ev_safe, 0.0)
             )
-            L_row = jnp.clip(L_row, L_min, L_max)
-            new_rows.append(L_row)
+            clip_rows.append((L_raw > L_max) | (L_raw < L_min))
+            new_rows.append(jnp.clip(L_raw, L_min, L_max))
 
             t_prev = t_i
 
+        L_previous = L_values
         L_values = jnp.stack(new_rows, axis=0)
+        clipped = jnp.stack(clip_rows, axis=0)
 
-    return LeverageGrid(
-        log_moneyness_grid=log_moneyness_grid,
-        time_grid=time_grid,
-        values=L_values,
+    return L_values, L_previous, jnp.mean(clipped.astype(spot.dtype))
+
+
+def calibrate_slv_leverage(
+    heston: HestonModel,
+    surface: Any,
+    spot: Float[Array, ""],
+    log_moneyness_grid: Float[Array, " n_k"],
+    time_grid: Float[Array, " n_t"],
+    n_paths: int,
+    key: jax.Array,
+    *,
+    method: EstimatorName = "particle",
+    n_iterations: int = 2,
+    bandwidth: Float[Array, ""] | Callable | None = None,
+    ridge: float = 1e-3,
+    L_max: float = 5.0,
+    L_min: float = 0.05,
+    settings: SolverSettings | None = None,
+    name: str = "slv_leverage",
+) -> CalibrationResult:
+    """Calibrate the SLV leverage function ``L(k, t)``.
+
+    **How the fixed point is reported.** There is no residual to drive to
+    zero — the leverage is the output of ``n_iterations`` passes of a Monte
+    Carlo fixed point ``L_{k+1} = G(L_k)`` — so the level is *explicit*
+    (``theta=None``): its value is an unrolled, differentiable map of the
+    inputs (Heston model, target surface, spot), and its risk is taken by
+    plain reverse-mode AD through the passes, never by the implicit function
+    theorem (``problem="fixed_point"``). Its diagnostics are those of the
+    fixed point (:func:`~valax.calibration.result.fixed_point_diagnostics`):
+
+    * ``residuals`` — the last increment ``L_K - L_{K-1}`` on the grid;
+    * ``converged`` — ``max|L_K - L_{K-1}| <= settings.atol``, and always
+      ``False`` for ``n_iterations=1`` (a single pass measures only the
+      distance from the ``L ≡ 1`` warm start);
+    * ``extras["clip_fraction"]`` — the share of grid cells whose raw
+      leverage hit ``[L_min, L_max]`` in the last pass (a high value means
+      the estimator is degenerate somewhere, whatever the increment says).
+
+    Each pass re-simulates the swarm with fresh randomness, so the increment
+    is bounded below by Monte Carlo noise; ``settings.atol`` must sit above
+    that floor (see :data:`SLV_SETTINGS`).
+
+    Args:
+        heston: Pass-1 calibrated ``HestonModel``.
+        surface: Implied-vol surface with ``total_variance(k, T)`` —
+            the Dupire target.
+        spot: Spot at calibration date ``S_0``.
+        log_moneyness_grid: Output grid in ``k = log(K/F(T))``. Must
+            be sorted ascending. The grid is the leverage's eventual
+            ``log_moneyness_grid``.
+        time_grid: Output grid in time (year fractions). Must be sorted
+            ascending; ``time_grid[0]`` should be > 0 (Dupire is
+            singular at 0).
+        n_paths: Particle count.
+        key: PRNG key.
+        method: ``"particle"`` (no regularisation, ``ridge`` ignored)
+            or ``"kernel"`` (Tikhonov ridge of size ``ridge``).
+        n_iterations: Outer fixed-point passes (default 2, the minimum that
+            measures convergence). ``1`` is the classical one-shot particle
+            method — usable, but always reported not converged.
+        bandwidth: Gaussian-kernel bandwidth. ``None`` (default) →
+            Silverman's rule per slice. Scalar or callable
+            ``(t, k_particles) -> h`` to override.
+        ridge: Ridge regulariser for ``method="kernel"``. Ignored when
+            ``method="particle"``.
+        L_max: Upper clip on ``L`` to prevent runaway values when the
+            kernel density is degenerate in a region with strong skew.
+        L_min: Lower clip on ``L`` (same rationale as ``L_max``).
+        settings: Fixed-point tolerance (``atol``); defaults to
+            :data:`SLV_SETTINGS`.
+        name: Level name used in diagnostics.
+
+    Returns:
+        The fixed-point :class:`~valax.calibration.result.CalibrationResult`;
+        the :class:`LeverageGrid` of shape
+        ``(len(time_grid), len(log_moneyness_grid))`` is ``result.value``.
+
+    Raises:
+        ValueError: If ``method`` is unknown or ``n_iterations < 1``.
+    """
+    if method not in ("particle", "kernel"):
+        raise ValueError(
+            f"calibrate_slv_leverage: method must be 'particle' or "
+            f"'kernel', got {method!r}"
+        )
+    if n_iterations < 1:
+        raise ValueError(
+            f"n_iterations must be >= 1, got {n_iterations}"
+        )
+    settings = SLV_SETTINGS if settings is None else settings
+    inputs = LevelInputs(
+        quotes=None,
+        upstream={
+            "heston": heston,
+            "surface": surface,
+            "spot": jnp.asarray(spot),
+        },
+        fixed={
+            "log_moneyness_grid": jnp.asarray(log_moneyness_grid),
+            "time_grid": jnp.asarray(time_grid),
+        },
+    )
+
+    def run(inp: LevelInputs):
+        up, fx = inp.upstream, inp.fixed
+        return _leverage_fixed_point(
+            up["heston"], up["surface"], up["spot"],
+            fx["log_moneyness_grid"], fx["time_grid"], n_paths, key,
+            method=method, n_iterations=n_iterations, bandwidth=bandwidth,
+            ridge=ridge, L_max=L_max, L_min=L_min,
+        )
+
+    def assemble(_theta: None, inp: LevelInputs) -> LeverageGrid:
+        values, _, _ = run(inp)
+        return LeverageGrid(
+            log_moneyness_grid=inp.fixed["log_moneyness_grid"],
+            time_grid=inp.fixed["time_grid"],
+            values=values,
+        )
+
+    values, previous, clip_fraction = run(inputs)
+    diagnostics = fixed_point_diagnostics(
+        values - previous,
+        n_iterations=n_iterations,
+        tol=settings.atol,
+        extras={"clip_fraction": clip_fraction},
+    )
+    return explicit_level(
+        name, inputs, assemble,
+        diagnostics=diagnostics,
+        problem="fixed_point",
+        settings=settings,
+        value=LeverageGrid(
+            log_moneyness_grid=inputs.fixed["log_moneyness_grid"],
+            time_grid=inputs.fixed["time_grid"],
+            values=values,
+        ),
     )
 
 
@@ -385,17 +491,25 @@ def calibrate_slv(
     key: jax.Array,
     *,
     method: EstimatorName = "particle",
-    n_iterations: int = 1,
+    n_iterations: int = 2,
     bandwidth: Float[Array, ""] | Callable | None = None,
     ridge: float = 1e-3,
     heston_initial_guess: HestonModel | None = None,
-    heston_solver: str = "levenberg_marquardt",
-    heston_max_steps: int = 512,
-) -> "SLVModel":  # noqa: F821 (lazy import below)
+    heston_settings: SolverSettings | None = None,
+    settings: SolverSettings | None = None,
+    name: str = "slv",
+) -> CalibrationResult:
     """End-to-end two-pass SLV calibration.
 
-    Pass 1: ``calibrate_heston`` against the vanilla quotes.
-    Pass 2: ``calibrate_slv_leverage`` against the Dupire surface.
+    Pass 1: :func:`~valax.calibration.heston.calibrate_heston` against the
+    vanilla quotes (a least-squares level).
+    Pass 2: :func:`calibrate_slv_leverage` against the Dupire surface (a
+    fixed-point level).
+
+    The returned result is pass 2's, with its value replaced by the
+    assembled :class:`SLVModel` and pass 1's result attached as its child —
+    so ``result.check()`` covers both passes and ``result.converged`` is
+    ``False`` if either failed.
 
     Args:
         strikes: Forwarded to ``calibrate_heston``.
@@ -415,16 +529,19 @@ def calibrate_slv(
         bandwidth: Forwarded to ``calibrate_slv_leverage``.
         ridge: Forwarded to ``calibrate_slv_leverage``.
         heston_initial_guess: Forwarded to ``calibrate_heston``.
-        heston_solver: Forwarded to ``calibrate_heston``.
-        heston_max_steps: Forwarded to ``calibrate_heston``.
+        heston_settings: Solver settings of pass 1.
+        settings: Fixed-point tolerance of pass 2.
+        name: Level name used in diagnostics.
 
     Returns:
-        A calibrated :class:`SLVModel`.
+        The :class:`~valax.calibration.result.CalibrationResult`; the
+        calibrated :class:`SLVModel` is ``result.value`` and the Heston fit
+        is ``result.children[0]``.
     """
     from valax.calibration.heston import calibrate_heston
     from valax.models.slv import SLVModel  # lazy import — see note at top of file
 
-    heston, _sol = calibrate_heston(
+    heston = calibrate_heston(
         strikes=strikes,
         market_prices=market_prices,
         spot=spot,
@@ -433,11 +550,11 @@ def calibrate_slv(
         expiry=expiry,
         pricing_fn=pricing_fn,
         initial_guess=heston_initial_guess,
-        solver=heston_solver,
-        max_steps=heston_max_steps,
+        settings=heston_settings,
+        name=f"{name}.heston",
     )
     leverage = calibrate_slv_leverage(
-        heston,
+        heston.value,
         surface,
         spot,
         log_moneyness_grid,
@@ -448,5 +565,8 @@ def calibrate_slv(
         n_iterations=n_iterations,
         bandwidth=bandwidth,
         ridge=ridge,
+        settings=settings,
+        name=f"{name}.leverage",
     )
-    return SLVModel.from_heston_and_leverage(heston, surface, leverage)
+    model = SLVModel.from_heston_and_leverage(heston.value, surface, leverage.value)
+    return dataclasses.replace(leverage, value=model, children=(heston,))

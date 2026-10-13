@@ -23,6 +23,15 @@ python examples/01_equity_options.py
 | [`06_pde_and_lattice.py`](#pde-and-lattice) | Crank-Nicolson, binomial trees | PDE grid convergence, CRR trees, American vs European puts, early exercise premium, method comparison |
 | [`07_synthetic_market.py`](#synthetic-market) | Synthetic generators, basket pricing, market tapes | Reproducible market state via `SeedRegistry`, multi-asset snapshot + correlation, batched analytic pricing, 5-step market evolution |
 | [`08_end_to_end_workflow.py`](#end-to-end-workflow) | Stages 1 → 6, calibration on synthetic, arbitrage injection | Ground-truth SABR → noisy smile → calibration to within the noise floor; portfolio pricing + autodiff Greeks; deliberate calendar-arb injection demonstrating the xfail backlog |
+| [`10_unified_market_tiers.py`](#unified-calibration-pricing-and-risk) | Unified quotes → calibrate → price → quote risk | One option on three markets — flat Black-Scholes, bootstrapped curve + SABR smile, + calibrated Heston — through the same workflow |
+| [`11_unified_multicurve_rates.py`](#unified-calibration-pricing-and-risk) | Multi-curve bootstrap, swap book, quote risk | Synthetic OIS + 3M quotes → joint bootstrap → swap book → book quote risk in one adjoint sweep (vs autodiff and FD), single-curve limit |
+| [`12_unified_equity_smile_and_model.py`](#unified-calibration-pricing-and-risk) | Equity smiles, Heston, MC quote risk | Noisy equity quotes → curve, SABR smiles, Heston → European / barrier / Asian prices → Monte Carlo quote risk with fixed-input sensitivities |
+| [`13_unified_quote_scenarios.py`](#unified-calibration-pricing-and-risk) | Quote scenarios, VaR / ES | Correlated quote scenarios → `vmap` recalibration + repricing compiled once → P&L explain vs first-order quote risk → VaR / ES |
+| [`14_unified_rates_per_trade_model.py`](#per-trade-model-calibration-for-bermudans) | Swaption cube, per-trade Hull–White, Bermudan risk | Curves → swaption cube → per-trade Hull–White on co-terminal baskets (`filter_vmap`) → Bermudan via `price()` PDE → quote risk; adjoint vs autodiff; λ_m vega profile vs full recalibration |
+| [`15_unified_rates_caps_optionlet_chain.py`](#caps-and-floors-off-the-optionlet-chain) | Cap strip, optionlet SABR, cap/floor risk | Curves → cap→caplet strip → optionlet SABR as chain nodes → caps / floors through `price()` → quote risk to cap and curve quotes; adjoint vs autodiff vs FD |
+| [`16_unified_calibration_diagnostics.py`](#diagnosing-a-failed-calibration) | Failure naming, conditioning, engine provenance | Bad quotes (NaN, off-market, stale) → `check()` / `failed_labels()` name the cell or bucket; healthy nodes unaffected; ill-conditioning alert; `check_engine` refusing a frozen-y Cheyette fit on another engine; fix and recalibrate |
+| [`17_unified_slv_fixed_point.py`](#slv-as-a-fixed-point-level) | SLV leverage, fixed-point diagnostics, MC exotic risk | Smile → Heston → SLV leverage as a fixed-point level (max\|ΔL\|, `converged`, clip fraction vs `n_iterations`) → barrier under LV / Heston / SLV → vega by AD through the unrolled passes vs FD |
+| [`18_unified_rates_per_trade_g2pp_cheyette.py`](#per-trade-g2-and-cheyette) | Per-trade G2++ and Cheyette, model risk | Per-trade G2++ (multi-curve, 2-D PDE) and Cheyette (single-curve, frozen-y PDE) on the trade's basket → Bermudan → quote risk reconciled; HW vs G2++ vs Cheyette Bermudan on the same basket |
 
 ---
 
@@ -65,15 +74,17 @@ model = SABRModel(alpha=jnp.array(0.25), beta=jnp.array(0.5),
 # Generate a smile
 smile = jax.vmap(lambda K: sabr_implied_vol(model, forward, K, expiry))(strikes)
 
-# Calibrate to market
-fitted, sol = calibrate_sabr(strikes, market_vols, forward, expiry, fixed_beta=jnp.array(0.5))
+# Calibrate to market — a CalibrationResult; the fitted SABRModel is .value
+result = calibrate_sabr(strikes, market_vols, forward, expiry, fixed_beta=jnp.array(0.5))
+result.check()                      # raises CalibrationError if not converged
+fitted = result.value
 ```
 
 Highlights:
 
 - **Parameter sensitivity** — see how rho controls skew, nu controls wings, beta controls the backbone
 - **Model risk** — differentiate price w.r.t. SABR parameters (d(price)/d(alpha), d(price)/d(rho))
-- **Calibration** — Levenberg-Marquardt, BFGS, and weighted fitting, all gradient-based via optimistix
+- **Calibration** — Levenberg-Marquardt (default), BFGS via `settings=SolverSettings(method="bfgs", ...)`, and weighted fitting, all gradient-based via optimistix
 
 ---
 
@@ -198,8 +209,8 @@ Highlights:
 sabr_truth   = sample_sabr_params(registry, cfg)                  # Stage 1
 smile_noisy  = synthesize_sabr_smile(registry, sabr_truth, F, T,
                                       strikes, vol_bp_noise=15)   # Stage 2
-sabr_fit, _  = calibrate_sabr(strikes, smile_noisy, F, T,
-                              fixed_beta=sabr_truth.beta)         # Stage 3
+sabr_fit     = calibrate_sabr(strikes, smile_noisy, F, T,
+                              fixed_beta=sabr_truth.beta).value   # Stage 3
 port         = sample_option_portfolio(registry, md, spec)        # Stage 4
 prices       = batch_price(black_scholes_price, *port["calls"]...) # Stage 5
 bad_w, diag  = inject_calendar_arb(w_clean, i=1, j=3)             # Stage 6
@@ -210,6 +221,98 @@ Highlights:
 - **Non-tautological calibration check** — the fit RMSE is compared against the *empirical* noise RMSE on the same draw; a passing test means the optimiser is at the noise floor, not that "calibrating SABR on SABR-generated data recovers SABR" (which would only test the optimiser).
 - **Closed loop in one script** — every stage uses outputs of the previous, so any inconsistency surfaces immediately.
 - **Arbitrage backlog reporting** — Stage 6 deliberately breaks a vector of total variances and prints the diagnosis the library *would* raise once detection lands.  The corresponding xfail tests turn green the day a detector is added.
+
+---
+
+## Unified Calibration, Pricing and Risk
+
+**`examples/10_…` to `examples/18_…`** — the unified workflow on synthetic quote universes: noisy quotes → a `CalibrationChain` → `price(instrument, model, market)` → quote risk by one adjoint sweep, reconciled against autodiff through every calibration. The walkthrough is [From Quotes to Risk](guide/calibration-to-risk.md); the quote generators are described in [Synthetic Market Data](guide/synthetic_market.md#synthetic-quote-universes).
+
+- **10** — one option on three market tiers (flat, curve + smile, + Heston), same workflow.
+- **11** — OIS + 3M joint bootstrap, swap book quote risk in one sweep.
+- **12** — equity curve, SABR smiles and Heston; exotic MC prices with quote and fixed-input risk.
+- **13** — correlated quote scenarios, `vmap` recalibration + repricing, P&L explain, VaR / ES.
+
+### Per-trade model calibration for Bermudans
+
+**`examples/14_unified_rates_per_trade_model.py`** — Rates end to end with a model calibrated **per trade**: curves → swaption SABR cube (on the curve-implied forwards) → a Hull–White σ fitted to each Bermudan's own co-terminal basket → Bermudan priced through `price()` on the PDE → quote risk.
+
+```python
+snap, world = rates_vol_snapshot(registry, default_config(), rates_spec, vol_spec,
+                                 bp_noise=0.5, vol_bp_noise=0.5)
+calibrated = calibrate_market(chain, quotes, fixed, strict=True)    # curves → cube
+
+node = swaption_basket_node("hw", template=HullWhiteModel(...),
+                            basket=coterminal_swaptions(bermudan),
+                            cube_id=vol_spec.cube_id, transforms={"volatility": positive()},
+                            fixed_fields={"mean_reversion": A_KEY}, target_keys=keys)
+batched = eqx.filter_vmap(fit)(stacked_baskets)   # one fit per trade, curve-free models
+pv = price(bermudan, model, calibrated.market, method="pde", config=PDE).price
+
+adj = quote_risk_adjoint(bermudan, None, calibrated, model_result=model_result,
+                         method="pde", config=PDE)
+```
+
+Highlights:
+
+- **Batched per-trade fits** — same-shaped baskets calibrate in one `eqx.filter_vmap`; the fitted `HullWhiteModel`s are curve-free (`price` binds the market curve), so they stack.
+- **Model reprices its basket** — each co-terminal European priced by Jamshidian through `price()` (the auto-default analytic route for `Swaption` × `HullWhiteModel`) is compared with the cube.
+- **Adjoint vs autodiff** — the model level's multiplier λ_m is pushed through the cube and curve levels and reconciled against autodiff through every calibration and the PDE.
+- **λ_m as a vega profile** — the basket target sensitivities, converted to per-vol-bp vega, sum to the total cube vega, and one entry is checked against full recalibration by finite differences.
+
+### Caps and floors off the optionlet chain
+
+**`examples/15_unified_rates_caps_optionlet_chain.py`** — the cap side of the rates vol chain: curves → `caplet_strip_node` (cap → caplet bootstrap per strike column, on the curve-projected forwards) → `optionlet_sabr_node` (one SABR smile per optionlet expiry, no quotes of its own) → caps and floors → quote risk.
+
+```python
+chain = CalibrationChain(nodes=(curve_node, vols.strip_node, vols.optionlet_node))
+calibrated = calibrate_market(chain, quotes, fixed, strict=True)
+pv = price(cap, OptionletSmile(surface_id="USD.OPTIONLET"), calibrated.market).price
+adj = quote_risk_adjoint(cap, SMILE, calibrated)
+ad = quote_risk_autodiff(cap, SMILE, chain, quotes, fixed)
+```
+
+Highlights:
+
+- **Truth recovery** — noise-free quotes recover the strip and the curves to solver precision; with 0.5 bp noise the strip error and SABR RMSE are bounded by the noise.
+- **Book through `price()`** — on- and off-grid strikes and an unquoted maturity; cap − floor equals the forward strip to round-off. `price` has no built-in (`Cap`, smile) pairing yet, so the example registers one through the public extension point `register_pricer` (a surface-reading `OptionletSmile` model calling `cap_price`).
+- **Where the vega lands** — on the cap quotes the caplets read, and structurally zero on longer maturities; Σ quote vegas ≈ the parallel-surface vega. The curve risk includes the strip's own dependence on the forwards (compared against rho with the surface frozen).
+- **Adjoint vs autodiff vs FD** — reconciled with an absolute tolerance scaled to the largest sensitivity (the optionlet level is a non-zero-residual least-squares fit, where the two paths agree to ~1e-8 of scale), then checked against full-recalibration finite differences.
+
+### Diagnosing a failed calibration
+
+**`examples/16_unified_calibration_diagnostics.py`** — what the `CalibrationResult` contract buys when the quotes are bad. Each scene is self-checked:
+
+1. **Clean baseline** — every level converged, with its label count, max residual and condition number.
+2. **A NaN swaption vol** — `strict=True` raises naming the cell (`'2Yx10Y'`); `failed_labels()` returns exactly that cell, and the other cells of the batched level are bit-identical to the baseline.
+3. **An off-market cap quote** — an infeasible strip bucket is named (by strike column in the chain, by bucket in standalone `strip_caplet_vols`); a stale but strippable quote passes the strip and is caught downstream by the optionlet SABR.
+4. **Unconvergeable settings** — `max_steps=1` on the curves or a smile is reported, never silently accepted.
+5. **Conditioning** — a fit on nearly-redundant strikes converges but trips `condition_alert` / `check(max_condition_number=...)` against `ILL_CONDITIONED_THRESHOLD`.
+6. **Engine provenance** — `check_engine` refuses a frozen-y Cheyette fit on a different PDE grid or on MC, accepts the matching engine, and never refuses exact (Jamshidian) or discretised fits.
+7. **Fix and recalibrate** — clean quotes restore the baseline exactly.
+
+The contract itself is in [Calibration § Solvers](guide/calibration.md#solvers) and [§ 8 Conditioning](guide/calibration.md#8-is-the-fit-trustworthy-conditioning-at-every-level).
+
+### SLV as a fixed-point level
+
+**`examples/17_unified_slv_fixed_point.py`** — the documented [SLV fixed-point strategy](guide/slv.md#how-the-fixed-point-is-reported) made runnable: smile → Heston backbone → `calibrate_slv_leverage` swept over `n_iterations` → an up-and-out call under local vol, Heston and SLV → quote risk.
+
+- **Fixed-point table** — max|ΔL| (the last increment, the level's residual), `converged`, clip fraction and the vanilla repricing error per `n_iterations`; `n_iterations=1` is never converged and its `check()` raises, the first converged pass passes `check()` together with its Heston child.
+- **Model picture** — all three models reprice the ATM vanilla within Monte Carlo error; the barrier prices differ, SLV between local vol and Heston.
+- **Risk by AD, not IFT** — `jax.grad` through the calibrations, the unrolled leverage passes and the SLV Monte Carlo, checked against a central difference that reruns every calibration on the same random numbers.
+
+The backbone uses half the calibrated vol-of-vol (a mixing fraction): with the full value the outer iteration does not settle on this market.
+
+### Per-trade G2++ and Cheyette
+
+**`examples/18_unified_rates_per_trade_g2pp_cheyette.py`** — Example 14 with the two richer short-rate models, plus the model risk between all three.
+
+- **G2++ (multi-curve)** — σ and η fitted per trade with a, b, ρ as fixed inputs, priced through `price(..., method="pde")` (2-D ADI). A co-terminal basket alone cannot separate the two factors (condition number ~1e17), so the basket adds the 1Y-tenor swaption at the first exercise date (~1e3). Same-shaped baskets fit in one `eqx.filter_vmap`; the PDE basket is checked against the Brigo–Mercurio closed form.
+- **Cheyette (single-curve)** — σ and the skew β fitted with κ fixed, on the co-terminals plus one off-strike option (β needs a second strike), through the frozen-y PDE. `price` refuses a trade with a distinct projection curve (Cheyette carries no tenor-basis overlay), so this section runs on a single-curve market; the fit records the engine-bound provenance.
+- **Risk** — for each model the adjoint (λ_m) is reconciled with autodiff (rtol 1e-6) and checked against full-recalibration finite differences; the G2++ vega profile across the basket sums to the total cube vega.
+- **Model risk** — Hull–White, G2++ and Cheyette fitted per trade to the same trade on the same market: the Bermudan spread across models is printed and bounded.
+
+The validation tests behind this are in `tests/test_calibration/test_per_trade_basket.py`.
 
 ---
 

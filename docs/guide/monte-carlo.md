@@ -159,8 +159,13 @@ market = MarketState(
 result = price(frn, hw_model, market, method="mc", config=config, key=key)
 ```
 
-Discounting is honoured by **re-fitting** the exact-fit model to the trade's
-discount curve; projection is the **frozen tenor-basis overlay** — see
+`hw_model` is curve-free (`initial_curve=None`) in both calls. Discounting is
+honoured by **binding** the exact-fit model to the trade's discount curve —
+`price()` binds it from the `MarketState` (and refuses a pre-bound model); a
+recipe called directly fills an unbound model from `discount_curve` and never
+re-fits a bound one. Projection is the **frozen tenor-basis overlay**, applied
+per model type (Hull–White and G2++; Cheyette raises on a distinct projection
+curve) — see
 [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md) for the
 derivation and for the one thing it cannot price (basis volatility). Path-wise,
 a floating coupon becomes \(b_i \hat D(0, T_{i-1}) - \hat D(0, T_i)\), whose
@@ -257,7 +262,7 @@ svi = calibrate_svi_surface(
     market_vols_per_expiry=[...],
     forwards=jnp.array([...]),
     expiries=jnp.array([...]),
-)
+).check().value                   # a CalibrationResult; .value is the surface
 
 # 2. Wrap it in a LocalVolModel
 model = LocalVolModel.from_flat_rate(svi, rate=0.03, dividend=0.01)
@@ -333,13 +338,15 @@ from valax.models import SLVModel
 from valax.pricing.mc import generate_slv_paths
 
 # Build the leverage grid (pass 2 of the two-pass calibration).
-leverage = calibrate_slv_leverage(
+result = calibrate_slv_leverage(
     heston_calibrated, svi_surface, spot=jnp.array(100.0),
     log_moneyness_grid=jnp.linspace(-0.25, 0.25, 11),
     time_grid=jnp.linspace(0.05, 2.0, 10),
     n_paths=10_000, key=jax.random.PRNGKey(0),
     method="kernel", n_iterations=2, ridge=1e-3,
 )
+leverage = result.value            # LeverageGrid
+result.diagnostics.max_abs_residual  # last fixed-point increment max|L_K - L_{K-1}|
 slv = SLVModel.from_heston_and_leverage(heston_calibrated, svi_surface, leverage)
 
 # Simulate.
@@ -350,6 +357,13 @@ S, V = generate_slv_paths(
 )
 # S.shape == V.shape == (50_000, 201); both legs returned.
 ```
+
+`calibrate_slv_leverage` (and the two-pass `calibrate_slv`, whose `.value` is
+the `SLVModel` and whose Heston fit is `result.children[0]`; pass
+`heston_settings=SolverSettings(...)` to tune it) returns a
+`CalibrationResult`. The leverage pass is a fixed-point iteration (default
+`n_iterations=2`); its diagnostics are the last outer-pass increment — see the
+[SLV guide](slv.md) for what converges and what does not.
 
 **Scheme.** Variance leg uses Andersen-QE (exact in distribution at
 each `dt`, same as `generate_heston_paths`). Log-spot leg is

@@ -50,6 +50,7 @@ import numpy as np
 import pytest
 
 from valax.calibration.hull_white import calibrate_hull_white, hw_swaption_prices
+from valax.core.binding import bind_curves
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.greeks.fixed_inputs import (
@@ -306,13 +307,14 @@ class TestRecalibratedFixedInputSensitivities:
     @pytest.fixture(scope="class")
     def recalibrated_price(self, basket, targets, curve, trade):
         def price(candidate):
-            fitted, _ = calibrate_hull_white(
+            fitted = calibrate_hull_white(
                 basket,
                 targets,
                 curve,
                 fixed_mean_reversion=candidate.mean_reversion,
-            )
-            return hw_swaption_price(trade, fitted)
+            ).value
+            # The fitted model is curve-free; bind it for the kernel call.
+            return hw_swaption_price(trade, bind_curves(fitted, curve))
 
         return price
 

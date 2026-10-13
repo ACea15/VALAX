@@ -62,7 +62,12 @@ coordinates may be used directly.
 
 **Explicit levels** have no solve — installing a quoted spot, a flat rate, a
 Dupire transform of an upstream surface. They are differentiated by plain
-reverse-mode AD.
+reverse-mode AD. A Monte Carlo fixed point run for a fixed number of passes
+(the SLV leverage) is explicit in the same sense; see §I.8.
+
+**Batched levels** — one independent fit per node (smile per expiry, SABR per
+cube cell, strip per strike column) — are a single level with a
+block-diagonal Jacobian; see §I.9.
 
 ### I.2 The implicit function theorem
 
@@ -171,22 +176,122 @@ code path:
 | Multi-curve | one joint curve level, block lower-triangular | the multi-curve bootstrap adjoint, including indirect discount delta |
 | + smile, + model | further levels | full quote-space delta and vega |
 
+### I.8 Fixed-point levels
+
+Some calibrations are not a residual driven to zero but a fixed-point
+iteration $L_{k+1} = G(L_k;\, \mathcal{M}_{<\ell})$ run for a fixed number of
+passes $K$. The SLV leverage is the case in point: $G$ re-simulates a particle
+swarm under $L_k$ and returns
+$L^2 = \sigma^2_{\text{Dupire}} / \widehat{\mathbb E}[V_t \mid k_t = k]$, with
+fresh Monte Carlo randomness on every pass. The output is the composition
+
+$$
+L_K = G\big(G(\cdots G(L_0)\cdots)\big), \qquad L_0 \equiv 1 ,
+$$
+
+an **explicit** function of the upstream inputs, and VALAX treats it as an
+explicit level ($\theta = \varnothing$) differentiated by plain reverse-mode
+AD through the $K$ unrolled passes.
+
+The implicit function theorem is not used, because its hypothesis fails: it
+needs a point with $R(\theta^\star) = 0$, and the natural candidate
+$R(L) = L - G(L)$ is never zero here — each evaluation of $G$ carries sampling
+noise of order $1/\sqrt{N_{\text{paths}}}$, so $\|L_K - G(L_K)\|$ stalls at
+the noise floor however many passes are run. Applying
+$(\partial R/\partial L)^{-\top}$ at a non-solution would differentiate a
+system nobody solved. Differentiating the passes actually computed is exact for
+the value actually returned.
+
+Convergence is still measured, on the last increment:
+
+$$
+r = L_K - L_{K-1}, \qquad \text{converged} \iff \max |r| \le \varepsilon ,
+$$
+
+with $\varepsilon$ set above the Monte Carlo noise floor. A single pass has no
+increment to measure — $L_1 - L_0$ is only the distance from the warm start —
+so $K = 1$ is always reported not converged and the default is $K = 2$.
+Implementation: `calibrate_slv_leverage` (`problem="fixed_point"`,
+`fixed_point_diagnostics`); recipe on the
+[SLV guide](../guide/slv.md#how-the-fixed-point-is-reported).
+
+### I.9 Batched levels
+
+When a level is a set of independent fits — node $i$ with unknowns
+$\theta_i$ and inputs $u_i(q, \mathcal{M}, p)$ — VALAX solves each node
+separately (each with its own convergence flag, reported by name) but treats
+the nodes as **one** level for the adjoint, with the stacked residual
+
+$$
+R(\theta; q, \mathcal{M}, p) =
+\begin{pmatrix} R_1(\theta_1;\, u_1) \\ \vdots \\ R_n(\theta_n;\, u_n) \end{pmatrix},
+\qquad
+\frac{\partial R}{\partial \theta} = \operatorname{diag}\!\left(\frac{\partial R_1}{\partial \theta_1}, \dots, \frac{\partial R_n}{\partial \theta_n}\right).
+$$
+
+The transposed solve of §I.4 decouples into $n$ small solves, and the condition
+number of the level is the ratio of the extreme singular values over all
+blocks. The node inputs $u_i$ are functions of the level inputs, not
+constants: a cube cell's forward is recomputed from the upstream curves inside
+the level, so $\partial R/\partial \mathcal{M}_{<\ell} \neq 0$ and the cell
+hands curve risk back up the chain. A sequential bootstrap (the cap strip,
+bucket $i$ reading buckets $< i$) is the lower-triangular analogue: solved
+bucket by bucket, packaged as one triangular level.
+
+### I.10 Per-trade model levels and the vega profile
+
+For a rates exotic the model level is per trade: model $M(\theta_m)$ fitted to
+basket instruments $I_k$ (e.g. the co-terminal Europeans of a Bermudan) whose
+targets are read off the calibrated market,
+
+$$
+r_k(\theta_m) = w_k\,\frac{\mathrm{price}\big(I_k, M(\theta_m), \mathcal{M}\big) - \big(T_k(\mathcal{M}) + s_k\big)}{|T_k(\mathcal{M}) + s_k|},
+\qquad T_k = \mathrm{price}\big(I_k \mid \text{cube}, \text{curves}\big),
+$$
+
+entering the chain through its first-order condition $R_m$ as in §I.1. The
+level reads only the market (and its fixed inputs), so the sweep of §I.4 hands
+$\lambda_m$ through $\partial R_m/\partial \mathcal{M}$ into the cube and curve
+levels: the trade's vega and the curve paths of its calibration reach the
+quotes in one pass.
+
+The **target shifts** $s_k$ are held-fixed inputs at value $0$. Because they
+enter the residual only through $T_k + s_k$, $\partial R_m/\partial s_k =
+\partial R_m/\partial T_k$, and
+
+$$
+\frac{\partial V}{\partial T_k} = -\left(\frac{\partial R_m}{\partial T_k}\right)^{\!\top}\lambda_m
+= -\left(\frac{\partial R_m}{\partial s_k}\right)^{\!\top}\lambda_m = \bar s_k ,
+$$
+
+so the fixed-input sensitivities of the shifts *are* the trade's exposure to
+each basket instrument's price — its vega profile across the basket — read off
+the same sweep with no extra solve, and checkable by bumping $s_k$ and
+recalibrating. Converting $\partial V/\partial T_k$ to vol units by each basket
+option's own vega gives the profile per vol point; shifting every cube quote by
+the same amount moves each basket vol by that amount, so the total cube vega
+equals the summed basket profile (§7.7 states the same identity for a
+vega-scaled residual, where $\lambda_{m,k}$ itself is the vega).
+
 ## Part II — How VALAX implements the chain
 
 | Piece | VALAX symbol | Status |
 | --- | --- | --- |
 | Level $R(\theta; q, \mathcal{M}, p)$ | `valax.calibration.level.CalibrationLevel`, `LevelInputs` | ✅ |
 | One IFT step | `valax.calibration.level.level_adjoint` | ✅ |
-| Solve + diagnostics (traceable `converged`) | `valax.calibration.chain.solve_level`, `CalibrationResult`, `SolverSettings` | ✅ |
-| Explicit level | `valax.calibration.chain.explicit_level`, `market_inputs_node` | ✅ |
-| 1a curves (single / multi, basis, xccy) | `valax.calibration.nodes.curve_graph_node` | ✅ |
+| Solve + diagnostics (traceable `converged`) | `valax.calibration.solve.solve_level`, `CalibrationResult`, `SolverSettings` | ✅ |
+| Batched level, block-diagonal (§I.9), failures named per node | `valax.calibration.solve.solve_batched_level`, `CalibrationResult.failed_labels` | ✅ |
+| Explicit level | `valax.calibration.solve.explicit_level`, `market_inputs_node` | ✅ |
+| Fixed-point level (§I.8) | `calibrate_slv_leverage` (`problem="fixed_point"`, `fixed_point_diagnostics`) | ✅ standalone; not a chain node |
+| 1a curves (single / multi, basis, xccy) | `valax.calibration.nodes.curve_graph_node` (same level as `bootstrap_curve_graph`) | ✅ |
 | 1b SABR smiles on upstream forwards (equity, lognormal) | `valax.calibration.nodes.sabr_smile_node` | ✅ |
 | 1b quote conversion / any market fit through `price` | `price_fit_node(..., install_fn=...)` | ✅ |
-| 1b swaption cube / optionlet strip as chain nodes | `calibrate_swaption_cube_from_curves`, `vol_adjoint` (standalone) | 🟡 not yet nodes |
+| 1b swaption cube on upstream forwards | `swaption_cube_node` (shares `swaption_cube_level` with `calibrate_swaption_cube_from_curves`) | ✅ |
+| 1b optionlet strip → optionlet SABR | `caplet_strip_node` → `optionlet_sabr_node` | ✅ |
 | 1b constrained SVI (KKT), FX delta system | — | ❌ |
 | 1a equity forward with discrete dividends / repo | — (continuous dividend quote only) | ❌ |
 | 2 model fit through `price` (per underlying) | `price_fit_node` + `calibrate_model` (Heston tested) | ✅ |
-| 2 per-trade basket (Hull-White co-terminal) | — | ❌ planned |
+| 2 per-trade basket (§I.10) | `coterminal_swaptions` + `swaption_basket_node` (Hull-White and G2++ validated multi-curve, Cheyette single-curve) | ✅ |
 | 2 Dupire (explicit) | — | ❌ |
 | Adjoint sweep | `valax.greeks.quote_risk.chain_adjoint`, `quote_risk_adjoint` | ✅ |
 | Autodiff path + reconciliation | `quote_risk_autodiff`, `reconcile_quote_risk` | ✅ |
@@ -290,6 +395,8 @@ $$
 - The curves receive adjoints from six paths in level 2 and pricing (Audit 6.4); missing any one gives a wrong delta.
 - The curve solve is block-triangular, so the transposed solve runs projection and basis blocks first and the discount block last.
 
+**In VALAX.** The rates chain runs end to end as chain levels: `curve_graph_node` (1a) → `swaption_cube_node`, a batched level (§I.9) whose cell forwards and annuities are recomputed from the upstream curves, and `caplet_strip_node` → `optionlet_sabr_node` (1b; the optionlet level has no quotes of its own, so its adjoint flows entirely upstream to the cap quotes and curves) → `swaption_basket_node` per trade (2; §I.10), with the Bermudan priced through `price(..., method="pde")`. `chain_adjoint` with `model_levels` runs the per-trade steps of the sweep and then the shared market levels. Status per requirement: [conformance map](../architecture/aad-audit-conformance.md); how-to: [From Quotes to Risk](../guide/calibration-to-risk.md#rates-per-trade-model-calibration).
+
 **Requirements**
 
 - **RT-1 (MUST)** Rates implementations meet the Audit Specification in full; this section adds no requirement beyond it.
@@ -386,7 +493,7 @@ $$
 - **Constrained surface.** Sensitivities come from the KKT system above and can jump when a constraint becomes active or inactive. Active-set changes between snapshots are monitored.
 - **Single stocks.** The joint forward-and-vol block per expiry has an American pricer inside its residual; its adjoint is the discrete adjoint of that PDE or tree.
 - **Rates delta.** The discount curve is the rates curve, so equity trades receive adjoints on rates OIS quotes.
-- **Local-stochastic vol.** A leverage function fitted by Monte Carlo fixed point is a noisy solve; define the residual on a PDE so the IFT applies, or report its sensitivities by bumping.
+- **Local-stochastic vol.** A leverage function fitted by Monte Carlo fixed point is a noisy solve; define the residual on a PDE so the IFT applies, or report its sensitivities by bumping. (VALAX takes a third route for its particle calibration: the fixed point is an explicit level differentiated by AD through the unrolled passes, with convergence measured on the last increment — §I.8.)
 - **Pricing.** Monte Carlo with smoothed triggers and barriers (autocallables, barriers, digital coupons); regression with frozen coefficients for products with a real exercise decision; PDE in one or two dimensions where possible.
 
 **Requirements**

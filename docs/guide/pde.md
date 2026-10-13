@@ -214,7 +214,12 @@ The same 1-D substrate prices interest-rate instruments under
 from valax.pricing.pde import PDEConfig, pde_price_dispatch
 
 config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
+# Kernel-level call: hw_model must be bound to its curve,
+# e.g. hw_model = bind_curves(HullWhiteModel(a, sigma), curve).
 price = pde_price_dispatch(bermudan_swaption, hw_model, config).price
+
+# Front door: a curve-free model; price() binds the market's curve.
+# price(bermudan_swaption, HullWhiteModel(a, sigma), market, method="pde", config=config)
 ```
 
 Three things differ from the equity recipes, each for a concrete reason:
@@ -256,9 +261,10 @@ Every Hull-White and G2++ recipe takes two optional market arguments,
 from valax.pricing.pde import PDEConfig, pde_price_dispatch
 
 config = PDEConfig(n_spot=401, n_time=400, spot_range=6.0)
+hw_model = HullWhiteModel(mean_reversion=a, volatility=sigma)   # curve-free
 result = pde_price_dispatch(
     payer_swaption, hw_model, config,
-    discount_curve=ois,          # collateral / OIS discounting
+    discount_curve=ois,          # binds the unbound model to OIS
     forward_curve=sofr_3m,       # tenor curve the floating leg projects off
 )
 ```
@@ -281,11 +287,14 @@ result = price(swaption, hw_model, market, method="pde", config=config)
 
 Two mechanisms are at work, and they are different in kind:
 
-- **Discounting is a re-fit, not a re-weighting.** Hull-White and G2++ are
-  exact-fit models, so their `initial_curve` *is* the discount curve; passing
-  `discount_curve` re-fits \(\alpha\) (resp. \(\varphi\)) to it via
-  `valax.pricing.multicurve.with_discount_curve`. The calibrated dynamics are
-  untouched.
+- **Discounting is a binding, not a re-weighting.** Hull-White and G2++ are
+  exact-fit models, so their `initial_curve` *is* the discount curve, and
+  \(\alpha\) (resp. \(\varphi\)) is fitted to whichever curve is bound.
+  `price()` binds it from the `MarketState` (the curve `model.curve_id`, else
+  the trade's `discount_id`) and refuses a pre-bound model; called directly, a
+  recipe's `discount_curve` fills an **unbound** model via
+  `valax.pricing.multicurve.with_discount_curve` and never re-fits a bound
+  one. The calibrated dynamics are untouched.
 - **Projection is a deterministic overlay.** A one-factor short rate produces
   one term structure, so the tenor basis is *frozen* at its time-zero value
   and enters each payoff as a constant multiplier. See
@@ -294,9 +303,12 @@ Two mechanisms are at work, and they are different in kind:
 
 Both default to `None`, which is the single-curve case: the recipes then run
 the arithmetic they always ran, so single-curve prices are unchanged
-bit-for-bit. The G2++ CMS-spread recipe rebuilds its par swap rates from the
-model's own bond strip and therefore **raises** on a distinct projection curve
-rather than silently ignoring it.
+bit-for-bit. Whether the overlay applies is a property of the model type
+(`valax.pricing.multicurve.basis_overlay`: Hull–White and G2++ yes, Cheyette
+no), and a trade that resolves a distinct projection curve the recipe/model
+cannot use **raises** rather than being silently priced single-curve — e.g.
+the G2++ CMS-spread recipe, which rebuilds its par swap rates from the model's
+own bond strip, or any Cheyette recipe.
 
 ## 6. When to use PDE
 

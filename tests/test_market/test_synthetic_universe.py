@@ -1,5 +1,6 @@
 """Synthetic quote universes: truth → quotes → calibration recovers truth."""
 
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -11,11 +12,14 @@ from valax.core.pricing import price
 from valax.instruments.options import EuropeanOption
 from valax.market import (
     EquityWorldSpec,
+    RatesVolSpec,
     RatesWorldSpec,
     SeedRegistry,
+    SyntheticMarketConfig,
     default_config,
     equity_snapshot,
     rates_snapshot,
+    rates_vol_snapshot,
     sample_equity_trades,
     sample_quote_scenarios,
     sample_swap_book,
@@ -151,3 +155,73 @@ class TestScenarios:
         atm = parts["smile"].vol_keys[0][2]
         corr = np.corrcoef(np.log(sc["SPX.SPOT"]), sc[atm])[0, 1]
         assert corr < -0.5
+
+
+# ── Rates volatility world: swaption cube and cap matrix ─────────────
+
+
+class TestRatesVolUniverse:
+    """Swaption-vol and cap-vol quotes generated from a true cube / strip."""
+
+    RATES = RatesWorldSpec(pillar_years=(1, 2, 3, 5, 7))
+    VOLS = RatesVolSpec(expiry_years=(1, 2), tenor_years=(2, 5), cap_years=(1, 2, 3))
+
+    @pytest.fixture(scope="class")
+    def snap_world(self):
+        return rates_vol_snapshot(
+            SeedRegistry(5, "test"), SyntheticMarketConfig(), self.RATES, self.VOLS
+        )
+
+    def test_keys_and_chain_shape(self, snap_world):
+        snap, world = snap_world
+        vols = snap.parts["vols"]
+        n_offsets = len(self.VOLS.strike_offsets_bp)
+        assert len(vols.swaption_keys) == 2 and len(vols.swaption_keys[0]) == 2
+        assert len(vols.swaption_keys[0][0]) == n_offsets
+        assert vols.swaption_keys[1][1][2] == "USD.SWPN.2Yx5Y.+0"
+        assert len(vols.cap_keys) == len(self.VOLS.cap_strike_offsets_bp)
+        assert [n.name for n in snap.chain.nodes] == [
+            "usd_curves", "usd_swaption_cube", "usd_cap_strip", "usd_optionlet_sabr",
+        ]
+        assert set(snap.chain.quote_keys) == set(snap.quotes.values)
+        assert snap.fixed[vols.beta_key] == self.VOLS.beta
+
+    def test_clean_swaption_quotes_are_the_true_cube(self, snap_world):
+        snap, world = snap_world
+        cube = world.cube
+        i, j = 1, 0
+        key = snap.parts["vols"].swaption_keys[i][j][-1]  # +100bp
+        strike = cube.forwards[i, j] + self.VOLS.strike_offsets_bp[-1] * 1e-4
+        expected = cube(strike, cube.expiries[i], cube.tenors[j],
+                        forward=cube.forwards[i, j])
+        np.testing.assert_allclose(float(snap.clean[key]), float(expected), atol=1e-14)
+
+    def test_clean_cap_quotes_reprice_the_true_strip(self, snap_world):
+        from valax.pricing.analytic.caplets import cap_price_bachelier
+
+        snap, world = snap_world
+        disc = world.rates.truth[world.discount_id]
+        fwd = world.rates.truth[world.forward_id]
+        k = 2
+        cap = eqx.tree_at(lambda c: c.strike, world.caps[-1], world.cap_strikes[k])
+        n = int(cap.fixing_dates.shape[0])
+        flat = snap.clean[snap.parts["vols"].cap_keys[k][-1]]
+        np.testing.assert_allclose(
+            float(cap_price_bachelier(cap, disc, flat, fwd)),
+            float(cap_price_bachelier(cap, disc, world.strip.vols[k, :n], fwd)),
+            rtol=1e-10,
+        )
+
+    def test_reproducible_and_noisy(self, snap_world):
+        snap, _ = snap_world
+        again, _ = rates_vol_snapshot(
+            SeedRegistry(5, "test"), SyntheticMarketConfig(), self.RATES, self.VOLS
+        )
+        noisy, _ = rates_vol_snapshot(
+            SeedRegistry(5, "test"), SyntheticMarketConfig(), self.RATES, self.VOLS,
+            vol_bp_noise=1.0,
+        )
+        key = snap.parts["vols"].swaption_keys[0][0][0]
+        assert float(again.quotes[key]) == float(snap.quotes[key])
+        assert float(snap.quotes[key]) == float(snap.clean[key])
+        assert 0.0 < abs(float(noisy.quotes[key] - snap.clean[key])) < 1e-3

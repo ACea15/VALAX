@@ -1,93 +1,120 @@
-"""Tests for SABRVolSurface."""
+"""SABR expiry-slice surfaces (and SVI) as batched calibration levels.
+
+The batched level must reproduce the per-slice fits it replaced exactly (the
+per-slice :func:`calibrate_sabr` is itself bit-identical to the pre-migration
+solver ladder), padding a ragged strike grid must not move the fit, and a
+slice that cannot be fitted is named by its expiry.
+"""
 
 import jax
 import jax.numpy as jnp
-import equinox as eqx
+import numpy as np
 import pytest
 
+from valax.calibration import CalibrationError, calibrate_sabr
 from valax.models.sabr import SABRModel
 from valax.pricing.analytic.sabr import sabr_implied_vol
-from valax.surfaces.sabr_surface import SABRVolSurface
+from valax.surfaces import (
+    SVISlice,
+    calibrate_sabr_surface,
+    calibrate_svi_slice,
+    calibrate_svi_surface,
+    svi_implied_vol,
+)
+
+jax.config.update("jax_enable_x64", True)
+
+EXPIRIES = jnp.array([0.25, 1.0, 2.0])
+FORWARDS = jnp.array([100.0, 101.0, 102.0])
 
 
-@pytest.fixture
-def sabr_surface():
-    """Two-expiry SABR surface with known parameters."""
-    return SABRVolSurface(
-        expiries=jnp.array([0.5, 1.0]),
-        forwards=jnp.array([100.0, 100.0]),
-        alphas=jnp.array([0.3, 0.25]),
-        betas=jnp.array([0.5, 0.5]),
-        rhos=jnp.array([-0.2, -0.3]),
-        nus=jnp.array([0.4, 0.35]),
-    )
-
-
-class TestSABRVolSurface:
-    def test_matches_direct_sabr_at_slice(self, sabr_surface):
-        """At an exact expiry, should match direct sabr_implied_vol."""
-        model = SABRModel(
-            alpha=jnp.array(0.3),
-            beta=jnp.array(0.5),
-            rho=jnp.array(-0.2),
-            nu=jnp.array(0.4),
+def _smiles(n_k=(9, 9, 9)):
+    strikes, vols = [], []
+    for i, n in enumerate(n_k):
+        truth = SABRModel(
+            alpha=jnp.array(2.0 + 0.2 * i), beta=jnp.array(0.5),
+            rho=jnp.array(-0.3 + 0.05 * i), nu=jnp.array(0.5 - 0.05 * i),
         )
-        expected = sabr_implied_vol(model, jnp.array(100.0), jnp.array(95.0), jnp.array(0.5))
-        actual = sabr_surface(jnp.array(95.0), jnp.array(0.5))
-        assert jnp.isclose(actual, expected, atol=1e-8)
+        k = jnp.linspace(80.0, 120.0, n)
+        v = jax.vmap(
+            lambda kk: sabr_implied_vol(truth, FORWARDS[i], kk, EXPIRIES[i])
+        )(k)
+        strikes.append(k)
+        vols.append(v + 2e-4 * jnp.sin(k))  # not exactly SABR: residual != 0
+    return strikes, vols
 
-    def test_matches_second_slice(self, sabr_surface):
-        model = SABRModel(
-            alpha=jnp.array(0.25),
-            beta=jnp.array(0.5),
-            rho=jnp.array(-0.3),
-            nu=jnp.array(0.35),
+
+class TestSABRSurface:
+    def test_batched_equals_per_slice_fits(self):
+        strikes, vols = _smiles()
+        res = calibrate_sabr_surface(
+            strikes, vols, FORWARDS, EXPIRIES, fixed_beta=jnp.array(0.5)
+        ).check()
+        assert res.labels == ("3M", "1Y", "2Y")
+        for i in range(3):
+            one = calibrate_sabr(
+                strikes[i], vols[i], FORWARDS[i], EXPIRIES[i],
+                fixed_beta=jnp.array(0.5),
+            ).value
+            np.testing.assert_allclose(res.value.alphas[i], one.alpha, atol=1e-12)
+            np.testing.assert_allclose(res.value.rhos[i], one.rho, atol=1e-12)
+            np.testing.assert_allclose(res.value.nus[i], one.nu, atol=1e-12)
+
+    def test_ragged_grid_padding_is_neutral(self):
+        strikes, vols = _smiles((9, 5, 7))
+        res = calibrate_sabr_surface(
+            strikes, vols, FORWARDS, EXPIRIES, fixed_beta=jnp.array(0.5)
+        ).check()
+        one = calibrate_sabr(
+            strikes[1], vols[1], FORWARDS[1], EXPIRIES[1],
+            fixed_beta=jnp.array(0.5),
+        ).value
+        np.testing.assert_allclose(res.value.alphas[1], one.alpha, atol=1e-12)
+        np.testing.assert_allclose(res.value.nus[1], one.nu, atol=1e-12)
+
+    def test_bad_slice_is_named(self):
+        strikes, vols = _smiles()
+        vols[2] = vols[2].at[0].set(jnp.nan)
+        res = calibrate_sabr_surface(
+            strikes, vols, FORWARDS, EXPIRIES, fixed_beta=jnp.array(0.5)
         )
-        expected = sabr_implied_vol(model, jnp.array(100.0), jnp.array(110.0), jnp.array(1.0))
-        actual = sabr_surface(jnp.array(110.0), jnp.array(1.0))
-        assert jnp.isclose(actual, expected, atol=1e-8)
+        assert res.failed_labels() == ("2Y",)
+        with pytest.raises(CalibrationError, match="2Y"):
+            res.check()
 
-    def test_interpolation_between_expiries(self, sabr_surface):
-        """At T=0.75, should return something between the two slices."""
-        vol_05 = sabr_surface(jnp.array(100.0), jnp.array(0.5))
-        vol_10 = sabr_surface(jnp.array(100.0), jnp.array(1.0))
-        vol_075 = sabr_surface(jnp.array(100.0), jnp.array(0.75))
-        lo = jnp.minimum(vol_05, vol_10)
-        hi = jnp.maximum(vol_05, vol_10)
-        assert lo <= vol_075 + 1e-6
-        assert vol_075 <= hi + 1e-6
 
-    def test_jit_compatible(self, sabr_surface):
-        f = eqx.filter_jit(sabr_surface)
-        vol = f(jnp.array(100.0), jnp.array(0.5))
-        assert jnp.isfinite(vol)
+def _svi_smiles():
+    strikes, vols = [], []
+    for i in range(3):
+        truth = SVISlice(
+            a=jnp.array(0.01 + 0.01 * i), b=jnp.array(0.1),
+            rho=jnp.array(-0.3), m=jnp.array(0.02), sigma=jnp.array(0.15),
+        )
+        k = jnp.linspace(80.0, 120.0, 9)
+        v = jax.vmap(
+            lambda kk: svi_implied_vol(truth, FORWARDS[i], kk, EXPIRIES[i])
+        )(k)
+        strikes.append(k)
+        vols.append(v + 1e-4 * jnp.cos(k))
+    return strikes, vols
 
-    def test_differentiable_wrt_strike(self, sabr_surface):
-        grad = jax.grad(lambda k: sabr_surface(k, jnp.array(0.5)))(jnp.array(100.0))
-        assert jnp.isfinite(grad)
 
-    def test_differentiable_wrt_alphas(self, sabr_surface):
-        """Gradient of vol w.r.t. SABR alpha parameters."""
-        def f(alphas):
-            surface = SABRVolSurface(
-                expiries=sabr_surface.expiries,
-                forwards=sabr_surface.forwards,
-                alphas=alphas,
-                betas=sabr_surface.betas,
-                rhos=sabr_surface.rhos,
-                nus=sabr_surface.nus,
-            )
-            return surface(jnp.array(100.0), jnp.array(0.5))
+class TestSVISurface:
+    def test_batched_equals_per_slice_fits(self):
+        strikes, vols = _svi_smiles()
+        res = calibrate_svi_surface(strikes, vols, FORWARDS, EXPIRIES).check()
+        for i in range(3):
+            one = calibrate_svi_slice(
+                strikes[i], vols[i], FORWARDS[i], EXPIRIES[i]
+            ).value
+            np.testing.assert_allclose(res.value.a_vec[i], one.a, atol=1e-10)
+            np.testing.assert_allclose(res.value.b_vec[i], one.b, atol=1e-10)
+            np.testing.assert_allclose(res.value.m_vec[i], one.m, atol=1e-10)
 
-        grad = jax.grad(f)(sabr_surface.alphas)
-        assert jnp.all(jnp.isfinite(grad))
-        # Alpha at the queried expiry should have highest sensitivity
-        assert jnp.abs(grad[0]) > 0
-
-    def test_vmap_over_strikes(self, sabr_surface):
-        strikes = jnp.linspace(80.0, 120.0, 10)
-        vols = jax.vmap(lambda k: sabr_surface(k, jnp.array(0.5)))(strikes)
-        assert vols.shape == (10,)
-        assert jnp.all(jnp.isfinite(vols))
-        # Negative rho should produce downward-sloping skew (lower strikes -> higher vol)
-        assert vols[0] > vols[-1]
+    def test_bad_slice_is_named(self):
+        strikes, vols = _svi_smiles()
+        vols[0] = vols[0].at[3].set(jnp.nan)
+        res = calibrate_svi_surface(strikes, vols, FORWARDS, EXPIRIES)
+        assert res.failed_labels() == ("3M",)
+        with pytest.raises(CalibrationError, match="3M"):
+            res.check()

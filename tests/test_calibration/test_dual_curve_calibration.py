@@ -36,6 +36,7 @@ from valax.calibration.hull_white import (
     hw_swaption_prices,
     swaption_prices_from_vols,
 )
+from valax.core.binding import bind_curves
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.instruments.rates import Swaption
@@ -122,34 +123,34 @@ class TestSingleCurveNonRegression:
         truth = _truth_hw(ois)
         targets = hw_swaption_prices(truth, surface)
 
-        default, _ = calibrate_hull_white(
+        default = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08)
-        )
-        explicit, _ = calibrate_hull_white(
+        ).value
+        explicit = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08),
             forward_curve=None,
-        )
+        ).value
         assert float(default.volatility) == float(explicit.volatility)
 
     def test_hull_white_recovers_sigma_single_curve(self, ois, surface):
         """The pre-existing round-trip still holds."""
         truth = _truth_hw(ois)
         targets = hw_swaption_prices(truth, surface)
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08)
-        )
+        ).value
         assert float(fitted.volatility) == pytest.approx(0.012, rel=1e-4)
 
     def test_projection_equal_to_discount_is_single_curve(self, ois, surface):
         truth = _truth_hw(ois)
         targets = hw_swaption_prices(truth, surface)
-        single, _ = calibrate_hull_white(
+        single = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08)
-        )
-        same, _ = calibrate_hull_white(
+        ).value
+        same = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08),
             forward_curve=ois,
-        )
+        ).value
         assert float(same.volatility) == float(single.volatility)
 
 
@@ -161,29 +162,28 @@ class TestDualCurveRoundTrip:
         truth = _truth_hw(ois)
         targets = hw_swaption_prices(truth, surface, projection)
 
-        fitted, sol = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             surface, targets, ois,
             fixed_mean_reversion=jnp.array(0.08),
             forward_curve=projection,
-        )
+        ).value
         assert float(fitted.volatility) == pytest.approx(0.012, rel=1e-4)
-        # The discount curve is still the one the model is exact-fitted to.
-        assert jnp.allclose(
-            fitted.initial_curve.discount_factors, ois.discount_factors
-        )
+        # The fitted model is curve-free: the discount curve it is exact-fitted
+        # to is bound from the market at pricing time, not embedded.
+        assert fitted.initial_curve is None
 
     def test_g2pp_recovers_vols_and_correlation(self, ois, projection, surface):
         truth = _truth_g2pp(ois)
         targets = g2pp_swaption_prices(truth, surface, projection)
 
-        fitted, _ = calibrate_g2pp(
+        fitted = calibrate_g2pp(
             surface, targets, ois,
             fixed_params={
                 "mean_reversion_x": jnp.array(0.50),
                 "mean_reversion_y": jnp.array(0.10),
             },
             forward_curve=projection,
-        )
+        ).value
         assert float(fitted.volatility_x) == pytest.approx(0.011, rel=5e-3)
         assert float(fitted.volatility_y) == pytest.approx(0.007, rel=5e-3)
         assert float(fitted.correlation) == pytest.approx(-0.70, rel=5e-2)
@@ -202,13 +202,13 @@ class TestBasisMatters:
         truth = _truth_hw(ois)
         targets = hw_swaption_prices(truth, surface, projection)
 
-        wrong, _ = calibrate_hull_white(
+        wrong = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08)
-        )
-        right, _ = calibrate_hull_white(
+        ).value
+        right = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08),
             forward_curve=projection,
-        )
+        ).value
         assert float(right.volatility) == pytest.approx(0.012, rel=1e-4)
         # The single-curve fit must miss, and by a margin far beyond solver noise.
         assert abs(float(wrong.volatility) - 0.012) > 0.1 * 0.012
@@ -216,11 +216,11 @@ class TestBasisMatters:
     def test_dual_curve_fit_reprices_its_targets(self, ois, projection, surface):
         truth = _truth_hw(ois)
         targets = hw_swaption_prices(truth, surface, projection)
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             surface, targets, ois,
             fixed_mean_reversion=jnp.array(0.08), forward_curve=projection,
-        )
-        repriced = hw_swaption_prices(fitted, surface, projection)
+        ).value
+        repriced = hw_swaption_prices(bind_curves(fitted, ois), surface, projection)
         assert jnp.allclose(repriced, targets, rtol=1e-4)
 
 
@@ -258,11 +258,13 @@ class TestVolsToPrices:
         targets = swaption_prices_from_vols(
             surface, ois, vols, forward_curve=projection
         )
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             surface, targets, ois,
             fixed_mean_reversion=jnp.array(0.08), forward_curve=projection,
+        ).value
+        model_prices = hw_swaption_prices(
+            bind_curves(fitted, ois), surface, projection
         )
-        model_prices = hw_swaption_prices(fitted, surface, projection)
         # One factor cannot fit a whole surface exactly; require the fit to be
         # in the right ballpark rather than exact.
         assert jnp.all(jnp.abs(model_prices - targets) / targets < 0.35)
@@ -274,47 +276,48 @@ class TestVolsToPrices:
 class TestCurveIdBinding:
     def test_curve_id_recorded_on_fitted_model(self, ois, projection, surface):
         targets = hw_swaption_prices(_truth_hw(ois), surface, projection)
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             surface, targets, ois,
             fixed_mean_reversion=jnp.array(0.08),
             forward_curve=projection,
             curve_id="USD.SOFR.OIS",
-        )
+        ).value
         assert fitted.curve_id == "USD.SOFR.OIS"
 
     def test_g2pp_curve_id_recorded(self, ois, surface):
         targets = g2pp_swaption_prices(_truth_g2pp(ois), surface)
-        fitted, _ = calibrate_g2pp(
+        fitted = calibrate_g2pp(
             surface, targets, ois,
             fixed_params={
                 "mean_reversion_x": jnp.array(0.50),
                 "mean_reversion_y": jnp.array(0.10),
             },
             curve_id="EUR.ESTR.OIS",
-        )
+        ).value
         assert fitted.curve_id == "EUR.ESTR.OIS"
 
-    def test_default_curve_id_is_the_sentinel(self, ois, surface):
+    def test_default_curve_id_is_unpinned(self, ois, surface):
+        """No curve_id: the model binds to the instrument's discount curve."""
         targets = hw_swaption_prices(_truth_hw(ois), surface)
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08)
-        )
-        assert fitted.curve_id == "_default_"
+        ).value
+        assert fitted.curve_id is None
 
-    def test_fitted_model_rebinds_to_a_shocked_market(self, ois, surface):
-        """A calibrated model with a recorded id works with a MarketState."""
+    def test_fitted_model_binds_to_a_shocked_market(self, ois, surface):
+        """A calibrated model with a recorded id binds from a MarketState."""
         from valax.core.market_state import MarketState
         from valax.curves.graph import CurveGraph
 
         targets = hw_swaption_prices(_truth_hw(ois), surface)
-        fitted, _ = calibrate_hull_white(
+        fitted = calibrate_hull_white(
             surface, targets, ois,
             fixed_mean_reversion=jnp.array(0.08), curve_id="USD.SOFR.OIS",
-        )
+        ).value
         shocked = MarketState(
             curves=CurveGraph(curves={"USD.SOFR.OIS": _flat_curve(0.04)})
         )
-        rebound = fitted.with_market_curve(shocked)
+        rebound = bind_curves(fitted, shocked)
         assert jnp.allclose(
             rebound.initial_curve.discount_factors,
             _flat_curve(0.04).discount_factors,

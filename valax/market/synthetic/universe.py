@@ -678,6 +678,446 @@ def synthesize_model_quotes(
     return QuoteSet.from_vector(keys, vols + noise)
 
 
+# ── Rates volatility world: swaption cube and cap matrix ─────────────
+
+
+@dataclass(frozen=True)
+class RatesVolSpec:
+    """Shape of a synthetic rates volatility market on a rates world.
+
+    Swaptions: one SABR smile per ``(expiry, tenor)`` cell, quoted as vols at
+    ATM-offset strikes. Caps: a flat-vol matrix over cap maturities × strikes
+    (offsets around the longest cap's ATM forward, fixed as absolute strikes),
+    generated from per-bucket caplet vols. Quotes are **normal** (Bachelier)
+    vols with a normal SABR (``beta = 0``) by default — the rates-desk
+    convention, well defined at any rate level, including the low and negative
+    rates the Nelson-Siegel-Svensson sampler produces.
+
+    Attributes:
+        cube_id: Surface id of the swaption cube.
+        expiry_years: Swaption expiries (integer years).
+        tenor_years: Underlying swap tenors (integer years).
+        strike_offsets_bp: Quoted strikes as offsets to each cell's forward.
+        is_normal: Normal (Bachelier) vol quotes if True, else lognormal.
+        shift: Displacement of the normal SABR expansion, so strikes and
+            forwards down to ``-shift`` are admissible.
+        beta: SABR beta of the true cube and caplets (held fixed by the
+            chain).
+        atm_vol_range: Range of the true ATM vol per cell, in the quoting
+            convention (absolute rate vol when normal).
+        rho_range: Range of the true SABR rho per cell.
+        nu_range: Range of the true SABR nu per cell.
+        strip_id: Surface id of the stripped cap matrix.
+        optionlet_id: Surface id of the SABR optionlet surface fitted on it.
+        cap_years: Quoted cap maturities (integer years, quarterly
+            optionlets, first fixing one quarter after the valuation date).
+        cap_strike_offsets_bp: Cap strikes as offsets to the longest cap's
+            ATM forward (rounded to 1bp, then held as absolute strikes).
+        caplet_vol_range: Range of the true ATM caplet vol per bucket.
+    """
+
+    cube_id: str = "USD.CUBE"
+    expiry_years: tuple[int, ...] = (1, 2, 5)
+    tenor_years: tuple[int, ...] = (2, 5, 10)
+    strike_offsets_bp: tuple[float, ...] = (-100.0, -50.0, 0.0, 50.0, 100.0)
+    is_normal: bool = True
+    shift: float = 0.03
+    beta: float = 0.0
+    atm_vol_range: tuple[float, float] = (0.0060, 0.0120)
+    rho_range: tuple[float, float] = (-0.40, -0.05)
+    nu_range: tuple[float, float] = (0.25, 0.50)
+    strip_id: str = "USD.OPTIONLET.STRIP"
+    optionlet_id: str = "USD.OPTIONLET"
+    cap_years: tuple[int, ...] = (1, 2, 3, 5)
+    cap_strike_offsets_bp: tuple[float, ...] = (-50.0, 0.0, 50.0, 100.0)
+    caplet_vol_range: tuple[float, float] = (0.0060, 0.0120)
+
+
+@dataclass(frozen=True)
+class RatesVolWorld:
+    """A sampled true rates-volatility market.
+
+    Attributes:
+        spec: The specification it was sampled from.
+        rates: The underlying rates world (true curves).
+        swaptions: ``[i][j]`` representative swaptions of the cube cells.
+        cube: The true :class:`~valax.surfaces.swaption_cube.SwaptionCube`.
+        caps: Quoted caps, ascending in maturity (strike field unused).
+        cap_strikes: Absolute strikes of the cap matrix.
+        strip: The true batched caplet vols (one
+            :class:`~valax.surfaces.caplet_stripping.CapletVolCurve` row per
+            cap strike) — piecewise constant per bucket, so a noise-free
+            strip recovers it exactly.
+    """
+
+    spec: RatesVolSpec
+    rates: RatesWorld
+    swaptions: tuple
+    cube: Any
+    caps: tuple
+    cap_strikes: Any
+    strip: Any
+
+    @property
+    def discount_id(self) -> str:
+        """Discount (OIS) curve id."""
+        return self.rates.spec.ois_id
+
+    @property
+    def forward_id(self) -> str:
+        """Projection curve id (the first projection tenor, else OIS)."""
+        tenors = self.rates.spec.projection_tenors
+        return self.rates.spec.projection_id(tenors[0]) if tenors else self.discount_id
+
+    def truth_market(self) -> "MarketState":
+        """True curves, cube and caplet strip as a ``MarketState``."""
+        from valax.core.market_state import MarketState
+
+        return MarketState(
+            curves=self.rates.truth,
+            surfaces={self.spec.cube_id: self.cube, self.spec.strip_id: self.strip},
+        )
+
+
+def _swaption_grid(world: RatesWorld, spec: RatesVolSpec) -> tuple:
+    """Annual-pay payer swaptions on the (expiry, tenor) grid."""
+    from valax.instruments.rates import Swaption
+
+    ref, dc = world.reference_date, world.day_count
+    grid = []
+    for e in spec.expiry_years:
+        expiry = ref + e * _DAYS_PER_YEAR
+        grid.append(tuple(
+            Swaption(
+                expiry_date=expiry,
+                fixed_dates=_annual(expiry, t),
+                strike=jnp.asarray(0.0),
+                notional=jnp.asarray(1.0),
+                is_payer=True,
+                day_count=dc,
+            )
+            for t in spec.tenor_years
+        ))
+    return tuple(grid)
+
+
+def _cap_strip_caps(world: RatesWorld, spec: RatesVolSpec) -> tuple:
+    """Nested quarterly caps, first fixing one quarter after the valuation date."""
+    from valax.instruments.rates import Cap
+
+    ref, dc = world.reference_date, world.day_count
+    n_max = 4 * max(spec.cap_years)
+    edges = ref + (jnp.arange(1, n_max + 2, dtype=jnp.int32) * _DAYS_PER_YEAR) // 4
+    caps = []
+    for y in spec.cap_years:
+        n = 4 * y - 1  # drop the spot-starting period (market convention)
+        caps.append(Cap(
+            fixing_dates=edges[:n], start_dates=edges[:n], end_dates=edges[1:n + 1],
+            strike=jnp.asarray(0.0), notional=jnp.asarray(1_000_000.0),
+            is_cap=True, day_count=dc,
+        ))
+    return tuple(caps)
+
+
+def sample_rates_vol_world(
+    registry: SeedRegistry,
+    rates: RatesWorld,
+    spec: RatesVolSpec = RatesVolSpec(),
+) -> RatesVolWorld:
+    """Sample a true SABR swaption cube and true caplet vols on a rates world.
+
+    Cube: one ATM vol level per world (uniform in ``atm_vol_range``) with a
+    ±5% uniform dispersion per cell, and rho and nu drawn uniformly per cell,
+    with alpha from
+    the leading-order backbone (``vol_atm * F^(-beta)`` normal,
+    ``vol_atm * F^(1-beta)`` lognormal) on the cell's true forward (computed with
+    the pricer's own forward / annuity off the true curves). Caps: per strike
+    and bucket, the lognormal SABR vol of a per-bucket smile at the bucket's
+    last optionlet — one vol per bucket, the representation the strip
+    solves for.
+
+    Stream names: ``"synthetic.universe.cube"``,
+    ``"synthetic.universe.caplets"``.
+
+    Args:
+        registry: Seed registry.
+        rates: The true rates world (curves).
+        spec: Volatility market shape.
+
+    Returns:
+        The :class:`RatesVolWorld`.
+    """
+    from valax.surfaces.caplet_stripping import (
+        CapletVolCurve,
+        _strip_plan,
+        optionlet_expiries,
+        optionlet_forwards,
+    )
+    from valax.calibration.sabr import sabr_vol_fn
+    from valax.surfaces.swaption_cube import (
+        SwaptionCube,
+        swaption_node_coordinates,
+        swaption_node_forwards_and_annuities,
+    )
+
+    vol_fn = sabr_vol_fn(spec.is_normal, spec.shift)
+
+    def backbone_alpha(atm_vol, forward):
+        if spec.is_normal:
+            return atm_vol * (forward + spec.shift) ** (-spec.beta)
+        return atm_vol * forward ** (1.0 - spec.beta)
+
+    disc = rates.truth[rates.spec.ois_id]
+    tenors = rates.spec.projection_tenors
+    fwd_curve = rates.truth[rates.spec.projection_id(tenors[0])] if tenors else None
+
+    swaptions = _swaption_grid(rates, spec)
+    expiries, tenor_axis = swaption_node_coordinates(swaptions, disc)
+    forwards, _ = swaption_node_forwards_and_annuities(swaptions, disc, fwd_curve)
+    shape = forwards.shape
+    k = jax.random.split(registry.key("synthetic.universe.cube"), 4)
+    # One ATM level per world with a ±5% cell-level dispersion: a realistic,
+    # smooth surface (independent per-cell levels would be a jagged term
+    # structure no one-factor model could fit to a co-terminal basket).
+    level = jax.random.uniform(k[0], (), minval=spec.atm_vol_range[0], maxval=spec.atm_vol_range[1])
+    atm = level * (1.0 + 0.05 * jax.random.uniform(k[3], shape, minval=-1.0, maxval=1.0))
+    rho = jax.random.uniform(k[1], shape, minval=spec.rho_range[0], maxval=spec.rho_range[1])
+    nu = jax.random.uniform(k[2], shape, minval=spec.nu_range[0], maxval=spec.nu_range[1])
+    beta = jnp.full(shape, spec.beta)
+    cube = SwaptionCube(
+        expiries=expiries, tenors=tenor_axis, forwards=forwards,
+        alphas=backbone_alpha(atm, forwards), betas=beta, rhos=rho, nus=nu,
+        shift=jnp.asarray(spec.shift), is_normal=spec.is_normal,
+        quote_form="atm_offset", dynamics="sticky_moneyness",
+    )
+
+    caps = _cap_strip_caps(rates, spec)
+    longest = caps[-1]
+    index, ends = _strip_plan(caps)
+    opt_expiries = optionlet_expiries(longest, disc)
+    opt_forwards = optionlet_forwards(longest, disc, fwd_curve)
+    last = jnp.asarray([e - 1 for e in ends])
+    n_b = len(ends)
+    kc = jax.random.split(registry.key("synthetic.universe.caplets"), 3)
+    b_atm = jax.random.uniform(kc[0], (n_b,), minval=spec.caplet_vol_range[0], maxval=spec.caplet_vol_range[1])
+    b_rho = jax.random.uniform(kc[1], (n_b,), minval=spec.rho_range[0], maxval=spec.rho_range[1])
+    b_nu = jax.random.uniform(kc[2], (n_b,), minval=spec.nu_range[0], maxval=spec.nu_range[1])
+    f_b, t_b = opt_forwards[last], opt_expiries[last]
+    atm_cap = float(jnp.round(jnp.mean(opt_forwards) * 1e4)) * 1e-4
+    strikes = atm_cap + jnp.asarray(spec.cap_strike_offsets_bp) * 1e-4
+
+    def bucket_vol(b, strike):
+        model = SABRModel(
+            alpha=backbone_alpha(b_atm[b], f_b[b]), beta=jnp.asarray(spec.beta),
+            rho=b_rho[b], nu=b_nu[b],
+        )
+        return vol_fn(model, f_b[b], strike, t_b[b])
+
+    bucket_vols = jnp.stack([
+        jnp.stack([bucket_vol(b, s) for b in range(n_b)]) for s in strikes
+    ])  # (n_strikes, n_buckets)
+    n_k = strikes.shape[0]
+    strip = CapletVolCurve(
+        expiries=jnp.broadcast_to(opt_expiries, (n_k,) + opt_expiries.shape),
+        vols=bucket_vols[:, index],
+        strike=strikes,
+        forwards=jnp.broadcast_to(opt_forwards, (n_k,) + opt_forwards.shape),
+        bucket_ends=ends,
+        is_normal=spec.is_normal,
+    )
+    return RatesVolWorld(
+        spec=spec, rates=rates, swaptions=swaptions, cube=cube,
+        caps=caps, cap_strikes=strikes, strip=strip,
+    )
+
+
+@dataclass(frozen=True)
+class RatesVolQuoteSet:
+    """Synthetic swaption-vol and cap-vol quotes and their chain nodes.
+
+    Attributes:
+        quotes: Noisy vol quotes.
+        clean: Noise-free vol quotes.
+        fixed: Held-fixed inputs (the cube's SABR beta).
+        swaption_keys: ``[i][j][k]`` swaption vol keys.
+        cap_keys: ``[strike][cap]`` flat cap vol keys.
+        beta_key: Fixed-input key of the cube's SABR beta.
+        cube_node: :func:`~valax.calibration.nodes.swaption_cube_node`.
+        strip_node: :func:`~valax.calibration.nodes.caplet_strip_node`.
+        optionlet_node: :func:`~valax.calibration.nodes.optionlet_sabr_node`.
+    """
+
+    quotes: QuoteSet
+    clean: QuoteSet
+    fixed: QuoteSet
+    swaption_keys: tuple
+    cap_keys: tuple
+    beta_key: str
+    cube_node: "CalibrationNode"
+    strip_node: "CalibrationNode"
+    optionlet_node: "CalibrationNode"
+
+
+def _flat_cap_vol(
+    cap: Any, curve: Any, forward_curve: Any, target: Any, is_normal: bool
+) -> Any:
+    """Flat vol repricing ``target`` (eager Newton; synthetic data only)."""
+    from valax.pricing.analytic.caplets import cap_price_bachelier, cap_price_black76
+
+    pricer = cap_price_bachelier if is_normal else cap_price_black76
+
+    def f(v):
+        return pricer(cap, curve, v, forward_curve) - target
+
+    vol = jnp.asarray(0.008 if is_normal else 0.25)
+    for _ in range(40):
+        vol = vol - f(vol) / jnp.maximum(jax.grad(f)(vol), 1e-12)
+    return vol
+
+
+def synthesize_rates_vol_quote_set(
+    registry: SeedRegistry,
+    world: RatesVolWorld,
+    *,
+    vol_bp_noise: float = 0.0,
+) -> RatesVolQuoteSet:
+    """Vol quotes of the true cube and cap matrix, plus their nodes.
+
+    Swaption keys ``"<CCY>.SWPN.<e>Yx<t>Y.<offset bp>"`` (vol at
+    ``F + offset``); cap keys ``"<CCY>.CAP.<n>Y.<strike bp>"`` (flat vol
+    repricing the cap under the true caplet vols), both in the spec's quoting
+    convention; fixed input
+    ``"<CCY>.SWPN.SABR.BETA"``.
+
+    Stream names: ``"synthetic.universe.swaption_vol_noise"``,
+    ``"synthetic.universe.cap_vol_noise"``.
+
+    Args:
+        registry: Seed registry.
+        world: The true rates-volatility market.
+        vol_bp_noise: Standard deviation of i.i.d. Gaussian vol noise, in vol
+            basis points.
+
+    Returns:
+        The :class:`RatesVolQuoteSet`.
+    """
+    from valax.calibration.nodes import (
+        caplet_strip_node,
+        optionlet_sabr_node,
+        swaption_cube_node,
+    )
+    from valax.calibration.sabr import sabr_vol_fn
+    from valax.pricing.analytic.caplets import cap_price_bachelier, cap_price_black76
+
+    spec, rates = world.spec, world.rates
+    vol_fn = sabr_vol_fn(spec.is_normal, spec.shift)
+    cap_pricer = cap_price_bachelier if spec.is_normal else cap_price_black76
+    ccy = rates.spec.currency
+    disc = rates.truth[world.discount_id]
+    fwd = rates.truth[world.forward_id] if world.forward_id != world.discount_id else None
+    offsets = jnp.asarray(spec.strike_offsets_bp) * 1e-4
+    cube = world.cube
+
+    swpn_keys, swpn_vols = [], []
+    for i, e in enumerate(spec.expiry_years):
+        row_k = []
+        for j, t in enumerate(spec.tenor_years):
+            keys = tuple(f"{ccy}.SWPN.{e}Yx{t}Y.{int(o):+d}" for o in spec.strike_offsets_bp)
+            model = SABRModel(alpha=cube.alphas[i, j], beta=cube.betas[i, j],
+                              rho=cube.rhos[i, j], nu=cube.nus[i, j])
+            f0 = cube.forwards[i, j]
+            swpn_vols.append(jax.vmap(
+                lambda o: vol_fn(model, f0, f0 + o, cube.expiries[i])
+            )(offsets))
+            row_k.append(keys)
+        swpn_keys.append(tuple(row_k))
+    swpn_flat = [k for row in swpn_keys for keys in row for k in keys]
+    swpn_clean = jnp.concatenate(swpn_vols)
+
+    cap_keys, cap_vols = [], []
+    for s_idx, strike in enumerate(world.cap_strikes):
+        row = []
+        for cap in world.caps:
+            struck = _restrike(cap, strike)
+            n = int(struck.fixing_dates.shape[0])
+            target = cap_pricer(struck, disc, world.strip.vols[s_idx, :n], fwd)
+            cap_vols.append(
+                _flat_cap_vol(struck, disc, fwd, target, spec.is_normal)
+            )
+            row.append(f"{ccy}.CAP.{n // 4 + 1}Y.{round(float(strike) * 1e4)}")
+        cap_keys.append(tuple(row))
+    cap_flat = [k for row in cap_keys for k in row]
+    cap_clean = jnp.stack(cap_vols)
+
+    swpn_noise = _gaussian_noise(
+        registry, "synthetic.universe.swaption_vol_noise", swpn_clean.shape,
+        vol_bp_noise * 1e-4,
+    )
+    cap_noise = _gaussian_noise(
+        registry, "synthetic.universe.cap_vol_noise", cap_clean.shape,
+        vol_bp_noise * 1e-4,
+    )
+    clean = QuoteSet.from_vector(swpn_flat, swpn_clean).merge(
+        QuoteSet.from_vector(cap_flat, cap_clean)
+    )
+    quotes = QuoteSet.from_vector(swpn_flat, swpn_clean + swpn_noise).merge(
+        QuoteSet.from_vector(cap_flat, cap_clean + cap_noise)
+    )
+    beta_key = f"{ccy}.SWPN.SABR.BETA"
+    fwd_id = None if world.forward_id == world.discount_id else world.forward_id
+    cube_node = swaption_cube_node(
+        spec.cube_id,
+        swaptions=world.swaptions,
+        strikes_per_node=[[offsets for _ in row] for row in world.swaptions],
+        quote_keys=swpn_keys,
+        discount_id=world.discount_id,
+        forward_id=fwd_id,
+        reference_date=rates.reference_date,
+        quote_form="atm_offset",
+        is_normal=spec.is_normal,
+        shift=spec.shift,
+        beta_key=beta_key,
+        name=f"{ccy.lower()}_swaption_cube",
+    )
+    strip_node = caplet_strip_node(
+        spec.strip_id,
+        caps=world.caps,
+        strikes=world.cap_strikes,
+        quote_keys=cap_keys,
+        discount_id=world.discount_id,
+        forward_id=fwd_id,
+        reference_date=rates.reference_date,
+        is_normal=spec.is_normal,
+        name=f"{ccy.lower()}_cap_strip",
+    )
+    optionlet_node = optionlet_sabr_node(
+        spec.optionlet_id,
+        strip_id=spec.strip_id,
+        beta=spec.beta,
+        is_normal=spec.is_normal,
+        shift=spec.shift,
+        name=f"{ccy.lower()}_optionlet_sabr",
+    )
+    return RatesVolQuoteSet(
+        quotes=quotes,
+        clean=clean,
+        fixed=QuoteSet.from_dict({beta_key: spec.beta}),
+        swaption_keys=tuple(swpn_keys),
+        cap_keys=tuple(cap_keys),
+        beta_key=beta_key,
+        cube_node=cube_node,
+        strip_node=strip_node,
+        optionlet_node=optionlet_node,
+    )
+
+
+def _restrike(cap: Any, strike: float) -> Any:
+    """``cap`` re-struck at ``strike``."""
+    import equinox as eqx
+
+    return eqx.tree_at(lambda c: c.strike, cap, jnp.asarray(strike))
+
+
 # ── Snapshots ────────────────────────────────────────────────────────
 
 
@@ -777,6 +1217,54 @@ def equity_snapshot(
         chain=CalibrationChain(nodes=(curves.node, smile.inputs_node, smile.smile_node)),
         truth_market=world.truth_market(),
         parts={"curves": curves, "smile": smile},
+    )
+    return snap, world
+
+
+def rates_vol_snapshot(
+    registry: SeedRegistry,
+    cfg: SyntheticMarketConfig,
+    rates_spec: RatesWorldSpec = RatesWorldSpec(),
+    vol_spec: RatesVolSpec = RatesVolSpec(),
+    *,
+    bp_noise: float = 0.0,
+    vol_bp_noise: float = 0.0,
+) -> tuple[SyntheticSnapshot, RatesVolWorld]:
+    """Sample a rates world with a swaption cube and a cap matrix, and quote it.
+
+    The chain is curves → swaption cube (on the curve-implied forwards) and
+    curves → cap strip → SABR optionlet surface. A noise-free snapshot
+    recovers the true curves, cube and caplet strip to solver tolerance
+    (the optionlet SABR fit is a smoothing of the strip, not a truth).
+
+    Args:
+        registry: Seed registry.
+        cfg: Reference date, day count, NSS ranges.
+        rates_spec: Rates market shape (needs a projection tenor of
+            ``"3M"`` for quarterly caps to project off the right curve; with
+            none, caps and swaptions project off the OIS curve).
+        vol_spec: Volatility market shape.
+        bp_noise: Curve quote noise in basis points.
+        vol_bp_noise: Vol quote noise in vol basis points.
+
+    Returns:
+        ``(snapshot, world)``.
+    """
+    from valax.calibration.chain import CalibrationChain
+
+    rates = sample_rates_world(registry, cfg, rates_spec)
+    world = sample_rates_vol_world(registry, rates, vol_spec)
+    curves = synthesize_curve_quote_set(registry, rates, bp_noise=bp_noise)
+    vols = synthesize_rates_vol_quote_set(registry, world, vol_bp_noise=vol_bp_noise)
+    snap = SyntheticSnapshot(
+        quotes=curves.quotes.merge(vols.quotes),
+        clean=curves.clean.merge(vols.clean),
+        fixed=vols.fixed,
+        chain=CalibrationChain(nodes=(
+            curves.node, vols.cube_node, vols.strip_node, vols.optionlet_node,
+        )),
+        truth_market=world.truth_market(),
+        parts={"curves": curves, "vols": vols},
     )
     return snap, world
 
@@ -986,17 +1474,23 @@ __all__ = [
     "EquityWorld",
     "EquityWorldSpec",
     "RatesWorld",
+    "RatesVolQuoteSet",
+    "RatesVolSpec",
+    "RatesVolWorld",
     "RatesWorldSpec",
     "SmileQuoteSet",
     "SyntheticSnapshot",
     "equity_snapshot",
     "rates_snapshot",
+    "rates_vol_snapshot",
     "sample_equity_trades",
     "sample_equity_world",
     "sample_quote_scenarios",
+    "sample_rates_vol_world",
     "sample_rates_world",
     "sample_swap_book",
     "synthesize_curve_quote_set",
     "synthesize_model_quotes",
+    "synthesize_rates_vol_quote_set",
     "synthesize_smile_quote_set",
 ]

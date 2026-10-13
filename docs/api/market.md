@@ -173,7 +173,7 @@ Domain contracts (enforced by construction):
 |---|---|
 | `HestonModel` | \(v_0, \kappa, \theta, \xi > 0\); \(-1 < \rho < 0\) (equity leverage). With `enforce_feller=True`, \(\xi < \sqrt{2 \kappa \theta}\) so the variance process stays positive. |
 | `SABRModel` | \(\alpha, \nu > 0\); \(0 \le \beta \le 1\); \(-1 < \rho < 1\). |
-| `HullWhiteModel` | `mean_reversion, volatility > 0`; the supplied `initial_curve` is *not* re-sampled. |
+| `HullWhiteModel` | `mean_reversion, volatility > 0`; the curve is *not* sampled — leave `initial_curve=None` for a curve-free model priced through `valax.price` (which binds the market's curve), or pass one for kernel-level use. |
 | `MultiAssetGBMModel` | All vols, dividends in their config ranges; correlation is PSD with unit diagonal. |
 
 ::: valax.market.sample_bs_params
@@ -376,6 +376,28 @@ with the calibration chain that consumes them. See
 ::: valax.market.synthesize_smile_quote_set
 
 ::: valax.market.synthesize_model_quotes
+
+### Rates volatility universe
+
+A true SABR swaption cube and true caplet vols sampled on a rates world,
+quoted as swaption-vol and flat cap-vol quotes, with the chain nodes that
+consume them: curves → swaption cube, and curves → cap strip → optionlet
+SABR surface (the
+[rates vol nodes](calibration.md#rates-volatility-nodes)).
+
+::: valax.market.RatesVolSpec
+
+::: valax.market.RatesVolWorld
+
+::: valax.market.RatesVolQuoteSet
+
+::: valax.market.sample_rates_vol_world
+
+::: valax.market.synthesize_rates_vol_quote_set
+
+::: valax.market.rates_vol_snapshot
+
+### Snapshots
 
 ::: valax.market.SyntheticSnapshot
 

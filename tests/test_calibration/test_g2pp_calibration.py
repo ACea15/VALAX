@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import pytest
 
 from valax.calibration.g2pp import calibrate_g2pp, g2pp_swaption_prices
+from valax.core.binding import bind_curves
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
 from valax.instruments.rates import Swaption
@@ -104,7 +105,7 @@ class TestRoundTrip:
         self, swaptions, market_prices, curve
     ):
         """Pin (a, b) at truth; recover (sigma, eta, rho)."""
-        fitted, sol = calibrate_g2pp(
+        fitted = calibrate_g2pp(
             swaptions,
             market_prices,
             curve,
@@ -120,15 +121,15 @@ class TestRoundTrip:
                 correlation=jnp.asarray(-0.5),
                 initial_curve=curve,
             ),
-        )
+        ).value
         assert float(fitted.volatility_x) == pytest.approx(_TRUE["volatility_x"], rel=2e-2)
         assert float(fitted.volatility_y) == pytest.approx(_TRUE["volatility_y"], rel=2e-2)
         assert float(fitted.correlation) == pytest.approx(_TRUE["correlation"], abs=2e-2)
 
     def test_full_fit_reprices_surface(self, swaptions, market_prices, curve):
         """A full 5-parameter fit reprices the generating surface tightly."""
-        fitted, sol = calibrate_g2pp(swaptions, market_prices, curve)
-        model_prices = g2pp_swaption_prices(fitted, swaptions)
+        fitted = calibrate_g2pp(swaptions, market_prices, curve).value
+        model_prices = g2pp_swaption_prices(bind_curves(fitted, curve), swaptions)
         rel = jnp.abs(model_prices - market_prices) / jnp.abs(market_prices)
         assert float(jnp.max(rel)) < 1e-3
 
@@ -145,12 +146,7 @@ class TestGuards:
             )
 
     def test_curve_is_pinned_not_fitted(self, swaptions, market_prices, curve):
-        fitted, _ = calibrate_g2pp(swaptions, market_prices, curve)
-        # The curve is exact-fitted, not a calibration DOF: its discount
-        # factors must come through untouched.
-        assert jnp.array_equal(
-            fitted.initial_curve.discount_factors, curve.discount_factors
-        )
-        assert jnp.array_equal(
-            fitted.initial_curve.pillar_dates, curve.pillar_dates
-        )
+        fitted = calibrate_g2pp(swaptions, market_prices, curve).value
+        # The curve is exact-fitted, not a calibration DOF: the fitted model
+        # is curve-free and binds the market curve at pricing time.
+        assert fitted.initial_curve is None

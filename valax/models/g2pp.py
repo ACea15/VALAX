@@ -60,8 +60,8 @@ from jaxtyping import Float
 from jax import Array
 
 from valax.curves.discount import DiscountCurve
-from valax.curves.graph import _DEFAULT_CURVE_ID
 from valax.dates.daycounts import year_fraction
+from valax.models.short_rate import require_initial_curve
 
 
 class G2PPModel(eqx.Module):
@@ -80,6 +80,11 @@ class G2PPModel(eqx.Module):
             between the two driving Brownian motions.
         initial_curve: Initial discount curve :math:`P^M(0, t)` used for
             exact-fit :math:`\\varphi(t)` calibration.
+            ``None`` (the default) leaves the model unbound:
+            :func:`valax.core.pricing.price` binds it from the market (see
+            :mod:`valax.models.short_rate`).
+        curve_id: Market id of the curve to bind, or ``None`` to use the
+            instrument's discount curve. Static.
     """
 
     mean_reversion_x: Float[Array, ""]
@@ -87,68 +92,8 @@ class G2PPModel(eqx.Module):
     volatility_x: Float[Array, ""]
     volatility_y: Float[Array, ""]
     correlation: Float[Array, ""]
-    initial_curve: DiscountCurve
-    curve_id: str = eqx.field(static=True, default=_DEFAULT_CURVE_ID)
-
-    @classmethod
-    def from_market(
-        cls,
-        market: Any,
-        *,
-        mean_reversion_x: Float[Array, ""],
-        mean_reversion_y: Float[Array, ""],
-        volatility_x: Float[Array, ""],
-        volatility_y: Float[Array, ""],
-        correlation: Float[Array, ""],
-        curve_id: str = _DEFAULT_CURVE_ID,
-    ) -> "G2PPModel":
-        """Build a G2++ model bound to a ``MarketState`` curve by id.
-
-        Resolves ``curve_id`` on ``market`` and embeds it as the model's
-        initial curve, recording the id so the model-market linkage is
-        explicit and re-bindable (pricing-ontology §3.1-§3.2). The curve is
-        still embedded in ``initial_curve`` for backward compatibility.
-
-        Args:
-            market: A ``MarketState`` (or anything exposing ``.curve(id)``).
-            mean_reversion_x: Mean-reversion speed of the first factor.
-            mean_reversion_y: Mean-reversion speed of the second factor.
-            volatility_x: Volatility of the first factor.
-            volatility_y: Volatility of the second factor.
-            correlation: Instantaneous correlation between the factors.
-            curve_id: Curve identifier to read the initial term structure
-                from; defaults to the ``"_default_"`` single-curve sentinel.
-
-        Returns:
-            A ``G2PPModel`` whose ``initial_curve`` is ``market``'s curve
-            for ``curve_id``.
-        """
-        return cls(
-            mean_reversion_x=jnp.asarray(mean_reversion_x),
-            mean_reversion_y=jnp.asarray(mean_reversion_y),
-            volatility_x=jnp.asarray(volatility_x),
-            volatility_y=jnp.asarray(volatility_y),
-            correlation=jnp.asarray(correlation),
-            initial_curve=market.curve(curve_id),
-            curve_id=curve_id,
-        )
-
-    def with_market_curve(self, market: Any) -> "G2PPModel":
-        """Re-bind the initial curve to ``market`` by this model's ``curve_id``.
-
-        Returns a copy whose ``initial_curve`` is refreshed from ``market``,
-        so a scenario-shocked ``MarketState`` flows through the model without
-        rebuilding it.
-
-        Args:
-            market: A ``MarketState`` (or anything exposing ``.curve(id)``).
-
-        Returns:
-            A re-bound ``G2PPModel``.
-        """
-        return eqx.tree_at(
-            lambda m: m.initial_curve, self, market.curve(self.curve_id)
-        )
+    initial_curve: DiscountCurve | None = None
+    curve_id: str | None = eqx.field(static=True, default=None)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -209,7 +154,7 @@ def _log_df_at_time(
     t: Float[Array, ""],
 ) -> Float[Array, ""]:
     """Log discount factor :math:`\\ln P^M(0, t)` at year-fraction *t*."""
-    times, log_dfs = _log_df_grid(model.initial_curve)
+    times, log_dfs = _log_df_grid(require_initial_curve(model))
     return jnp.interp(t, times, log_dfs)
 
 
@@ -218,7 +163,7 @@ def _market_df(
     t: Float[Array, "..."],
 ) -> Float[Array, "..."]:
     """Market discount factor :math:`P^M(0, t)` at year-fraction *t*."""
-    times, log_dfs = _log_df_grid(model.initial_curve)
+    times, log_dfs = _log_df_grid(require_initial_curve(model))
     return jnp.exp(jnp.interp(t, times, log_dfs))
 
 

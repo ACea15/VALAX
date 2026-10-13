@@ -4,6 +4,17 @@ Volatility surface construction and calibration. All surfaces are
 callable `eqx.Module` pytrees with signature
 `surface(strike, expiry) -> implied_vol`.
 
+Every surface calibrator returns a
+[`CalibrationResult`](calibration.md#valax.calibration.result.CalibrationResult)
+whose `.value` is the surface. Multi-slice builders
+(`calibrate_sabr_surface`, `calibrate_svi_surface`,
+`build_sabr_caplet_surface`, the swaption cube) are **batched levels**: each
+slice / cell is solved independently in one `vmap`, per-node diagnostics are
+aligned with `result.labels` (e.g. `"2Y"`, `"5Yx10Y"`), and a failure is
+reported by name (`result.failed_labels()`, `result.check()`). Ragged strike
+grids are padded with zero-weight points. Solver choice is the keyword-only
+`settings=SolverSettings(...)`.
+
 ## Dupire / SLV protocol: `total_variance`
 
 All three surface types additionally expose
@@ -140,9 +151,13 @@ Caps are quoted with **one flat vol per maturity**; nothing prices with a
 flat vol. Stripping converts the quotes into a per-optionlet term
 structure that reprices every quoted cap exactly, and it is the canonical
 dual-curve operation — forwards are projected off the tenor curve,
-payoffs discounted off OIS. Each quoted maturity contributes one scalar
-`optimistix.Newton` root-find, so the whole strip is differentiable by
-implicit differentiation. Recipe and worked example:
+payoffs discounted off OIS. The strip is solved bucket by bucket (a
+sequential bootstrap, one Newton root-find per quoted maturity, labelled
+`"cap 3Y"` etc.) and packaged as **one lower-triangular root level**, so the
+whole strip is differentiable by a single implicit-function adjoint.
+`strip_optionlet_surface` returns the optionlet SABR level with the strip
+level as `result.children[0]`; its `settings=` drive the SABR fits and
+`strip_settings=` the strip. Recipe and worked example:
 [Volatility Surfaces § Cap → caplet stripping](../guide/vol-surfaces.md#cap-caplet-optionlet-stripping-rates).
 
 ::: valax.surfaces.CapletVolCurve
@@ -157,17 +172,32 @@ implicit differentiation. Recipe and worked example:
 
 ::: valax.surfaces.optionlet_expiries
 
+### Strip level building blocks
+
+::: valax.surfaces.caplet_stripping.caplet_strip_level
+
+::: valax.surfaces.caplet_stripping.strip_buckets
+
+::: valax.surfaces.caplet_stripping.strip_columns_level
+
+::: valax.surfaces.caplet_stripping.caplet_strip_residual_fn
+
+::: valax.surfaces.caplet_stripping.cap_strip_labels
+
+::: valax.surfaces.caplet_stripping.STRIP_SETTINGS
+
 ## Swaption cube (rates)
 
 One SABR model per **(expiry, tenor)** node, with the strike dimension supplied
 in closed form rather than tabulated. `is_normal` selects lognormal Black-76 or
 normal Bachelier, the latter honouring a displacement `shift`.
 
-`calibrate_swaption_cube_from_curves` is the **curve-aware** route: give it the
-node *schedules* and the curves and it derives the grid axes and each node's
-$(S_x, A_d)$ itself, so the fitted parameters are differentiable functions of
-the curve pillars. `calibrate_swaption_cube` remains the explicit opt-out for
-exogenous forwards. Recipe and worked example:
+The cube is calibrated **from the curves**: give
+`calibrate_swaption_cube_from_curves` (or `_from_graph`) the node *schedules*
+and the curves and it derives the grid axes and each node's $(S_x, A_d)$
+itself, so the fitted parameters are differentiable functions of the curve
+pillars. Each (expiry, tenor) cell is one slice of a batched level, labelled
+`"5Yx10Y"` etc. Recipe and worked example:
 [Volatility Surfaces § Swaption cube](../guide/vol-surfaces.md#swaption-cube-curve-aware-calibration).
 
 ::: valax.surfaces.SwaptionCube
@@ -176,11 +206,13 @@ exogenous forwards. Recipe and worked example:
 
 ::: valax.surfaces.calibrate_swaption_cube_from_graph
 
+::: valax.surfaces.swaption_cube_level
+
+::: valax.surfaces.swaption_node_labels
+
 ::: valax.surfaces.swaption_node_coordinates
 
 ::: valax.surfaces.swaption_node_forwards_and_annuities
-
-::: valax.surfaces.calibrate_swaption_cube
 
 ### Smile dynamics
 
@@ -196,9 +228,9 @@ documented once in
 
 A premium quote is expressed *against a numeraire*, and the numeraire is a
 function of the curves — so converting one to a volatility is a dual-curve
-operation, not a unit change. The conversion is a scalar `optimistix.Newton`
-root-find and is implicitly differentiated, so the implied vol carries genuine
-curve risk. Physical and cash settlement are distinct conventions; see
+operation, not a unit change. The conversion is a scalar Newton root level
+(`INVERSION_SETTINGS` by default) returning a `CalibrationResult`, and is
+implicitly differentiated, so the implied vol carries genuine curve risk. Physical and cash settlement are distinct conventions; see
 [Volatility Surfaces § Premium quotes](../guide/vol-surfaces.md#premium-quotes).
 
 ::: valax.surfaces.swaption_premium

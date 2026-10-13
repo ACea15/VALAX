@@ -32,20 +32,19 @@ from collections.abc import Sequence
 
 import equinox as eqx
 import jax.numpy as jnp
-import optimistix
 from jaxtyping import Float
 from jax import Array
 
-from valax.calibration.transforms import (
-    TransformSpec,
-    model_to_unconstrained,
-    positive,
-    unconstrained_to_model,
-)
+from valax.calibration.basket import basket_fit_level
+from valax.calibration.level import LevelInputs
+from valax.calibration.result import CalibrationProvenance, CalibrationResult
+from valax.calibration.settings import SolverSettings
+from valax.calibration.transforms import TransformSpec, positive
 from valax.curves.discount import DiscountCurve
 from valax.instruments.rates import Swaption
 from valax.models.hull_white import HullWhiteModel
 from valax.pricing.analytic.hull_white_swaptions import hw_swaption_price
+from valax.pricing.multicurve import with_discount_curve
 from valax.pricing.analytic.swaptions import (
     swaption_price_bachelier,
     swaption_price_black76,
@@ -125,59 +124,35 @@ def hw_swaption_prices(
     )
 
 
-def _hw_price_residuals(
-    raw_params: dict[str, Float[Array, ""]],
-    args: tuple,
-) -> Float[Array, " n_quotes"]:
-    """Weighted price residuals, in the optimistix ``(y, args)`` form.
-
-    Residuals are scaled by the market price by default.  Swaption prices across
-    an expiry/tenor grid span more than an order of magnitude, so absolute
-    residuals would let the longest-dated quotes dominate the fit and would
-    leave the Jacobian badly conditioned.
-    """
-    (
-        transforms, template, swaptions, market_prices, weights, scale,
-        forward_curve,
-    ) = args
-    model = unconstrained_to_model(raw_params, transforms, template)
-    return (
-        weights
-        * (hw_swaption_prices(model, swaptions, forward_curve) - market_prices)
-        / scale
-    )
-
-
-def _hw_sse(
-    raw_params: dict[str, Float[Array, ""]],
-    args: tuple,
-) -> Float[Array, ""]:
-    """Scalar objective for gradient-based minimisers."""
-    return jnp.sum(_hw_price_residuals(raw_params, args) ** 2)
-
-
 def calibrate_hull_white(
     swaptions: Sequence[Swaption],
     market_prices: Float[Array, " n_quotes"],
     curve: DiscountCurve,
+    *,
     initial_guess: HullWhiteModel | None = None,
     fixed_mean_reversion: Float[Array, ""] | None = None,
     weights: Float[Array, " n_quotes"] | None = None,
     relative: bool = True,
-    solver: str = "bfgs",
-    max_steps: int = 256,
+    settings: SolverSettings | None = None,
     forward_curve: DiscountCurve | None = None,
     curve_id: str | None = None,
-) -> tuple[HullWhiteModel, optimistix.Solution]:
+    name: str = "hull_white",
+) -> CalibrationResult:
     r"""Fit Hull-White :math:`(a, \sigma)` to a swaption surface.
 
-    **Single- and dual-curve.** By default this is the single-curve fit it
-    always was, bit-for-bit.  Passing ``forward_curve`` makes ``curve`` the
-    *discount* (e.g. OIS) curve and projects the underlying swaps' floating
-    legs off the projection curve, through the same frozen tenor-basis overlay
-    the MC/PDE recipes use — so the fitted model is consistent with the engine
-    that will later price with it.  Multi-curve is an upgrade, not a
-    replacement.
+    A weighted least-squares level (:func:`~valax.calibration.basket.basket_fit_level`)
+    on Jamshidian prices: the quotes are the target prices, the curves are
+    the level's upstream input (so its adjoint carries curve risk), and a
+    fixed mean reversion is a held-fixed input (its sensitivity is reported).
+    The engine is exact, so the provenance is audit metadata and the fitted
+    parameters are portable to any engine.
+
+    **Single- and dual-curve.** By default this is the single-curve fit.
+    Passing ``forward_curve`` makes ``curve`` the *discount* (e.g. OIS) curve
+    and projects the underlying swaps' floating legs off the projection
+    curve, through the same frozen tenor-basis overlay the MC/PDE recipes
+    use — so the fitted model is consistent with the engine that will later
+    price with it.
 
     .. warning::
 
@@ -202,100 +177,76 @@ def calibrate_hull_white(
         relative: Divide each residual by its market price (default).  Prices
             across an expiry/tenor grid span an order of magnitude, so absolute
             residuals would let long-dated quotes dominate.
-        solver: ``"bfgs"`` (default) or ``"gauss_newton"``.
-
-            ``"bfgs"`` minimises the sum of squares with a line search, so it
-            is *damped* and converges from essentially any starting point.
-            ``"gauss_newton"`` converges quadratically near the solution but is
-            undamped: from a distant start it can overshoot into a region where
-            the transformed parameters overflow, producing a non-finite step.
-            Prefer it only with a good initial guess.
-
-            ``"levenberg_marquardt"`` -- the usual damped least-squares choice
-            -- is deliberately **not** offered.  Unlike
-            :func:`valax.calibration.calibrate_sabr`, this residual closes over
-            a sequence of instrument pytrees, and ``optimistix`` 0.1.0's
-            Levenberg-Marquardt raises ``List arity mismatch`` when it
-            recombines the Jacobian's static/dynamic partition in that case.
-        max_steps: Maximum optimiser iterations.
+        settings: Solver settings; defaults to
+            :data:`~valax.calibration.basket.BASKET_SETTINGS`
+            (line-searched BFGS to 1e-12). Any least-squares method is
+            accepted (e.g. ``SolverSettings(method="gauss_newton")`` from a
+            good initial guess).
         forward_curve: Optional projection curve for the underlying swaps'
             floating legs.  ``None`` (the default) is the single-curve fit.
         curve_id: Optional identifier of the discount curve in the
-            :class:`~valax.core.market_state.MarketState` it came from.  When
-            given it is recorded on the fitted model, so the
-            model-to-market linkage is explicit and
-            :meth:`~valax.models.hull_white.HullWhiteModel.with_market_curve`
-            can re-bind the model under a shocked market.
+            :class:`~valax.core.market_state.MarketState` it came from,
+            recorded on the fitted model.
+        name: Level name used in diagnostics.
 
     Returns:
-        Tuple of the fitted model and the ``optimistix`` solution carrying
-        convergence diagnostics.
+        The :class:`~valax.calibration.result.CalibrationResult`; the fitted
+        :class:`~valax.models.hull_white.HullWhiteModel` is ``result.value``
+        — **curve-free** (``initial_curve=None``): price it through
+        :func:`valax.price`, which binds the curve from the market, or bind
+        one explicitly with :func:`valax.core.binding.bind_curves`.
 
     Raises:
-        ValueError: If ``solver`` is not recognised, or if the number of
-            quotes does not match the number of swaptions.
+        ValueError: If the number of quotes does not match the number of
+            swaptions, or ``settings.method`` is not a least-squares method.
     """
+    swaptions = tuple(swaptions)
     if len(swaptions) != market_prices.shape[0]:
         raise ValueError(
             f"Got {len(swaptions)} swaptions but "
             f"{market_prices.shape[0]} market prices."
         )
-
     if initial_guess is None:
         initial_guess = HullWhiteModel(
             mean_reversion=jnp.asarray(0.05),
             volatility=jnp.asarray(0.01),
-            initial_curve=curve,
         )
-    else:
-        initial_guess = eqx.tree_at(
-            lambda m: m.initial_curve, initial_guess, curve
-        )
-
-    # Record which market curve the model is bound to.  ``curve_id`` is a
-    # *static* field, so it is not a pytree leaf and ``eqx.tree_at`` cannot
-    # reach it; ``dataclasses.replace`` rebuilds the (frozen) module instead.
-    if curve_id is not None:
-        initial_guess = dataclasses.replace(initial_guess, curve_id=curve_id)
-
-    if fixed_mean_reversion is not None:
-        initial_guess = eqx.tree_at(
-            lambda m: m.mean_reversion,
-            initial_guess,
-            jnp.asarray(fixed_mean_reversion),
-        )
-        transforms = {"volatility": positive()}
-    else:
-        transforms = dict(HULL_WHITE_TRANSFORMS)
-
-    if weights is None:
-        weights = jnp.ones_like(market_prices)
-
-    if relative:
-        # Guard against a zero quote (a worthless deep-OTM swaption).
-        scale = jnp.maximum(jnp.abs(market_prices), 1e-8)
-    else:
-        scale = jnp.ones_like(market_prices)
-
-    y0 = model_to_unconstrained(initial_guess, transforms)
-    args = (
-        transforms, initial_guess, tuple(swaptions), market_prices, weights, scale,
-        forward_curve,
+    # The fitted model is curve-free: the curve is market data, bound only
+    # for pricing. ``curve_id`` is static, hence ``dataclasses.replace``.
+    initial_guess = dataclasses.replace(
+        initial_guess, initial_curve=None,
+        curve_id=initial_guess.curve_id if curve_id is None else curve_id,
+    )
+    fixed = (
+        None if fixed_mean_reversion is None
+        else {"mean_reversion": fixed_mean_reversion}
     )
 
-    if solver == "bfgs":
-        opt = optimistix.BFGS(rtol=1e-12, atol=1e-12)
-        sol = optimistix.minimise(
-            _hw_sse, opt, y0, args=args, max_steps=max_steps, throw=False,
-        )
-    elif solver == "gauss_newton":
-        opt = optimistix.GaussNewton(rtol=1e-10, atol=1e-10)
-        sol = optimistix.least_squares(
-            _hw_price_residuals, opt, y0, args=args, max_steps=max_steps,
-            throw=False,
-        )
-    else:
-        raise ValueError(f"Unknown solver: {solver!r}")
+    def bind(model: HullWhiteModel, inp: LevelInputs) -> HullWhiteModel:
+        return with_discount_curve(model, inp.upstream[0])
 
-    fitted = unconstrained_to_model(sol.value, transforms, initial_guess)
-    return fitted, sol
+    def prices(model: HullWhiteModel, inp: LevelInputs) -> Float[Array, " n"]:
+        return hw_swaption_prices(model, swaptions, inp.upstream[1])
+
+    return basket_fit_level(
+        name,
+        quotes=market_prices,
+        upstream=(curve, forward_curve),
+        initial_guess=initial_guess,
+        transforms=HULL_WHITE_TRANSFORMS,
+        prices_fn=prices,
+        bind_fn=bind,
+        fixed_params=fixed,
+        weights=weights,
+        relative=relative,
+        settings=settings,
+        provenance=JAMSHIDIAN_PROVENANCE,
+        model_label="Hull-White",
+    )
+
+
+#: Provenance of a closed-form-priced fit (Jamshidian for Hull-White, the
+#: Brigo-Mercurio integral for G2++): exact, so parameters are portable.
+JAMSHIDIAN_PROVENANCE = CalibrationProvenance(
+    method="analytic", engine_kind="exact"
+)
