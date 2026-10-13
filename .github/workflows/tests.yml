@@ -17,6 +17,7 @@ name: Tests
 on:
   push:
     branches: [main]
+    tags: ["v*"]  # a release tag runs the full suite, slow tests included
   pull_request:
     branches: [main]
   schedule:
@@ -32,6 +33,12 @@ concurrency:
 
 permissions:
   contents: read
+
+# Tests marked @pytest.mark.slow are deselected by default (tests/conftest.py).
+# PRs and pushes to main run the fast suite; the weekly schedule, a manual
+# dispatch and a release tag run everything (the pre-release gate).
+env:
+  VALAX_RUN_SLOW: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')) && '1' || '0' }}
 
 jobs:
   pytest:
@@ -68,10 +75,10 @@ jobs:
         # coverage.xml for the Codecov upload step below.
         run: |
           if [ "${{ matrix.python-version }}" = "3.11" ]; then
-            pytest -q --tb=short --benchmark-skip \
+            pytest -q --tb=short --benchmark-skip -n auto --dist loadscope \
               --cov=valax --cov-report=xml --cov-report=term-missing
           else
-            pytest -q --tb=short --benchmark-skip
+            pytest -q --tb=short --benchmark-skip -n auto --dist loadscope
           fi
 
       - name: Upload coverage to Codecov
@@ -95,6 +102,7 @@ jobs:
     # main commits still get Mac coverage.
     if: >
       github.event_name == 'push' && github.ref == 'refs/heads/main'
+      || startsWith(github.ref, 'refs/tags/')
       || github.event_name == 'schedule'
       || github.event_name == 'workflow_dispatch'
     name: pytest (macos, py${{ matrix.python-version }})
@@ -125,4 +133,4 @@ jobs:
         # SIMD paths). If tests start failing here on tolerance grounds,
         # loosen the offending atol/rtol rather than treating it as a
         # correctness bug.
-        run: pytest -q --tb=short --benchmark-skip
+        run: pytest -q --tb=short --benchmark-skip -n auto --dist loadscope

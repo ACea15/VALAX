@@ -5,6 +5,13 @@ random data should request a :class:`SeedRegistry`, *not* call
 ``jax.random.PRNGKey`` directly.  This makes every test reproducible
 with a single environment variable (``VALAX_MASTER_SEED``) and the
 golden-dataset harness compatible across pytest sessions.
+
+It also owns the ``slow`` marker policy: tests marked ``@pytest.mark.slow``
+are **deselected by default** so a normal session stays fast. Include them
+with ``pytest --runslow`` (or ``VALAX_RUN_SLOW=1``) — the full run required
+before a release and done by the scheduled / manual CI job — or select only
+them with ``pytest -m slow``. Any explicit ``-m`` expression is applied as
+written (so ``pytest -m audit`` collects every audit gate, slow or not).
 """
 
 from __future__ import annotations
@@ -19,6 +26,39 @@ from valax.market.synthetic import (
     SyntheticMarketConfig,
     default_config,
 )
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register ``--runslow``."""
+    parser.addoption(
+        "--runslow",
+        action="store_true",
+        default=False,
+        help="also run tests marked @pytest.mark.slow (the full pre-release run)",
+    )
+
+
+def _run_slow(config: pytest.Config) -> bool:
+    """Whether this session includes the ``slow`` tests."""
+    if config.getoption("--runslow") or os.environ.get("VALAX_RUN_SLOW") == "1":
+        return True
+    # An explicit marker expression (``-m slow``, ``-m audit``, ``-m "not
+    # slow"``) is the user choosing the selection; respect it as written.
+    return bool(config.getoption("markexpr"))
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Deselect ``slow`` tests unless the session asked for them."""
+    if _run_slow(config):
+        return
+    keep, drop = [], []
+    for item in items:
+        (drop if item.get_closest_marker("slow") else keep).append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep
 
 
 @pytest.fixture(scope="session")

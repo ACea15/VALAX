@@ -36,8 +36,14 @@ pip install -e ".[docs]"
 ### Common commands
 
 ```bash
-# Full test suite (≈ a few seconds; the QL comparison tests may take longer).
+# Test suite, slow tests deselected (see "Slow tests" below).
 pytest
+
+# The same, in parallel (pytest-xdist, in the dev extras): ~13 min instead of
+# ~24 on a 10-core laptop, ~10 GB peak memory. `loadscope` keeps each module /
+# class on one worker so module-scoped fixtures (calibrated markets) are built
+# once, not once per worker. Use `-n auto` on a machine with memory to spare.
+pytest -n 4 --dist loadscope
 
 # Single test file.
 pytest tests/test_pricing/test_black_scholes.py
@@ -48,12 +54,39 @@ pytest tests/test_pricing/test_black_scholes.py::test_call_price -v
 # Performance benchmarks.
 pytest --benchmark-only
 
+# Slow tests (PDE-in-the-loop calibration risk, long examples) are
+# deselected by default; the full run is required before a release
+pytest --runslow          # everything (or VALAX_RUN_SLOW=1 pytest)
+pytest -m slow            # only the slow tests
+
 # Build docs (strict mode catches broken links and unrendered references).
 mkdocs build --strict
 
 # Serve docs locally (http://127.0.0.1:8000).
 mkdocs serve
 ```
+
+### Slow tests
+
+A normal `pytest` session must stay fast, so expensive tests carry
+`@pytest.mark.slow` and are **deselected by default** (the policy lives in
+`tests/conftest.py`). Mark a test (or class) slow when it takes more than
+about **15 s** on a laptop including its share of fixture setup — typically
+PDE-in-the-loop calibration risk, second derivatives through a 2-D PDE, or a
+long end-to-end example. A slow test is still a gate, not an optional extra:
+
+- `pytest --runslow` (or `VALAX_RUN_SLOW=1 pytest`) runs everything — required
+  before a release, and run by the scheduled and manual CI jobs;
+- `pytest -m slow` runs only the slow tests; any explicit `-m` expression is
+  applied as written (`pytest -m audit` collects every audit gate, slow or
+  not).
+
+Audit conformance gates (`-m audit`) are deliberately left unmarked even
+when they exceed the threshold: they are the spec, and run by default.
+
+Keep a fast sibling where you can: e.g. the closed-form G2++ per-trade
+validation runs by default, the engine-consistent (PDE-basket) variant is
+slow.
 
 ### QuantLib comparison tests
 
@@ -476,6 +509,7 @@ Before requesting review, confirm:
 - [ ] **Tests** added under `tests/` mirroring the source layout, covering:
   closed-form (if applicable), Greeks vs FD, JIT-compat, and edge cases.
 - [ ] **QuantLib comparison test** added if there's a QL counterpart.
+- [ ] **Calibration register** entry added / updated for a new or changed calibration (`docs/applications/calibration-register.md`; enforced by `tests/test_docs/test_calibration_register.py`).
 - [ ] **Docs updated** per §5 — documented on exactly one owning page (no
   duplication), with the **coverage matrix** (`docs/applications/instrument-pricing.md`)
   adjusted to match the code.

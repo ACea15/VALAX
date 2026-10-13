@@ -12,16 +12,20 @@ from pathlib import Path
 import pytest
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+# Examples taking more than ~15 s even in fast mode are ``slow`` (deselected
+# by default; ``pytest --runslow``). Every example script still runs on each
+# pull request in the Examples CI workflow, in full mode.
+_slow = pytest.mark.slow
 UNIFIED = (
-    "10_unified_market_tiers.py",
+    pytest.param("10_unified_market_tiers.py", marks=_slow),
     "11_unified_multicurve_rates.py",
-    "12_unified_equity_smile_and_model.py",
+    pytest.param("12_unified_equity_smile_and_model.py", marks=_slow),
     "13_unified_quote_scenarios.py",
-    "14_unified_rates_per_trade_model.py",
-    "15_unified_rates_caps_optionlet_chain.py",
-    "16_unified_calibration_diagnostics.py",
-    "17_unified_slv_fixed_point.py",
-    "18_unified_rates_per_trade_g2pp_cheyette.py",
+    pytest.param("14_unified_rates_per_trade_model.py", marks=_slow),
+    pytest.param("15_unified_rates_caps_optionlet_chain.py", marks=_slow),
+    pytest.param("16_unified_calibration_diagnostics.py", marks=_slow),
+    pytest.param("17_unified_slv_fixed_point.py", marks=_slow),
+    pytest.param("18_unified_rates_per_trade_g2pp_cheyette.py", marks=_slow),
 )
 
 

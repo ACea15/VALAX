@@ -221,6 +221,7 @@ class TestSABRPaths:
         # All vol paths should start at alpha
         assert jnp.allclose(vol_paths[:, 0], float(typical_sabr.alpha), atol=1e-5)
 
+    @pytest.mark.slow  # large MC (~17 s)
     def test_mc_vs_analytic_convergence(self, lognormal_sabr):
         """MC call price should converge to analytic within 2 standard errors."""
         F = jnp.array(100.0)
@@ -363,6 +364,7 @@ class TestSABRNormalConsistency:
         assert all(b > a for a, b in zip(gaps, gaps[1:])), gaps
 
 
+@pytest.mark.slow  # large MC (~24 s)
 class TestSABRNormalMonteCarlo:
     def test_normal_price_matches_mc(self, normal_sabr):
         """Normal-expansion price lands within 2 standard errors of the SABR

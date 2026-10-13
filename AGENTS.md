@@ -6,7 +6,8 @@ VALAX is a JAX-native quantitative finance valuation engine (Python ≥3.11). Se
 
 ## Build / lint / test
 - Install: `pip install -e ".[dev]"` (optional: `pip install -e ".[docs]"`, `pip install QuantLib` for `tests/test_quantlib_comparison/`).
-- Full suite: `pytest`. Benchmarks only: `pytest --benchmark-only`. Marker filter: `pytest -m "golden and detects"` (markers: `arbitrage`, `golden`, `detects`).
+- Full suite: `pytest`; in parallel `pytest -n 4 --dist loadscope` (pytest-xdist; ~1.8× faster, ~10 GB peak — prefer it for whole-suite runs, and run long ones in the background). Benchmarks only: `pytest --benchmark-only`. Marker filter: `pytest -m "golden and detects"` (markers: `arbitrage`, `golden`, `detects`, `audit`, `slow`).
+- **Slow tests** (`@pytest.mark.slow`, > ~15 s incl. fixture setup) are deselected by default; `pytest --runslow` (or `VALAX_RUN_SLOW=1`) runs everything and is required before a release; `pytest -m slow` runs only them. Mark new expensive tests slow, keeping a fast sibling where possible.
 - Single file: `pytest tests/test_pricing/test_black_scholes.py`. Single test: `pytest tests/test_pricing/test_black_scholes.py::test_call_price -v`.
 - Docs (strict, must pass pre-PR): `mkdocs build --strict`, then `python scripts/check_doc_anchors.py` (intra-page anchors; `--strict` checks only page-level links). Serve: `mkdocs serve`.
 - No configured linter/formatter; match surrounding style and keep `mkdocs build --strict` + `pytest` green.
@@ -39,6 +40,7 @@ Docs go stale when code lands without doc updates — the failure mode this proj
 - **Instrument guides** (`guide/{fixed-income,callable-bonds,rates-exotics,fx,inflation,equity-exotics,credit}.md`) — each instrument's payoff/cashflow maths and how-to recipe live on **exactly one** asset-class guide.
 - **Solver guides** (`guide/{analytical,monte-carlo,pde,lattice}.md`) — engine mechanics + that engine's model-coverage matrix + the vanilla contract for that engine. Do **not** re-derive an instrument's exotic payoff here; link to its instrument guide.
 - **Calibration** (`guide/{calibration,curves,why-multicurve,vol-surfaces,slv}.md`), **Theory** (`theory/`, the maths), **API** (`api/`, mkdocstrings autodoc of public symbols).
+- **Calibration assumptions register** (`applications/calibration-register.md`) — owns each calibration's assumptions, limitations (with evidence) and improvement path; links to the guides / theory / roadmap instead of repeating them.
 - **No duplication.** Document each instrument, derivation, or selling point once and cross-link. If you catch yourself copying a formula, example, or status table between pages, replace the copy with a link.
 
 ## Definition of done — adding/changing a pricer, instrument, model, calibration, or surface
@@ -48,6 +50,7 @@ In the **same change** (not "later"), and stated with clear intent in the commit
 3. **Roadmap** — flip `[ ]`→`[x]` (or add the line) naming the implementing symbol/module. Never leave an implemented feature unchecked; never mark an unbuilt one done. A change that only defines an instrument pytree with no pricer is 🟡, not ✅.
 4. **API** — export new public symbols (`__init__.py`) and confirm they render on the relevant `docs/api/*.md` autodoc page.
 5. **Theory** — add/extend the maths page when introducing new modelling.
+5a. **Calibration register** — for a new or changed calibration (curve build, smile / surface fit, strip, model basket, chain node), add or update its entry in `docs/applications/calibration-register.md`: what it fits and holds fixed (with defaults), targets & objective (price/vol, absolute/relative, weights, level kind), engine & provenance, settings, market inputs, assumptions, limitations *with the evidence that measured them*, validation, and the improvement path (a roadmap line). `tests/test_docs/test_calibration_register.py` fails for an exported entry point without one. Limitations found while building examples or tests go here, not only in a commit message.
 6. **Verify** — both `pytest` and `mkdocs build --strict` must be green (strict catches broken doc links and orphaned/missing nav entries).
 
 When **removing or renaming**, grep the docs for inbound links to the old path/anchor and fix them before deleting; `mkdocs build --strict` guards page-level links but not intra-page anchors — run `python scripts/check_doc_anchors.py` after the build for those. The coverage matrix and roadmap are the two files you must never forget to touch.
