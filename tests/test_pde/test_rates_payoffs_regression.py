@@ -25,6 +25,14 @@ schedule rather than on one inferred from the payment dates.
 The swaption and Bermudan goldens are **unchanged to the last bit**, which is
 the useful signal: the correction touches bond coupon accrual and the exercise
 obstacle, and nothing else.
+
+**Cell-averaged payoffs.** The recipes now cell-average kinked payoffs and
+exercise projections by default (``smooth_payoff=True``, see
+:mod:`valax.pricing.pde.payoff_smoothing`). The goldens stay the pointwise
+numbers and every config here sets ``smooth_payoff=False``, so the switch is
+proven to restore the original arithmetic exactly; the smoothed prices are
+validated against oracles in ``test_payoff_smoothing.py`` and the per-model
+files instead.
 """
 
 import jax.numpy as jnp
@@ -143,9 +151,15 @@ CH2 = CheyetteModel2F(
     initial_curve=CURVE,
 )
 
-C1 = PDEConfig(n_spot=121, n_time=60, spot_range=6.0, scheme=Scheme.CRANK_NICOLSON)
-C2 = PDEConfig2D(n_x=71, n_y=71, n_time=50, x_range=6.0, scheme=Scheme.CRAIG_SNEYD)
-CE = PDEConfig2D(n_x=81, n_y=61, n_time=60, x_range=6.0, y_max=3.0)
+# ``smooth_payoff=False``: the goldens are the pointwise-payoff arithmetic, so
+# this gate also proves that switching the cell-averaged payoff off restores
+# the pre-smoothing prices to the last bit.
+C1 = PDEConfig(n_spot=121, n_time=60, spot_range=6.0, scheme=Scheme.CRANK_NICOLSON,
+               smooth_payoff=False)
+C2 = PDEConfig2D(n_x=71, n_y=71, n_time=50, x_range=6.0, scheme=Scheme.CRAIG_SNEYD,
+                 smooth_payoff=False)
+CE = PDEConfig2D(n_x=81, n_y=61, n_time=60, x_range=6.0, y_max=3.0,
+                 smooth_payoff=False)
 
 DISPATCH_CASES = {
     "hw_bullet": (BULLET, HW, C1),

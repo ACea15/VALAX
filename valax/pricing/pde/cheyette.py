@@ -106,7 +106,9 @@ from valax.pricing.pde.grids import (
 )
 from valax.pricing.pde.operators import Operator1D, build_operator_1d
 from valax.pricing.pde.operators2d import Operator2D, build_operator_2d
+from valax.pricing.pde.payoff_smoothing import positive_part
 from valax.pricing.pde.rates_payoffs import (
+    bermudan_terminal_and_event,
     caplet_fixing_values,
     caplet_values_by_level,
     cms_spread_values_by_level,
@@ -466,7 +468,8 @@ def _callable_style_price_1f(
             bond, model, grid, config, horizon
         )
         return exercisable_terminal_and_event(
-            coupons, bond.face_value, strike_at_level, is_call
+            coupons, bond.face_value, strike_at_level, is_call,
+            smooth=config.smooth_payoff,
         )
 
     return _solve_cheyette_1f(model, config, horizon, build)
@@ -524,7 +527,7 @@ def _swaption_cheyette(*, instrument, model, config) -> PDEResult:
             instrument.day_count,
             instrument.is_payer,
         )
-        return jnp.maximum(swap, 0.0), None
+        return positive_part(swap, config.smooth_payoff), None
 
     return PDEResult(price=_solve_cheyette_1f(model, config, horizon, build))
 
@@ -556,7 +559,8 @@ def _caplet_cheyette(*, instrument, model, config) -> PDEResult:
     def build(grid: Grid1D):
         bond = _cheyette_discount_factor_1f(model, grid)(horizon, end_time)
         terminal = caplet_fixing_values(
-            bond, instrument.strike, tau, instrument.notional, instrument.is_cap
+            bond, instrument.strike, tau, instrument.notional, instrument.is_cap,
+            smooth=config.smooth_payoff,
         )
         return terminal, None
 
@@ -587,6 +591,7 @@ def _cap_cheyette(*, instrument, model, config) -> PDEResult:
             dt,
             config.n_time,
             (grid.n,),
+            smooth=config.smooth_payoff,
         )
         terminal = caplet_vals[config.n_time]
         return terminal, lambda level, values: values + caplet_vals[level]
@@ -629,16 +634,9 @@ def _bermudan_swaption_cheyette(*, instrument, model, config) -> PDEResult:
             )
             for e in range(n_exercise)
         ])
-        terminal = jnp.maximum(tails[-1], 0.0)
-        exercise_at_level = (
-            jnp.full((config.n_time + 1, grid.n), -jnp.inf)
-            .at[levels]
-            .set(tails)
+        return bermudan_terminal_and_event(
+            tails, levels, config.n_time, config.smooth_payoff
         )
-        event_fn = lambda level, values: jnp.maximum(
-            values, exercise_at_level[level]
-        )
-        return terminal, event_fn
 
     return PDEResult(price=_solve_cheyette_1f(model, config, horizon, build))
 
@@ -994,7 +992,7 @@ def _swaption_cheyette_2f(*, instrument, model, config) -> PDEResult:
             instrument.day_count,
             instrument.is_payer,
         )
-        return jnp.maximum(swap, 0.0), None
+        return positive_part(swap, config.smooth_payoff), None
 
     return PDEResult(price=_solve_cheyette_2f(model, config, horizon, build))
 
@@ -1019,7 +1017,8 @@ def _caplet_cheyette_2f(*, instrument, model, config) -> PDEResult:
     def build(grid: Grid2D):
         bond = _cheyette_discount_factor_2f(model, grid)(horizon, end_time)
         terminal = caplet_fixing_values(
-            bond, instrument.strike, tau, instrument.notional, instrument.is_cap
+            bond, instrument.strike, tau, instrument.notional, instrument.is_cap,
+            smooth=config.smooth_payoff,
         )
         return terminal, None
 
@@ -1050,6 +1049,7 @@ def _cap_cheyette_2f(*, instrument, model, config) -> PDEResult:
             dt,
             config.n_time,
             (grid.n_x, grid.n_y),
+            smooth=config.smooth_payoff,
         )
         terminal = caplet_vals[config.n_time]
         return terminal, lambda level, values: values + caplet_vals[level]
@@ -1127,7 +1127,8 @@ def _callable_style_price_2f(
             bond, model, grid, config, horizon
         )
         return exercisable_terminal_and_event(
-            coupons, bond.face_value, strike_at_level, is_call
+            coupons, bond.face_value, strike_at_level, is_call,
+            smooth=config.smooth_payoff,
         )
 
     return _solve_cheyette_2f(model, config, horizon, build)
@@ -1197,16 +1198,9 @@ def _bermudan_swaption_cheyette_2f(*, instrument, model, config) -> PDEResult:
             )
             for e in range(n_exercise)
         ])
-        terminal = jnp.maximum(tails[-1], 0.0)
-        exercise_at_level = (
-            jnp.full((config.n_time + 1, grid.n_x, grid.n_y), -jnp.inf)
-            .at[levels]
-            .set(tails)
+        return bermudan_terminal_and_event(
+            tails, levels, config.n_time, config.smooth_payoff
         )
-        event_fn = lambda level, values: jnp.maximum(
-            values, exercise_at_level[level]
-        )
-        return terminal, event_fn
 
     return PDEResult(price=_solve_cheyette_2f(model, config, horizon, build))
 
@@ -1591,7 +1585,7 @@ def cheyette_exact_price(
                 instrument.day_count,
                 instrument.is_payer,
             )
-            return jnp.maximum(swap, 0.0), None
+            return positive_part(swap, config.smooth_payoff), None
 
         return PDEResult(price=_solve_cheyette_exact(model, config, horizon, build))
 
@@ -1612,6 +1606,7 @@ def cheyette_exact_price(
                 tau,
                 instrument.notional,
                 instrument.is_cap,
+                smooth=config.smooth_payoff,
             )
             return terminal, None
 

@@ -75,6 +75,13 @@ class PDEConfig(eqx.Module):
         penalty_rho: Penalty coefficient for the American penalty method.
         penalty_iters: Fixed penalty iterations per time step (kept static so
             the whole solve remains differentiable).
+        smooth_payoff: Replace the pointwise positive part of kinked payoffs
+            and exercise projections by its exact cell average
+            (:mod:`~valax.pricing.pde.payoff_smoothing`), making the discrete
+            price :math:`C^1` in the model inputs at an :math:`O(h^2)` bias.
+            ``False`` restores pointwise sampling bit-for-bit. Applied by the
+            short-rate recipes (Hull-White, Cheyette); the equity recipes
+            ignore it.
     """
 
     n_spot: int = eqx.field(static=True, default=200)
@@ -85,6 +92,7 @@ class PDEConfig(eqx.Module):
     rannacher_steps: int = eqx.field(static=True, default=0)
     penalty_rho: float = eqx.field(static=True, default=1.0e6)
     penalty_iters: int = eqx.field(static=True, default=5)
+    smooth_payoff: bool = eqx.field(static=True, default=True)
 
 
 class PDEConfig2D(eqx.Module):
@@ -105,6 +113,13 @@ class PDEConfig2D(eqx.Module):
         exercise: Exercise style (default European).
         theta: Implicitness parameter for the per-axis solves.
         rannacher_steps: Fully-implicit start-up steps.
+        smooth_payoff: Smooth kinked payoffs and exercise projections over
+            each node's cell with the bias-neutral :math:`C^1` kernel of
+            :mod:`~valax.pricing.pde.payoff_smoothing`. This makes the discrete
+            price :math:`C^1` in the model inputs at the accuracy of pointwise
+            sampling. ``False`` restores pointwise sampling bit-for-bit.
+            Applied by the short-rate recipes (G2++, Cheyette 2F and
+            exact-``y``); the Heston recipes ignore it.
     """
 
     n_x: int = eqx.field(static=True, default=128)
@@ -117,3 +132,4 @@ class PDEConfig2D(eqx.Module):
     exercise: Exercise = eqx.field(static=True, default=Exercise.EUROPEAN)
     theta: float = eqx.field(static=True, default=0.5)
     rannacher_steps: int = eqx.field(static=True, default=2)
+    smooth_payoff: bool = eqx.field(static=True, default=True)

@@ -62,6 +62,11 @@ from jaxtyping import Float, Int
 from valax.dates.accrual import bond_accrued_interest_at_dates
 from valax.dates.daycounts import year_fraction
 from valax.pricing.multicurve import apply_swap_basis
+from valax.pricing.pde.payoff_smoothing import (
+    positive_part,
+    project_max,
+    project_min,
+)
 
 # A closure valuing a cash-flow portfolio at the grid nodes: given the
 # valuation time, the payment times and the cash flows, it returns the node
@@ -270,6 +275,7 @@ def caplet_fixing_values(
     notional: Float[Array, ""],
     is_cap: bool,
     basis: Float[Array, ""] | None = None,
+    smooth: bool = False,
 ) -> Float[Array, "..."]:
     r"""Fixing-date value of a single caplet/floorlet at every grid node.
 
@@ -299,15 +305,17 @@ def caplet_fixing_values(
         is_cap: ``True`` for a caplet, ``False`` for a floorlet.
         basis: Frozen tenor basis over :math:`(T_0, T_1)`, or ``None`` for
             single-curve projection.
+        smooth: Static switch: cell-average the positive part over each
+            node's cell (:func:`~valax.pricing.pde.payoff_smoothing.positive_part`)
+            instead of sampling it pointwise. Every axis of
+            ``bond_at_fixing`` must be a grid axis.
 
     Returns:
         The caplet/floorlet value at each grid node.
     """
     intrinsic = 1.0 if basis is None else basis
     moneyness = intrinsic - bond_at_fixing * (1.0 + strike * tau)
-    payoff = (
-        jnp.maximum(moneyness, 0.0) if is_cap else jnp.maximum(-moneyness, 0.0)
-    )
+    payoff = positive_part(moneyness if is_cap else -moneyness, smooth)
     return notional * payoff
 
 
@@ -325,6 +333,7 @@ def caplet_values_by_level(
     n_time: int,
     node_shape: tuple[int, ...],
     basis: Float[Array, " n_caplets"] | None = None,
+    smooth: bool = False,
 ) -> Float[Array, "n_levels ..."]:
     r"""Caplet fixing-value to inject at each time level, per grid node.
 
@@ -351,6 +360,8 @@ def caplet_values_by_level(
         basis: Per-caplet frozen tenor basis over each accrual period (see
             :func:`caplet_fixing_values`), or ``None`` for single-curve
             projection.
+        smooth: Static switch: cell-average each caplet's positive part (see
+            :func:`caplet_fixing_values`).
 
     Returns:
         Caplet value indexed by ``(time level, *node)``; zero where no caplet
@@ -364,7 +375,9 @@ def caplet_values_by_level(
     )
     def caplet_val(level_time, end_time, tau, b):
         bond = discount_factor(level_time, end_time)
-        return caplet_fixing_values(bond, strike, tau, notional, is_cap, b)
+        return caplet_fixing_values(
+            bond, strike, tau, notional, is_cap, b, smooth=smooth
+        )
 
     # ``basis is None`` is a *trace-time* branch, not a traced value: it keeps
     # the single-curve arithmetic literally unchanged rather than multiplying
@@ -557,6 +570,7 @@ def exercisable_terminal_and_event(
     face_value: Float[Array, ""],
     strike_at_level: Float[Array, " n_levels"],
     is_call: bool,
+    smooth: bool = False,
 ) -> tuple[Float[Array, "..."], Callable]:
     r"""Terminal condition and exercise event for a callable/puttable bond.
 
@@ -582,6 +596,12 @@ def exercisable_terminal_and_event(
             :func:`exercise_obstacle_by_level`).
         is_call: ``True`` for issuer-optimal (callable), ``False`` for
             holder-optimal (puttable).
+        smooth: Static switch: cell-average the exercise projection
+            (:func:`~valax.pricing.pde.payoff_smoothing.project_min` /
+            :func:`~valax.pricing.pde.payoff_smoothing.project_max`) instead
+            of projecting pointwise. Non-exercise levels (infinite neutral
+            obstacle) pass the continuation value through untouched either
+            way.
 
     Returns:
         ``(terminal, event_fn)`` — the horizon condition (redemption plus final
@@ -590,13 +610,83 @@ def exercisable_terminal_and_event(
     node_shape = coupons.shape[1:]
     terminal = jnp.full(node_shape, face_value) + coupons[-1]
 
+    if not smooth:
+        def event_fn(level, values):
+            obstacle = strike_at_level[level]
+            exercised = (
+                jnp.minimum(values, obstacle)
+                if is_call
+                else jnp.maximum(values, obstacle)
+            )
+            return exercised + coupons[level]
+
+        return terminal, event_fn
+
+    project = project_min if is_call else project_max
+
     def event_fn(level, values):
         obstacle = strike_at_level[level]
-        exercised = (
-            jnp.minimum(values, obstacle)
-            if is_call
-            else jnp.maximum(values, obstacle)
+        # The neutral +-inf obstacle would make (C - E) infinite and its cell
+        # variation NaN; substitute a finite stand-in and discard the result
+        # (double-where, so the discarded branch has finite gradients too).
+        active = jnp.isfinite(obstacle)
+        safe_obstacle = jnp.where(active, obstacle, 0.0)
+        exercised = jnp.where(
+            active, project(values, safe_obstacle, True), values
         )
         return exercised + coupons[level]
+
+    return terminal, event_fn
+
+
+def bermudan_terminal_and_event(
+    tails: Float[Array, "n_exercise ..."],
+    levels: Int[Array, " n_exercise"],
+    n_time: int,
+    smooth: bool = False,
+) -> tuple[Float[Array, "..."], Callable]:
+    r"""Terminal condition and exercise event for a Bermudan swaption.
+
+    The last exercise date is the horizon, so the terminal condition is the
+    positive part of the last tail swap; at every earlier exercise level the
+    holder takes :math:`\max(C, E_e) = C + (E_e - C)^+`. Non-exercise levels
+    pass the continuation value through.
+
+    Args:
+        tails: Tail-swap value at each exercise date, per grid node.
+        levels: Snapped time level of each exercise date.
+        n_time: Number of backward time steps.
+        smooth: Static switch: cell-average the terminal positive part and the
+            exercise projections (:mod:`~valax.pricing.pde.payoff_smoothing`)
+            instead of sampling them pointwise.
+
+    Returns:
+        ``(terminal, event_fn)``.
+    """
+    node_shape = tails.shape[1:]
+    terminal = positive_part(tails[-1], smooth)
+
+    if not smooth:
+        # -inf is the neutral obstacle: it never wins the maximum, so
+        # non-exercise levels pass the continuation value straight through.
+        exercise_at_level = (
+            jnp.full((n_time + 1, *node_shape), -jnp.inf).at[levels].set(tails)
+        )
+
+        def event_fn(level, values):
+            return jnp.maximum(values, exercise_at_level[level])
+
+        return terminal, event_fn
+
+    # Smoothed: an explicit mask instead of the -inf obstacle, whose cell
+    # variation would be NaN (see exercisable_terminal_and_event).
+    is_exercise = jnp.zeros(n_time + 1, dtype=bool).at[levels].set(True)
+    exercise_at_level = (
+        jnp.zeros((n_time + 1, *node_shape)).at[levels].set(tails)
+    )
+
+    def event_fn(level, values):
+        projected = project_max(values, exercise_at_level[level], True)
+        return jnp.where(is_exercise[level], projected, values)
 
     return terminal, event_fn

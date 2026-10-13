@@ -24,6 +24,7 @@ modelling background is ``docs/theory/risk-measures.md`` §7.4 and the recipe is
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from valax.curves.discount import DiscountCurve
@@ -119,7 +120,8 @@ def _callable(ref_date, schedule, dates, coupon, call_price=1.0):
 
 # A longer bond callable at *every* coupon date (near-continuous American
 # call) plus a low model vol is what makes the call pin the price at par when
-# it is deep in-the-money, collapsing effective convexity toward zero.
+# it is deep in-the-money: effective convexity is then negative, most negative
+# at the call boundary and shrinking toward zero from below deep in the money.
 CONV_CONFIG = PDEConfig(n_spot=251, n_time=400, spot_range=6.0)
 
 
@@ -235,24 +237,27 @@ def test_callable_duration_below_bullet(
 # ── 6. Convexity compression near the call boundary (the money shot) ──
 
 
-def test_callable_convexity_compressed_at_call_boundary(
+def test_callable_convexity_negative_at_call_boundary(
     ref_date, long_schedule, conv_model
 ):
-    """The embedded call collapses effective convexity toward zero.
+    """The embedded call turns effective convexity negative as rates fall.
 
-    Textbook intuition says a callable shows *negative* effective convexity as
-    yields fall.  That statement is really about a bond's price-vs-yield-to-call
-    curve flattening at the call price.  Measured properly here — as the second
-    derivative of the full term-structure model price with respect to a parallel
-    discount-curve spread — the capped redemption is still discounted convexly,
-    so a deep-in-the-money callable's convexity does not go strictly negative;
-    it floors at the small positive convexity of the near-term call stub.
+    Measured as the second derivative of the full Hull-White PDE price with
+    respect to a parallel discount-curve spread, a deep-in-the-money callable
+    shows the textbook **negative effective convexity**: the call caps the
+    price, so the bond is short the call's gamma.
 
-    The economically real and reproducible signature is therefore **massive
-    convexity compression**: the call annihilates the bond's convexity, taking
-    it from the bullet's large positive value to essentially zero, and — unlike
-    a bullet, whose convexity *rises* as rates fall — the callable's convexity
-    *falls* toward zero as rates fall and the call bites.
+    History: this test used to assert the opposite (convexity "floors at a
+    small positive value", +0.33 here). That number was an artifact. With the
+    call projection sampled pointwise, ``max`` is piecewise linear in the
+    spread, so autodiff's second derivative misses the curvature concentrated
+    at the node crossings — a wide-step finite difference on the same
+    pointwise grid gave -4.6 / -2.4 / -0.6 / +0.3 at h = 10 / 5 / 2 / 1 bp,
+    i.e. it was dominated by kinks. With the cell-averaged projection
+    (``PDEConfig.smooth_payoff``, the default) the price is C¹, autodiff gives
+    -4.19 and the finite difference converges to it (-4.19 at 2 bp and 1 bp).
+    At the money (6% coupon on a 5% curve) the convexity is about -229: the
+    duration collapses from ~7 to ~0 across the call boundary.
     """
     # Callable at every coupon date => near-continuous American call.
     callable_bond = _callable(
@@ -267,15 +272,27 @@ def test_callable_convexity_compressed_at_call_boundary(
         callable_bond, conv_model, CONV_CONFIG, -0.02
     )
 
-    # Bullet is strongly positively convex; the call compresses convexity to a
-    # small fraction of it.
+    # Bullet is strongly positively convex; deep in the money the call makes
+    # the callable *negatively* convex, by a small fraction of the bullet's.
     assert float(conv_bullet) > 10.0
-    assert 0.0 <= float(conv_itm) < 0.05 * float(conv_bullet)
+    assert float(conv_itm) < 0.0
+    assert abs(float(conv_itm)) < 0.25 * float(conv_bullet)
     assert float(conv_atm) < float(conv_bullet)
 
-    # Negative-convexity *direction*: convexity falls as rates fall (call
-    # biting), the opposite of a positively-convex bullet.
-    assert float(conv_itm) < float(conv_atm)
+    # Negative convexity is deepest where the call boundary sits (at the
+    # money here: 6% coupon on a 5% curve) and shrinks toward zero deep in the
+    # money, where the price is pinned near the call price.
+    assert float(conv_atm) < float(conv_itm) < 0.0
+
+    # The autodiff convexity is the derivative of a C¹ price: a central
+    # second difference converges to it, at both points.
+    p = lambda s: price_under_spread(
+        callable_bond, conv_model, CONV_CONFIG, jnp.asarray(s)
+    )
+    h = 1e-4
+    for s0, conv in ((-0.02, conv_itm), (0.0, conv_atm)):
+        fd = (p(s0 + h) - 2 * p(s0) + p(s0 - h)) / h**2 / p(s0)
+        np.testing.assert_allclose(float(conv), float(fd), rtol=5e-3)
 
 
 def test_effective_convexity_matches_finite_difference(

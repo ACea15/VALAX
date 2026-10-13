@@ -248,7 +248,8 @@ market price; for an option-free bond it collapses to the Z-spread. See
 [Models & Theory §7.9](../theory/risk-measures.md#79-option-adjusted-spread-and-z-spread)
 for the mathematics (including why, under Hull-White, the parallel-shift
 and re-fit definitions of OAS coincide, and why a callable's effective
-convexity does not go strictly negative when measured this way).
+convexity is negative near the call boundary — recovered as an autodiff
+Greek once the PDE's call projection is cell-averaged).
 
 ### Option-adjusted spread
 

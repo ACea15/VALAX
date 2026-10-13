@@ -167,6 +167,123 @@ $$
 at every node, straight from the affine bond price. So the *only* numerical
 error in the whole scheme is in the continuation value.
 
+### Kinks: cell-averaged payoff and exercise
+
+The terminal payoff $\max(f, 0)$ (a swaption's swap value, a caplet's
+moneyness) and the exercise projection
+$\max(C, E) = C + (E - C)^+$ are kinked, and sampling them at the nodes
+makes the discrete price only **piecewise** smooth in the inputs. As a
+parameter moves, the exercise boundary slides continuously, but each node
+switches branch all at once. Every crossing puts a kink in the price, and two
+things go wrong:
+
+- the pointwise convergence order in the grid is erratic (a node near the
+  boundary flips sign of error as the mesh is refined);
+- finite-difference risk becomes step-dependent. A central difference that
+  straddles a crossing measures the average slope of two pieces. Autodiff is
+  exact on each piece, but on a kink it returns that piece's slope, which can
+  differ from the smooth sensitivity by several percent.
+
+The remedy (Pooley, Vetzal & Forsyth 2003) gives each node the **cell average**
+of the kinked function rather than its point value. Take $f$ linear across the
+node's cell, with $\delta$ its half-variation over the cell, so $f$ ranges over
+$[f_i - \delta, f_i + \delta]$. The average of $f^+$ over the cell is then exactly
+
+$$
+\overline{f^+}(f, \delta) =
+\begin{cases}
+\max(f, 0), & |f| \ge \delta, \\[2pt]
+\dfrac{(f + \delta)^2}{4\delta}, & |f| < \delta .
+\end{cases}
+$$
+
+Value and both partial derivatives match at $|f| = \delta$, so this is $C^1$
+jointly in $(f, \delta)$. It recovers $\max(f, 0)$ as $\delta \to 0$. Only
+nodes whose cell straddles the kink change, each by at most $\delta/4 = O(h)$,
+on a band of width $O(h)$. The integrated bias is therefore $O(h^2)$, the order
+of the Crank–Nicolson / Craig–Sneyd schemes that consume it.
+
+$\delta$ is read off the grid. Along one axis, the cell of node $i$ is
+$[x_{i-1/2}, x_{i+1/2}]$, and the central-difference linearisation gives
+
+$$
+\delta_i = \tfrac14\,|f_{i+1} - f_{i-1}| = \tfrac12\,|\partial_x f|\,\bar h_i ,
+$$
+
+which is valid on non-uniform grids too. Edge nodes use the one-sided
+$\tfrac12|f_1 - f_0|$. On the 2-D (G2++, two-factor Cheyette, exact-$y$) grids
+the per-axis values are combined in quadrature,
+$\delta = \sqrt{\delta_x^2 + \delta_y^2}$. This is a **separable
+approximation**: across a rectangle a linear $f$ is a sum of two uniforms
+(trapezoidal), and the formula above swaps that for the uniform with the same
+mean and variance. The support-matching choice $\delta_x + \delta_y$
+over-smooths by the cross term.
+
+**On 2-D grids the kernel is bias-neutral rather than the cell average.** The
+cell average is one-signed: $\int(\overline{f^+} - f^+)\,df = \delta^2/6$ per
+crossing. In 1-D that excess is exactly what removes the offset-dependent
+error of pointwise sampling. In 2-D an oblique exercise boundary crosses the
+nodes at every cell offset, so pointwise sampling is already self-averaging,
+and the excess is pure added bias. On a G2++ OTM receiver at 61² nodes with
+the time error converged out, it gave a spatial error of
+$+8.9\times10^{-3}$, against $+2.7\times10^{-3}$ pointwise. The 2-D recipes
+therefore use the $C^1$ kernel with the same band and **zero integrated
+bias**:
+
+$$
+s(f, \delta) = \delta\Bigl[\tfrac14(u+1)^2 - \tfrac{5}{32}(1 - u^2)^2\Bigr],
+\qquad u = f/\delta,\ |u| < 1 ,
+$$
+
+and $\max(f, 0)$ outside. The quartic term and its derivative vanish at
+$u = \pm1$, so the kernel stays $C^1$, and its integral cancels the
+$\delta^2/6$. The price then tracks the pointwise price to within a few
+percent of the pointwise error, and it is $C^1$. The cost is a dip of at most
+$0.0256\,\delta$ below $f^+$ near $u \approx -0.52$. That is $O(h)$, confined
+to the band, and zero in the integral.
+
+!!! note "Design decision: the 2-D kernel"
+    The first design applied the exact cell average on every grid. It was
+    replaced on 2-D grids by the bias-neutral kernel above because it broke an
+    independent oracle: the G2++ dual-curve receiver of
+    `tests/test_pricing/test_dual_curve_swaptions.py` (PDE vs the
+    Brigo-Mercurio closed form, rtol $2\times10^{-3}$) went from
+    $4.6\times10^{-4}$ pointwise to $6.6\times10^{-3}$ with the cell average;
+    the bias-neutral kernel gives $3.8\times10^{-4}$. Loosening the oracle's
+    tolerance to keep a smoother-looking formula was ruled out. The kernel
+    choice is made by grid rank in a single place
+    (`valax.pricing.pde.payoff_smoothing.positive_part`), so it is a one-line
+    change. **Not tried:** the exact 2-D cell average for a linear $f$ (a
+    trapezoidal distribution rather than the uniform-equivalent used for
+    $\delta$), which might give both zero excess bias and exact averaging.
+    **Not covered:** the equity PDEs (terminal payoffs, the equity Bermudan
+    projection, Heston) do not smooth yet.
+
+For exercise, $\delta$ is computed from $E - C$ at the exercise level, and the
+projection becomes $C + \overline{(E - C)^+}$, with the 2-D kernel in place of
+the overline on 2-D grids. Issuer calls use $C - \overline{(C - E)^+}$. Non-exercise levels are masked out explicitly,
+because the neutral $\mp\infty$ obstacle would give an undefined cell
+variation. All guards are double-`where`, so gradients are finite everywhere.
+
+The engines apply this by default (`smooth_payoff=True` on `PDEConfig` /
+`PDEConfig2D`; see the [PDE guide](../guide/pde.md#55-non-smooth-payoffs-rannacher-start-up-and-cell-averaging)).
+Measured effect on the European swaption against the closed form. The ratios
+are successive errors as the grid doubles; 4 is clean second order.
+
+| Model / grid refinement | pointwise | smoothed |
+|---|---|---|
+| Hull-White 3Y×5Y ATM (50→800 nodes), error ratios | 0.81, −63, 4.2, 5.4 | 4.2, 4.0, 4.0, 4.0 |
+| Hull-White 3Y×5Y K+100bp, error ratios | 212, 0.12, 2.3, −54 | 3.7, 4.1, 4.1, 4.0 |
+| G2++ 3Y×5Y ATM (31²→121²), errors | −3.80e-5, −1.14e-5, −3.24e-6 | −3.91e-5, −1.16e-5, −3.21e-6 |
+
+In 1-D the smoothing fixes the convergence. In 2-D it leaves the accuracy as
+it was, and what it adds is the $C^1$ dependence on inputs. That dependence
+holds in both cases: central differences of a Bermudan agree with `jax.grad`
+to $10^{-8}$–$10^{-9}$ for relative steps from $10^{-4}$ to $10^{-6}$, even at
+a point where the pointwise G2++ price has a kink (pointwise spread across
+those steps: $6.7\times10^{-4}$). A 401-point parameter scan has no jumps in
+its first differences, where the pointwise G2++ scan had 100.
+
 ---
 
 ## 5 · Validation
@@ -209,7 +326,12 @@ traceable.
 
 Autodiff sensitivities to both $a$ and $\sigma$ match central differences to
 $10^{-8}$–$10^{-11}$ across callable bonds, European swaptions and Bermudan
-swaptions — including through the exercise projection.
+swaptions — including through the exercise projection. That holds for every
+step size, not only inside one smooth piece, because the projection is cell
+averaged
+([§4](#kinks-cell-averaged-payoff-and-exercise)). With
+`smooth_payoff=False`, a step that straddles a node crossing returns the mean
+slope of two pieces instead.
 
 ---
 

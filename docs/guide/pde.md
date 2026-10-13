@@ -197,12 +197,64 @@ Scheme choice:
 - `Scheme.HV` (Hundsdorfer–Verwer) — better damping for strongly correlated /
   convection-dominated regimes (large `|ρ|`).
 
-### 5.5 Non-smooth payoffs and Rannacher start-up
+### 5.5 Non-smooth payoffs, Rannacher start-up and cell averaging
 
 Crank–Nicolson can oscillate near a payoff discontinuity (digitals) or kink
 (vanillas at the strike), polluting gamma and vega. Setting `rannacher_steps`
 runs that many fully-implicit steps first to damp the oscillations before
 switching to CN — enabled by default for digital and barrier recipes.
+
+Rannacher damps the *time* stepping; it does nothing about where the kink sits
+relative to the *nodes*. The short-rate engines (Hull–White, G2++, Cheyette 1F/2F
+and exact-\(y\)) therefore also **cell-average** every kinked payoff they sample:
+
+- the terminal \(\max(\cdot, 0)\) of swaptions and the Bermudan's last
+  exercise;
+- caplet / floorlet fixing values, both the single caplet and each caplet of a
+  cap strip;
+- the Bermudan exercise projection \(\max(C, E)\), and the callable / puttable
+  bond projections \(\min(C, K)\) / \(\max(C, K)\).
+
+Each node near the kink gets a \(C^1\) function of the payoff and of its
+variation across the node's cell, instead of the point value. Without this,
+the discrete price is piecewise smooth, with a kink whenever a node crosses
+the exercise boundary. With it, the price is \(C^1\) in the model parameters,
+curve and strike, and finite-difference risk no longer depends on the step: it
+equals `jax.grad`. The bias is \(O(h^2)\), the order of the schemes.
+
+- **1-D grids** (Hull–White, Cheyette 1F) use the exact cell average. This
+  also cleans up convergence: the European swaption error against Jamshidian
+  falls by 4.0 per refinement, where pointwise sampling gave ratios such as
+  −63 and 212.
+- **2-D grids** (G2++, Cheyette 2F, exact-\(y\)) use a bias-neutral variant.
+  It has the same band and is \(C^1\), with zero integrated bias, so prices
+  stay within a few percent of the pointwise error of the pointwise prices.
+  There the cell average's one-signed bias measured larger than the error it
+  removes: on the G2++ dual-curve receiver checked against the closed form
+  it took the error from \(4.6\times10^{-4}\) (pointwise) to
+  \(6.6\times10^{-3}\), against \(3.8\times10^{-4}\) for the bias-neutral
+  kernel. The kernel, its \(O(h)\) nodal dip (at most \(0.0256\,\delta\)) and
+  the design decision are in
+  [Hull-White PDE § 4](../theory/hull-white-pde.md#kinks-cell-averaged-payoff-and-exercise).
+
+The switch is a static field on both configs and is on by default:
+
+```python
+from valax.pricing.pde import PDEConfig, PDEConfig2D
+
+PDEConfig(n_spot=201, n_time=150, spot_range=5.0)                       # smoothed (default)
+PDEConfig2D(n_x=81, n_y=81, n_time=100, x_range=5.0, smooth_payoff=False)  # pointwise
+```
+
+`smooth_payoff=False` restores the pointwise arithmetic bit-for-bit. Prices
+move by \(O(h^2)\) between the two settings, so a calibration bound to a grid
+(`engine_kind="discretised"` / `"modelling_bias"`) is bound to the setting too:
+the flag is part of the config the provenance records. The equity and Heston
+recipes ignore the flag. The formula, the choice of the cell half-variation
+\(\delta\) (including the 2-D quadrature approximation) and the convergence
+evidence are in
+[Hull-White Finite Differences §4](../theory/hull-white-pde.md#kinks-cell-averaged-payoff-and-exercise);
+the implementation is `valax.pricing.pde.payoff_smoothing`.
 
 ## 5.6 Interest rates: the Hull–White short-rate PDE
 

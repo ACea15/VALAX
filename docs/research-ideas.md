@@ -302,6 +302,18 @@ QuantLib cross-check (`tests/test_quantlib_comparison/test_local_vol_pde_ql.py`)
 
 ### Recovering textbook negative effective convexity for callable bonds
 
+!!! success "Resolved"
+    The sign flip was there all along: the "positive floor" below was the
+    autodiff second derivative of a *pointwise-sampled* PDE call projection,
+    which is piecewise linear between node crossings and so hides the
+    curvature at the call boundary. With the cell-averaged projection
+    (`PDEConfig.smooth_payoff`, default) the Hull-White PDE price is C¹ and
+    the autodiff effective convexity is negative — ≈ −229 at the money,
+    ≈ −4.2 deep in the money, finite-difference-confirmed — see the
+    signature in [Theory § 7.9](theory/risk-measures.md#79-option-adjusted-spread-and-z-spread)
+    and `tests/test_risk/test_oas.py::test_callable_convexity_negative_at_call_boundary`.
+    The text below is the original framing, kept for the record.
+
 **Context / motivation.** The OAS work (`valax/risk/oas.py`) set out to
 reproduce the classic callable-bond signature — **negative** effective convexity
 near the call boundary — as an autodiff second derivative of price w.r.t. a

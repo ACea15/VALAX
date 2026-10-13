@@ -136,7 +136,9 @@ from valax.pricing.multicurve import (
     require_single_curve,
     with_discount_curve,
 )
+from valax.pricing.pde.payoff_smoothing import positive_part
 from valax.pricing.pde.rates_payoffs import (
+    bermudan_terminal_and_event,
     caplet_fixing_values,
     caplet_values_by_level,
     cms_spread_values_by_level,
@@ -592,7 +594,7 @@ def _swaption_g2pp(
             instrument.is_payer,
             basis,
         )
-        return jnp.maximum(swap, 0.0), None
+        return positive_part(swap, config.smooth_payoff), None
 
     return PDEResult(price=_solve_g2pp(model, config, horizon, build))
 
@@ -643,6 +645,7 @@ def _caplet_g2pp(
             instrument.notional,
             instrument.is_cap,
             basis,
+            smooth=config.smooth_payoff,
         )
         return terminal, None
 
@@ -693,6 +696,7 @@ def _cap_g2pp(
             config.n_time,
             (grid.n_x, grid.n_y),
             basis,
+            smooth=config.smooth_payoff,
         )
         terminal = caplet_vals[config.n_time]
         return terminal, lambda level, values: values + caplet_vals[level]
@@ -787,7 +791,8 @@ def _callable_style_price_g2pp(
     def build(grid: Grid2D):
         coupons = _coupon_values_by_level(bond, model, grid, config, horizon)
         return exercisable_terminal_and_event(
-            coupons, bond.face_value, strike_at_level, is_call
+            coupons, bond.face_value, strike_at_level, is_call,
+            smooth=config.smooth_payoff,
         )
 
     return _solve_g2pp(model, config, horizon, build)
@@ -906,18 +911,10 @@ def _bermudan_swaption_g2pp(
             for e in range(n_exercise)
         ])  # (n_exercise, n_x, n_y)
 
-        # The last exercise date *is* the horizon: exercise or expire worthless.
-        terminal = jnp.maximum(tails[-1], 0.0)
-        # -inf is the neutral obstacle: it never wins the maximum, so
-        # non-exercise levels pass the continuation value straight through.
-        exercise_at_level = (
-            jnp.full((config.n_time + 1, grid.n_x, grid.n_y), -jnp.inf)
-            .at[levels]
-            .set(tails)
+        # The last exercise date *is* the horizon: exercise or expire
+        # worthless; earlier exercise levels project max(C, tail).
+        return bermudan_terminal_and_event(
+            tails, levels, config.n_time, config.smooth_payoff
         )
-        event_fn = lambda level, values: jnp.maximum(
-            values, exercise_at_level[level]
-        )
-        return terminal, event_fn
 
     return PDEResult(price=_solve_g2pp(model, config, horizon, build))

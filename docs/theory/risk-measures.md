@@ -472,17 +472,29 @@ $\text{DV01}_z$ is the cash P&L for a one-basis-point widening of the spread (se
 
 For a bond with an embedded option the spread Greeks require the model, because the option is repriced at each spread. VALAX takes them as exact autodiff derivatives through the PDE exercise projection.
 
-#### The callable-convexity subtlety
+#### The callable-convexity signature
 
-Textbooks describe a callable bond as exhibiting **negative** effective convexity as yields fall — the issuer's call caps price appreciation. That statement is about a bond's *price-versus-yield-to-call* curve flattening at the call price. Measured properly as the second derivative of the full term-structure model price with respect to a **parallel discount-curve spread**, in the exact-fit Hull-White framework a callable's effective convexity does **not** go strictly negative:
+Textbooks describe a callable bond as exhibiting **negative** effective convexity as yields fall — the issuer's call caps price appreciation. VALAX recovers this as an exact autodiff Greek: the second derivative of the full Hull-White PDE price with respect to a **parallel discount-curve spread**,
 
 $$
-P(s) \;=\; \mathbb{E}\Big[\textstyle\sum_i \text{CF}_i(s)\, e^{-\int (r+s)}\Big],
+C_{\text{eff}} = \frac{1}{P}\frac{\partial^2 P}{\partial s^2},
+\qquad
+P(s) = \mathbb{E}\Big[\textstyle\sum_i \text{CF}_i\, e^{-\int (r+s)}\Big]\ \text{with the call exercised optimally}.
 $$
 
-and even when the bond is deep in-the-money to be called, the capped redemption is still a fixed near-term cash flow discounted by $e^{-s\,t}$ — a convex function of $s$. So the convexity floors at the *small positive* convexity of the near-term call stub rather than crossing zero.
+At each call date the bond's value is $\min(\text{continuation}, K)$: the holder is short the issuer's call, hence short its gamma, and that negative curvature is concentrated at the exercise boundary. On the 10Y callable of `tests/test_risk/test_oas.py` (6% coupon on a 5% curve, callable at every coupon date, $\sigma$ = 1%), $C_{\text{eff}} \approx -229$ at the money — the duration collapses from about 7 to about 0 across the boundary — and $\approx -4.2$ deep in the money (rates −200 bp), where the price is pinned near the call price, against $\approx +70$ for the bullet: **most negative at the call boundary, shrinking toward zero from below** as the call becomes certain. Duration is compressed below the bullet's in the same way.
 
-The economically real and **reproducible** signature is therefore **convexity compression**: the call annihilates the bond's convexity, taking it from the bullet's large positive value (e.g. $\sim 70$) down toward zero, and — unlike a bullet, whose convexity *rises* as rates fall — the callable's convexity *falls* toward zero as rates fall and the call bites. The same asymmetry shows up in duration, which the call *compresses* below the bullet's. VALAX's tests assert this compression, not a sign flip.
+!!! note "Why the grid matters for this Greek"
+    The projection $\min(V, K)$ is a kink. Sampled pointwise at grid nodes, the
+    discrete price is piecewise linear in $s$ between node crossings, so its
+    *autodiff* second derivative misses the curvature concentrated at the
+    crossings — an earlier version of this page reported a "small positive
+    floor" (+0.33 here) that was exactly this artifact, and a wide-step finite
+    difference on that grid swung from −4.6 to +0.3 as $h$ went from 10 bp to
+    1 bp. With the projection sampled as a cell average
+    (`PDEConfig.smooth_payoff`, the default — see the
+    [PDE guide](../guide/pde.md)) the price is C¹, and autodiff and finite
+    differences agree (−4.19 at $h$ = 2 bp and 1 bp).
 
 #### The compounding-convention trap
 

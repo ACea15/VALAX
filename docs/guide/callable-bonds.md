@@ -203,11 +203,15 @@ For an option-free bond `callable_bond_oas` collapses exactly to the
 it once there is an option to adjust for.
 
 !!! warning "Two subtleties worth knowing"
-    - **Convexity compression, not a sign flip.** The textbook "negative convexity"
-      of a callable is a *price-vs-yield-to-call* statement. Measured as this
-      parallel-spread derivative, `effective_convexity` does **not** go strictly
-      negative — the call instead *compresses* convexity from the bullet's large
-      positive value toward zero as the call bites.
+    - **Negative convexity, and the grid.** `effective_convexity` is the
+      autodiff second derivative of the PDE price in a parallel spread, and it
+      shows the textbook negative convexity: most negative at the call boundary
+      (≈ −229 on the 10Y callable in `tests/test_risk/test_oas.py`), shrinking
+      toward zero from below deep in the money. This needs the PDE's call
+      projection to be smooth (`PDEConfig.smooth_payoff=True`, the default):
+      sampled pointwise, the price is piecewise linear between node crossings
+      and autodiff misses the curvature at the boundary — see
+      [Theory § 7.9](../theory/risk-measures.md#79-option-adjusted-spread-and-z-spread).
     - **Compounding convention.** VALAX quotes OAS on a *continuous* basis. Tools
       like QuantLib quote it on a *compounded* basis; the two differ by a few bp
       and are not exactly reconcilable by a scalar formula on a non-flat curve.
