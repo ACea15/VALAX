@@ -117,7 +117,7 @@ surface = calibrate_svi_surface(
 ).check().value
 ```
 
-SVI interpolates **total variance** (not implied vol) across expiries. This preserves the calendar spread no-arbitrage condition: total variance must be non-decreasing in expiry.
+SVI interpolates **total variance** (not implied vol) linearly across expiries. That preserves the calendar-spread condition (total variance non-decreasing in expiry) *between* two slices that already satisfy it — but the per-slice fits do not enforce it, nor the butterfly condition within a slice: no arbitrage constraint is imposed anywhere (see the [calibration register](../applications/calibration-register.md#svi-slice-and-surface)).
 
 | Parameter | Meaning | Constraint |
 |---|---|---|
@@ -127,7 +127,7 @@ SVI interpolates **total variance** (not implied vol) across expiries. This pres
 | $m$ | Horizontal shift of the smile vertex | Real |
 | $\sigma$ | Smoothing at the vertex | $\sigma > 0$ |
 
-**When to use:** Equity options desks. SVI fits market smiles well with only 5 parameters, extrapolates cleanly, and can be constrained for arbitrage-freeness. The linear wings match the Roger Lee moment formula for extreme strikes.
+**When to use:** Equity options desks. SVI fits market smiles well with only 5 parameters, extrapolates cleanly, and can in principle be constrained for arbitrage-freeness (not yet implemented — a constrained KKT level is on the roadmap). The linear wings match the Roger Lee moment formula for extreme strikes.
 
 ## Cap → caplet (optionlet) stripping (rates)
 
@@ -150,7 +150,7 @@ $$
   + \sum_{j \in \mathcal{C}_i \setminus \mathcal{C}_{i-1}} \text{Optionlet}_j(\sigma_i),
 $$
 
-where $\mathcal{C}_i$ is the $i$-th quoted cap's optionlet index set and $\sigma_i$ — the vol shared by the incremental bucket — is the only unknown. Each step is a scalar Newton root-find (bucket by bucket, labelled `"cap 1Y"`, `"cap 2Y"`, …), and the solved buckets are packaged as **one lower-triangular root level**, so the whole strip is differentiable by a single **implicit-function adjoint**: `jax.grad` of a stripped vol with respect to a quoted cap vol, a discount pillar, or a projection pillar works without unrolling the solver.
+where $\mathcal{C}_i$ is the $i$-th quoted cap's optionlet index set and $\sigma_i$ — the vol shared by the incremental bucket — is the only unknown. Each step is a scalar Newton root-find (bucket by bucket, labelled by the cap's maturity from the valuation date — `"cap 1Y"`, `"cap 2Y"`, … matching quote keys such as `USD.CAP.2Y.<bp>`, even though the quoted strip drops the spot-starting caplet), and the solved buckets are packaged as **one lower-triangular root level**, so the whole strip is differentiable by a single **implicit-function adjoint**: `jax.grad` of a stripped vol with respect to a quoted cap vol, a discount pillar, or a projection pillar works without unrolling the solver.
 
 ```python
 import jax.numpy as jnp
@@ -179,6 +179,8 @@ cap_price_from_strip(caps[2], strip, ois, sofr3m)
 ```
 
 `strip_caplet_vols` is JIT-safe (`eqx.filter_jit` over the quotes) and reprices each quoted cap to ~1e-10 relative — including when the repricing is done by QuantLib's `BlackCapFloorEngine` off the adopted strip, which is how the routine is validated against `ql.OptionletStripper1` ([validation pyramid § 5.2](../architecture/quantlib-validation-pyramid.md#52-files)). Pass `is_normal=True` to strip Bachelier-quoted vols, which is the branch to use at or below zero rates. An optionlet that has already fixed has zero vega and nothing to strip — drop it from the quoted strip, as the market does, or the call raises.
+
+**A failed bucket is NaN.** If a bucket's root-find fails (an infeasible or missing quote), its vol is set to NaN — traced, `jnp.where(converged, vol, nan)`, so a converged strip and its gradients are untouched — and, the strip being triangular, every later bucket fails with it. `result.failed_labels()` lists them all and `result.root_cause_labels()` (and the `check()` message, as "first failure(s)") names the bucket whose own solve failed. In a strike matrix (`strip_optionlet_surface`, `caplet_strip_node`) each bucket is labelled by strike and maturity, e.g. `"K=3.00% cap 2Y"`, and the downstream optionlet SABR fit reports every expiry fed the NaN as failed. See the [calibration guide](calibration.md#solvers) for the naming rules.
 
 ### From a strip to a surface
 

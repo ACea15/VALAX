@@ -180,10 +180,15 @@ code path:
 
 Some calibrations are not a residual driven to zero but a fixed-point
 iteration $L_{k+1} = G(L_k;\, \mathcal{M}_{<\ell})$ run for a fixed number of
-passes $K$. The SLV leverage is the case in point: $G$ re-simulates a particle
-swarm under $L_k$ and returns
-$L^2 = \sigma^2_{\text{Dupire}} / \widehat{\mathbb E}[V_t \mid k_t = k]$, with
-fresh Monte Carlo randomness on every pass. The output is the composition
+passes $K$. The SLV leverage is the case in point: $G$ runs one
+Guyon–Henry-Labordère sweep, building
+$L^2 = \sigma^2_{\text{Dupire}} / \widehat{\mathbb E}[V_t \mid k_t = k]$ row by
+row from particles simulated under the rows already built ($L_k$ enters only
+as the predictor of the not-yet-built row in the midpoint-in-time
+interpolation), with fresh Monte Carlo randomness on every pass. Because each
+sweep is already self-consistent, the increment $L_K - L_{K-1}$ for
+$K \ge 2$ is the estimator's Monte Carlo noise — a stability check, not a
+contraction. The output is the composition
 
 $$
 L_K = G\big(G(\cdots G(L_0)\cdots)\big), \qquad L_0 \equiv 1 ,
@@ -238,6 +243,34 @@ hands curve risk back up the chain. A sequential bootstrap (the cap strip,
 bucket $i$ reading buckets $< i$) is the lower-triangular analogue: solved
 bucket by bucket, packaged as one triangular level.
 
+**Failure semantics.** Each node (and, for a strip, each bucket — a node
+carries a sub-node axis, labelled per $(\text{strike}, \text{bucket})$)
+reports its own convergence. A failed strip bucket installs NaN, never a
+best-effort value (a NaN-fed cube cell likewise ends NaN):
+$\theta_i \leftarrow \texttt{where}(c_i, \theta_i, \mathrm{NaN})$ with $c_i$
+the convergence flag. The mask is against a
+constant, so on a converged node $\partial\theta_i/\partial(\cdot)$ — and
+hence the adjoint — is unchanged. In the triangular case the NaN propagates
+to every later bucket; this is the honest outcome (their equations read an
+undefined input) and the first failure is recorded as the root cause.
+
+**Joint levels** (a curve build: one Newton solve, $\partial R/\partial\theta$
+dense) have no per-node flag, so a failure is attributed from the inputs and
+residuals: a non-finite quote $q_i$ makes every $R_j$ non-finite and is named
+directly; otherwise the nodes with $|R_i| \ge \tfrac12 \max_j |R_j|$ are named,
+evaluated at the solver's last iterate — or, when that iterate is non-finite,
+at the starting point $\theta_0$, where an infeasible quote's residual
+dominates. The latter is a heuristic, not a theorem: it localises a single
+gross outlier, not a subtle inconsistency spread over several quotes.
+
+**Trade data.** A level's residual may read instrument data that is neither a
+quote, an upstream object nor a held-fixed input (a per-trade basket). It is a
+fourth input block, $d$, carried as a pytree leaf
+(`LevelInputs.data`) so the level is a function of its arguments only — a
+result returned from `jit` / `vmap` holds no captured tracer. $\bar d$ is
+computed by the VJP but never accumulated: $d$ is a contract term, not a risk
+factor.
+
 ### I.10 Per-trade model levels and the vega profile
 
 For a rates exotic the model level is per trade: model $M(\theta_m)$ fitted to
@@ -280,7 +313,9 @@ vega-scaled residual, where $\lambda_{m,k}$ itself is the vega).
 | Level $R(\theta; q, \mathcal{M}, p)$ | `valax.calibration.level.CalibrationLevel`, `LevelInputs` | ✅ |
 | One IFT step | `valax.calibration.level.level_adjoint` | ✅ |
 | Solve + diagnostics (traceable `converged`) | `valax.calibration.solve.solve_level`, `CalibrationResult`, `SolverSettings` | ✅ |
-| Batched level, block-diagonal (§I.9), failures named per node | `valax.calibration.solve.solve_batched_level`, `CalibrationResult.failed_labels` | ✅ |
+| Batched level, block-diagonal (§I.9), failures named per node (per `(node, sub-node)` with `sub_labels`; root cause of a sequential strip) | `valax.calibration.solve.solve_batched_level`, `CalibrationResult.failed_labels`, `CalibrationResult.root_cause_labels` | ✅ |
+| Joint-level failure localisation (§I.9) | `CalibrationResult.failed_labels` (non-finite quote → worst cluster, `FAILURE_CLUSTER_FRACTION`) | ✅ |
+| Trade-data input block (§I.9) | `LevelInputs.data` (`swaption_basket_node`, `price_fit_node`, `basket_fit_level(data=...)`) | ✅ |
 | Explicit level | `valax.calibration.solve.explicit_level`, `market_inputs_node` | ✅ |
 | Fixed-point level (§I.8) | `calibrate_slv_leverage` (`problem="fixed_point"`, `fixed_point_diagnostics`) | ✅ standalone; not a chain node |
 | 1a curves (single / multi, basis, xccy) | `valax.calibration.nodes.curve_graph_node` (same level as `bootstrap_curve_graph`) | ✅ |

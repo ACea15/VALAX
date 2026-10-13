@@ -71,6 +71,10 @@ uses when `settings=None`):
 
 ::: valax.calibration.result.CalibrationProvenance
 
+::: valax.calibration.result.CLOSED_FORM_PROVENANCE
+
+::: valax.calibration.result.engine_provenance
+
 ::: valax.calibration.result.check_engine
 
 ::: valax.calibration.result.fixed_point_diagnostics
@@ -79,12 +83,16 @@ uses when `settings=None`):
 
 ::: valax.calibration.result.ENGINE_KINDS
 
+::: valax.calibration.result.FAILURE_CLUSTER_FRACTION
+
 ### Solving a level
 
 `valax.calibration.solve` is the one place a level is solved and packaged as
 a `CalibrationResult`. Batched levels (`solve_batched_level`) solve each node
 independently in one `vmap` and report per-node diagnostics aligned with
-`result.labels`, so a failed smile / cube cell / strip bucket is named.
+`result.labels`, so a failed smile / cube cell / strip bucket is named; a node
+solved in stages (a cap-strip column) passes `sub_labels` and is labelled per
+`(node, stage)`, e.g. `"K=3.00% cap 2Y"`.
 
 ::: valax.calibration.solve.solve_level
 
@@ -209,7 +217,8 @@ SLV model reproduces the input local-vol surface. See
 estimator (`particle` vs. `kernel`). Both return a `CalibrationResult`
 (`.value` is the `LeverageGrid` / `SLVModel`); the leverage pass is a
 fixed-point level whose diagnostics are the last outer-pass increment, and
-`calibrate_slv` carries the Heston fit as `result.children[0]`.
+`calibrate_slv` carries the Heston level as `result.children[0]` — fitted
+(optionally multi-expiry, with `fixed_params`) or supplied via `heston=`.
 
 ::: valax.calibration.calibrate_slv_leverage
 

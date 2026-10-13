@@ -16,6 +16,12 @@ This page covers the **end-to-end calibration workflow**: which liquid market in
     `CalibrationResult`) and quote-space risk through the whole chain, see
     [From Quotes to Risk](calibration-to-risk.md).
 
+!!! info "Assumptions and limitations"
+    This page is the how-to. What each calibrator fits and holds fixed, its
+    objective, engine and defaults, its known limitations and its
+    improvement path are recorded once, in the
+    [Calibration Assumptions Register](../applications/calibration-register.md).
+
 ## 1. End-to-End Workflow at a Glance
 
 Every VALAX calibration follows the same three-stage pipeline:
@@ -96,7 +102,7 @@ The interest-rate calibration universe is the most heterogeneous; it combines mo
 | [`calibrate_sabr`](#3-sabr-smile-calibration) | Single-expiry parametric fit; standard for rates and FX |
 | [`calibrate_sabr_surface`](vol-surfaces.md#sabr-surface) | Multi-expiry SABR cube; smooth across expiries |
 | [`calibrate_svi_slice`](vol-surfaces.md#svi-surface) | Single-expiry SVI (Gatheral); better wings for equity |
-| [`calibrate_svi_surface`](vol-surfaces.md#svi-surface) | Multi-expiry SVI; calendar-spread no-arbitrage by construction |
+| [`calibrate_svi_surface`](vol-surfaces.md#svi-surface) | Multi-expiry SVI, one slice per expiry with total variance interpolated linearly in expiry. **No arbitrage constraints are imposed** (neither butterfly nor calendar) — see the [calibration register](../applications/calibration-register.md#svi-slice-and-surface) |
 | `GridVolSurface(...)` | Direct construction when broker quotes are already smoothed |
 
 **Calibration output.** A `SABRVolSurface`, `SVIVolSurface`, or `GridVolSurface` — all JAX pytrees, all callable as `surface(strike, expiry) -> vol`.
@@ -205,7 +211,8 @@ tolerance changes the compiled program but never the calibrator.
 
 | Family | Default settings | Why |
 |---|---|---|
-| Curve bootstraps, cap strips, premium → vol | `EXACT_SETTINGS` — Newton to 1e-10 | Square systems with an exact solution |
+| Curve bootstraps (`bootstrap_curve_graph`, `curve_graph_node`) | `EXACT_SETTINGS` — Newton to 1e-10 | Square systems with an exact solution |
+| Cap strips (`strip_caplet_vols`, `caplet_strip_node`), premium → vol (`swaption_implied_normal_vol`) | `STRIP_SETTINGS` / `INVERSION_SETTINGS` — scalar Newton to 1e-12, 100 steps | Square, one unknown per bucket / quote, well conditioned: solved to machine precision |
 | Smiles and surfaces (`calibrate_sabr`, `calibrate_svi_*`, `calibrate_sabr_surface`, cube, optionlet surface), `calibrate_heston` | `FIT_SETTINGS` — Levenberg-Marquardt to 1e-8 | A fit residual does not vanish, and price-based fits have a noise floor near 1e-10 that a tighter step tolerance cannot get under |
 | `calibrate_hull_white`, `calibrate_g2pp`, `swaption_basket_node` | `BASKET_SETTINGS` — line-searched BFGS to 1e-12 | The Jamshidian / Brigo-Mercurio closed forms nest a root-find whose implicit derivative is non-finite far from the solution, where an undamped LM step can land; BFGS's line search keeps the iterates where the pricer is defined. Tight, because the engines have no noise floor |
 | `calibrate_cheyette`, `calibrate_cheyette_2f` | `CHEYETTE_SETTINGS` — BFGS to 1e-10 | As above, with the PDE's discretisation floor |
@@ -245,8 +252,49 @@ cube.check()   # CalibrationError: ... did not converge at node(s) ['5Yx10Y'] ..
 ```
 
 Labels follow the market's own tenors: `"2Y"` for a smile expiry, `"5Yx10Y"`
-for a cube cell, `"cap 3Y"` for a strip bucket, `"K=3.00%"` for a strike
-column; a curve build labels each quote `"<i>:<Type>"`.
+for a cube cell, `"cap 3Y"` for a strip bucket — the cap's **maturity** from
+the valuation date, so it matches the quote key `USD.CAP.3Y.<bp>` — and
+`"K=3.00% cap 3Y"` for a bucket of a cap-matrix strip (one label per
+`(strike, bucket)`, row-major over the `(n_strikes, n_buckets)` diagnostics,
+via `solve_batched_level(..., sub_labels=...)`). A curve build labels each
+quote by its key (`curve_graph_node`) or `"<i>:<Type>"`
+(`bootstrap_curve_graph`).
+
+**Sequential solves name their first failure.** A cap strip is triangular:
+bucket *i* reads the vols of buckets < *i*. A failed bucket installs **NaN**
+(as a failed cube cell does — never a plausible finite vol), so every later
+bucket of its column fails too. `failed_labels()` lists all of them;
+`root_cause_labels()` — and the `check()` message, as "first failure(s)" —
+names the one whose own solve failed:
+
+```python
+strip.failed_labels()      # ('K=-0.86% cap 2Y', 'K=-0.86% cap 3Y')
+strip.root_cause_labels()  # ('K=-0.86% cap 2Y',)
+```
+
+**Joint solves are localised, not blanket-blamed.** A curve build is one
+Newton solve, so a failure has no per-node flag; `failed_labels()` attributes
+it as follows (see `CalibrationResult.failed_labels`):
+
+1. a non-finite **quote** names exactly that quote (it poisons every
+   residual, so residuals cannot localise it);
+2. an explicit `max_residual=` names every node above it (absolute semantics);
+3. otherwise the **worst cluster** — nodes within a factor
+   `FAILURE_CLUSTER_FRACTION` (0.5) of the largest residual; if the solve
+   diverged to NaN everywhere (an infeasible quote, e.g. a −50% OIS rate),
+   the cluster is taken on the residuals at the starting point
+   (`diagnostics.extras["initial_residuals"]`), where the off-market quote
+   stands out. That last step is a heuristic: treat it as "start here".
+
+In example 16 a NaN or infeasible curve quote is named alone, and
+`max_steps=1` names the four long-end quotes rather than all 14.
+
+**Results from `jit` / `vmap` keep their diagnostics.** Trade data a residual
+reads — a per-trade basket, the model template, weights — travels in
+`LevelInputs.data` rather than in the static residual's closure, so
+`result.condition_number()` works on a fit returned from
+`eqx.filter_jit` (and inside `eqx.filter_vmap`). `data` is not a risk input:
+`chain_adjoint` and the quote-risk paths ignore its cotangent.
 
 **Engine provenance (Cheyette).** A fitted model is a property of the model
 only if the pricing engine it was fitted on is exact or converges under
@@ -279,7 +327,7 @@ Exact-`y` fits (`engine="exact"`) are recorded as `discretised` and Hull-White
 | Jacobian condition number | `result.condition_number()` |
 | Quoted values | `result.inputs.quotes` |
 | Fitted quotes, native units | `fitted_curve_quotes(instruments, result.value, ref)` |
-| Which quote broke the build | `result.failed_labels()` |
+| Which quote broke the build | `result.failed_labels()` (NaN quote → that quote; otherwise the worst cluster) |
 
 `quote_jacobian` raises `CalibrationError` on an unconverged build rather than
 returning sensitivities of a system nobody solved.

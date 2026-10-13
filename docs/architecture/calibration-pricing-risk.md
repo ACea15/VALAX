@@ -49,7 +49,7 @@ The consequences are the design:
 | --- | --- | --- |
 | Quotes ``q`` and fixed inputs ``p`` | `QuoteSet` (keyed, differentiable, vmappable) | `valax.market.quotes` |
 | Calibrated market | `MarketState` (`flat`, `single_curve`, keyed multi-curve) | `valax.core.market_state` |
-| One level | `CalibrationLevel`, `LevelInputs(quotes, upstream, fixed)` | `valax.calibration.level` |
+| One level | `CalibrationLevel`, `LevelInputs(quotes, upstream, fixed, data)` (`data`: trade data, not a risk input) | `valax.calibration.level` |
 | Solver choice and tolerances | `SolverSettings`, `run_solver`; defaults `EXACT_SETTINGS`, `FIT_SETTINGS`, `BASKET_SETTINGS`, `CHEYETTE_SETTINGS` | `valax.calibration.settings`, `.basket`, `.cheyette` |
 | Result of a calibration | `CalibrationResult` (value, theta, inputs, `residual_fn`, `assemble_fn`, traceable diagnostics, `labels`, `problem`, `provenance`, `children`; `check()`, `failed_labels()`, `condition_number()`, `converged`) | `valax.calibration.result` |
 | Level builders | `solve_level` (one solve), `solve_batched_level` (one solve per node, `vmap`-ed), `explicit_level` (explicit maps, fixed points); `stack_slices`, `period_label(s)` | `valax.calibration.solve` |
@@ -125,7 +125,7 @@ per expiry, SABR per cube cell, SVI per slice and a strip per strike column
 are solved by `solve_batched_level`: one independent solve per node inside a
 single `vmap` (one trace, one compile whatever the node count), with
 per-node diagnostics aligned to `labels`. A failure is therefore *named*
-(`"5Yx10Y"`, `"2Y"`, `"cap 3Y"`, `"K=3.00%"`) by `failed_labels()` and in
+(`"5Yx10Y"`, `"2Y"`, `"cap 3Y"`, `"K=3.00% cap 3Y"`) by `failed_labels()` and in
 the `check()` error, instead of collapsing to one flag for the grid. For the
 adjoint the nodes are still one level: its residual stacks the per-node
 residuals (first-order conditions for fits), so `dR/dθ` is block-diagonal and
@@ -146,8 +146,9 @@ checks one object, and each child keeps its own level for the adjoint.
 
 **D9 — A Monte Carlo fixed point is an explicit level differentiated by
 plain AD, never by the IFT.** The SLV leverage `L_{k+1} = G(L_k)` is computed
-by `n_iterations` unrolled passes, each re-simulating the particle swarm with
-fresh randomness. There is no residual the solver drives to zero — the
+by `n_iterations` unrolled passes, each a self-consistent Guyon–Henry-Labordère
+sweep of the particle swarm with fresh randomness. There is no residual the
+solver drives to zero — the
 increment never falls below the Monte Carlo noise floor — so there is no
 `R(θ) = 0` at which the implicit function theorem could be applied, and
 pretending otherwise would differentiate a fiction. `calibrate_slv_leverage`
@@ -175,10 +176,15 @@ limit) the parameters are valid on that engine only. Each result records
 field, so models fitted on different engines have one type, stack under
 `vmap`, and the engine is not a grouping axis of the book. `check_engine(result,
 method, config)` refuses a mismatched engine only for `modelling_bias`
-(`cheyette_provenance("frozen", cfg)`); for `exact` (`JAMSHIDIAN_PROVENANCE`,
-Hull-White / G2++) and `discretised` (`cheyette_provenance("exact", cfg)`) it is
-audit metadata. `price()` does not consult provenance: the check is an eager,
-explicit opt-in before pricing.
+(`cheyette_provenance("frozen", cfg)`); for `exact` (`CLOSED_FORM_PROVENANCE`,
+Hull-White / G2++ closed forms) and `discretised` (PDE / MC baskets,
+`cheyette_provenance("exact", cfg)`) it is audit metadata. Calibrators record
+their engine directly; nodes that price through `price()` (`price_fit_node`,
+`swaption_basket_node`) derive it with `engine_provenance(model, method,
+config)` — a `singledispatch` on the model type (default: `"analytic"` →
+exact, anything else → discretised; Cheyette's `"pde"` → modelling bias),
+with `method="auto"` resolved per instrument first. `price()` does not consult
+provenance: the check is an eager, explicit opt-in before pricing.
 
 **D11 — Curves are bound to models by the market, through one declared
 requirement.** Exact-fit short-rate models (Hull-White, G2++, Cheyette 1F/2F)
@@ -254,7 +260,7 @@ deliberately unconvergeable fit is reported (see
 Tracked on the [roadmap](../roadmap.md#unified-calibration-pricing-and-risk):
 richer synthetic quote noise; constrained (KKT) SVI and FX smile levels;
 credit and FX quote levels; reaching every pricer through `price` (the
-remaining rates pricers including the G2++ analytic swaption and the
+remaining rates pricers including the
 Hull-White tree, caps / swaptions off the cube surfaces, default configs); a
 keyed set of forward curves in `ResolvedMarket` for multi-index instruments
 (D11); derivative convergence of the numerical engines; the position /

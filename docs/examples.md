@@ -31,7 +31,7 @@ python examples/01_equity_options.py
 | [`15_unified_rates_caps_optionlet_chain.py`](#caps-and-floors-off-the-optionlet-chain) | Cap strip, optionlet SABR, cap/floor risk | Curves → cap→caplet strip → optionlet SABR as chain nodes → caps / floors through `price()` → quote risk to cap and curve quotes; adjoint vs autodiff vs FD |
 | [`16_unified_calibration_diagnostics.py`](#diagnosing-a-failed-calibration) | Failure naming, conditioning, engine provenance | Bad quotes (NaN, off-market, stale) → `check()` / `failed_labels()` name the cell or bucket; healthy nodes unaffected; ill-conditioning alert; `check_engine` refusing a frozen-y Cheyette fit on another engine; fix and recalibrate |
 | [`17_unified_slv_fixed_point.py`](#slv-as-a-fixed-point-level) | SLV leverage, fixed-point diagnostics, MC exotic risk | Smile → Heston → SLV leverage as a fixed-point level (max\|ΔL\|, `converged`, clip fraction vs `n_iterations`) → barrier under LV / Heston / SLV → vega by AD through the unrolled passes vs FD |
-| [`18_unified_rates_per_trade_g2pp_cheyette.py`](#per-trade-g2-and-cheyette) | Per-trade G2++ and Cheyette, model risk | Per-trade G2++ (multi-curve, 2-D PDE) and Cheyette (single-curve, frozen-y PDE) on the trade's basket → Bermudan → quote risk reconciled; HW vs G2++ vs Cheyette Bermudan on the same basket |
+| [`18_unified_rates_per_trade_g2pp_cheyette.py`](#per-trade-g2-and-cheyette) | Per-trade G2++ and Cheyette, model risk | Per-trade G2++ (multi-curve, closed-form basket, 2-D PDE Bermudan) and Cheyette (single-curve, frozen-y PDE) → quote risk reconciled; exact vs engine-consistent G2++ calibration; HW vs G2++ vs Cheyette Bermudan on the same basket |
 
 ---
 
@@ -285,8 +285,8 @@ Highlights:
 
 1. **Clean baseline** — every level converged, with its label count, max residual and condition number.
 2. **A NaN swaption vol** — `strict=True` raises naming the cell (`'2Yx10Y'`); `failed_labels()` returns exactly that cell, and the other cells of the batched level are bit-identical to the baseline.
-3. **An off-market cap quote** — an infeasible strip bucket is named (by strike column in the chain, by bucket in standalone `strip_caplet_vols`); a stale but strippable quote passes the strip and is caught downstream by the optionlet SABR.
-4. **Unconvergeable settings** — `max_steps=1` on the curves or a smile is reported, never silently accepted.
+3. **An off-market cap quote** — an infeasible strip bucket is named by strike and cap maturity (`'K=-0.86% cap 2Y'`, matching the quote key `USD.CAP.2Y.-86`), installs NaN so the later bucket of its column fails too, and `root_cause_labels()` names the first; a stale but strippable quote passes the strip and is caught downstream by the optionlet SABR.
+4. **Unconvergeable settings and bad curve quotes** — `max_steps=1` on the curves or a smile is reported, never silently accepted; the curve failure names the long-end cluster of quotes (4 of 14), not all of them, and a NaN or infeasible (−50%) curve quote is named alone.
 5. **Conditioning** — a fit on nearly-redundant strikes converges but trips `condition_alert` / `check(max_condition_number=...)` against `ILL_CONDITIONED_THRESHOLD`.
 6. **Engine provenance** — `check_engine` refuses a frozen-y Cheyette fit on a different PDE grid or on MC, accepts the matching engine, and never refuses exact (Jamshidian) or discretised fits.
 7. **Fix and recalibrate** — clean quotes restore the baseline exactly.
@@ -295,21 +295,23 @@ The contract itself is in [Calibration § Solvers](guide/calibration.md#solvers)
 
 ### SLV as a fixed-point level
 
-**`examples/17_unified_slv_fixed_point.py`** — the documented [SLV fixed-point strategy](guide/slv.md#how-the-fixed-point-is-reported) made runnable: smile → Heston backbone → `calibrate_slv_leverage` swept over `n_iterations` → an up-and-out call under local vol, Heston and SLV → quote risk.
+**`examples/17_unified_slv_fixed_point.py`** — the documented [SLV fixed-point strategy](guide/slv.md#how-the-fixed-point-is-reported) made runnable: smile → two-expiry Heston backbone (κ fixed) → `calibrate_slv(heston=…)` swept over `n_iterations` → an up-and-out call under local vol, Heston and SLV → quote risk.
 
-- **Fixed-point table** — max|ΔL| (the last increment, the level's residual), `converged`, clip fraction and the vanilla repricing error per `n_iterations`; `n_iterations=1` is never converged and its `check()` raises, the first converged pass passes `check()` together with its Heston child.
-- **Model picture** — all three models reprice the ATM vanilla within Monte Carlo error; the barrier prices differ, SLV between local vol and Heston.
-- **Risk by AD, not IFT** — `jax.grad` through the calibrations, the unrolled leverage passes and the SLV Monte Carlo, checked against a central difference that reruns every calibration on the same random numbers.
+- **Backbone conditioning** — `calibrate_heston` with all five parameters free does not converge on the 1Y smile alone and does on both smiles (per-quote `expiry`).
+- **Fixed-point table** — max|ΔL| (the last increment, the level's residual — Monte Carlo noise, since every pass is a self-consistent Guyon–Henry-Labordère sweep), `converged`, clip fraction and the vanilla repricing error per `n_iterations`; `n_iterations=1` is never converged and its `check()` raises, the first converged pass passes `check()` together with its Heston child.
+- **Model picture** — all three models reprice the ATM vanilla within Monte Carlo error; the barrier prices differ, SLV between local vol and Heston. Local vol runs on the raw SABR surface (the default `LocalVolGuard` keeps deep-wing paths finite).
+- **Risk by AD, not IFT** — `jax.grad` through the calibrations, the unrolled leverage passes and the SLV Monte Carlo, checked against a central difference that reruns the same passes on the same random numbers with the Heston backbone held; through the backbone the QE variance scheme makes the sample only piecewise smooth, and the example shows the bump FD failing to settle there.
 
-The backbone uses half the calibrated vol-of-vol (a mixing fraction): with the full value the outer iteration does not settle on this market.
+The backbone uses the full calibrated vol-of-vol: no mixing fraction and no hand-clamped wings are needed.
 
 ### Per-trade G2++ and Cheyette
 
 **`examples/18_unified_rates_per_trade_g2pp_cheyette.py`** — Example 14 with the two richer short-rate models, plus the model risk between all three.
 
-- **G2++ (multi-curve)** — σ and η fitted per trade with a, b, ρ as fixed inputs, priced through `price(..., method="pde")` (2-D ADI). A co-terminal basket alone cannot separate the two factors (condition number ~1e17), so the basket adds the 1Y-tenor swaption at the first exercise date (~1e3). Same-shaped baskets fit in one `eqx.filter_vmap`; the PDE basket is checked against the Brigo–Mercurio closed form.
-- **Cheyette (single-curve)** — σ and the skew β fitted with κ fixed, on the co-terminals plus one off-strike option (β needs a second strike), through the frozen-y PDE. `price` refuses a trade with a distinct projection curve (Cheyette carries no tenor-basis overlay), so this section runs on a single-curve market; the fit records the engine-bound provenance.
-- **Risk** — for each model the adjoint (λ_m) is reconciled with autodiff (rtol 1e-6) and checked against full-recalibration finite differences; the G2++ vega profile across the basket sums to the total cube vega.
+- **G2++ (multi-curve)** — σ and η fitted per trade with a, b, ρ as fixed inputs, the basket priced by `price`'s default for the pair (the Brigo–Mercurio closed form), the Bermudan by the 2-D ADI PDE. A co-terminal basket alone cannot separate the two factors (condition number ~1e16), so the basket adds the 1Y-tenor swaption at the first exercise date (~1e3). Same-shaped baskets fit in one `eqx.filter_vmap`.
+- **Exact vs engine-consistent calibration** — the same basket fitted on the Bermudan's own PDE grid instead. The closed-form fit has portable parameters (provenance `exact`); the PDE fit fits the basket *as that grid prices it* (`discretised`, grid recorded), so the grid's swaption bias does not add to its basket miss. The example prints both parameter sets, the basket miss on the grid and the Bermudan under each. Full mode adds a converged reference (161×161×200): on each grid the engine-consistent fit's Bermudan error is several times smaller (41×41×40: −0.55 vs −0.07 bp; 81×81×100: −0.11 vs +0.004 bp) because it cancels against the basket's — the reason to calibrate on the pricing engine, at the cost of grid-bound parameters.
+- **Cheyette (single-curve)** — σ and the skew β fitted with κ fixed, on the co-terminals plus one off-strike option (β needs a second strike), through the frozen-y PDE. `price` refuses a trade with a distinct projection curve (Cheyette carries no tenor-basis overlay), so this section runs on a single-curve market; the node records the engine-bound provenance and `check_engine` refuses another grid.
+- **Risk** — the adjoint (λ_m) is reconciled with autodiff (rtol 1e-6) and checked against full-recalibration finite differences; the G2++ vega profile across the basket sums to the total cube vega.
 - **Model risk** — Hull–White, G2++ and Cheyette fitted per trade to the same trade on the same market: the Bermudan spread across models is printed and bounded.
 
 The validation tests behind this are in `tests/test_calibration/test_per_trade_basket.py`.

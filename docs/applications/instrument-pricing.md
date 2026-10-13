@@ -53,7 +53,9 @@ Vanilla contracts are documented on the pricing-method pages:
 
 ## Coverage matrix
 
-The **Calibration** column names the route that produces each input. Every
+The **Calibration** column names the route that produces each input; what
+each route fits, holds fixed and assumes, and its known limitations, are in
+the [Calibration Assumptions Register](calibration-register.md). Every
 route can also be expressed as a level of a calibration chain (quotes →
 curves → vol objects → model) with quote-space risk through the whole chain —
 see [From Quotes to Risk](../guide/calibration-to-risk.md); which levels exist
@@ -85,7 +87,7 @@ as chain nodes today is tracked on the
 | [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | single forward per period | ✅ |
 | [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | strip of independent caplets | ✅ |
 | [Interest-rate swap](#interest-rate-swap) | Analytic | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
-| [Swaption](#swaption) | Analytic · MC · PDE (Hull-White analytic = Jamshidian, reachable through `price()` and its auto default) | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube); as a chain: `swaption_cube_node` on the upstream curves · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)); per trade off the cube: `swaption_basket_node` | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
+| [Swaption](#swaption) | Analytic · MC · PDE (Hull-White analytic = Jamshidian, G2++ analytic = Brigo-Mercurio; both reachable through `price()` and its auto default) | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube); as a chain: `swaption_cube_node` on the upstream curves · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)); per trade off the cube: `swaption_basket_node` | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
 | [CMS swap](#cms-swap) | Analytic | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
 | [CMS-spread swap](#cms-spread-swap) | MC · PDE | G2++ · Cheyette-2F | HW → swaption surface | 2-factor decorrelation (steepener / flattener) | ✅ |
 | [CMS cap / floor](#cms-cap-floor) | Analytic | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |

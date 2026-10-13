@@ -153,7 +153,8 @@ structure that reprices every quoted cap exactly, and it is the canonical
 dual-curve operation — forwards are projected off the tenor curve,
 payoffs discounted off OIS. The strip is solved bucket by bucket (a
 sequential bootstrap, one Newton root-find per quoted maturity, labelled
-`"cap 3Y"` etc.) and packaged as **one lower-triangular root level**, so the
+by cap maturity `"cap 3Y"` etc., or `"K=3.00% cap 3Y"` in a strike matrix; a
+failed bucket installs NaN) and packaged as **one lower-triangular root level**, so the
 whole strip is differentiable by a single implicit-function adjoint.
 `strip_optionlet_surface` returns the optionlet SABR level with the strip
 level as `result.children[0]`; its `settings=` drive the SABR fits and

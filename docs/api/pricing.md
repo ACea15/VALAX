@@ -73,6 +73,20 @@ default in `valax/__init__.py`). See
 
 ::: valax.pricing.analytic.dupire_local_vol_from_strike
 
+Path simulation (the local-vol Monte Carlo and the SLV leverage target)
+evaluates Dupire through a guard that makes it total: the query is clamped to
+a trusted log-moneyness domain (flat local vol beyond), a non-positive
+Gatheral denominator falls back to the implied variance, and the local
+variance is clipped to a band around the ATM variance — with finite
+gradients throughout. See the
+[Monte Carlo guide § local volatility](../guide/monte-carlo.md#local-volatility).
+
+::: valax.pricing.analytic.LocalVolGuard
+
+::: valax.pricing.analytic.guarded_local_vol
+
+::: valax.pricing.analytic.guarded_local_variance
+
 ### Bonds
 
 ::: valax.pricing.analytic.zero_coupon_bond_price
@@ -593,6 +607,29 @@ the caplet/cap/floor and two-factor callable/puttable recipes cheap to add.
 ::: valax.pricing.pde.rates_payoffs.exercise_obstacle_by_level
 
 ::: valax.pricing.pde.rates_payoffs.exercisable_terminal_and_event
+
+::: valax.pricing.pde.rates_payoffs.bermudan_terminal_and_event
+
+### Cell-averaged payoffs
+
+Every kinked payoff and exercise projection above is sampled through
+`valax.pricing.pde.payoff_smoothing` when `config.smooth_payoff` is set (the
+default). The positive part is replaced by its exact cell average on 1-D grids
+and by a bias-neutral \(C^1\) kernel on 2-D grids. Either way the discrete
+price is \(C^1\) in its inputs, at an \(O(h^2)\) bias. See
+[PDE guide §5.5](../guide/pde.md#55-non-smooth-payoffs-rannacher-start-up-and-cell-averaging).
+
+::: valax.pricing.pde.payoff_smoothing.smooth_positive_part
+
+::: valax.pricing.pde.payoff_smoothing.bias_neutral_positive_part
+
+::: valax.pricing.pde.payoff_smoothing.cell_half_variation
+
+::: valax.pricing.pde.payoff_smoothing.positive_part
+
+::: valax.pricing.pde.payoff_smoothing.project_max
+
+::: valax.pricing.pde.payoff_smoothing.project_min
 
 ## Multi-curve overlay for the short-rate solvers
 

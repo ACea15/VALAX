@@ -75,6 +75,7 @@ nav:
       - Research Ideas: research-ideas.md
   - Solvers and Instruments:
       - Overview: applications/instrument-pricing.md
+      - Calibration Assumptions Register: applications/calibration-register.md
       - Instruments:
           - Fixed Income: guide/fixed-income.md
           - Callable/Puttable/FRN/Convertible Bonds: guide/callable-bonds.md

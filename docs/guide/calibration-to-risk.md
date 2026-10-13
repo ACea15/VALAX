@@ -180,7 +180,8 @@ swaptions → Bermudan priced through `price` → quote risk by one sweep.
   (`"5Yx10Y"`); see [Calibration § Solvers](calibration.md#solvers).
 - `swaption_basket_node` is a model-scope level: targets are the basket
   swaptions priced off the calibrated cube and curves, model prices go through
-  `price` (Jamshidian for Hull-White), and the fitted model is curve-free —
+  `price` (by default the closed form — Jamshidian for Hull-White,
+  Brigo-Mercurio for G2++), and the fitted model is curve-free —
   `price` binds its curve from the market.
 - Zero-valued **target shifts**, one fixed input per basket instrument, report
   `∂V/∂T_k`: the trade's vega profile across its basket.
@@ -272,7 +273,25 @@ baskets = [coterminal_swaptions(t) for t in trades]       # same shapes
 stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *baskets)
 batch = eqx.filter_vmap(fit_one)(stacked)
 batch.diagnostics.converged                                # one flag per trade
+
+# Per-trade conditioning, inside the vmap; a single jitted fit keeps its
+# diagnostics too (the basket travels in LevelInputs.data, not a closure).
+kappas = eqx.filter_vmap(lambda b: fit_one(b).condition_number())(stacked)
+eqx.filter_jit(fit_one)(baskets[0]).condition_number()
 ```
+
+**Other models, and which engine fits the basket.** The same node fits G2++
+and Cheyette. G2++ prices its basket by its own closed form by default
+(Brigo-Mercurio, `price`'s auto route for `Swaption × G2PPModel`) but needs a
+basket beyond the co-terminals — add the short-tenor swaption at the first
+exercise — to separate its two factors; Cheyette has no closed form and fits
+on the frozen-`y` PDE, single-curve only. Passing `method="pde", config=...`
+fits the basket *on the Bermudan's own grid* instead: the parameters become
+grid-bound, but the grid's Bermudan error largely cancels against its
+basket's. The node records the choice as provenance (`exact`; `discretised`
+with the grid; `modelling_bias` for Cheyette, which `check_engine` binds to
+that grid). [Example 18](../examples.md#per-trade-g2-and-cheyette) compares
+the two G2++ fits against a converged reference.
 
 Example 14 runs the whole workflow self-checking, including the identity that
 the total cube vega equals the summed basket profile. The maths of the
