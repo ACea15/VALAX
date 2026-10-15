@@ -39,15 +39,32 @@ from jax import Array
 
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import year_fraction
-from valax.models.short_rate import require_initial_curve
+from valax.models.short_rate import (
+    as_buckets,
+    check_buckets,
+    decayed_integral,
+    default_bucket_times,
+    is_constant,
+    piecewise_integral,
+    require_initial_curve,
+    volatility_bucket_fields,
+)
 
 
 class HullWhiteModel(eqx.Module):
-    """Hull-White one-factor model.
+    """Hull-White one-factor model with piecewise-constant volatility.
+
+    The short-rate volatility :math:`\\sigma(t)` is piecewise constant on
+    buckets (see :mod:`valax.models.short_rate`): ``volatility[j]`` applies on
+    :math:`[\\tau_j, \\tau_{j+1})` with :math:`\\tau_0 = 0`, the interior
+    breakpoints are ``volatility_times`` and the last value extends flat. A
+    constant volatility is one bucket; passing a scalar ``volatility``
+    promotes it to one, and every closed form then runs its original
+    constant-parameter formula.
 
     Attributes:
         mean_reversion: Mean-reversion speed :math:`a` (positive scalar).
-        volatility: Short-rate volatility :math:`\\sigma` (positive scalar).
+        volatility: Short-rate volatility per bucket (positive).
         initial_curve: Initial discount curve :math:`P^M(0, t)` used for
             exact-fit :math:`\\theta(t)` calibration.
             ``None`` (the default) leaves the model unbound:
@@ -55,12 +72,55 @@ class HullWhiteModel(eqx.Module):
             :mod:`valax.models.short_rate`).
         curve_id: Market id of the curve to bind, or ``None`` to use the
             instrument's discount curve. Static.
+        volatility_times: Interior bucket breakpoints in year fractions from
+            the curve's reference date, increasing; empty for one bucket.
+            Data, not a calibrated parameter (it is set from the trade's
+            exercise dates by the co-terminal bootstrap).
     """
 
     mean_reversion: Float[Array, ""]
-    volatility: Float[Array, ""]
-    initial_curve: DiscountCurve | None = None
-    curve_id: str | None = eqx.field(static=True, default=None)
+    volatility: Float[Array, " n_buckets"]
+    initial_curve: DiscountCurve | None
+    curve_id: str | None = eqx.field(static=True)
+    volatility_times: Float[Array, " n_buckets_minus_1"]
+
+    def __init__(
+        self,
+        mean_reversion: Float[Array, ""],
+        volatility: Float[Array, " n_buckets"] | Float[Array, ""],
+        initial_curve: DiscountCurve | None = None,
+        curve_id: str | None = None,
+        *,
+        volatility_times: Float[Array, " n_buckets_minus_1"] | None = None,
+    ):
+        """Build a model; a scalar ``volatility`` becomes one bucket.
+
+        Args:
+            mean_reversion: Mean-reversion speed :math:`a`.
+            volatility: Volatility per bucket, or a scalar for a constant one.
+            initial_curve: Bound initial curve, or ``None`` (bound by
+                ``price``).
+            curve_id: Market id of the curve to bind (static).
+            volatility_times: Interior breakpoints (``n_buckets - 1``);
+                required for more than one bucket.
+        """
+        self.mean_reversion = mean_reversion
+        self.volatility = as_buckets(volatility)
+        self.initial_curve = initial_curve
+        self.curve_id = curve_id
+        self.volatility_times = (
+            default_bucket_times(self.volatility)
+            if volatility_times is None else volatility_times
+        )
+
+    def __check_init__(self) -> None:
+        """Validate the bucket structure (shapes only)."""
+        check_buckets("HullWhiteModel", self.volatility, self.volatility_times)
+
+
+@volatility_bucket_fields.register(HullWhiteModel)
+def _hw_bucket_fields(model: HullWhiteModel) -> tuple[str, ...]:
+    return ("volatility",)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -219,6 +279,17 @@ def hw_alpha(
     At :math:`t = 0` the second term vanishes and
     :math:`\\alpha(0) = f^M(0, 0) = r(0)`.
 
+    With a piecewise-constant :math:`\\sigma(t)` the convexity term is the
+    general
+
+    .. math::
+
+        \\int_0^t \\sigma(u)^2 e^{-a(t-u)} B(u, t)\\,du
+            = \\frac{I_a(t) - I_{2a}(t)}{a},
+        \\qquad I_k(t) = \\int_0^t \\sigma(u)^2 e^{-k(t-u)}\\,du,
+
+    which reduces to the expression above for a constant :math:`\\sigma`.
+
     Args:
         model: Hull-White model carrying the initial curve and parameters.
         t: Year fraction(s) from the curve reference date.
@@ -230,11 +301,107 @@ def hw_alpha(
         Brigo & Mercurio (2006), *Interest Rate Models*, §3.3 (eq. 3.30).
     """
     a = model.mean_reversion
-    sigma = model.volatility
     t_arr = jnp.asarray(t)
     forward = jnp.vectorize(lambda s: _instantaneous_forward(model, s))(t_arr)
-    convexity = (sigma**2 / (2.0 * a**2)) * (1.0 - jnp.exp(-a * t_arr)) ** 2
-    return forward + convexity
+    if is_constant(model.volatility):
+        sigma = model.volatility[0]
+        convexity = (sigma**2 / (2.0 * a**2)) * (1.0 - jnp.exp(-a * t_arr)) ** 2
+        return forward + convexity
+    return forward + _convexity(model, t_arr)
+
+
+def _variance_integrals(
+    model: HullWhiteModel,
+    rate: Float[Array, ""],
+    t: Float[Array, "..."],
+) -> tuple[Float[Array, "..."], Float[Array, "..."]]:
+    """``(I_k(t), ∫_0^t I_k)`` for :math:`v = \\sigma^2` at decay rate ``k``."""
+    return decayed_integral(
+        model.volatility**2, model.volatility_times, rate, t
+    )
+
+
+def _convexity(model: HullWhiteModel, t: Float[Array, "..."]) -> Float[Array, "..."]:
+    """Exact-fit convexity :math:`(I_a(t) - I_{2a}(t))/a` (piecewise σ)."""
+    a = model.mean_reversion
+    return (
+        _variance_integrals(model, a, t)[0]
+        - _variance_integrals(model, 2.0 * a, t)[0]
+    ) / a
+
+
+def _convexity_antiderivative(
+    model: HullWhiteModel, t: Float[Array, "..."]
+) -> Float[Array, "..."]:
+    """:math:`\\int_0^t` of the exact-fit convexity (piecewise σ)."""
+    a = model.mean_reversion
+    return (
+        _variance_integrals(model, a, t)[1]
+        - _variance_integrals(model, 2.0 * a, t)[1]
+    ) / a
+
+
+def hw_state_variance(
+    model: HullWhiteModel,
+    s: Float[Array, "..."],
+    t: Float[Array, "..."],
+) -> Float[Array, "..."]:
+    """Conditional variance of the centred state :math:`x(t)` given :math:`x(s)`.
+
+    .. math::
+
+        V(s, t) = \\int_s^t \\sigma(u)^2 e^{-2a(t-u)}\\,du
+                = I_{2a}(t) - e^{-2a(t-s)}\\,I_{2a}(s),
+
+    which is :math:`\\frac{\\sigma^2}{2a}(1 - e^{-2a(t-s)})` for a constant
+    :math:`\\sigma`. It is the exact Monte Carlo step variance and the
+    variance a trinomial-tree level must match.
+
+    Args:
+        model: Hull-White model.
+        s: Start time(s) in year fractions.
+        t: End time(s) in year fractions (``t >= s``).
+
+    Returns:
+        The conditional variance.
+    """
+    a = model.mean_reversion
+    if is_constant(model.volatility):
+        sigma = model.volatility[0]
+        return (sigma**2 / (2.0 * a)) * (1.0 - jnp.exp(-2.0 * a * (t - s)))
+    i_t = _variance_integrals(model, 2.0 * a, t)[0]
+    i_s = _variance_integrals(model, 2.0 * a, s)[0]
+    return i_t - jnp.exp(-2.0 * a * (t - s)) * i_s
+
+
+def hw_mean_variance_rate(
+    model: HullWhiteModel,
+    t0: Float[Array, "..."],
+    t1: Float[Array, "..."],
+) -> Float[Array, "..."]:
+    """Time average of :math:`\\sigma(t)^2` over ``[t0, t1]``.
+
+    The diffusion coefficient a discretised scheme should use for a step that
+    may straddle a bucket breakpoint (exact for the step's total variance
+    rate).
+
+    Args:
+        model: Hull-White model.
+        t0: Start of each interval in year fractions.
+        t1: End of each interval in year fractions (``t1 > t0``).
+
+    Returns:
+        :math:`\\frac{1}{t_1 - t_0}\\int_{t_0}^{t_1}\\sigma(u)^2\\,du`.
+    """
+    if is_constant(model.volatility):
+        sigma = model.volatility[0]
+        return jnp.broadcast_to(sigma**2, jnp.broadcast_shapes(
+            jnp.shape(t0), jnp.shape(t1)
+        ))
+    sq, times = model.volatility**2, model.volatility_times
+    return (
+        piecewise_integral(sq, times, t1) - piecewise_integral(sq, times, t0)
+    ) / (t1 - t0)
 
 
 def _convexity_integral(
@@ -294,13 +461,19 @@ def hw_alpha_average(
         The average of :math:`\\alpha` over each ``[t0, t1]`` interval.
     """
     a = model.mean_reversion
-    sigma = model.volatility
     dt = t1 - t0
 
     forward_avg = (_log_df_at_time(model, t0) - _log_df_at_time(model, t1)) / dt
-    convexity_avg = (sigma**2 / (2.0 * a**2)) * (
-        _convexity_integral(a, t1) - _convexity_integral(a, t0)
-    ) / dt
+    if is_constant(model.volatility):
+        sigma = model.volatility[0]
+        convexity_avg = (sigma**2 / (2.0 * a**2)) * (
+            _convexity_integral(a, t1) - _convexity_integral(a, t0)
+        ) / dt
+    else:
+        convexity_avg = (
+            _convexity_antiderivative(model, t1)
+            - _convexity_antiderivative(model, t0)
+        ) / dt
     return forward_avg + convexity_avg
 
 
@@ -343,7 +516,6 @@ def hw_bond_price(
         Zero-coupon bond price :math:`P(t, T)`.
     """
     a = model.mean_reversion
-    sigma = model.volatility
 
     B = hw_B(a, T - t)
     f_t = _instantaneous_forward(model, t)
@@ -351,11 +523,23 @@ def hw_bond_price(
     ln_PM_T = _log_df_at_time(model, T)
     ln_PM_t = _log_df_at_time(model, t)
 
-    ln_A = (
-        ln_PM_T - ln_PM_t
-        + B * f_t
-        - (sigma**2 / (4.0 * a)) * (1.0 - jnp.exp(-2.0 * a * t)) * B**2
-    )
+    if is_constant(model.volatility):
+        # Kept in the original evaluation order: reordering the terms leaves
+        # the value unchanged but reorders reverse-mode accumulation, which
+        # moved a gradient by one ulp.
+        sigma = model.volatility[0]
+        ln_A = (
+            ln_PM_T - ln_PM_t
+            + B * f_t
+            - (sigma**2 / (4.0 * a)) * (1.0 - jnp.exp(-2.0 * a * t)) * B**2
+        )
+    else:
+        # General form: (1/2) B^2 Var[x(t)] with Var[x(t)] = I_{2a}(t).
+        ln_A = (
+            ln_PM_T - ln_PM_t
+            + B * f_t
+            - 0.5 * B**2 * hw_short_rate_variance(model, t)
+        )
     return jnp.exp(ln_A - B * r)
 
 
@@ -370,7 +554,19 @@ def hw_short_rate_variance(
     .. math::
 
         \\text{Var}[r(t)] = \\frac{\\sigma^2}{2a}(1 - e^{-2at})
+
+    for a constant :math:`\\sigma`, and
+    :math:`I_{2a}(t) = \\int_0^t \\sigma(u)^2 e^{-2a(t-u)}\\,du` in general.
+
+    Args:
+        model: Hull-White model.
+        t: Time(s) in year fractions.
+
+    Returns:
+        The variance of :math:`r(t)` (equivalently of the state :math:`x(t)`).
     """
     a = model.mean_reversion
-    sigma = model.volatility
-    return (sigma**2 / (2.0 * a)) * (1.0 - jnp.exp(-2.0 * a * t))
+    if is_constant(model.volatility):
+        sigma = model.volatility[0]
+        return (sigma**2 / (2.0 * a)) * (1.0 - jnp.exp(-2.0 * a * t))
+    return _variance_integrals(model, 2.0 * a, t)[0]

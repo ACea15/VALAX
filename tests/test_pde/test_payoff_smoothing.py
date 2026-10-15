@@ -233,7 +233,7 @@ def _g2_price_in_sigma(config):
     def f(sigma):
         model = G2PPModel(
             mean_reversion_x=jnp.array(0.5), mean_reversion_y=jnp.array(0.1),
-            volatility_x=sigma, volatility_y=jnp.array(0.008),
+            volatility_x=sigma, volatility_ratio=jnp.array(0.008) / sigma,
             correlation=jnp.array(-0.7), initial_curve=_CURVE,
         )
         return pde_price_dispatch(_BERMUDAN, model, config).price

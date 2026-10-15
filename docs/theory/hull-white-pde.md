@@ -39,7 +39,9 @@ $\theta(t) = \alpha'(t) + a\,\alpha(t)$.)
 
 Three things fall out, all of which the numerics want:
 
-- the drift and diffusion are **time-independent**, so the mesh is built once;
+- the drift does not depend on time, and the diffusion is constant (piecewise
+  constant in time with a bucketed $\sigma(t)$, see
+  [below](#with-a-time-dependent-volatility)), so the mesh is built once;
 - the state starts exactly at the **origin**, so the price is always read off at
   $x = 0$ — a fixed point, unlike the equity solvers whose read-off slides with
   spot and needs `stop_gradient` scaffolding to keep gamma well defined;
@@ -95,6 +97,23 @@ second order on flat, sloped and humped curves alike:
 | 200 | 3.29e-06 | 3.91e-06 | 1.17e-05 |
 | 400 | 8.23e-07 | 9.78e-07 | 2.94e-06 |
 | 800 | 2.06e-07 | 2.45e-07 | 7.36e-07 |
+
+### With a time-dependent volatility
+
+With a piecewise-constant $\sigma(t)$ the convexity part of $\alpha$ changes,
+and the diffusion also varies by step. The averaging discipline above carries
+over unchanged. Each step's operator row uses the exact step average of
+$\sigma^2$ (`hw_mean_variance_rate`) and the exact step average of the
+piecewise $\alpha$. A step that straddles a bucket breakpoint therefore carries
+exactly its variance and its discount, and the time grid does not need to be
+aligned to the breakpoints. The mesh is still built once. Its half-width is set
+by the state's standard deviation at the horizon,
+$\sqrt{\int_0^{T}\sigma(u)^2e^{-2a(T-u)}du}$. The derivation is in
+[Time-Dependent Volatility §4.2](time-dependent-volatility.md#42-pde-exact-step-averages).
+
+Against the Jamshidian closed form with the same $\sigma(t)$, the scheme stays
+**second order**, including for a 5× steep $\sigma(t)$, whose finest-mesh error
+is $1.4\times10^{-5}$ (`tests/test_pde/test_hull_white_piecewise.py`).
 
 ---
 
@@ -296,6 +315,8 @@ its first differences, where the pointwise G2++ scan had 100.
 | Bermudan swaption | `ql.FdHullWhiteSwaptionEngine` | ~2e-4 relative |
 | Bermudan swaption | `ql.TreeSwaptionEngine` | ~1.2e-3 relative |
 | Callable / puttable bond | VALAX HW tree, `ql.TreeCallableFixedRateBondEngine` | < 5e-3 |
+| European swaption, $\sigma(t)$ | Jamshidian with the same $\sigma(t)$ | second order (finest 1.4e-5, 5× steep) |
+| Bermudan swaption, $\sigma(t)$ | general HW tree and QuantLib `Gsr` | ~1e-5 ([details](time-dependent-volatility.md#8-validation)) |
 
 Two structural checks complement the numerical ones, and are sharper because
 they hold *exactly* rather than to tolerance:

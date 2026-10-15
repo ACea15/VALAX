@@ -290,7 +290,7 @@ class TestJITAndGrad:
             return float(
                 eqx.filter_grad(
                     lambda m: mc_price_dispatch(inst, m, mc_config, key).price
-                )(model).volatility
+                )(model).volatility[0]
             )
 
         assert dv(callable_bond_2cd) < 0.0
@@ -357,7 +357,7 @@ class TestHWTreeJMax:
             )
         )(model)
         assert jnp.isfinite(grads.volatility)
-        assert float(grads.volatility) < 0.0  # call optionality hurts the holder
+        assert float(grads.volatility[0]) < 0.0  # call optionality hurts the holder
 
         with pytest.raises(jax.errors.ConcretizationTypeError):
             eqx.filter_grad(

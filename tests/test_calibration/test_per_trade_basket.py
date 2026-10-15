@@ -225,7 +225,7 @@ class TestBatching:
             return node.calibrate(QuoteSet(), market, fixed)
 
         batched = eqx.filter_vmap(fit)(stacked)
-        assert batched.value.volatility.shape == (2,)
+        assert batched.value.volatility.shape == (2, 1)
         assert batched.value.initial_curve is None
         assert bool(jnp.all(batched.diagnostics.converged))
         for i, b in enumerate(baskets):
@@ -258,15 +258,27 @@ class TestJittedResultDiagnostics:
         return fit
 
     def test_condition_number_after_filter_jit(self, setup):
-        fit = self._fit_fn(setup)
-        eager = fit(setup["basket"])
-        jitted = eqx.filter_jit(fit)(setup["basket"])
+        """The jitted result's eager helper returns the right κ at its own θ.
+
+        The oracle is an independent SVD of a forward-mode ``dR/dθ`` at the
+        jitted θ (the helper uses reverse mode).
+        """
+        from jax.flatten_util import ravel_pytree
+
+        jitted = eqx.filter_jit(self._fit_fn(setup))(setup["basket"])
         assert bool(jitted.converged)
         assert jitted.inputs.data is not None
-        k_eager = float(eager.condition_number())
         k_jit = float(jitted.condition_number())  # used to raise UnexpectedTracerError
-        assert np.isfinite(k_eager) and k_eager > 1.0
-        np.testing.assert_allclose(k_jit, k_eager, rtol=1e-6)
+        flat, unravel = ravel_pytree(jitted.theta)
+        jac = np.asarray(jax.jacfwd(
+            lambda x: jnp.ravel(jitted.residual_fn(unravel(x), jitted.inputs))
+        )(flat))
+        sv = np.linalg.svd(jac, compute_uv=False)
+        k_oracle = sv[0] / sv[-1]
+        assert np.isfinite(k_oracle) and k_oracle > 1.0
+        # Measured 3.7e-11 (κ ≈ 2e6: the SVD of a near-singular J amplifies
+        # roundoff).
+        np.testing.assert_allclose(k_jit, k_oracle, rtol=1e-9)
         assert jitted.failed_labels() == ()
 
     def test_condition_number_inside_filter_vmap(self, setup):
@@ -368,12 +380,12 @@ def _g2_node(world, basket, name="g2_trade", method="analytic", config=None):
         name,
         template=G2PPModel(
             mean_reversion_x=jnp.asarray(0.8), mean_reversion_y=jnp.asarray(0.03),
-            volatility_x=jnp.asarray(0.006), volatility_y=jnp.asarray(0.006),
+            volatility_x=jnp.asarray(0.006), volatility_ratio=jnp.asarray(1.0),
             correlation=jnp.asarray(-0.7),
         ),
         basket=basket,
         cube_id=world.spec.cube_id,
-        transforms={"volatility_x": positive(), "volatility_y": positive()},
+        transforms={"volatility_x": positive(), "volatility_ratio": positive()},
         fixed_fields={"mean_reversion_x": "G2.A", "mean_reversion_y": "G2.B",
                       "correlation": "G2.RHO"},
         target_keys=keys,
@@ -430,6 +442,38 @@ def _check_fd(s, adj, pv, cases, rtol):
                                    err_msg=key)
 
 
+def _condition_in_sigma_eta(res):
+    """Condition number of a G2++ (σ, r) fit, measured in (σ, η) coordinates.
+
+    The fit's unknowns are θ = (u(σ), u(r)), η = r·σ, with u the inverse
+    softplus of :func:`positive`. A condition number depends on coordinates:
+    this one fit measures 11,014 in θ but 4,685 in φ = (u(σ), u(η)), the
+    coordinates this test's bound was set in. At the solution the fit's
+    gradient vanishes, so the level Hessian maps exactly as
+    :math:`H_\\varphi = A^\\top H_\\theta A`, :math:`A = \\partial\\theta/\\partial\\varphi`.
+    """
+    from jax.flatten_util import ravel_pytree
+
+    spec = positive()
+    flat, unravel = ravel_pytree(res.theta)
+    h_theta = jax.jacfwd(lambda f: res.residual_fn(unravel(f), res.inputs))(flat)
+
+    def theta_of(phi):
+        sigma = spec.from_unconstrained(phi[0:1])
+        eta = spec.from_unconstrained(phi[1:2])
+        return ravel_pytree({
+            "volatility_x": phi[0:1],
+            "volatility_ratio": spec.to_unconstrained(eta / sigma),
+        })[0]
+
+    sigma = spec.from_unconstrained(res.theta["volatility_x"])
+    ratio = spec.from_unconstrained(res.theta["volatility_ratio"])
+    phi0 = jnp.concatenate([res.theta["volatility_x"], spec.to_unconstrained(ratio * sigma)])
+    np.testing.assert_allclose(theta_of(phi0), flat, rtol=1e-12)
+    a = jax.jacfwd(theta_of)(phi0)
+    return float(np.linalg.cond(np.asarray(a.T @ h_theta @ a)))
+
+
 class TestG2PPPerTrade:
     @pytest.mark.slow  # two eager condition numbers (~19 s)
     def test_short_tenor_option_makes_the_fit_well_posed(self, g2_setup):
@@ -438,8 +482,11 @@ class TestG2PPPerTrade:
         co_node, co_keys = _g2_node(s["world"], s["basket"][:3], name="g2_co")
         fixed = s["fixed"].with_values({k: jnp.asarray(0.0) for k in co_keys})
         co = co_node.calibrate(QuoteSet(), market, fixed)
+        # Rank deficiency is coordinate-free: the co-terminals alone stay
+        # singular in any parametrisation.
         assert float(co.condition_number()) > 1e5
-        assert float(s["model"].condition_number()) < 1e4
+        # The bound was set in (σ, η); evaluate it there (see helper).
+        assert _condition_in_sigma_eta(s["model"]) < 1e4
 
     def test_model_is_curve_free_and_converged(self, g2_setup):
         res = g2_setup["model"]
@@ -507,7 +554,7 @@ class TestG2PPPerTrade:
             return node.calibrate(QuoteSet(), market, fixed)
 
         batched = eqx.filter_vmap(fit)(stacked)
-        assert batched.value.volatility_x.shape == (2,)
+        assert batched.value.volatility_x.shape == (2, 1)
         assert batched.value.initial_curve is None
         assert bool(jnp.all(batched.diagnostics.converged))
         one_fit = eqx.filter_jit(fit)

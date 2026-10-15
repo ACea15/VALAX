@@ -119,7 +119,7 @@ def _x_boundary_term(
 
 
 def solve_backward_2d(
-    operator: Operator2D,
+    operator: Operator2D | Callable[[Int[Array, ""]], Operator2D],
     boundary: Boundary2D,
     terminal: Float[Array, "n_x n_y"],
     *,
@@ -134,7 +134,14 @@ def solve_backward_2d(
 
     Args:
         operator: The split 2-D operator (with variance boundary rows already
-            baked into ``A2``).
+            baked into ``A2``), constant in time — or, for a time-dependent
+            operator, a function of the backward step index ``m`` (a traced
+            scalar, ``m = 0`` nearest expiry, same convention as the stacked
+            rows of :func:`~valax.pricing.pde.schemes.solve_backward_1d`)
+            returning that step's operator. The function form assembles each
+            row inside the time loop instead of storing ``n_time`` copies of
+            the 2-D bands (see
+            :func:`~valax.pricing.pde.coefficients.g2pp_operator_rows`).
         boundary: Log-spot Dirichlet data as functions of time-remaining.
         terminal: Terminal (payoff) field of shape ``(n_x, n_y)``.
         expiry: Time to expiry ``T`` (``dt = T / n_time``).
@@ -169,10 +176,13 @@ def solve_backward_2d(
         )
 
     dt = expiry / n_time
-    op = operator
+    # A time-dependent operator is a function of the step index; resolved at
+    # trace time, so the constant-operator path is unchanged.
+    time_dependent = not isinstance(operator, Operator2D)
 
     def step(u, inputs):
         m, theta_m, do_correction = inputs
+        op = operator(m) if time_dependent else operator
         theta_dt = theta_m * dt
         # Backward march from expiry: the carry entering step ``m`` has ``m``
         # steps already taken (tau = m*dt; ``m = 0`` is the terminal payoff at

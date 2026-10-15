@@ -185,6 +185,14 @@ swaptions → Bermudan priced through `price` → quote risk by one sweep.
   `price` binds its curve from the market.
 - Zero-valued **target shifts**, one fixed input per basket instrument, report
   `∂V/∂T_k`: the trade's vega profile across its basket.
+- `mode="coterminal_bootstrap"` gives the model's volatility **one bucket per
+  co-terminal** (breakpoints at the exercise dates, [piecewise-constant
+  σ(t)](../theory/time-dependent-volatility.md)) and solves the square,
+  triangular level bucket by bucket: every co-terminal is repriced exactly,
+  and `λ_m` has one entry per exercise date. The default
+  `mode="least_squares"` fits constant parameters instead — a compromise on
+  a co-terminal strip (1–3% misses in example 14), but the tool for a smile or
+  global basket with more instruments than parameters.
 
 ```python
 import valax
@@ -224,6 +232,7 @@ hw = swaption_basket_node(
     transforms={"volatility": positive()},
     fixed_fields={"mean_reversion": "HW.MEAN_REVERSION"},
     target_keys=targets,                     # zero shifts -> vega profile
+    mode="coterminal_bootstrap",             # one sigma bucket per exercise
 )
 fixed = snap.fixed.merge(QuoteSet.from_dict(
     {"HW.MEAN_REVERSION": 0.03, **{k: 0.0 for k in targets}}))
@@ -231,6 +240,8 @@ fixed = snap.fixed.merge(QuoteSet.from_dict(
 # 3. Market once, model per trade, Bermudan through price().
 calibrated = calibrate_market(chain, quotes, fixed, strict=True)
 fit = calibrate_model(hw, quotes, calibrated.market, fixed, strict=True)
+fit.value.volatility, fit.value.volatility_times   # sigma(t): 3 buckets, 2 breaks
+fit.diagnostics.residuals                          # per co-terminal, ~1e-14
 pde = PDEConfig(n_spot=100, n_time=60)
 pv = price(trade, fit.value, calibrated.market, method="pde", config=pde).price
 
@@ -240,7 +251,7 @@ risk = quote_risk_adjoint(trade, None, calibrated, model_result=fit,
 check = quote_risk_autodiff(trade, None, chain, quotes, fixed, model_node=hw,
                             method="pde", config=pde)
 assert reconcile_quote_risk(risk, check, rtol=1e-6, atol=1e-10).ok
-profile = [risk.fixed[k] for k in targets]   # ∂V/∂T_k across the basket
+profile = [risk.fixed[k] for k in targets]   # ∂V/∂T_k, one per exercise date
 risk.fixed["HW.MEAN_REVERSION"]              # held-fixed mean reversion
 ```
 
@@ -265,11 +276,15 @@ def fit_one(basket):
         "hw", template=hw_template, basket=basket, cube_id=vol_spec.cube_id,
         transforms={"volatility": positive()},
         fixed_fields={"mean_reversion": "HW.MEAN_REVERSION"}, target_keys=targets,
+        mode="coterminal_bootstrap",
     )
     return node.calibrate(QuoteSet(), calibrated.market, fixed)
 
-trades = [trade, eqx.tree_at(lambda t: t.strike, trade, jnp.asarray(0.035))]
-baskets = [coterminal_swaptions(t) for t in trades]       # same shapes
+later = eqx.tree_at(lambda t: (t.exercise_dates, t.fixed_dates), trade,
+                    (trade.exercise_dates + 90, trade.fixed_dates + 90))
+trades = [trade, later]           # different exercise dates, same shapes
+baskets = [coterminal_swaptions(t) for t in trades]
+# The sigma(t) breakpoints are traced data, so each trade keeps its own.
 stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *baskets)
 batch = eqx.filter_vmap(fit_one)(stacked)
 batch.diagnostics.converged                                # one flag per trade
@@ -280,25 +295,39 @@ kappas = eqx.filter_vmap(lambda b: fit_one(b).condition_number())(stacked)
 eqx.filter_jit(fit_one)(baskets[0]).condition_number()
 ```
 
-**Other models, and which engine fits the basket.** The same node fits G2++
-and Cheyette. G2++ prices its basket by its own closed form by default
-(Brigo-Mercurio, `price`'s auto route for `Swaption × G2PPModel`) but needs a
-basket beyond the co-terminals — add the short-tenor swaption at the first
-exercise — to separate its two factors; Cheyette has no closed form and fits
-on the frozen-`y` PDE, single-curve only. Passing `method="pde", config=...`
+**Other models, and which engine fits the basket.** The same node bootstraps
+G2++ and Cheyette 1F/2F. It fits the first-factor volatility
+(`transforms={"volatility_x": positive()}` for G2++, `"volatility"` for
+Cheyette, `"volatility_1"` for Cheyette 2F) and holds everything else as
+fixed inputs through `fixed_fields`: mean reversions, correlation and the
+second factor's **ratio** (`volatility_ratio`, η = ratio·σ) for the
+two-factor models, κ and the skew β for Cheyette. Their sensitivities come
+out of the same sweep. G2++ prices its basket by its own closed form by
+default (Brigo-Mercurio, `price`'s auto route for `Swaption × G2PPModel`). A
+least-squares fit of both G2++ vols instead needs a basket beyond the
+co-terminals (add the short-tenor swaption at the first exercise) to separate
+the two factors. Cheyette has no closed form and fits on the frozen-`y` PDE,
+single-curve only. Passing `method="pde", config=...`
 fits the basket *on the Bermudan's own grid* instead: the parameters become
 grid-bound, but the grid's Bermudan error largely cancels against its
 basket's. The node records the choice as provenance (`exact`; `discretised`
 with the grid; `modelling_bias` for Cheyette, which `check_engine` binds to
 that grid). [Example 18](../examples.md#per-trade-g2-and-cheyette) compares
-the two G2++ fits against a converged reference.
+the two G2++ bootstraps against a converged reference.
+
+A target the earlier buckets already overprice has no root: the result is
+then not converged, `fit.root_cause_labels()` names that co-terminal, it and
+the later buckets hold NaN, and the buckets before it stay exact. What the
+bootstrap assumes and its measured limits (for one, quote noise becomes
+bucket-to-bucket noise in σ(t)) are in the
+[register](../applications/calibration-register.md#per-trade-co-terminal-bootstrap).
 
 Example 14 runs the whole workflow self-checking, including the identity that
 the total cube vega equals the summed basket profile. The maths of the
-per-trade level and the target-shift trick is
+per-trade level, the bootstrap and the target-shift trick is
 [Calibration Chains § I.10](../theory/calibration-chains.md#i10-per-trade-model-levels-and-the-vega-profile);
 the design decisions are
-[D11–D12](../architecture/calibration-pricing-risk.md#3-decisions).
+[D11–D14](../architecture/calibration-pricing-risk.md#3-decisions).
 
 ## Book risk in one sweep
 

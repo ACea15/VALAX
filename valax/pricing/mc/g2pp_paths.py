@@ -14,7 +14,10 @@ is jointly Gaussian with
 and time-homogeneous conditional covariance ``g2pp_factor_covariance``.
 Increments are drawn by Cholesky-factoring that :math:`2\times2` matrix
 once, then applying it to standard normals — the two-factor analogue of the
-one-factor exact scheme in :mod:`valax.pricing.mc.hull_white_paths`.
+one-factor exact scheme in :mod:`valax.pricing.mc.hull_white_paths`.  With
+piecewise-constant volatilities the step covariance
+(``g2pp_state_covariance``) depends on the step and is factored per step; it
+stays exact when a step straddles a bucket breakpoint.
 
 The short rate is recovered as :math:`r(t) = x(t) + y(t) + \varphi(t)` and
 the money-market log-discount factor is accumulated with the trapezoidal
@@ -35,10 +38,18 @@ from jax import Array
 from valax.models.g2pp import (
     G2PPModel,
     g2pp_phi,
+    g2pp_phi_integral,
     g2pp_factor_covariance,
     g2pp_instantaneous_forward,
     g2pp_market_df,
+    g2pp_state_covariance,
 )
+from valax.models.short_rate import is_constant
+
+
+def _is_constant(model: G2PPModel) -> bool:
+    """Whether both G2++ volatilities are a single bucket (trace time)."""
+    return is_constant(model.volatility_x) and is_constant(model.volatility_ratio)
 
 
 class G2PPPathResult(eqx.Module):
@@ -81,7 +92,11 @@ def generate_g2pp_paths(
     :math:`\ln P^M(0, t_i)/P^M(0, t_{i+1})` -- so a curved initial forward
     introduces no repricing bias (the two-factor analogue of Hull-White's exact
     step-average ``hw_alpha_average``).  Only the small, smooth convexity and
-    stochastic ``x + y`` parts use the trapezoidal rule.
+    stochastic ``x + y`` parts use the trapezoidal rule.  With
+    piecewise-constant volatilities the step covariance is factored per step
+    and the whole deterministic part :math:`\int\varphi` is integrated exactly
+    (:func:`~valax.models.g2pp.g2pp_phi_integral`); only ``x + y`` is
+    trapezoided.
 
     Args:
         model: G2++ model carrying the initial curve and factor parameters.
@@ -100,19 +115,30 @@ def generate_g2pp_paths(
     e_adt = jnp.exp(-model.mean_reversion_x * dt)
     e_bdt = jnp.exp(-model.mean_reversion_y * dt)
 
-    # Cholesky of the 2x2 conditional covariance: increment = z @ L.T draws a
-    # correlated (x, y) shock with exactly this covariance for z ~ N(0, I).
-    cov = g2pp_factor_covariance(model, dt)
-    chol = jnp.linalg.cholesky(cov)
-
     phi_grid = g2pp_phi(model, times)  # (n_steps + 1,)
 
-    # Deterministic drift split: phi = f^M(0, .) + convexity.  The forward part
-    # is integrated exactly (it telescopes to a market-DF ratio), the small
-    # convexity part is trapezoided.
-    ln_pm_grid = jnp.log(g2pp_market_df(model, times))                   # (n+1,)
-    forward_grid = jax.vmap(lambda s: g2pp_instantaneous_forward(model, s))(times)
-    convexity_grid = phi_grid - forward_grid                            # (n+1,)
+    if _is_constant(model):
+        # Cholesky of the 2x2 conditional covariance: increment = z @ L.T draws
+        # a correlated (x, y) shock with exactly this covariance for z ~ N(0, I).
+        cov = g2pp_factor_covariance(model, dt)
+        chol = jnp.linalg.cholesky(cov)
+        chol_steps = None
+
+        # Deterministic drift split: phi = f^M(0, .) + convexity.  The forward
+        # part is integrated exactly (it telescopes to a market-DF ratio), the
+        # small convexity part is trapezoided.
+        ln_pm_grid = jnp.log(g2pp_market_df(model, times))                   # (n+1,)
+        forward_grid = jax.vmap(lambda s: g2pp_instantaneous_forward(model, s))(times)
+        convexity_grid = phi_grid - forward_grid                            # (n+1,)
+    else:
+        # Piecewise sigma(t), eta(t): the exact step covariance depends on the
+        # step, I_k(t_{i+1}) - e^{-k dt} I_k(t_i), one Cholesky per step.
+        chol_steps = jnp.linalg.cholesky(
+            g2pp_state_covariance(model, times[:-1], times[1:])
+        )  # (n_steps, 2, 2)
+        # The whole deterministic part integrates exactly:
+        # int phi = -ln P^M(0, t) + V(0, t) / 2.
+        phi_int_grid = g2pp_phi_integral(model, times)                     # (n+1,)
 
     # Standard normals for both factors, all steps and paths: (n_steps, n_paths, 2).
     normals = jax.random.normal(
@@ -123,18 +149,24 @@ def generate_g2pp_paths(
         x_i, y_i, log_df_i = carry
         z, i = xs  # z: (n_paths, 2)
 
-        shock = z @ chol.T  # (n_paths, 2)
+        step_chol = chol if chol_steps is None else chol_steps[i]
+        shock = z @ step_chol.T  # (n_paths, 2)
         x_next = x_i * e_adt + shock[:, 0]
         y_next = y_i * e_bdt + shock[:, 1]
 
         r_i = x_i + y_i + phi_grid[i]
         r_next = x_next + y_next + phi_grid[i + 1]
 
-        # -∫ r ds over the step: exact forward part + trapezoidal remainder.
-        det_forward = ln_pm_grid[i + 1] - ln_pm_grid[i]
         stochastic = 0.5 * dt * ((x_i + y_i) + (x_next + y_next))
-        convexity = 0.5 * dt * (convexity_grid[i] + convexity_grid[i + 1])
-        log_df_next = log_df_i + det_forward - convexity - stochastic
+        if chol_steps is None:
+            # -∫ r ds over the step: exact forward part + trapezoidal remainder.
+            det_forward = ln_pm_grid[i + 1] - ln_pm_grid[i]
+            convexity = 0.5 * dt * (convexity_grid[i] + convexity_grid[i + 1])
+            log_df_next = log_df_i + det_forward - convexity - stochastic
+        else:
+            # Exact deterministic part, trapezoidal stochastic part.
+            det = phi_int_grid[i + 1] - phi_int_grid[i]
+            log_df_next = log_df_i - det - stochastic
 
         return (x_next, y_next, log_df_next), (x_next, y_next, r_next, log_df_next)
 

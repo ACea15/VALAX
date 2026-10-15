@@ -184,7 +184,7 @@ def g2_setup(request):
         mean_reversion_1=jnp.asarray(k1),
         mean_reversion_2=jnp.asarray(k2),
         volatility_1=jnp.asarray(s1),
-        volatility_2=jnp.asarray(s2),
+        volatility_ratio=jnp.asarray(s2) / jnp.asarray(s1),
         skew_1=jnp.asarray(0.0),
         skew_2=jnp.asarray(0.0),
         correlation=jnp.asarray(rho),

@@ -386,7 +386,7 @@ ch = calibrate_cheyette(
     basket, targets, ois, fixed_params={"mean_reversion": 0.05}, engine="frozen", config=CFG,
     settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=60 if FAST else 200),
 )
-print(f"  Cheyette fit: σ={float(ch.value.volatility):.5f} (true 0.009), "
+print(f"  Cheyette fit: σ={float(ch.value.volatility[0]):.5f} (true 0.009), "
       f"β={float(ch.value.skew):.3f} (true 0.1), converged={bool(ch.converged)}")
 print(f"  provenance: {ch.provenance.method!r}, {ch.provenance.engine_kind!r}")
 assert ch.provenance == cheyette_provenance("frozen", CFG)
@@ -410,7 +410,7 @@ hw = calibrate_hull_white(
     fixed_mean_reversion=jnp.asarray(0.03),
 ).check()
 print(f"  Hull-White (Jamshidian) provenance {hw.provenance.engine_kind!r}: "
-      f"σ={float(hw.value.volatility):.5f}")
+      f"σ={float(hw.value.volatility[0]):.5f}")
 assert hw.provenance.engine_kind == "exact"
 for method, cfg in (("pde", CFG), ("mc", None), ("lattice", None)):
     assert check_engine(hw, method, cfg) is hw

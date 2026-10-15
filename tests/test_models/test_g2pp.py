@@ -72,7 +72,7 @@ def model(flat_curve):
         mean_reversion_x=jnp.array(0.50),
         mean_reversion_y=jnp.array(0.10),
         volatility_x=jnp.array(0.010),
-        volatility_y=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.8),
         correlation=jnp.array(-0.70),
         initial_curve=flat_curve,
     )
@@ -106,7 +106,7 @@ class TestExactFit:
             mean_reversion_x=jnp.array(0.50),
             mean_reversion_y=jnp.array(0.10),
             volatility_x=jnp.array(0.010),
-            volatility_y=jnp.array(0.008),
+            volatility_ratio=jnp.array(0.8),
             correlation=jnp.array(-0.70),
             initial_curve=_steep_curve(ref_date),
         )
@@ -136,8 +136,8 @@ class TestVarianceTerm:
         """
         a = float(model.mean_reversion_x)
         b = float(model.mean_reversion_y)
-        sig = float(model.volatility_x)
-        eta = float(model.volatility_y)
+        sig = float(model.volatility_x[0])
+        eta = float(model.volatility_y[0])
         rho = float(model.correlation)
         t, T = 1.0, 5.0
 
@@ -179,7 +179,7 @@ class TestHullWhiteReduction:
             mean_reversion_x=jnp.array(0.30),
             mean_reversion_y=jnp.array(0.10),
             volatility_x=jnp.array(0.012),
-            volatility_y=jnp.array(0.0),
+            volatility_ratio=jnp.array(0.0),
             correlation=jnp.array(0.0),
             initial_curve=flat_curve,
         )
@@ -198,7 +198,7 @@ class TestHullWhiteReduction:
             mean_reversion_x=jnp.array(0.30),
             mean_reversion_y=jnp.array(0.10),
             volatility_x=jnp.array(0.012),
-            volatility_y=jnp.array(0.0),
+            volatility_ratio=jnp.array(0.0),
             correlation=jnp.array(0.0),
             initial_curve=flat_curve,
         )
@@ -231,7 +231,7 @@ class TestFactorCovariance:
     def test_cross_sign_follows_rho(self, flat_curve):
         pos = G2PPModel(
             mean_reversion_x=jnp.array(0.5), mean_reversion_y=jnp.array(0.1),
-            volatility_x=jnp.array(0.01), volatility_y=jnp.array(0.01),
+            volatility_x=jnp.array(0.01), volatility_ratio=jnp.array(1.0),
             correlation=jnp.array(0.6), initial_curve=flat_curve,
         )
         assert float(g2pp_factor_covariance(pos, jnp.array(0.5))[0, 1]) > 0.0

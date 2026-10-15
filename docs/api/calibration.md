@@ -100,6 +100,8 @@ solved in stages (a cap-strip column) passes `sub_labels` and is labelled per
 
 ::: valax.calibration.solve.explicit_level
 
+::: valax.calibration.solve.triangular_root_level
+
 ::: valax.calibration.solve.stack_slices
 
 ::: valax.calibration.solve.period_label
@@ -153,11 +155,16 @@ the strip.
 #### Per-trade model calibration
 
 Co-terminal swaption baskets and the per-trade short-rate fit on them (the
-building blocks of [example 14](../examples.md#per-trade-model-calibration-for-bermudans)).
+building blocks of [example 14](../examples.md#per-trade-model-calibration-for-bermudans)):
+a least-squares fit of constant parameters, or the exact co-terminal
+bootstrap of a piecewise-constant σ(t)
+(`mode="coterminal_bootstrap"`, a `triangular_root_level`).
 
 ::: valax.calibration.nodes.coterminal_swaptions
 
 ::: valax.calibration.nodes.swaption_basket_node
+
+::: valax.calibration.nodes.BASKET_MODES
 
 ## Short-rate basket fits
 

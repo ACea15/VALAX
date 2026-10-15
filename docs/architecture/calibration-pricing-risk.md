@@ -218,6 +218,49 @@ sweep, checkable by bumping the shift. Baskets may be traced, so same-shaped
 per-trade baskets calibrate in one `eqx.filter_vmap`; the curve-free models
 (D11) are what makes the result stackable.
 
+**D13 — Time-dependent parameters live on the model; their breakpoints are
+data.** A short-rate volatility is always an array of buckets
+(`Float[Array, " n_buckets"]`; a scalar is promoted to one bucket), with
+keyword-only `volatility_times` holding the `n_buckets - 1` interior
+breakpoints. The breakpoints are a **traced leaf, not a static field**:
+per-trade models whose buckets sit on different exercise dates have the same
+shapes, so they batch under `eqx.filter_vmap` and stack like any other model,
+and only the bucket *count* is static. Every kernel has a trace-time
+`is_constant` branch that keeps the constant-volatility formula and its
+evaluation order verbatim, so a one-bucket model is bit-identical to the
+pre-σ(t) code (checked against a golden file). Reordering the arithmetic is
+not harmless: once it changed a reverse-mode gradient by one ulp. A model
+whose two factor volatilities must share buckets is parametrised as a first
+volatility and a **ratio** (G2++ `volatility_x` + `volatility_ratio`,
+Cheyette 2F `volatility_1` + `volatility_ratio`; the second volatility is a
+read-only property), so a bootstrap fits one bucketed field with the ratio
+held as a reported fixed input. `volatility_bucket_fields(model)` (a
+`singledispatch`) names the bucketed fields, and is how a node validates which
+field may be bootstrapped. The bucket convention and maths are in
+[Time-Dependent Volatility](../theory/time-dependent-volatility.md).
+
+**D14 — Triangular levels are solved bucket by bucket.** A co-terminal
+bootstrap (`swaption_basket_node(mode="coterminal_bootstrap")`) is square and
+lower-triangular: bucket *k*'s equation reads buckets 1..*k*. It is built by
+`triangular_root_level`, which solves one scalar Newton root per bucket with
+the earlier buckets passed in the solver's `args` (so autodiff differentiates
+through every stage), and reports the full triangular residual (one
+triangular solve for the IFT adjoint) and **per-bucket** diagnostics. A
+failed bucket installs NaN and is named as the root cause; every bucket after
+it is solved against finite stand-ins and reported failed, and every bucket
+before it keeps its exact root. Each bucket's reported residual is its own,
+evaluated with the later buckets at finite stand-ins, because a later
+bucket's NaN enters an earlier equation with weight exactly zero and
+`0 · NaN` is NaN. A **joint** solver (one Newton solve of the whole system,
+Jacobian tagged lower triangular so `lineax` substitutes) was built and
+measured against it, and removed: every step builds the full Jacobian
+(Hull-White, *n* = 4 / 6 / 10 co-terminals: 120 / 252 / 770 pricings vs
+40 / 58 / 108; Cheyette PDE, *n* = 3 / 5: 60 / 150 PDE solves vs 28 / 48), it
+compiled slower and never ran faster, and on an infeasible bucket it marked
+every bucket failed under the wrong root cause (before the nested root-finds
+were guarded, it raised at runtime instead). Roots agreed to ≤ 1.4e-13. The
+evidence is in `scripts/bench_coterminal_bootstrap.py`.
+
 ## 4. Extending the framework
 
 | To add… | You provide | It then works with |
@@ -264,8 +307,10 @@ remaining rates pricers including the
 Hull-White tree, caps / swaptions off the cube surfaces, default configs); a
 keyed set of forward curves in `ResolvedMarket` for multi-index instruments
 (D11); derivative convergence of the numerical engines; the position /
-portfolio layer. Hull-White, G2++ (multi-curve, 2-D PDE basket) and
-Cheyette (single-curve, frozen-y PDE basket) are all validated per trade
-through the same `swaption_basket_node`; G2++ needs a basket beyond the
-co-terminals to identify both factors (see
-[examples](../examples.md#per-trade-g2-and-cheyette)).
+portfolio layer; a global piecewise σ(t) calibration on a user grid for
+portfolio / XVA simulation (D13). Hull-White, G2++ (multi-curve, 2-D PDE
+basket) and Cheyette 1F/2F (single-curve, frozen-y PDE basket) are all
+validated per trade through the same `swaption_basket_node`, both as an exact
+co-terminal bootstrap (D14) and as a least-squares fit of constant
+parameters, where G2++ needs a basket beyond the co-terminals to identify both
+factors (see [examples](../examples.md#per-trade-g2-and-cheyette)).

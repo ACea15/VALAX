@@ -109,7 +109,7 @@ class TestConditionalMoments:
 
         # Analytic mean: alpha(T) = f^M(0,T) + sigma^2/(2a^2)*(1-exp(-a*T))^2
         a = float(hw_model.mean_reversion)
-        sigma = float(hw_model.volatility)
+        sigma = float(hw_model.volatility[0])
         fwd_T = float(_instantaneous_forward(hw_model, jnp.asarray(T)))
         analytic_mean = fwd_T + (sigma**2 / (2.0 * a**2)) * (1.0 - float(jnp.exp(-a * T)))**2
 
@@ -136,7 +136,7 @@ class TestConditionalMoments:
         n_seeds = 8
 
         a = float(hw_model.mean_reversion)
-        sigma = float(hw_model.volatility)
+        sigma = float(hw_model.volatility[0])
         fwd_T = float(_instantaneous_forward(hw_model, jnp.asarray(T)))
         analytic_mean = (
             fwd_T + (sigma**2 / (2.0 * a**2)) * (1.0 - float(jnp.exp(-a * T))) ** 2
@@ -342,7 +342,7 @@ class TestJITAndGrad:
             return jnp.mean(res.short_rates[:, -1])
 
         grads = _loss(hw_model)
-        dL_dsigma = grads.volatility
+        dL_dsigma = grads.volatility[0]
         assert jnp.isfinite(dL_dsigma), f"grad w.r.t. sigma is not finite: {dL_dsigma}"
         assert float(dL_dsigma) != 0.0, "grad w.r.t. sigma is zero (no signal?)"
 

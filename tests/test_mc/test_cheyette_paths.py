@@ -83,7 +83,7 @@ def model_2f(ref_date):
         mean_reversion_1=jnp.array(0.50),
         mean_reversion_2=jnp.array(0.10),
         volatility_1=jnp.array(0.010),
-        volatility_2=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.008) / jnp.array(0.010),
         skew_1=jnp.array(-2.0),
         skew_2=jnp.array(1.5),
         correlation=jnp.array(-0.70),
@@ -157,7 +157,7 @@ class TestZCBRepricing:
     def test_steep_curve_2f(self, ref_date):
         model = CheyetteModel2F(
             mean_reversion_1=jnp.array(0.50), mean_reversion_2=jnp.array(0.10),
-            volatility_1=jnp.array(0.010), volatility_2=jnp.array(0.008),
+            volatility_1=jnp.array(0.010), volatility_ratio=jnp.array(0.008) / jnp.array(0.010),
             skew_1=jnp.array(-3.0), skew_2=jnp.array(2.0),
             correlation=jnp.array(-0.70), initial_curve=_steep_curve(ref_date),
         )

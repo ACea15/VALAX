@@ -503,7 +503,7 @@ result = calibrate_hull_white(
 ).check()
 model = result.value
 
-float(model.volatility)   # 0.010261
+model.volatility          # Array([0.010261]) — one bucket: σ is constant
 model.curve_id            # 'USD.SOFR.OIS'
 model.initial_curve       # None — the fitted model is curve-free
 

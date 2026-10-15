@@ -135,6 +135,54 @@ generators (`generate_g2pp_paths` and the Cheyette path generators). See
 [API: Pricing](../api/pricing.md) for the full registered recipe list and the
 [Calibration](calibration.md) guide for fitting these models.
 
+### Time-dependent volatility
+
+All four short-rate path generators accept piecewise-constant volatility
+buckets (`volatility` + `volatility_times` on `HullWhiteModel` /
+`CheyetteModel`; `volatility_x` + `volatility_ratio` on `G2PPModel`;
+`volatility_1` + `volatility_ratio` on `CheyetteModel2F`). The time grid is
+uniform; each step's randomness is built from the exact integral of the
+volatility over that step, so a step straddling a bucket breakpoint carries
+the right variance (maths:
+[Time-Dependent Volatility](../theory/time-dependent-volatility.md)):
+
+| Model | Per-step scheme with \(\sigma(t)\) | Exact in the state? |
+|---|---|---|
+| `HullWhiteModel` | exact conditional variance `hw_state_variance(model, t_i, t_{i+1})` | yes, at any step size |
+| `G2PPModel` | per-step Cholesky of the exact \(2\times2\) conditional covariance `g2pp_state_covariance` | yes, at any step size |
+| `CheyetteModel` | local vol frozen per step at \(\sigma_{\text{step}}(1 + \beta x)\), \(\sigma_{\text{step}}^2\) = exact step average of \(\sigma^2\) (`cheyette_mean_variance_rate`) | only at \(\beta = 0\) |
+| `CheyetteModel2F` | same, with the exact step averages of \(\sigma_1^2, \sigma_2^2, \rho\sigma_1\sigma_2\) (`cheyette_mean_variance_rates_2f`) | only at \(\beta_i = 0\) |
+
+A one-bucket model runs the original constant-parameter code.
+
+!!! warning "Known limitation: the short-rate recipes ignore `MCConfig.n_steps`"
+    Every Hull-White, G2++ and Cheyette (1F and 2F) recipe reads only
+    `config.n_paths` from `MCConfig`. The number of time steps is a separate
+    recipe keyword, `n_steps`, **defaulting to 100**, and the grid is uniform
+    on `[0, T]` (`T` is a second recipe keyword, defaulting per instrument —
+    the last payment date for bonds, the option expiry for a swaption): it
+    is not built from the event dates. Every event — coupon, fixing,
+    payment, expiry, exercise — is snapped to the *nearest* step by rounding
+    `t · n_steps / T`, so an event that does not sit on the grid is valued at
+    a shifted time.
+
+    Consequences, measured with `n_paths=20_000` and a fixed key:
+
+    - `MCConfig(n_steps=4)` and `MCConfig(n_steps=400)` give bit-identical
+      prices — both run 100 steps (checked for a Hull-White bond and for
+      G2++ and Cheyette European swaptions).
+    - Through `valax.price(..., method="mc", config=...)` the step count is
+      therefore **always 100**: `price()` has no way to forward the keyword.
+    - Calling the dispatcher directly, `mc_price_dispatch(trade, bound_model,
+      config, key, n_steps=400)` does change the grid (and with it the
+      draws): the same Hull-White bond moved from 101.9939 to 102.0379
+      (stderr 0.041).
+
+    Until the recipes honour `config.n_steps`, pass `n_steps=` (and `T=` if
+    needed) to `mc_price_dispatch` when the event dates are not multiples of
+    `T / 100`, or when the trapezoidal discount quadrature needs a finer
+    step.
+
 ### Multi-curve: OIS discounting with a separate projection curve
 
 The Hull-White and G2++ rates recipes take two optional market arguments,
@@ -502,11 +550,18 @@ r(t+\Delta t) \mid r(t) \;\sim\; \mathcal{N}\!\left(
   \tfrac{\sigma^2}{2a}\bigl(1 - e^{-2a\Delta t}\bigr)\right)
 $$
 
+(the variance shown is the constant-\(\sigma\) case; with piecewise-constant
+\(\sigma(t)\) the generator uses the exact step variance
+`hw_state_variance(model, t, t + Δt)` instead — see
+[§2](#time-dependent-volatility)).
+
 There is therefore **no Euler bias in \(r\) at any step size**. `n_steps`
 controls only the accuracy of the trapezoidal accumulation of
 \(\int_0^{t}r\,ds\) into `log_discount_factors`, which is what actually
 discounts cash flows — so choose it based on the discounting accuracy you
-need, not on the stability of the rate process.
+need, not on the stability of the rate process. (Calling the generator
+directly, `n_steps` is the argument you pass; the dispatcher recipes take it
+as a keyword and ignore `MCConfig.n_steps` — see the warning in §2.)
 
 ```python
 from valax.pricing.mc import generate_hull_white_paths

@@ -123,7 +123,7 @@ def _cheyette_2f(curve, beta1=0.0, beta2=0.0, rho=-0.7):
         mean_reversion_1=jnp.array(0.5),
         mean_reversion_2=jnp.array(0.1),
         volatility_1=jnp.array(0.01),
-        volatility_2=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.008) / jnp.array(0.01),
         skew_1=jnp.array(beta1),
         skew_2=jnp.array(beta2),
         correlation=jnp.array(rho),
@@ -136,7 +136,7 @@ def _g2pp(curve, rho=-0.7):
         mean_reversion_x=jnp.array(0.5),
         mean_reversion_y=jnp.array(0.1),
         volatility_x=jnp.array(0.01),
-        volatility_y=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.8),
         correlation=jnp.array(rho),
         initial_curve=curve,
     )
@@ -400,7 +400,8 @@ class TestDifferentiabilityAndJit:
 
         def price(sig1):
             m = _cheyette_2f(flat_curve)
-            m = eqx.tree_at(lambda mm: mm.volatility_1, m, sig1)
+            # volatility_1 is a bucket array: one bucket for a constant level.
+            m = eqx.tree_at(lambda mm: mm.volatility_1, m, jnp.reshape(sig1, (1,)))
             return pde_price_dispatch(s, m, cfg).price
 
         v = eqx.filter_jit(price)(jnp.array(0.01))

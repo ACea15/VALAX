@@ -20,8 +20,12 @@ from valax.models.g2pp import (
     g2pp_instantaneous_forward,
     g2pp_V,
     g2pp_phi,
+    g2pp_phi_integral,
+    g2pp_diffusion_rates,
     g2pp_bond_price,
     g2pp_factor_covariance,
+    g2pp_state_covariance,
+    g2pp_forward_measure_moments,
     g2pp_short_rate_variance,
 )
 from valax.models.cheyette import (
@@ -32,6 +36,8 @@ from valax.models.cheyette import (
     cheyette_instantaneous_forward,
     cheyette_local_vol,
     cheyette_local_vol_2f,
+    cheyette_mean_variance_rate,
+    cheyette_mean_variance_rates_2f,
     cheyette_y_gaussian,
     cheyette_y_gaussian_2f,
     cheyette_gaussian_mean,

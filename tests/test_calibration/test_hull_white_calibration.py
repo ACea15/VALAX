@@ -122,7 +122,7 @@ class TestSyntheticRoundTrip:
             settings=SolverSettings(method=method, rtol=1e-12, atol=1e-12),
         ).value
         assert float(fitted.mean_reversion) == pytest.approx(_TRUE_A, rel=1e-5)
-        assert float(fitted.volatility) == pytest.approx(_TRUE_SIGMA, rel=1e-5)
+        assert float(fitted.volatility[0]) == pytest.approx(_TRUE_SIGMA, rel=1e-5)
 
     def test_residuals_vanish(self, swaptions, synthetic_prices, curve):
         fitted = bind_curves(
@@ -141,7 +141,7 @@ class TestSyntheticRoundTrip:
             fixed_mean_reversion=jnp.asarray(_TRUE_A),
         ).value
         assert float(fitted.mean_reversion) == pytest.approx(_TRUE_A, rel=1e-12)
-        assert float(fitted.volatility) == pytest.approx(_TRUE_SIGMA, rel=1e-5)
+        assert float(fitted.volatility[0]) == pytest.approx(_TRUE_SIGMA, rel=1e-5)
 
     @pytest.mark.parametrize(
         "start", [(0.02, 0.004), (0.20, 0.030), (0.08, 0.012), (0.5, 0.05)]
@@ -159,7 +159,7 @@ class TestSyntheticRoundTrip:
             swaptions, synthetic_prices, curve, initial_guess=guess
         ).value
         assert float(fitted.mean_reversion) == pytest.approx(_TRUE_A, rel=1e-4)
-        assert float(fitted.volatility) == pytest.approx(_TRUE_SIGMA, rel=1e-4)
+        assert float(fitted.volatility[0]) == pytest.approx(_TRUE_SIGMA, rel=1e-4)
 
     def test_fitted_parameters_stay_positive(
         self, swaptions, synthetic_prices, curve
@@ -174,7 +174,7 @@ class TestSyntheticRoundTrip:
             swaptions, synthetic_prices, curve, initial_guess=guess
         ).value
         assert float(fitted.mean_reversion) > 0.0
-        assert float(fitted.volatility) > 0.0
+        assert float(fitted.volatility[0]) > 0.0
 
 
 # ── Model limitations, asserted rather than assumed ───────────────────
@@ -292,5 +292,5 @@ class TestAPI:
         grads = eqx.filter_grad(
             lambda m: jnp.sum(hw_swaption_prices(m, swaptions))
         )(true_model)
-        assert float(grads.volatility) > 0.0
+        assert float(grads.volatility[0]) > 0.0
         assert jnp.isfinite(grads.mean_reversion)

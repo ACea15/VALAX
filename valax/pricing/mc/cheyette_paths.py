@@ -54,7 +54,10 @@ from valax.models.cheyette import (
     cheyette_local_vol_2f,
     cheyette_instantaneous_forward,
     cheyette_market_df,
+    cheyette_mean_variance_rate,
+    cheyette_mean_variance_rates_2f,
 )
+from valax.models.short_rate import is_constant
 
 
 class CheyettePathResult(eqx.Module):
@@ -127,10 +130,16 @@ def generate_cheyette_paths(
     the martingale identity :math:`\mathbb{E}[D(0, T)] = P^M(0, T)` holds within
     Monte-Carlo error.
 
+    With a piecewise-constant level :math:`\sigma(t)` each step freezes
+    :math:`\sigma_r = \sigma_{\mathrm{step}}(1 + \beta x)` with
+    :math:`\sigma_{\mathrm{step}}^2` the exact time average of
+    :math:`\sigma(t)^2` over the step
+    (:func:`~valax.models.cheyette.cheyette_mean_variance_rate`).
+
     Args:
         model: One-factor Cheyette model carrying the initial curve and
-            parameters :math:`\kappa` (mean reversion), :math:`\sigma`
-            (volatility level), and :math:`\beta` (skew).
+            parameters :math:`\kappa` (mean reversion), :math:`\sigma(t)`
+            (volatility level per bucket), and :math:`\beta` (skew).
         T: Horizon in year fractions.
         n_steps: Number of equally-spaced time steps.
         n_paths: Number of independent Monte Carlo paths.
@@ -158,11 +167,25 @@ def generate_cheyette_paths(
 
     normals = jax.random.normal(key, shape=(n_steps, n_paths), dtype=jnp.float64)
 
+    if is_constant(model.volatility):
+        def local_vol(x_i, i):
+            return cheyette_local_vol(model, x_i)
+    else:
+        # Piecewise sigma(t): each step's level is the root of the exact step
+        # average of sigma^2, so a step straddling a breakpoint carries the
+        # step's exact variance rate.
+        sigma_step = jnp.sqrt(
+            cheyette_mean_variance_rate(model, times[:-1], times[1:])
+        )                                                                # (n,)
+
+        def local_vol(x_i, i):
+            return jnp.maximum(sigma_step[i] * (1.0 + model.skew * x_i), 0.0)
+
     def step_fn(carry, xs):
         x_i, y_i, log_df_i = carry
         z, i = xs
 
-        sigma_r = cheyette_local_vol(model, x_i)                        # (n_paths,)
+        sigma_r = local_vol(x_i, i)                                     # (n_paths,)
         x_next = (
             x_i * e_kdt
             + (y_i / kappa) * (1.0 - e_kdt)
@@ -220,6 +243,17 @@ def generate_cheyette_paths_2f(
         \Delta t})/(\kappa_1+\kappa_2)` to :math:`O(\Delta t^2)`, consistent with
         the scheme's overall order.
 
+    With piecewise-constant levels :math:`\sigma_1(t)`,
+    :math:`\sigma_2(t) = r(t)\sigma_1(t)` each step freezes
+    :math:`\sigma_{r,i} = \sigma_{i,\mathrm{step}}(1 + \beta_i x_i)` with
+    :math:`\sigma_{i,\mathrm{step}}^2` the exact time average of
+    :math:`\sigma_i(t)^2` over the step, and correlates the shocks with
+    :math:`\rho_{\mathrm{step}} = \overline{\rho\sigma_1\sigma_2} /
+    (\sigma_{1,\mathrm{step}}\sigma_{2,\mathrm{step}})`, so the step's
+    instantaneous covariance is the exact average of :math:`\rho\sigma_1\sigma_2`
+    (:func:`~valax.models.cheyette.cheyette_mean_variance_rates_2f`); the
+    :math:`y_{12}` forcing uses the same covariance.
+
     Args:
         model: Two-factor Cheyette model carrying the initial curve and
             per-factor parameters plus the correlation :math:`\rho`.
@@ -261,15 +295,47 @@ def generate_cheyette_paths_2f(
         key, shape=(n_steps, n_paths, 2), dtype=jnp.float64
     )
 
+    if is_constant(model.volatility_1) and is_constant(model.volatility_ratio):
+        def shocks(z, i):
+            zc = z @ chol.T  # correlated normals, (n_paths, 2)
+            return zc[:, 0], zc[:, 1]
+
+        def local_vols(x1_i, x2_i, i):
+            return cheyette_local_vol_2f(model, x1_i, x2_i)
+
+        def step_rho(i):
+            return rho
+    else:
+        # Piecewise sigma_1(t), r(t): each step's levels are the roots of the
+        # exact step averages of sigma_i^2, and the shock correlation is set so
+        # the instantaneous covariance is the exact step average of
+        # rho sigma_1 sigma_2 (|rho_step| <= |rho| by Cauchy-Schwarz).
+        var1, var2, cov12 = cheyette_mean_variance_rates_2f(
+            model, times[:-1], times[1:]
+        )                                                               # (n,)
+        sigma1_step = jnp.sqrt(var1)
+        sigma2_step = jnp.sqrt(var2)
+        rho_step = cov12 / (sigma1_step * sigma2_step)
+        rho_comp = jnp.sqrt(1.0 - rho_step**2)
+
+        def shocks(z, i):
+            return z[:, 0], rho_step[i] * z[:, 0] + rho_comp[i] * z[:, 1]
+
+        def local_vols(x1_i, x2_i, i):
+            sig1 = jnp.maximum(sigma1_step[i] * (1.0 + model.skew_1 * x1_i), 0.0)
+            sig2 = jnp.maximum(sigma2_step[i] * (1.0 + model.skew_2 * x2_i), 0.0)
+            return sig1, sig2
+
+        def step_rho(i):
+            return rho_step[i]
+
     def step_fn(carry, xs):
         x1_i, x2_i, y11_i, y22_i, y12_i, log_df_i = carry
         z, i = xs  # z: (n_paths, 2)
 
-        zc = z @ chol.T  # correlated normals, (n_paths, 2)
-        z1 = zc[:, 0]
-        z2 = zc[:, 1]
+        z1, z2 = shocks(z, i)
 
-        sig1, sig2 = cheyette_local_vol_2f(model, x1_i, x2_i)
+        sig1, sig2 = local_vols(x1_i, x2_i, i)
 
         drift1 = (y11_i + y12_i) / k1
         drift2 = (y12_i + y22_i) / k2
@@ -279,7 +345,7 @@ def generate_cheyette_paths_2f(
         y11_next = y11_i * e_2k1dt + (sig1**2 / (2.0 * k1)) * (1.0 - e_2k1dt)
         y22_next = y22_i * e_2k2dt + (sig2**2 / (2.0 * k2)) * (1.0 - e_2k2dt)
         y12_next = y12_i * e_k12dt + (
-            rho * sig1 * sig2 / (k1 + k2)
+            step_rho(i) * sig1 * sig2 / (k1 + k2)
         ) * (1.0 - e_k12dt)
 
         det_forward = ln_pm_grid[i + 1] - ln_pm_grid[i]

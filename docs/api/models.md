@@ -164,6 +164,33 @@ for callables, puttables, Bermudan swaptions, and IR exotics:
 
 ::: valax.models.hull_white.hw_short_rate_variance
 
+::: valax.models.hull_white.hw_state_variance
+
+::: valax.models.hull_white.hw_mean_variance_rate
+
+### Piecewise-constant volatility helpers
+
+Shared by Hull–White, G2++ and Cheyette (`valax.models.short_rate`): bucket
+construction and validation at the user boundary, and the closed-form
+integrals of a piecewise-constant function that every Gaussian quantity of
+these models is built from.
+
+::: valax.models.short_rate.as_buckets
+
+::: valax.models.short_rate.default_bucket_times
+
+::: valax.models.short_rate.check_buckets
+
+::: valax.models.short_rate.is_constant
+
+::: valax.models.short_rate.bucket_index
+
+::: valax.models.short_rate.volatility_bucket_fields
+
+::: valax.models.short_rate.decayed_integral
+
+::: valax.models.short_rate.piecewise_integral
+
 ## G2++ (two-factor Gaussian short-rate)
 
 The two-additive-factor Gaussian model (equivalent to two-factor Hull–White).
@@ -173,10 +200,18 @@ Bermudans that a one-factor model structurally cannot price:
 
 \[
     r(t) = x(t) + y(t) + \varphi(t), \qquad
-    dx = -a\,x\,dt + \sigma\,dW_1, \quad
-    dy = -b\,y\,dt + \eta\,dW_2, \quad
+    dx = -a\,x\,dt + \sigma(t)\,dW_1, \quad
+    dy = -b\,y\,dt + \eta(t)\,dW_2, \quad
     dW_1\,dW_2 = \rho\,dt.
 \]
+
+!!! note "Constructor: `volatility_x` and `volatility_ratio`"
+    The model is parameterised by the first-factor volatility `volatility_x`
+    (\(\sigma\), per bucket) and the **ratio** `volatility_ratio`
+    (\(\eta / \sigma\), per bucket, sharing `volatility_times`; a one-bucket
+    ratio is broadcast to the bucket count of `volatility_x`). The
+    second-factor volatility \(\eta(t) = \text{ratio}(t)\,\sigma(t)\) is the
+    read-only property `volatility_y` — it is **not** a constructor argument.
 
 !!! success "Exact fit"
     At \(t = 0\) with \(x = y = 0\), `g2pp_bond_price` recovers the initial
@@ -206,6 +241,14 @@ Bermudans that a one-factor model structurally cannot price:
 
 ::: valax.models.g2pp.g2pp_short_rate_variance
 
+::: valax.models.g2pp.g2pp_phi_integral
+
+::: valax.models.g2pp.g2pp_diffusion_rates
+
+::: valax.models.g2pp.g2pp_state_covariance
+
+::: valax.models.g2pp.g2pp_forward_measure_moments
+
 ## Cheyette (quasi-Gaussian short-rate)
 
 The Markovian HJM model under a separable volatility. A **state-dependent**
@@ -220,8 +263,12 @@ for callable exotics:
     dy = (\sigma_r^2 - 2\kappa y)\,dt,
 \]
 
-with the displaced-diffusion local vol $\sigma_r(t, x) = \sigma(1 + \beta x)$.
-The two-factor `CheyetteModel2F` adds decorrelation on top of the skew.
+with the displaced-diffusion local vol $\sigma_r(t, x) = \sigma(t)(1 + \beta x)$,
+whose level $\sigma(t)$ is piecewise constant (`volatility` per bucket plus
+`volatility_times`, as for Hull–White). The two-factor `CheyetteModel2F` adds
+decorrelation on top of the skew; it takes `volatility_1` (per bucket) and
+`volatility_ratio` ($\sigma_2 = \text{ratio}\cdot\sigma_1$, read back as the
+property `volatility_2`).
 
 !!! success "Exact fit"
     With $r = f^M(0, t) + x$ and $x(0) = 0$, the convexity is carried
@@ -253,6 +300,10 @@ The two-factor `CheyetteModel2F` adds decorrelation on top of the skew.
 ::: valax.models.cheyette.cheyette_y_gaussian
 
 ::: valax.models.cheyette.cheyette_gaussian_mean
+
+::: valax.models.cheyette.cheyette_mean_variance_rate
+
+::: valax.models.cheyette.cheyette_mean_variance_rates_2f
 
 ## LIBOR Market Model (LMM / BGM)
 

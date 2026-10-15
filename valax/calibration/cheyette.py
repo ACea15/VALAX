@@ -21,8 +21,9 @@ sets the ATM volatility level and :math:`\beta` the skew. Calibrating
 :math:`\beta` requires a **strike slice** of caplets or swaptions — the skew is
 invisible at a single (ATM) strike.
 
-**Two factors** :math:`(\kappa_1, \kappa_2, \sigma_1, \sigma_2, \beta_1,
-\beta_2, \rho)`. Fix :math:`\kappa_1, \kappa_2` (well separated to avoid the
+**Two factors** :math:`(\kappa_1, \kappa_2, \sigma_1, r, \beta_1,
+\beta_2, \rho)`, with the second level parameterised as the ratio
+:math:`r = \sigma_2 / \sigma_1` (as in G2++). Fix :math:`\kappa_1, \kappa_2` (well separated to avoid the
 :math:`\kappa_1 = \kappa_2` degeneracy) and start :math:`\rho` from a prior; a
 decorrelation-sensitive instrument (e.g. a CMS-spread option) is needed to pin
 :math:`\rho` beyond the ATM surface.
@@ -64,6 +65,7 @@ from valax.calibration.transforms import (
 )
 from valax.curves.discount import DiscountCurve
 from valax.models.cheyette import CheyetteModel, CheyetteModel2F
+from valax.models.short_rate import as_buckets
 from valax.pricing.multicurve import require_single_curve, with_discount_curve
 from valax.pricing.pde import PDEConfig, PDEConfig2D, Scheme, pde_price_dispatch
 from valax.pricing.pde.cheyette import cheyette_exact_price
@@ -256,10 +258,13 @@ def calibrate_cheyette(
         curve: Initial discount curve; Cheyette is exact-fitted to it, so it is
             *not* a calibration degree of freedom.
         initial_guess: Starting model. Defaults to
-            :math:`\kappa = 0.05, \sigma = 0.01, \beta = 0`.
+            :math:`\kappa = 0.05, \sigma = 0.01, \beta = 0` (one volatility
+            bucket: a constant :math:`\sigma`, so ``result.value.volatility``
+            has shape ``(1,)``). The fit is over the buckets of the guess.
         fixed_params: Optional mapping of parameter name to a value to hold
             fixed (e.g. ``{"mean_reversion": 0.05}``). The recommended workflow
-            pins :math:`\kappa` and fits :math:`(\sigma, \beta)`.
+            pins :math:`\kappa` and fits :math:`(\sigma, \beta)`. A scalar
+            ``volatility`` value is promoted to one bucket.
         weights: Per-quote residual weights. Default: uniform.
         relative: Divide each residual by its market price (default).
         settings: Solver settings; defaults to :data:`CHEYETTE_SETTINGS`
@@ -302,6 +307,12 @@ def calibrate_cheyette(
             volatility=jnp.asarray(0.01),
             skew=jnp.asarray(0.0),
         )
+    if fixed_params is not None:
+        # The volatility is a bucket array: promote a scalar to one bucket.
+        fixed_params = {
+            k: as_buckets(jnp.asarray(v)) if k == "volatility" else v
+            for k, v in fixed_params.items()
+        }
     return _cheyette_fit(
         name, tuple(instruments), market_prices, curve, initial_guess,
         CHEYETTE_TRANSFORMS, fixed_params, weights, relative, settings,
@@ -340,10 +351,16 @@ def calibrate_cheyette_2f(
         curve: Initial discount curve; exact-fitted, not a degree of freedom.
         initial_guess: Starting model. Defaults to
             :math:`\kappa_1 = 0.5, \kappa_2 = 0.1, \sigma_1 = 0.01,
-            \sigma_2 = 0.008, \beta_1 = \beta_2 = 0, \rho = -0.7` (well-separated
-            mean reversions avoid the :math:`\kappa_1 = \kappa_2` degeneracy).
+            r = \sigma_2/\sigma_1 = 0.8` (:math:`\sigma_2 = 0.008`),
+            :math:`\beta_1 = \beta_2 = 0, \rho = -0.7` (well-separated mean
+            reversions avoid the :math:`\kappa_1 = \kappa_2` degeneracy), one
+            volatility bucket. The fit is over :math:`\sigma_1` and the ratio
+            :math:`r` (``volatility_ratio``) on the buckets of the guess;
+            :math:`\sigma_2 = r\sigma_1` is ``result.value.volatility_2``.
         fixed_params: Optional mapping of parameter name to a value to hold
             fixed. The recommended workflow pins :math:`\kappa_1, \kappa_2`.
+            Scalar ``volatility_1`` / ``volatility_ratio`` values are
+            promoted to one bucket.
         weights: Per-quote residual weights. Default: uniform.
         relative: Divide each residual by its market price (default).
         settings: Solver settings; defaults to :data:`CHEYETTE_SETTINGS`.
@@ -374,11 +391,18 @@ def calibrate_cheyette_2f(
             mean_reversion_1=jnp.asarray(0.5),
             mean_reversion_2=jnp.asarray(0.1),
             volatility_1=jnp.asarray(0.01),
-            volatility_2=jnp.asarray(0.008),
+            volatility_ratio=jnp.asarray(0.008) / jnp.asarray(0.01),
             skew_1=jnp.asarray(0.0),
             skew_2=jnp.asarray(0.0),
             correlation=jnp.asarray(-0.7),
         )
+    if fixed_params is not None:
+        # The levels are bucket arrays: promote scalars to one bucket.
+        fixed_params = {
+            k: as_buckets(jnp.asarray(v))
+            if k in ("volatility_1", "volatility_ratio") else v
+            for k, v in fixed_params.items()
+        }
     return _cheyette_fit(
         name, tuple(instruments), market_prices, curve, initial_guess,
         CHEYETTE_2F_TRANSFORMS, fixed_params, weights, relative, settings,

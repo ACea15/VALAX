@@ -6,10 +6,12 @@ This is the shape that `jax.grad`, `jax.jit`, and `jax.vmap` expect —
 Greeks, batch pricing, and calibration all compose out of the box.
 
 !!! tip "One call convention over all of them"
-    Every pricer on this page is also reachable through the unified
+    The pricers on this page are also reachable through the unified
     [`price(instrument, model, market, method=...)`](core.md) entry point,
     which binds an instrument's curve/underlying selectors against a
-    [`MarketState`](core.md#marketstate) and picks a method for you. The
+    [`MarketState`](core.md#marketstate) and picks a method for you — except
+    the Hull–White trinomial-tree pricers under [Lattice](#lattice), which
+    are direct calls only for now. The
     explicit signatures below remain the primary API; the unified one is
     what portfolio, risk, and multi-method comparison code should use.
 
@@ -138,6 +140,12 @@ is the auto-default `"analytic"` route for `Swaption` × `HullWhiteModel`);
 called directly as a kernel, the model must be bound first with
 [`bind_curves`](core.md#valax.core.binding.bind_curves).
 
+Both Jamshidian pricers accept a piecewise-constant \(\sigma(t)\) (only the
+bond-option variance changes). The critical-rate Newton solve is guarded: an
+absurd or non-finite parameter yields a NaN price and NaN gradient instead of
+a runtime raise inside `jit` / `vmap`. Measured overhead and an example:
+[Analytical guide § short-rate swaptions](../guide/analytical.md#short-rate-swaptions-jamshidian-brigomercurio).
+
 ::: valax.pricing.analytic.hw_swaption_price
 
 ::: valax.pricing.analytic.hw_critical_rate
@@ -158,6 +166,10 @@ this *analytic* pricer is reserved for a future extension and must be `None`;
 for a dual-curve G2++ swaption today, use the PDE or MC recipe, which implement
 the deterministic tenor basis of
 [`valax.pricing.multicurve`](#multi-curve-overlay-for-the-short-rate-solvers).
+
+The price accepts piecewise-constant \(\sigma(t)\) and \(\eta(t)\) (via
+`volatility_x` / `volatility_ratio`), and the exercise-boundary Newton solve
+carries the same NaN-not-raise guard as Jamshidian's.
 
 ::: valax.pricing.analytic.g2pp_swaption_price
 
@@ -327,6 +339,9 @@ Typical `market_args`:
 - Optional per-recipe knobs: e.g. `annual_factor` for variance-swap
   realization, `n_steps_per_period` for LMM, `lsm_config` for
   Bermudan.
+- Short-rate recipes (Hull–White, G2++, Cheyette): `T` (horizon) and
+  `n_steps` (default 100). These recipes **ignore `MCConfig.n_steps`**; see
+  the [Monte Carlo guide § time-dependent volatility](../guide/monte-carlo.md#time-dependent-volatility).
 
 ::: valax.pricing.mc.mc_price_dispatch
 
@@ -421,7 +436,9 @@ branch.
 The Hull–White short-rate generator samples the **exact** conditional
 Ornstein–Uhlenbeck law rather than discretising the SDE, so it is unbiased in
 \(r(t)\) at any step size (the only discretisation error is the trapezoidal
-accumulation of \(\int r\,dt\) into the log discount factor). See
+accumulation of \(\int r\,dt\) into the log discount factor). With a
+piecewise-constant \(\sigma(t)\) each step uses the exact step variance
+(`hw_state_variance`). See
 [Hull–White Monte Carlo](../theory/hull-white-mc.md) for the derivation.
 
 ::: valax.pricing.mc.HullWhitePathResult
@@ -432,7 +449,8 @@ The G2++ generator samples the **exact** two-factor conditional Gaussian law
 (Cholesky of the \(2\times2\) conditional covariance) and integrates the
 deterministic forward part of the discount exactly, so it is unbiased in the
 factors and reprices the initial curve within Monte-Carlo error on flat and
-steep curves alike. See [G2++ Monte Carlo](../theory/g2pp.md#4-monte-carlo-exact-two-factor-scheme).
+steep curves alike. With piecewise-constant volatilities the covariance is
+factored per step (`g2pp_state_covariance`). See [G2++ Monte Carlo](../theory/g2pp.md#4-monte-carlo-exact-two-factor-scheme).
 
 ::: valax.pricing.mc.G2PPPathResult
 
@@ -534,6 +552,11 @@ Unlike the trinomial tree, nothing here has to be concrete: schedules are
 scattered with traced indices, so the pricers compose with `eqx.filter_jit` and
 `eqx.filter_grad` directly.
 
+With a piecewise-constant \(\sigma(t)\) each stacked row diffuses at the exact
+step average of \(\sigma^2\); the per-model \(\sigma(t)\) coverage of all
+short-rate PDEs (which builders take it, which raise) is in the
+[PDE guide §5.8](../guide/pde.md#58-time-dependent-volatility).
+
 ::: valax.pricing.pde.coefficients.hw_operator_stack
 
 ::: valax.pricing.pde.grids.centred_state_grid
@@ -558,7 +581,14 @@ ADI grid. See the theory note
 [G2++ PDE](../theory/g2pp.md#8-pde-2-d-finite-differences) for the
 discretisation, boundary treatment and validation.
 
+The constant operator above is for a one-bucket model and raises
+`ValueError` for more than one volatility bucket; a piecewise-constant model
+is solved with one operator per backward step, assembled inside the ADI loop
+by `g2pp_operator_rows` (the recipes pick the builder themselves).
+
 ::: valax.pricing.pde.coefficients.g2pp_operator_2d
+
+::: valax.pricing.pde.coefficients.g2pp_operator_rows
 
 ::: valax.pricing.pde.boundary.apply_linearity_bc_2d
 
@@ -578,9 +608,22 @@ advection axis (`cheyette_exact_price`, which also supports a `Caplet`) for a
 bias-free, zero-Monte-Carlo-noise measurement of the frozen-\(y\) error. See
 the theory note [Cheyette §8 PDE](../theory/cheyette.md#8-pde-finite-differences).
 
+All three tiers accept a piecewise-constant volatility level. The 1-F
+`cheyette_operator_stack` handles both cases; the constant 2-D builders
+`cheyette_operator_2d` (frozen-\(y\) 2F) and `cheyette_exact_operator_2d`
+(exact-\(y\)) raise `ValueError` for more than one bucket, and their
+per-step counterparts `cheyette_operator_rows_2d` and
+`cheyette_exact_operator_rows` take over.
+
 ::: valax.pricing.pde.cheyette.cheyette_operator_stack
 
 ::: valax.pricing.pde.cheyette.cheyette_operator_2d
+
+::: valax.pricing.pde.cheyette.cheyette_operator_rows_2d
+
+::: valax.pricing.pde.cheyette.cheyette_exact_operator_2d
+
+::: valax.pricing.pde.cheyette.cheyette_exact_operator_rows
 
 ::: valax.pricing.pde.cheyette.cheyette_exact_price
 
@@ -693,7 +736,9 @@ triangulation used across the tests and the `examples/comparisons/` scripts.
 
 Which numerical engines can price each vanilla-rates instrument under each
 short-rate model. **A** = analytic (closed form), **P** = finite-difference
-PDE, **M** = Monte Carlo, **Q** = QuantLib comparison available.
+PDE, **M** = Monte Carlo, **T** = Hull–White trinomial tree (direct call, not
+yet through `price()`), **Q** = QuantLib comparison available. Every engine
+listed accepts piecewise-constant volatility \(\sigma(t)\).
 
 | Instrument                       | Hull–White | G2++      | Cheyette 1F | Cheyette 2F |
 |----------------------------------|------------|-----------|-------------|-------------|
@@ -701,9 +746,9 @@ PDE, **M** = Monte Carlo, **Q** = QuantLib comparison available.
 | Floating-rate note               | A M        | A M       | M           | M           |
 | Caplet / floorlet                | A P (Q)    | P         | P M         | P           |
 | Cap / floor                      | A P Q      | P         | P M         | P           |
-| European swaption                | A P M Q    | A P M Q   | P M         | P           |
-| Bermudan swaption                | P M Q      | P M Q     | P           | P           |
-| Callable / puttable bond         | P M Q      | P         | P           | P           |
+| European swaption                | A P T Q    | A P M Q   | P M         | P           |
+| Bermudan swaption                | P T Q      | P Q       | P           | P           |
+| Callable / puttable bond         | P M T Q    | P         | P           | P           |
 | CMS-spread swap                  | —          | P M       | —           | P M         |
 
 **Multi-curve.** The Hull–White and G2++ engines accept a trade's own
@@ -711,6 +756,11 @@ PDE, **M** = Monte Carlo, **Q** = QuantLib comparison available.
 [the overlay above](#multi-curve-overlay-for-the-short-rate-solvers)); the
 Cheyette engines and the CMS-spread recipes are single-curve and reject a
 distinct projection curve rather than ignoring it.
+
+**Monte Carlo** here means a registered short-rate `mc_price_dispatch` recipe
+(see [Built-in recipes](#built-in-recipes)); there is none for Hull–White
+swaptions or for Bermudan swaptions under the short-rate models — the MC
+Bermudan route is Longstaff–Schwartz on `LMMModel`.
 
 Notes: the Cheyette PDE is the frozen-\(y\) production engine; the one-factor
 exact-\(y\) PDE (`cheyette_exact_price`) additionally prices the fixed-rate
@@ -758,9 +808,10 @@ exactly. Callable price is bounded above by the equivalent straight
 bond; puttable price is bounded below.
 
 The lattice half-width \(j_{\max}\) determines array shapes, so it must be a
-concrete Python `int`. It is computed automatically from `mean_reversion`,
-which forces that parameter to be concrete — pass `j_max=` explicitly (see
-`hw_tree_j_max`) to differentiate through the tree with `eqx.filter_grad`.
+concrete Python `int`. It is computed automatically from the concrete model
+parameters, which forces them to be concrete — pass `j_max=` explicitly (see
+`hw_tree_j_max` for a constant \(\sigma\), `hw_tree_width` for \(\sigma(t)\))
+to differentiate through the tree with `eqx.filter_grad`.
 
 ::: valax.pricing.lattice.hull_white_tree.hw_tree_j_max
 
@@ -771,3 +822,33 @@ which forces that parameter to be concrete — pass `j_max=` explicitly (see
 ::: valax.pricing.lattice.hull_white_tree.callable_bond_price
 
 ::: valax.pricing.lattice.hull_white_tree.puttable_bond_price
+
+### General tree for piecewise-constant σ(t)
+
+`build_hull_white_tree` dispatches a model with more than one volatility
+bucket to `build_general_hull_white_tree` (Hull & White 2001), whose level
+spacing follows \(\sigma(t)\); a one-bucket model keeps the Hull–White 1994
+tree above, bit-identically. The general tree's half-width depends on the
+whole volatility path, so size it eagerly with `hw_tree_width` (not
+`hw_tree_j_max`) before `jit` / `grad`; an undersized width gives NaN prices,
+never wrong ones. The callable / puttable pricers above run on it unchanged.
+See [Lattice guide § general tree](../guide/lattice.md#general-tree-for-piecewise-constant-volatility).
+
+::: valax.pricing.lattice.hull_white_tree.hw_tree_width
+
+::: valax.pricing.lattice.hull_white_tree.build_general_hull_white_tree
+
+::: valax.pricing.lattice.hull_white_tree.GeneralHullWhiteTree
+
+### Swaptions on the Hull–White tree
+
+European and Bermudan swaptions on either tree, with cell-averaged payoffs
+(`smooth_payoff=True`, default) giving monotone first-order convergence in
+`n_steps`. They are independent checks of Jamshidian and the PDE, reached by
+**direct call only** — not yet through `price()`. Usage, accuracy evidence and
+step-count guidance:
+[Lattice guide § swaptions on the tree](../guide/lattice.md#swaptions-on-the-tree).
+
+::: valax.pricing.lattice.hull_white_tree.swaption_tree_price
+
+::: valax.pricing.lattice.hull_white_tree.bermudan_swaption_tree_price

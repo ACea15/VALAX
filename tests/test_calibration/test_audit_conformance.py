@@ -430,8 +430,8 @@ class TestSingleCurveLimitAtTheModel:
             fixed_mean_reversion=jnp.array(0.08),
             forward_curve=curve,
         ).value
-        assert float(dual.volatility) == pytest.approx(
-            float(single.volatility), rel=T4_MODEL_RTOL
+        assert float(dual.volatility[0]) == pytest.approx(
+            float(single.volatility[0]), rel=T4_MODEL_RTOL
         )
 
 

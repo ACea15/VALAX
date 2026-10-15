@@ -204,3 +204,5 @@ $$
 **When to use:** American/Bermudan options on a single underlying (natural backward induction). Pedagogically clear. Limited to low dimensions (multi-asset trees have exponential node growth).
  
 **VALAX implementation:** `valax/pricing/lattice/binomial.py` (`binomial_price`). Supports European and American exercise. Uses `jax.lax.scan` for backward induction. Greeks via `jax.grad` through the entire tree computation.
+
+**Short-rate trinomial trees:** the Hull-White trinomial tree (`valax/pricing/lattice/hull_white_tree.py`) and its general form for a time-dependent $\sigma(t)$, including how it differs from the classical Hull & White (1994) construction, are derived in [Time-Dependent Volatility §4.4](time-dependent-volatility.md#44-the-general-hull-white-trinomial-tree).

@@ -96,8 +96,18 @@ $$
 ZBP = X\,P(0,T)\,\Phi(-h + \sigma_p) - P(0,S)\,\Phi(-h)
 $$
 
-These are Black formulas with the *bond* as underlying. Summing gives the
-swaption:
+These are Black formulas with the *bond* as underlying.
+
+!!! note "Time-dependent volatility"
+    With a piecewise-constant \(\sigma(t)\) only \(\sigma_p\) changes. It
+    becomes \(\sigma_p = B(T,S)\sqrt{I_{2a}(T)}\), where
+    \(I_{2a}(T) = \int_0^T \sigma(u)^2 e^{-2a(T-u)}\,du\) is the variance of the
+    state at expiry. \(B\) does not involve \(\sigma\), so every bond is still
+    monotone in \(r\) and the decomposition of §2 holds unchanged. The derivation
+    is in
+    [Time-Dependent Volatility §3](time-dependent-volatility.md#3-hull-white-with-piecewise-constant-volatility).
+
+Summing gives the swaption:
 
 $$
 \text{payer} = N\sum_{i=1}^{n} c_i\,ZBP(T_0, T_i, X_i),
@@ -127,13 +137,29 @@ price is *not* stationary with respect to it. Differentiating through the
 solver iterations would be both slower and less accurate. VALAX's autodiff
 sensitivities agree with central differences to ~1e-11.
 
+**A failed solve is NaN, not an exception.** Differentiating through a
+root-find that did not converge makes the implicit-derivative linear solve
+non-finite. Inside `jit` or `vmap` that raises at runtime, so one absurd iterate
+of a calibration would abort a whole batch. `hw_critical_rate` therefore runs a
+detached probe solve first to decide whether the solve succeeded. The
+differentiable solve then runs on `where(ok, real input, detached stand-in)`,
+and a failure returns NaN, so the price and its gradient are NaN. On the
+healthy path every input is the real one, so the value and the gradient are
+bit-identical to the unguarded solve (`tests/test_pricing/test_root_guard.py`).
+The [G2++ boundary](g2pp.md#3-european-swaptions-brigomercurio-integral)
+\(\bar y(x)\) uses the same guard.
+
 ---
 
 ## 5 · Why this makes Hull–White calibratable
 
-Hull–White has exactly **two** free parameters: \(a\) and \(\sigma\). The drift
-\(\theta(t)\) is not free — it is pinned by the exact-fit condition to the
-initial curve. So calibration means fitting two numbers to a swaption surface.
+With a constant volatility, Hull–White has exactly **two** free parameters:
+\(a\) and \(\sigma\). The drift \(\theta(t)\) is not free — it is pinned by the
+exact-fit condition to the initial curve. So calibration means fitting two
+numbers to a swaption surface. A piecewise-constant \(\sigma(t)\) adds one
+volatility per bucket. The bucket breakpoints are inputs, not fitted
+parameters (see
+[Time-Dependent Volatility §1](time-dependent-volatility.md#1-the-bucket-convention)).
 
 That is only practical if each model price is cheap. A lattice or Monte-Carlo
 price inside a least-squares loop is expensive and introduces discretisation
@@ -166,12 +192,23 @@ co-terminal basket read off a calibrated swaption cube is the
 
 ### What it cannot do
 
-A one-factor Gaussian model produces a *normal* volatility term structure that
-decays with expiry. It cannot reproduce a smile at all (volatility does not
-depend on strike), and it cannot match an arbitrary ATM surface shape. Fitting
-a flat Black-76 surface leaves a visible residual — around 8 % rms in the test
-suite — and that is the correct outcome, not a bug. If you need smile, you need
-SABR on top or a different model.
+A one-factor Gaussian model cannot reproduce a smile at all, because volatility
+does not depend on strike. If you need smile, you need SABR on top or a
+different model.
+
+With a **constant** \(\sigma\) it also produces a *normal* volatility term
+structure that decays with expiry, so it cannot match an arbitrary ATM surface
+shape. Fitting a flat Black-76 surface leaves a visible residual, around 8 %
+rms in the test suite. That is the correct outcome for a two-parameter model,
+not a bug.
+
+A piecewise-constant \(\sigma(t)\) removes the term-structure limitation for
+**one strip** of options. With one bucket per co-terminal expiry, the
+co-terminal swaptions of a Bermudan can be matched exactly, one bucket after
+another (see [Calibration Chains](calibration-chains.md)). It still does not
+fit a whole surface. One \(\sigma(t)\) can fit one strip (for example, the
+co-terminals of one trade), but not every expiry × tenor cell at once, because
+a given expiry has a single \(\sigma\) history for all tenors.
 
 ---
 
@@ -184,6 +221,14 @@ SABR on top or a different model.
 | Payer − receiver parity | `< 1e-9` rel | Exact-fit: parity is pure curve, model-free |
 | Autodiff vs central differences | `~1e-11` | Implicit differentiation of \(r^\star\) |
 | Synthetic round-trip | `1e-5` on \((a,\sigma)\) | Calibration recovers generating parameters |
+| QuantLib `Gsr` + dense `Gaussian1dSwaptionEngine`, \(\sigma(t)\) | `< 5e-6` rel | Piecewise \(\sigma_p\) against an independent implementation |
+| Same, breakpoints shifted | `> 1e-3` rel (must disagree) | Anti-vacuity: the buckets are really read |
+| Root guard (`test_root_guard.py`) | bit-identical when healthy, NaN on failure | §4 guard |
+
+The \(\sigma(t)\) rows are explained in
+[Time-Dependent Volatility §8](time-dependent-volatility.md#8-validation),
+including why QuantLib's `Gaussian1dJamshidianSwaptionEngine` is not used as the
+oracle.
 
 ---
 

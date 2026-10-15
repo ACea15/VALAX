@@ -240,7 +240,7 @@ class TestHWAlpha:
     def test_alpha_closed_form(self, model):
         """alpha(t) = f^M(0,t) + sigma^2/(2a^2) (1 - e^{-at})^2."""
         a = float(model.mean_reversion)
-        sigma = float(model.volatility)
+        sigma = float(model.volatility[0])
         for t in (0.25, 3.0, 12.0):
             expected = float(
                 hw_instantaneous_forward(model, jnp.array(t))
@@ -269,7 +269,7 @@ class TestHWAlpha:
         theta(t) = f_t(0,t) + a f(0,t) + sigma^2/(2a) (1 - e^{-2at}).
         """
         a = model.mean_reversion
-        sigma = model.volatility
+        sigma = model.volatility[0]
 
         d_alpha = jax.grad(lambda s: hw_alpha(model, s))
         d_fwd = jax.grad(lambda s: hw_instantaneous_forward(model, s))
@@ -293,7 +293,7 @@ class TestHWAlpha:
 
         g = eqx.filter_grad(lambda m: hw_alpha(m, jnp.array(5.0)))(model)
         # d alpha / d sigma = sigma/a^2 (1 - e^{-at})^2 > 0.
-        assert float(g.volatility) > 0.0
+        assert float(g.volatility[0]) > 0.0
 
 
 # ── Exact step-averaged alpha ────────────────────────────────────────
@@ -331,7 +331,7 @@ class TestHWAlphaAverage:
     def test_forward_part_telescopes_to_the_discount_ratio(self, model):
         """The market-forward half integrates to ln P(0,t0) - ln P(0,t1)."""
         a = float(model.mean_reversion)
-        sigma = float(model.volatility)
+        sigma = float(model.volatility[0])
         t0, t1 = 1.5, 4.5
 
         def convexity_integral(t):

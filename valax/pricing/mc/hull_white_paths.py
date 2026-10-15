@@ -38,7 +38,8 @@ import equinox as eqx
 from jaxtyping import Float
 from jax import Array
 
-from valax.models.hull_white import HullWhiteModel, hw_alpha
+from valax.models.hull_white import HullWhiteModel, hw_alpha, hw_state_variance
+from valax.models.short_rate import is_constant
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -113,7 +114,6 @@ def generate_hull_white_paths(
         ``(n_paths, n_steps + 1)``.
     """
     a = model.mean_reversion
-    sigma = model.volatility
 
     dt = jnp.asarray(T / n_steps, dtype=jnp.float64)
     times = jnp.linspace(0.0, T, n_steps + 1)  # (n_steps + 1,)
@@ -140,7 +140,15 @@ def generate_hull_white_paths(
     # This is the unique unbiased exact-sampling formula for any dt.
 
     e_adt = jnp.exp(-a * dt)                                               # scalar
-    v_dt = (sigma**2 / (2.0 * a)) * (1.0 - jnp.exp(-2.0 * a * dt))       # conditional variance
+    if is_constant(model.volatility):
+        sigma = model.volatility[0]
+        v_dt = (sigma**2 / (2.0 * a)) * (1.0 - jnp.exp(-2.0 * a * dt))   # conditional variance
+        sd_steps = jnp.broadcast_to(jnp.sqrt(v_dt), (n_steps,))
+    else:
+        # Piecewise sigma(t): the exact step variance
+        # V(t_i, t_{i+1}) = int sigma(u)^2 e^{-2a(t_{i+1}-u)} du, which stays
+        # exact when a step straddles a bucket breakpoint.
+        sd_steps = jnp.sqrt(hw_state_variance(model, times[:-1], times[1:]))
 
     # Precompute the exact-fit shift on the full time grid (n_steps+1,).
     # alpha(t) = f^M(0,t) + sigma^2/(2a^2) * (1-exp(-a*t))^2
@@ -167,8 +175,8 @@ def generate_hull_white_paths(
         # Exact conditional mean: alpha(t+dt) + (r_i - alpha(t)) * e^{-a dt}
         mu = alpha_next + (r_i - alpha_i) * e_adt
 
-        # Draw r_{i+1} from N(mu, v_dt).
-        r_next = mu + jnp.sqrt(v_dt) * z  # (n_paths,)
+        # Draw r_{i+1} from N(mu, V(t_i, t_{i+1})).
+        r_next = mu + sd_steps[i] * z  # (n_paths,)
 
         # Accumulate log-discount factor: trapezoidal rule.
         log_df_next = log_df_i - 0.5 * dt * (r_i + r_next)

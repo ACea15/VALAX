@@ -27,11 +27,11 @@ python examples/01_equity_options.py
 | [`11_unified_multicurve_rates.py`](#unified-calibration-pricing-and-risk) | Multi-curve bootstrap, swap book, quote risk | Synthetic OIS + 3M quotes → joint bootstrap → swap book → book quote risk in one adjoint sweep (vs autodiff and FD), single-curve limit |
 | [`12_unified_equity_smile_and_model.py`](#unified-calibration-pricing-and-risk) | Equity smiles, Heston, MC quote risk | Noisy equity quotes → curve, SABR smiles, Heston → European / barrier / Asian prices → Monte Carlo quote risk with fixed-input sensitivities |
 | [`13_unified_quote_scenarios.py`](#unified-calibration-pricing-and-risk) | Quote scenarios, VaR / ES | Correlated quote scenarios → `vmap` recalibration + repricing compiled once → P&L explain vs first-order quote risk → VaR / ES |
-| [`14_unified_rates_per_trade_model.py`](#per-trade-model-calibration-for-bermudans) | Swaption cube, per-trade Hull–White, Bermudan risk | Curves → swaption cube → per-trade Hull–White on co-terminal baskets (`filter_vmap`) → Bermudan via `price()` PDE → quote risk; adjoint vs autodiff; λ_m vega profile vs full recalibration |
+| [`14_unified_rates_per_trade_model.py`](#per-trade-model-calibration-for-bermudans) | Swaption cube, per-trade Hull–White, Bermudan risk | Curves → swaption cube → per-trade Hull–White σ(t) bootstrapped on co-terminal baskets (`filter_vmap`) → Bermudan via `price()` PDE → quote risk; adjoint vs autodiff; λ_m vega profile vs full recalibration |
 | [`15_unified_rates_caps_optionlet_chain.py`](#caps-and-floors-off-the-optionlet-chain) | Cap strip, optionlet SABR, cap/floor risk | Curves → cap→caplet strip → optionlet SABR as chain nodes → caps / floors through `price()` → quote risk to cap and curve quotes; adjoint vs autodiff vs FD |
 | [`16_unified_calibration_diagnostics.py`](#diagnosing-a-failed-calibration) | Failure naming, conditioning, engine provenance | Bad quotes (NaN, off-market, stale) → `check()` / `failed_labels()` name the cell or bucket; healthy nodes unaffected; ill-conditioning alert; `check_engine` refusing a frozen-y Cheyette fit on another engine; fix and recalibrate |
 | [`17_unified_slv_fixed_point.py`](#slv-as-a-fixed-point-level) | SLV leverage, fixed-point diagnostics, MC exotic risk | Smile → Heston → SLV leverage as a fixed-point level (max\|ΔL\|, `converged`, clip fraction vs `n_iterations`) → barrier under LV / Heston / SLV → vega by AD through the unrolled passes vs FD |
-| [`18_unified_rates_per_trade_g2pp_cheyette.py`](#per-trade-g2-and-cheyette) | Per-trade G2++ and Cheyette, model risk | Per-trade G2++ (multi-curve, closed-form basket, 2-D PDE Bermudan) and Cheyette (single-curve, frozen-y PDE) → quote risk reconciled; exact vs engine-consistent G2++ calibration; HW vs G2++ vs Cheyette Bermudan on the same basket |
+| [`18_unified_rates_per_trade_g2pp_cheyette.py`](#per-trade-g2-and-cheyette) | Per-trade G2++ and Cheyette, model risk | Per-trade G2++ σ(t) (multi-curve, closed-form basket, 2-D PDE Bermudan) and Cheyette σ(t) (single-curve, frozen-y PDE), both bootstrapped → quote risk reconciled; exact vs engine-consistent G2++ calibration; HW vs G2++ vs Cheyette Bermudan on the same basket |
 
 ---
 
@@ -235,7 +235,7 @@ Highlights:
 
 ### Per-trade model calibration for Bermudans
 
-**`examples/14_unified_rates_per_trade_model.py`** — Rates end to end with a model calibrated **per trade**: curves → swaption SABR cube (on the curve-implied forwards) → a Hull–White σ fitted to each Bermudan's own co-terminal basket → Bermudan priced through `price()` on the PDE → quote risk.
+**`examples/14_unified_rates_per_trade_model.py`** — Rates end to end with a model calibrated **per trade**: curves → swaption SABR cube (on the curve-implied forwards) → a Hull–White σ(t) bootstrapped on each Bermudan's own co-terminal basket → Bermudan priced through `price()` on the PDE → quote risk.
 
 ```python
 snap, world = rates_vol_snapshot(registry, default_config(), rates_spec, vol_spec,
@@ -245,7 +245,8 @@ calibrated = calibrate_market(chain, quotes, fixed, strict=True)    # curves →
 node = swaption_basket_node("hw", template=HullWhiteModel(...),
                             basket=coterminal_swaptions(bermudan),
                             cube_id=vol_spec.cube_id, transforms={"volatility": positive()},
-                            fixed_fields={"mean_reversion": A_KEY}, target_keys=keys)
+                            fixed_fields={"mean_reversion": A_KEY}, target_keys=keys,
+                            mode="coterminal_bootstrap")   # one σ bucket per exercise
 batched = eqx.filter_vmap(fit)(stacked_baskets)   # one fit per trade, curve-free models
 pv = price(bermudan, model, calibrated.market, method="pde", config=PDE).price
 
@@ -255,10 +256,10 @@ adj = quote_risk_adjoint(bermudan, None, calibrated, model_result=model_result,
 
 Highlights:
 
-- **Batched per-trade fits** — same-shaped baskets calibrate in one `eqx.filter_vmap`; the fitted `HullWhiteModel`s are curve-free (`price` binds the market curve), so they stack.
-- **Model reprices its basket** — each co-terminal European priced by Jamshidian through `price()` (the auto-default analytic route for `Swaption` × `HullWhiteModel`) is compared with the cube.
+- **Batched per-trade bootstraps** — same-shaped baskets calibrate in one `eqx.filter_vmap`; each trade gets its own σ(t) (one bucket per exercise date, breakpoints as traced data), and the fitted `HullWhiteModel`s are curve-free (`price` binds the market curve), so they stack.
+- **Model reprices its basket exactly** — each co-terminal European priced by Jamshidian through `price()` (the auto-default analytic route for `Swaption` × `HullWhiteModel`) matches the cube to ≤ 1e-13; a constant σ fitted by least squares to the same basket is printed alongside and misses by up to 2.8%.
 - **Adjoint vs autodiff** — the model level's multiplier λ_m is pushed through the cube and curve levels and reconciled against autodiff through every calibration and the PDE.
-- **λ_m as a vega profile** — the basket target sensitivities, converted to per-vol-bp vega, sum to the total cube vega, and one entry is checked against full recalibration by finite differences.
+- **λ_m as a vega profile** — one entry per exercise date: the basket target sensitivities, converted to per-vol-bp vega, sum to the total cube vega, and one entry is checked against full recalibration by finite differences.
 
 ### Caps and floors off the optionlet chain
 
@@ -308,13 +309,13 @@ The backbone uses the full calibrated vol-of-vol: no mixing fraction and no hand
 
 **`examples/18_unified_rates_per_trade_g2pp_cheyette.py`** — Example 14 with the two richer short-rate models, plus the model risk between all three.
 
-- **G2++ (multi-curve)** — σ and η fitted per trade with a, b, ρ as fixed inputs, the basket priced by `price`'s default for the pair (the Brigo–Mercurio closed form), the Bermudan by the 2-D ADI PDE. A co-terminal basket alone cannot separate the two factors (condition number ~1e16), so the basket adds the 1Y-tenor swaption at the first exercise date (~1e3). Same-shaped baskets fit in one `eqx.filter_vmap`.
-- **Exact vs engine-consistent calibration** — the same basket fitted on the Bermudan's own PDE grid instead. The closed-form fit has portable parameters (provenance `exact`); the PDE fit fits the basket *as that grid prices it* (`discretised`, grid recorded), so the grid's swaption bias does not add to its basket miss. The example prints both parameter sets, the basket miss on the grid and the Bermudan under each. Full mode adds a converged reference (161×161×200): on each grid the engine-consistent fit's Bermudan error is several times smaller (41×41×40: −0.55 vs −0.07 bp; 81×81×100: −0.11 vs +0.004 bp) because it cancels against the basket's — the reason to calibrate on the pricing engine, at the cost of grid-bound parameters.
-- **Cheyette (single-curve)** — σ and the skew β fitted with κ fixed, on the co-terminals plus one off-strike option (β needs a second strike), through the frozen-y PDE. `price` refuses a trade with a distinct projection curve (Cheyette carries no tenor-basis overlay), so this section runs on a single-curve market; the node records the engine-bound provenance and `check_engine` refuses another grid.
+- **G2++ (multi-curve)** — σ(t) bootstrapped per trade, one bucket per exercise date, with a, b, ρ and the factor ratio η/σ as fixed inputs; the basket priced by `price`'s default for the pair (the Brigo–Mercurio closed form), the Bermudan by the 2-D ADI PDE. Every co-terminal is repriced exactly and the level's condition number is ~7. For comparison, the least-squares fit of two constant vols needs the 1Y-tenor swaption at the first exercise date to separate the two factors (condition number 5.8e3 with it, 5.6e5 on the co-terminals alone) and still misses the basket by 1.5%. ∂V/∂(η/σ), the price of holding the factor split fixed, is reported and checked by finite differences. Same-shaped baskets fit in one `eqx.filter_vmap`.
+- **Exact vs engine-consistent calibration** — the same basket bootstrapped on the Bermudan's own PDE grid instead. The closed-form fit has portable parameters (provenance `exact`); the PDE fit reprices the basket exactly *as that grid prices it* (`discretised`, grid recorded), so the grid's swaption bias (5.7e-4) does not reach the basket. The example prints both σ(t), the basket miss on the grid and the Bermudan under each. Full mode adds a converged reference (161×161×200): on each grid the engine-consistent fit's Bermudan error is several times smaller (41×41×40: −0.624 vs −0.096 bp; 81×81×100: −0.117 vs +0.005 bp) because it cancels against the basket's — the reason to calibrate on the pricing engine, at the cost of grid-bound parameters.
+- **Cheyette (single-curve)** — σ(t) bootstrapped through the frozen-y PDE with κ and the skew β held as fixed inputs (identifying β would need a strike slice and a least-squares fit, which is ill-conditioned per trade; see the [register](applications/calibration-register.md#cheyette-1f-2f)). `price` refuses a trade with a distinct projection curve (Cheyette carries no tenor-basis overlay), so this section runs on a single-curve market; the node records the engine-bound provenance and `check_engine` refuses another grid.
 - **Risk** — the adjoint (λ_m) is reconciled with autodiff (rtol 1e-6) and checked against full-recalibration finite differences; the G2++ vega profile across the basket sums to the total cube vega.
-- **Model risk** — Hull–White, G2++ and Cheyette fitted per trade to the same trade on the same market: the Bermudan spread across models is printed and bounded.
+- **Model risk** — Hull–White, G2++ and Cheyette each bootstrapped on the same trade's co-terminals on the same market. Every model reprices them exactly on its calibration engine, so the Bermudan spread across models (1.7%) is the exercise-value model risk the Europeans do not pin down, plus each Bermudan grid's own swaption error (printed).
 
-The validation tests behind this are in `tests/test_calibration/test_per_trade_basket.py`.
+The validation tests behind this are in `tests/test_calibration/test_coterminal_bootstrap.py` (bootstrap) and `tests/test_calibration/test_per_trade_basket.py` (least squares).
 
 ---
 
@@ -328,5 +329,6 @@ These are deliberately *red*. They are not examples of correct usage — they de
 |---|---|
 | [`01_sabr_vol_convention_mismatch.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/01_sabr_vol_convention_mismatch.py) | Fitting a **normal**-quoted SABR smile with the **lognormal** Hagan formula. The solver reports a small residual and returns nonsense parameters — so a small calibration residual is necessary but *not sufficient*. |
 | [`02_where_guard_kills_the_derivative.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/02_where_guard_kills_the_derivative.py) | A `jnp.where` guard on a removable singularity with the **right value and no derivative**. Two "independent" adjoints agreed bit-for-bit and were both wrong, because they shared the broken primitive; the finite difference nobody believed was right all along. |
+| [`03_unrolled_series_compile_time.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/03_unrolled_series_compile_time.py) | A correct, fast formula whose **traced graph** is enormous: a series written as an expanded double sum is unrolled by JAX, so values and run time are fine but compile time scales with the program *as written* — a quote-risk compile through the G2++ PDE took 427 s instead of 4 s. |
 
 The prose counterpart is [Numerical Pitfalls](architecture/numerical-pitfalls.md), which keeps one write-up per bug — symptom, the signals that pointed the wrong way, root cause, fix, and the generalisable lesson — together with the debugging methodology that localised it.

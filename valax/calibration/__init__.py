@@ -45,6 +45,7 @@ from valax.calibration.solve import (
     solve_batched_level,
     solve_level,
     stack_slices,
+    triangular_root_level,
 )
 
 from valax.calibration.transforms import (
@@ -125,6 +126,7 @@ _LAZY = {
         "optionlet_sabr_node",
         "coterminal_swaptions",
         "swaption_basket_node",
+        "BASKET_MODES",
     ),
 }
 _LAZY_INDEX = {name: mod for mod, names in _LAZY.items() for name in names}

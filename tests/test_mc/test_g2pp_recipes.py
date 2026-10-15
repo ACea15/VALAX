@@ -64,7 +64,7 @@ def model(curve):
         mean_reversion_x=jnp.array(0.50),
         mean_reversion_y=jnp.array(0.10),
         volatility_x=jnp.array(0.010),
-        volatility_y=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.8),
         correlation=jnp.array(-0.70),
         initial_curve=curve,
     )

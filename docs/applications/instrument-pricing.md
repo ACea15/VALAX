@@ -87,7 +87,7 @@ as chain nodes today is tracked on the
 | [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | single forward per period | ✅ |
 | [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | strip of independent caplets | ✅ |
 | [Interest-rate swap](#interest-rate-swap) | Analytic | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
-| [Swaption](#swaption) | Analytic · MC · PDE (Hull-White analytic = Jamshidian, G2++ analytic = Brigo-Mercurio; both reachable through `price()` and its auto default) | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube); as a chain: `swaption_cube_node` on the upstream curves · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)); per trade off the cube: `swaption_basket_node` | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
+| [Swaption](#swaption) | Analytic · MC · PDE · Lattice (Hull-White analytic = Jamshidian, G2++ analytic = Brigo-Mercurio; both reachable through `price()` and its auto default. Hull-White tree: `swaption_tree_price`, a direct call, not yet routed through `price()`) | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette (constant or [piecewise-constant σ(t)](../theory/time-dependent-volatility.md)) · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube); as a chain: `swaption_cube_node` on the upstream curves · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)); per trade off the cube: `swaption_basket_node` | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
 | [CMS swap](#cms-swap) | Analytic | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
 | [CMS-spread swap](#cms-spread-swap) | MC · PDE | G2++ · Cheyette-2F | HW → swaption surface | 2-factor decorrelation (steepener / flattener) | ✅ |
 | [CMS cap / floor](#cms-cap-floor) | Analytic | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |
@@ -98,7 +98,7 @@ as chain nodes today is tracked on the
 | [Tenor basis swap](#tenor-basis-swap) | Analytic | n-a (curves) | curve bootstrap · `TenorBasisSwap` quote | one projection curve per leg | ✅ |
 | [Cross-currency swap](#cross-currency-swap) | Analytic | n-a (curves + FX spot) | joint curve bootstrap | telescoping under CIP | ✅ |
 | [Total return swap](#total-return-swap) | Analytic | n-a (curves) | curve bootstrap | self-financing asset | ✅ |
-| [Bermudan swaption](#bermudan-swaption) | MC · PDE | Hull-White · G2++ · Cheyette · LMM | per trade (Hull-White, G2++; Cheyette single-curve): `coterminal_swaptions` + `swaption_basket_node` off the calibrated cube, priced through `price(..., method="pde")` with quote risk via `chain_adjoint` ([how-to](../guide/calibration-to-risk.md#rates-per-trade-model-calibration)); LMM uncalibrated | early exercise | ✅ |
+| [Bermudan swaption](#bermudan-swaption) | MC · PDE · Lattice (Hull-White tree: `bermudan_swaption_tree_price`, a direct call, not yet routed through `price()`) | Hull-White · G2++ · Cheyette (constant or [piecewise-constant σ(t)](../theory/time-dependent-volatility.md)) · LMM | per trade (Hull-White, G2++, Cheyette 1F/2F; Cheyette single-curve): `coterminal_swaptions` + `swaption_basket_node` off the calibrated cube — `mode="coterminal_bootstrap"` gives one σ bucket per exercise date and reprices every co-terminal exactly, `mode="least_squares"` fits constant parameters — priced through `price(..., method="pde")` with quote risk via `chain_adjoint` ([how-to](../guide/calibration-to-risk.md#rates-per-trade-model-calibration)); LMM uncalibrated | early exercise | ✅ |
 
 ### Bonds & fixed income
 
@@ -107,8 +107,8 @@ as chain nodes today is tracked on the
 | [Zero-coupon bond](#zero-coupon-bond) | Analytic | n-a (curve) | curve bootstrap | single cash flow | ✅ |
 | [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | n-a · Hull-White · G2++ · Cheyette | curve / HW | day-count accrual per period | ✅ |
 | [Floating-rate bond](#floating-rate-note) | Analytic · MC | n-a (curves) · Hull-White · G2++ · Cheyette | curve / HW | par-reset replication | ✅ |
-| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | issuer-optimal call, clean call price | ✅ |
-| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE) · G2++ · Cheyette (PDE) | HW→swaptions | holder-optimal put, clean put price | ✅ |
+| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE; σ(t) on the general tree) · G2++ · Cheyette (PDE) | HW→swaptions | issuer-optimal call, clean call price | ✅ |
+| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE; σ(t) on the general tree) · G2++ · Cheyette (PDE) | HW→swaptions | holder-optimal put, clean put price | ✅ |
 | [Convertible bond](#convertible-bond) | — | equity-credit | — | equity conversion option | 🟡 |
 
 !!! note "Conventions that apply to every row above"
@@ -265,7 +265,7 @@ Exchange of floating legs in two currencies plus (optionally) notional exchange.
 Exchanges the total return of a reference asset for a funding rate + spread. Under a self-financing assumption the asset leg telescopes on the discount curve; the NPV reduces to the funding spread annuity. See [Rates exotics guide](../guide/rates-exotics.md).
 
 ### Bermudan swaption
-Right to enter the underlying swap on one of several `exercise_dates` — the canonical early-exercise rate exotic. Priced by Longstaff-Schwartz on [LMM](../theory/stochastic-models.md#26-libor-market-model-lmm-bgm) paths, or backward induction on the [Hull-White tree/PDE](../theory/hull-white-pde.md). See [Theory §9.4](../theory/rate-derivatives.md#94-bermudan-swaptions-and-early-exercise).
+Right to enter the underlying swap on one of several `exercise_dates` — the canonical early-exercise rate exotic. Priced by Longstaff-Schwartz on [LMM](../theory/stochastic-models.md#26-libor-market-model-lmm-bgm) paths, or backward induction on the [Hull-White PDE](../theory/hull-white-pde.md) or [tree](../theory/time-dependent-volatility.md#44-the-general-hull-white-trinomial-tree), the G2++ 2-D PDE or the Cheyette PDE. Its model is typically calibrated per trade by a co-terminal bootstrap: a [piecewise-constant σ(t)](../theory/time-dependent-volatility.md) with one bucket per exercise date, repricing each co-terminal European exactly ([Calibration Chains § I.10](../theory/calibration-chains.md#i10-per-trade-model-levels-and-the-vega-profile)). See [Theory §9.4](../theory/rate-derivatives.md#94-bermudan-swaptions-and-early-exercise).
 
 ---
 

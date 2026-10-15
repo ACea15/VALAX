@@ -5,18 +5,23 @@
      0.5 normal-vol bp on the cube.
   2. Calibrate the market chain: the curves, then the cube on the
      curve-implied forwards (every cell its own SABR fit, named on failure).
-  3. Calibrate Hull-White **per trade**: each Bermudan gets σ fitted to its own
-     co-terminal European basket, priced off the calibrated cube, with mean
-     reversion held fixed. Same-shaped baskets are calibrated in one
-     ``eqx.filter_vmap``; the fitted models are curve-free (``price`` binds the
-     market curve), so they stack.
+  3. Calibrate Hull-White **per trade** by a **co-terminal bootstrap**: each
+     Bermudan gets a piecewise-constant σ(t) with one bucket per exercise date
+     (breakpoints at the exercise dates), solved bucket by bucket so that
+     every co-terminal European of its basket, priced off the calibrated
+     cube, is repriced exactly; mean reversion is held fixed. Same-shaped
+     baskets are calibrated in one ``eqx.filter_vmap`` (the breakpoints are
+     traced data); the fitted models are curve-free (``price`` binds the
+     market curve), so they stack. A constant σ fitted by least squares to
+     the same basket is shown for comparison: it misses by 1–2%.
   4. Price the Bermudans through ``price`` (Hull-White PDE) and check the model
-     reprices its basket (Jamshidian through ``price`` vs. the cube).
+     reprices its basket (Jamshidian through ``price`` vs. the cube) to 1e-10.
   5. Quote risk of one Bermudan by the adjoint sweep — the model level's
      multiplier λ_m pushed through the cube and curve levels — and
      independently by autodiff through every calibration and the PDE. The
      basket target shifts report λ_m as the **vega profile across the
-     basket**, checked against full recalibration.
+     basket**, one entry per exercise date, checked against full
+     recalibration.
 
 Run::
 
@@ -108,8 +113,8 @@ cube = calibrated.market.surfaces[vol_spec.cube_id]
 err = float(jnp.max(jnp.abs(cube.forwards - world.cube.forwards))) * 1e4
 print(f"  max forward error vs truth {err:.2f} bp (from 0.5 bp curve noise)")
 
-# %% 3. Per-trade Hull-White, batched
-header("3. Hull-White σ fitted per trade to its co-terminal basket (filter_vmap)")
+# %% 3. Per-trade Hull-White σ(t), batched
+header("3. Hull-White σ(t) bootstrapped per trade on its co-terminal basket (filter_vmap)")
 
 ref = int(world.rates.reference_date)
 
@@ -131,7 +136,14 @@ TRANSFORMS = {"volatility": positive()}
 FIXED_FIELDS = {"mean_reversion": A_KEY}
 
 
-def basket_node(basket, name="hw"):
+def basket_node(basket, name="hw", mode="coterminal_bootstrap"):
+    """Per-trade Hull-White level.
+
+    ``"coterminal_bootstrap"``: one σ bucket per basket swaption, every one
+    repriced exactly (a square, lower-triangular root level; each bucket is
+    seeded at its co-terminal's cube vol, so the template σ is only a
+    fallback). ``"least_squares"``: one constant σ, fitted.
+    """
     keys = tuple(f"{name}.TARGET.{i}" for i in range(len(basket)))
     node = swaption_basket_node(
         name,
@@ -142,6 +154,7 @@ def basket_node(basket, name="hw"):
         transforms=TRANSFORMS,
         fixed_fields=FIXED_FIELDS,
         target_keys=keys,
+        mode=mode,
     )
     return node, keys
 
@@ -162,9 +175,23 @@ stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *baskets)
 batched = eqx.filter_vmap(fit)(stacked)
 assert bool(jnp.all(batched.diagnostics.converged))
 assert batched.value.initial_curve is None  # curve-free: price binds the curve
+n_ex = len(trades[0].exercise_dates)
+assert batched.value.volatility.shape == (len(trades), n_ex)  # one bucket per exercise
+print("  σ(t) buckets [0, 2Y) [2Y, 3Y) [3Y, 4Y) [4Y, ∞) — breakpoints at the exercise dates")
 for i, t in enumerate(trades):
-    print(f"  trade {i}: K={float(t.strike):.3%}  σ_HW={float(batched.value.volatility[i]):.5f}"
-          f"  basket fit RMSE {float(batched.diagnostics.rmse[i]):.1e} (relative)")
+    sigmas = "  ".join(f"{float(s):.5f}" for s in batched.value.volatility[i])
+    miss = float(jnp.max(jnp.abs(batched.diagnostics.residuals[i])))
+    print(f"  trade {i}: K={float(t.strike):.3%}  σ(t) = {sigmas}"
+          f"  max basket miss {miss:.0e} (relative)")
+    assert miss < 1e-10
+
+# For comparison: one constant σ fitted by least squares to trade 0's basket
+# (the mode="least_squares" default) — it cannot match every co-terminal.
+lsq_node, _ = basket_node(baskets[0], mode="least_squares")
+lsq = lsq_node.calibrate(QuoteSet(), calibrated.market, fixed)
+assert bool(lsq.converged)
+print(f"  least squares, constant σ (trade 0): σ = {float(lsq.value.volatility[0]):.5f}"
+      f"  basket RMSE {float(lsq.diagnostics.rmse):.1e} (relative)")
 
 # %% 4. Price the book
 header("4. Bermudans through price() (PDE); the model reprices its basket")
@@ -179,11 +206,18 @@ for i, (t, m, b) in enumerate(zip(trades, models, baskets)):
     assert float(pv) >= euro - 1e-6
 disc = calibrated.market.curve(world.discount_id)
 fwd = calibrated.market.curve(world.forward_id)
+print("  trade 0's basket: cube vs Hull-White σ(t) (bootstrap) vs constant σ (least squares)")
+worst_boot = worst_lsq = 0.0
 for sw in baskets[0]:
     mkt = float(swaption_price(sw, disc, cube, fwd))
-    mdl = float(price(sw, models[0], calibrated.market).price)
+    boot = float(price(sw, models[0], calibrated.market).price)
+    const = float(price(sw, lsq.value, calibrated.market).price)
+    worst_boot = max(worst_boot, abs(boot / mkt - 1.0))
+    worst_lsq = max(worst_lsq, abs(const / mkt - 1.0))
     print(f"    basket expiry {(int(sw.expiry_date) - ref) / 365:.0f}Y: cube {mkt * 1e4:7.2f} bp"
-          f"  HW {mdl * 1e4:7.2f} bp")
+          f"  σ(t) {boot * 1e4:7.2f} bp  constant σ {const * 1e4:7.2f} bp")
+print(f"  max |model / cube - 1|: σ(t) {worst_boot:.0e}, constant σ {worst_lsq:.1%}")
+assert worst_boot < 1e-10 < worst_lsq
 
 # %% 5. Quote risk of trade 0
 header("5. Quote risk of trade 0: adjoint (λ_m) vs autodiff, vega profile")
@@ -228,6 +262,10 @@ for k, sw in zip(target_keys, baskets[0]):
     print(f"    expiry {(int(sw.expiry_date) - ref) / 365:.0f}Y:  ∂V/∂T = {float(adj.fixed[k]):+.4f}"
           f"   → {profile[-1] * 1e4:+.4f} bp per vol bp")
 assert all(p > 0 for p in profile), profile  # long payer Bermudan: long every co-terminal
+# The bootstrap's λ_m has exactly one entry per exercise date (bucket k ↔
+# co-terminal k ↔ exercise k), labelled by the basket's target keys.
+assert len(profile) == len(trade.exercise_dates)
+assert model_result.labels == target_keys
 
 # Two views of the same vega: shifting every cube quote by 1 bp moves each
 # basket vol by ~1 bp, so the total cube vega equals the summed basket profile.

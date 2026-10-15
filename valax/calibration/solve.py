@@ -2,13 +2,15 @@ r"""Level builders: the single implementation of "run a calibration".
 
 Every calibration in VALAX — chain node or standalone calibrator
 (``calibrate_sabr``, ``calibrate_hull_white``, ``strip_caplet_vols``, …) —
-packages its solve through one of three builders, so every level reports
+packages its solve through one of four builders, so every level reports
 convergence the same way and carries a residual that is, by construction, the
 one the solver used:
 
 * :func:`solve_level` — one solve (``"root"`` or ``"least_squares"``);
 * :func:`solve_batched_level` — one independent solve per node, ``vmap``-ed,
   reported per node (slice / cube / strip loops);
+* :func:`triangular_root_level` — a square lower-triangular system (a
+  co-terminal bootstrap), solved bucket by bucket, reported per bucket;
 * :func:`explicit_level` — no implicit solve (explicit maps, fixed points).
 
 This module depends only on the solver settings, the level and the result
@@ -429,6 +431,202 @@ def period_labels(years: Any, prefix: str = "") -> tuple[str, ...]:
         return tuple(f"{prefix}#{i}" for i in range(n))
 
 
+# ── Triangular root levels ───────────────────────────────────────────
+
+
+#: Default settings of a triangular level: Newton to 1e-12.
+_TRIANGULAR_SETTINGS = SolverSettings(
+    method="newton", rtol=1e-12, atol=1e-12, max_steps=100
+)
+
+
+def triangular_root_level(
+    name: str,
+    bucket_residual_fn: Callable[[int, Float[Array, " n"], LevelInputs], Float[Array, ""]],
+    theta0: Float[Array, " n"],
+    inputs: LevelInputs,
+    assemble_fn: Callable[[Float[Array, " n"], LevelInputs], Any],
+    settings: SolverSettings | None = None,
+    *,
+    labels: Sequence[str],
+    provenance: CalibrationProvenance | None = None,
+) -> CalibrationResult:
+    r"""A square, lower-triangular root level, solved bucket by bucket.
+
+    The level has one unknown and one equation per bucket, and equation
+    :math:`k` reads only the unknowns :math:`\theta_{1..k}` — a co-terminal
+    bootstrap (swaption :math:`k` sees the volatility buckets up to its
+    expiry), a cap strip. Its Jacobian is therefore lower triangular, and the
+    level is solved as the classical bootstrap: one scalar Newton root-find
+    per bucket with the earlier buckets held fixed (passed in the solver's
+    ``args``, so autodiff differentiates through every stage) —
+    :math:`O(n)` bucket evaluations per sweep. Bucket :math:`k` starts from
+    its own seed ``theta0[k]`` (detached).
+
+    The result's level residual is the full triangular :math:`R(\theta)`, so
+    the IFT adjoint is one triangular solve, and the diagnostics are per
+    bucket, aligned with ``labels``: a bucket converged when its solve
+    succeeded with a finite residual and every bucket before it converged; a
+    failed bucket installs NaN — never a best-effort value — and
+    ``extras["root_cause"]`` marks the first one, so
+    :meth:`~valax.calibration.result.CalibrationResult.root_cause_labels`
+    names it while the later buckets inherit the failure. Downstream of a
+    failure every bucket is solved against finite stand-ins, so the healthy
+    buckets before it keep their exact roots.
+
+    Each bucket's *reported* residual is its own — evaluated with the buckets
+    after it at finite stand-ins — because a later failure's NaN enters an
+    earlier equation with weight exactly zero, and ``0 * NaN`` is NaN.
+
+    A joint solver (one Newton solve of the whole system, Jacobian tagged
+    lower triangular for ``lineax`` substitution) was built and measured
+    against this one and removed: it costs :math:`O(n^2)` bucket
+    evaluations per step (770 vs 108 pricings at :math:`n = 10`), compiles
+    slower, never ran faster, and on an infeasible bucket it marks every
+    bucket failed with the wrong root cause (see the D14 architecture note).
+
+    Args:
+        name: Level name for diagnostics.
+        bucket_residual_fn: ``(k, theta, inputs) -> residual of bucket k``
+            with ``k`` static; must depend on ``theta[:k + 1]`` only.
+        theta0: Initial guess, one seed per bucket; bucket ``k`` starts from
+            ``theta0[k]``, and the buckets after ``k`` sit at their seeds
+            while ``k`` is solved (they do not enter its equation).
+        inputs: The level inputs.
+        assemble_fn: ``(theta, inputs) -> calibrated object``.
+        settings: Solver settings (Newton); defaults to Newton at 1e-12.
+        labels: One label per bucket.
+        provenance: Pricing engine the level was calibrated on, if any.
+
+    Returns:
+        The :class:`~valax.calibration.result.CalibrationResult`
+        (``problem="root"``).
+
+    Raises:
+        ValueError: If the labels do not match the bucket count.
+    """
+    settings = _TRIANGULAR_SETTINGS if settings is None else settings
+    theta0 = jnp.asarray(theta0)
+    n = theta0.shape[0]
+    labels = tuple(labels)
+    if len(labels) != n:
+        raise ValueError(
+            f"triangular_root_level({name!r}): {len(labels)} labels for {n} "
+            f"buckets."
+        )
+
+    def residual_fn(theta: Float[Array, " n"], inp: LevelInputs) -> Float[Array, " n"]:
+        return jnp.stack([bucket_residual_fn(k, theta, inp) for k in range(n)])
+
+    theta, diagnostics = _solve_sequential(
+        bucket_residual_fn, theta0, inputs, settings
+    )
+
+    return CalibrationResult(
+        value=assemble_fn(theta, inputs),
+        theta=theta,
+        inputs=inputs,
+        diagnostics=diagnostics,
+        residual_fn=residual_fn,
+        assemble_fn=assemble_fn,
+        settings=settings,
+        name=name,
+        labels=labels,
+        problem="root",
+        provenance=provenance,
+    )
+
+
+def _own_residuals(
+    bucket_residual_fn: Callable,
+    theta: Float[Array, " n"],
+    theta0: Float[Array, " n"],
+    inputs: LevelInputs,
+) -> Float[Array, " n"]:
+    """Each bucket's residual with the buckets *after* it at finite stand-ins.
+
+    Equal to the level residual for a finite ``theta`` (bucket ``k`` reads
+    ``theta[:k + 1]`` only). After a failure, the later buckets hold NaN, and
+    although they enter an earlier bucket's equation with weight exactly zero,
+    ``0 * NaN`` is NaN — so a healthy bucket would report a NaN residual.
+    Replacing what bucket ``k`` must not read makes the report per bucket.
+    """
+    n = theta.shape[0]
+    stand_in = jax.lax.stop_gradient(theta0)
+    return jnp.stack([
+        bucket_residual_fn(k, jnp.concatenate([theta[: k + 1], stand_in[k + 1:]]), inputs)
+        for k in range(n)
+    ])
+
+
+def _bucket_diagnostics(
+    final: Float[Array, " n"],
+    converged: Any,
+    root_cause: Any,
+    n_steps: Any,
+) -> CalibrationDiagnostics:
+    """Per-bucket diagnostics of a triangular level."""
+    return CalibrationDiagnostics(
+        residuals=final[:, None],
+        max_abs_residual=jnp.abs(final),
+        rmse=jnp.abs(final),
+        n_steps=jnp.asarray(n_steps, dtype=jnp.int32),
+        converged=converged,
+        extras={"root_cause": root_cause},
+    )
+
+
+def _solve_sequential(
+    bucket_residual_fn: Callable,
+    theta0: Float[Array, " n"],
+    inputs: LevelInputs,
+    settings: SolverSettings,
+) -> tuple[Float[Array, " n"], CalibrationDiagnostics]:
+    """The bootstrap: one scalar root per bucket, earlier buckets held fixed."""
+    import optimistix as optx
+
+    n = theta0.shape[0]
+    known = theta0[:0]
+    seeds = jax.lax.stop_gradient(theta0)
+    converged, steps, root_cause = [], [], []
+    upstream_ok = jnp.asarray(True)
+    for k in range(n):
+
+        def one_bucket(x, args, _k=k):
+            prev, inp = args
+            theta = jnp.concatenate([
+                prev, jnp.reshape(x, (1,)),
+                jax.lax.stop_gradient(theta0[_k + 1:]),
+            ])
+            return bucket_residual_fn(_k, theta, inp)
+
+        # Downstream of a failed bucket the known values hold NaN, and a NaN
+        # residual makes lineax raise at runtime even with throw=False. Solve
+        # against a finite stand-in instead (detached; an identity on the
+        # healthy path, so gradients are untouched) — the bucket is reported
+        # failed and installs NaN regardless.
+        prev = jnp.where(upstream_ok, known, jax.lax.stop_gradient(theta0[:k]))
+        sol = run_solver("root", one_bucket, seeds[k], (prev, inputs), settings)
+        ok = (
+            upstream_ok
+            & (sol.result == optx.RESULTS.successful)
+            & jnp.isfinite(one_bucket(sol.value, (prev, inputs)))
+        )
+        # A failed bucket installs NaN, never a plausible-looking value; the
+        # ``where`` is against a constant, so a converged bucket's gradient is
+        # untouched.
+        known = jnp.concatenate([known, jnp.reshape(jnp.where(ok, sol.value, jnp.nan), (1,))])
+        converged.append(ok)
+        root_cause.append(~ok & upstream_ok)
+        upstream_ok = upstream_ok & ok
+        steps.append(sol.stats.get("num_steps", jnp.asarray(-1)))
+
+    return known, _bucket_diagnostics(
+        _own_residuals(bucket_residual_fn, known, theta0, inputs),
+        jnp.stack(converged), jnp.stack(root_cause), jnp.stack(steps),
+    )
+
+
 __all__ = [
     "explicit_level",
     "period_label",
@@ -436,4 +634,5 @@ __all__ = [
     "solve_batched_level",
     "solve_level",
     "stack_slices",
+    "triangular_root_level",
 ]

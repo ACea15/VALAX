@@ -83,7 +83,7 @@ def hw(flat_curve):
 def g2(flat_curve):
     return G2PPModel(
         mean_reversion_x=jnp.array(0.5), mean_reversion_y=jnp.array(0.1),
-        volatility_x=jnp.array(0.01), volatility_y=jnp.array(0.008),
+        volatility_x=jnp.array(0.01), volatility_ratio=jnp.array(0.8),
         correlation=jnp.array(-0.7), initial_curve=flat_curve,
     )
 
@@ -99,7 +99,7 @@ def _cheyette_1f(flat_curve, beta=0.0, kappa=0.10, sigma=0.01):
 def cheyette_2f(flat_curve):
     return CheyetteModel2F(
         mean_reversion_1=jnp.array(0.5), mean_reversion_2=jnp.array(0.1),
-        volatility_1=jnp.array(0.01), volatility_2=jnp.array(0.008),
+        volatility_1=jnp.array(0.01), volatility_ratio=jnp.array(0.008) / jnp.array(0.01),
         skew_1=jnp.array(0.1), skew_2=jnp.array(0.05),
         correlation=jnp.array(-0.7), initial_curve=flat_curve,
     )

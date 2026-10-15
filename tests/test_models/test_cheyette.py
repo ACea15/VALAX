@@ -87,7 +87,7 @@ def model_2f(flat_curve):
         mean_reversion_1=jnp.array(0.50),
         mean_reversion_2=jnp.array(0.10),
         volatility_1=jnp.array(0.010),
-        volatility_2=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.008) / jnp.array(0.010),
         skew_1=jnp.array(-2.0),
         skew_2=jnp.array(1.5),
         correlation=jnp.array(-0.70),
@@ -144,7 +144,7 @@ class TestExactFit:
     def test_zcb_recovers_steep_curve_2f(self, ref_date):
         model = CheyetteModel2F(
             mean_reversion_1=jnp.array(0.50), mean_reversion_2=jnp.array(0.10),
-            volatility_1=jnp.array(0.010), volatility_2=jnp.array(0.008),
+            volatility_1=jnp.array(0.010), volatility_ratio=jnp.array(0.008) / jnp.array(0.010),
             skew_1=jnp.array(-2.0), skew_2=jnp.array(1.5),
             correlation=jnp.array(-0.70), initial_curve=_steep_curve(ref_date),
         )
@@ -248,13 +248,13 @@ class TestG2PPReduction:
     def test_zcb_matches_g2pp(self, flat_curve):
         ch = CheyetteModel2F(
             mean_reversion_1=jnp.array(0.50), mean_reversion_2=jnp.array(0.10),
-            volatility_1=jnp.array(0.010), volatility_2=jnp.array(0.008),
+            volatility_1=jnp.array(0.010), volatility_ratio=jnp.array(0.008) / jnp.array(0.010),
             skew_1=jnp.array(0.0), skew_2=jnp.array(0.0),
             correlation=jnp.array(-0.70), initial_curve=flat_curve,
         )
         g2 = G2PPModel(
             mean_reversion_x=jnp.array(0.50), mean_reversion_y=jnp.array(0.10),
-            volatility_x=jnp.array(0.010), volatility_y=jnp.array(0.008),
+            volatility_x=jnp.array(0.010), volatility_ratio=jnp.array(0.8),
             correlation=jnp.array(-0.70), initial_curve=flat_curve,
         )
         for t, T in [(1.0, 5.0), (2.0, 10.0), (0.5, 7.0)]:

@@ -10,18 +10,26 @@ stochastic-volatility model adds a 2-D (ADI) operator via
 :func:`hw_operator_stack`, whose *discount* coefficient is the state variable
 itself; and the G2++ two-factor Gaussian short-rate model adds the 2-D operator
 :func:`g2pp_operator_2d`, whose discount is the *sum* of the two state
-variables ``x + y``. Further models (SLV) are added later.
+variables ``x + y`` (with per-step rows :func:`g2pp_operator_rows` for
+piecewise-constant volatilities). Further models (SLV) are added later.
 """
+
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
 from jax import Array, lax
-from jaxtyping import Float
+from jaxtyping import Float, Int
 
 from valax.models.black_scholes import BlackScholesModel
-from valax.models.g2pp import G2PPModel
+from valax.models.g2pp import G2PPModel, g2pp_diffusion_rates
 from valax.models.heston import HestonModel
-from valax.models.hull_white import HullWhiteModel, hw_alpha_average
+from valax.models.hull_white import (
+    HullWhiteModel,
+    hw_alpha_average,
+    hw_mean_variance_rate,
+)
+from valax.models.short_rate import is_constant
 from valax.models.local_vol import LocalVolModel
 from valax.pricing.analytic.dupire import dupire_local_vol
 from valax.pricing.pde.grids import Grid1D, Grid2D
@@ -166,6 +174,14 @@ def hw_operator_stack(
     averaging restores clean second-order behaviour and, with it, Hull-White's
     defining exact fit to the initial curve.
 
+    With a piecewise-constant :math:`\sigma(t)` the diffusion varies by row
+    too: row ``m`` uses the exact time average of :math:`\sigma^2` over its
+    step (:func:`~valax.models.hull_white.hw_mean_variance_rate`), so a step
+    straddling a bucket breakpoint carries the step's exact variance rate.
+    The time grid itself is uniform and set by ``n_time`` alone; only the
+    domain width (through the state variance at the horizon) moves with
+    :math:`\sigma`.
+
     Unlike the equity recipes nothing is detached from autodiff here: the grid
     is anchored at the origin rather than at a market quote (see
     :func:`~valax.pricing.pde.grids.centred_state_grid`), so ``a`` and
@@ -183,7 +199,6 @@ def hw_operator_stack(
         ``(n_time, n)``.
     """
     a = model.mean_reversion
-    sigma = model.volatility
     x = grid.nodes
 
     dt = expiry / n_time
@@ -193,14 +208,30 @@ def hw_operator_stack(
     alphas = hw_alpha_average(model, k * dt, (k + 1) * dt)  # (n_time,)
 
     drift = -a * x
-    diffusion = sigma**2
 
-    def _row_operator(alpha: Float[Array, ""]) -> Operator1D:
+    if is_constant(model.volatility):
+        diffusion = model.volatility[0] ** 2
+
+        def _row_operator(alpha: Float[Array, ""]) -> Operator1D:
+            return build_operator_1d(
+                grid, drift=drift, diffusion=diffusion, discount=x + alpha
+            )
+
+        return jax.vmap(_row_operator)(alphas)
+
+    # Piecewise sigma(t): each row diffuses at the exact time average of
+    # sigma^2 over its step, so a step straddling a bucket breakpoint carries
+    # the right total variance.
+    diffusions = hw_mean_variance_rate(model, k * dt, (k + 1) * dt)  # (n_time,)
+
+    def _row_operator_tv(
+        alpha: Float[Array, ""], diffusion: Float[Array, ""]
+    ) -> Operator1D:
         return build_operator_1d(
             grid, drift=drift, diffusion=diffusion, discount=x + alpha
         )
 
-    return jax.vmap(_row_operator)(alphas)
+    return jax.vmap(_row_operator_tv)(alphas, diffusions)
 
 
 def heston_operator_2d(model: HestonModel, grid: Grid2D) -> Operator2D:
@@ -306,17 +337,29 @@ def g2pp_operator_2d(model: G2PPModel, grid: Grid2D) -> Operator2D:
     axes are anchored at the origin (the read-off is always at ``(0, 0)``), so
     ``a, b, sigma, eta, rho`` stay fully differentiable through the coefficients.
 
+    This constant-coefficient operator is for a one-bucket (constant
+    volatility) model; a piecewise-constant :math:`\sigma(t), \eta(t)` makes
+    the diffusion time dependent — use :func:`g2pp_operator_rows`.
+
     Args:
-        model: G2++ model parameters.
+        model: G2++ model parameters (one volatility bucket).
         grid: The tensor-product ``(x, y)`` centred-factor grid.
 
     Returns:
         The assembled :class:`~valax.pricing.pde.operators2d.Operator2D`.
+
+    Raises:
+        ValueError: If the model has more than one volatility bucket.
     """
+    if not (is_constant(model.volatility_x) and is_constant(model.volatility_ratio)):
+        raise ValueError(
+            "g2pp_operator_2d builds the constant-volatility operator; a "
+            "piecewise-constant G2PPModel needs g2pp_operator_rows."
+        )
     a = model.mean_reversion_x
     b = model.mean_reversion_y
-    sigma = model.volatility_x
-    eta = model.volatility_y
+    sigma = model.volatility_x[0]
+    eta = model.volatility_ratio[0] * sigma
     rho = model.correlation
 
     x = grid.x.nodes[:, jnp.newaxis]  # (n_x, 1)
@@ -338,3 +381,65 @@ def g2pp_operator_2d(model: G2PPModel, grid: Grid2D) -> Operator2D:
         mixed=mixed,
         discount=discount,
     )
+
+
+def g2pp_operator_rows(
+    model: G2PPModel,
+    grid: Grid2D,
+    *,
+    expiry: Float[Array, ""],
+    n_time: int,
+) -> Callable[[Int[Array, ""]], Operator2D]:
+    r"""Per-step G2++ ADI operators for piecewise-constant volatilities.
+
+    With :math:`\sigma(t), \eta(t)` piecewise constant the diffusion block of
+    :func:`g2pp_operator_2d` varies in time. Backward step ``m`` (``m = 0``
+    nearest expiry) spans forward time ``[k dt, (k+1) dt]`` with
+    ``k = n_time - m - 1``, and its operator uses the **exact step averages**
+    of :math:`\sigma^2`, :math:`\eta^2` and :math:`\rho\sigma\eta`
+    (:func:`~valax.models.g2pp.g2pp_diffusion_rates`), so a step straddling a
+    bucket breakpoint carries the step's exact variance rates. Drift and the
+    state discount ``x + y`` are unchanged; :math:`\varphi(t)` is still
+    factored out of the operator by the recipe.
+
+    Unlike the 1-D :func:`hw_operator_stack`, which materialises the stacked
+    bands, this returns a function of the step index: only three scalars per
+    step are stored and each row is assembled inside the ADI time loop
+    (:func:`~valax.pricing.pde.schemes2d.solve_backward_2d` accepts either),
+    so memory stays that of a single 2-D operator.
+
+    Args:
+        model: G2++ model parameters.
+        grid: The tensor-product ``(x, y)`` centred-factor grid.
+        expiry: Horizon ``T`` in year fractions (``dt = T / n_time``).
+        n_time: Number of backward time steps.
+
+    Returns:
+        A function mapping the backward step index ``m`` (traced scalar) to
+        the :class:`~valax.pricing.pde.operators2d.Operator2D` of that step.
+    """
+    a = model.mean_reversion_x
+    b = model.mean_reversion_y
+
+    dt = expiry / n_time
+    k = n_time - jnp.arange(n_time) - 1
+    diff_x, diff_v, mixed = g2pp_diffusion_rates(model, k * dt, (k + 1) * dt)
+
+    x = grid.x.nodes[:, jnp.newaxis]  # (n_x, 1)
+    y = grid.y.nodes[jnp.newaxis, :]  # (1, n_y)
+    drift_x = -a * x
+    drift_v = -b * y
+    discount = x + y
+
+    def row(m: Int[Array, ""]) -> Operator2D:
+        return build_operator_2d(
+            grid,
+            diff_x=diff_x[m],
+            drift_x=drift_x,
+            diff_v=diff_v[m],
+            drift_v=drift_v,
+            mixed=mixed[m],
+            discount=discount,
+        )
+
+    return row

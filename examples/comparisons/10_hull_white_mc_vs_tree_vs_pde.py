@@ -420,9 +420,9 @@ grad_pb = eqx.filter_grad(
     lambda m: puttable_bond_price(puttable_bond, m, n_steps=TREE_STEPS, j_max=j_max_val)
 )(model)
 
-print(f"\n  Tree  d(callable)/d(σ) = {float(grad_cb.volatility):+.4f}")
+print(f"\n  Tree  d(callable)/d(σ) = {float(grad_cb.volatility[0]):+.4f}")
 print(f"  Tree  d(callable)/d(a) = {float(grad_cb.mean_reversion):+.4f}")
-print(f"  Tree  d(puttable)/d(σ) = {float(grad_pb.volatility):+.4f}")
+print(f"  Tree  d(puttable)/d(σ) = {float(grad_pb.volatility[0]):+.4f}")
 print(f"  Tree  d(puttable)/d(a) = {float(grad_pb.mean_reversion):+.4f}")
 print(f"  (callable σ-grad < 0: higher vol → issuer benefits → bond cheaper for holder)")
 print(f"  (puttable σ-grad > 0: higher vol → holder benefits → bond more valuable)")
@@ -439,12 +439,12 @@ grad_pb_pde = eqx.filter_grad(
     lambda m: pde_price_dispatch(puttable_bond, m, PDE_GRAD_CFG).price
 )(model)
 
-print(f"\n  PDE   d(callable)/d(σ) = {float(grad_cb_pde.volatility):+.4f}"
-      f"   (tree: {float(grad_cb.volatility):+.4f})")
+print(f"\n  PDE   d(callable)/d(σ) = {float(grad_cb_pde.volatility[0]):+.4f}"
+      f"   (tree: {float(grad_cb.volatility[0]):+.4f})")
 print(f"  PDE   d(callable)/d(a) = {float(grad_cb_pde.mean_reversion):+.4f}"
       f"   (tree: {float(grad_cb.mean_reversion):+.4f})")
-print(f"  PDE   d(puttable)/d(σ) = {float(grad_pb_pde.volatility):+.4f}"
-      f"   (tree: {float(grad_pb.volatility):+.4f})")
+print(f"  PDE   d(puttable)/d(σ) = {float(grad_pb_pde.volatility[0]):+.4f}"
+      f"   (tree: {float(grad_pb.volatility[0]):+.4f})")
 print(f"  PDE   d(puttable)/d(a) = {float(grad_pb_pde.mean_reversion):+.4f}"
       f"   (tree: {float(grad_pb.mean_reversion):+.4f})")
 print(f"  → tree and PDE sensitivities agree — same price, same derivatives.")
@@ -457,7 +457,7 @@ def _mc_grad(m):
     return jnp.mean(jnp.exp(res.log_discount_factors[:, -1]))
 
 grad_mc = _mc_grad(model)
-print(f"\n  MC    d(ZCB P(0,3))/d(σ) = {float(grad_mc.volatility):+.6f}")
+print(f"\n  MC    d(ZCB P(0,3))/d(σ) = {float(grad_mc.volatility[0]):+.6f}")
 print(f"  MC    d(ZCB P(0,3))/d(a) = {float(grad_mc.mean_reversion):+.6f}")
 
 print("""

@@ -137,7 +137,7 @@ HW = HullWhiteModel(
 )
 G2 = G2PPModel(
     mean_reversion_x=jnp.array(0.5), mean_reversion_y=jnp.array(0.1),
-    volatility_x=jnp.array(0.01), volatility_y=jnp.array(0.008),
+    volatility_x=jnp.array(0.01), volatility_ratio=jnp.array(0.8),
     correlation=jnp.array(-0.7), initial_curve=CURVE,
 )
 CH1 = CheyetteModel(
@@ -146,7 +146,7 @@ CH1 = CheyetteModel(
 )
 CH2 = CheyetteModel2F(
     mean_reversion_1=jnp.array(0.5), mean_reversion_2=jnp.array(0.1),
-    volatility_1=jnp.array(0.01), volatility_2=jnp.array(0.008),
+    volatility_1=jnp.array(0.01), volatility_ratio=jnp.array(0.008) / jnp.array(0.01),
     skew_1=jnp.array(0.1), skew_2=jnp.array(0.05), correlation=jnp.array(-0.7),
     initial_curve=CURVE,
 )

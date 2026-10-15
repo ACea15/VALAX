@@ -257,7 +257,8 @@ class TestJITAndGrad:
     def test_autodiff_matches_finite_difference(self, atm_payer, model, field):
         """Implicit differentiation through the Newton solve must be exact."""
         grads = eqx.filter_grad(lambda m: hw_swaption_price(atm_payer, m))(model)
-        analytic = float(getattr(grads, field))
+        g = getattr(grads, field)
+        analytic = float(g[0] if field == "volatility" else g)
 
         where = lambda m: getattr(m, field)  # noqa: E731
         base = getattr(model, field)
@@ -272,7 +273,7 @@ class TestJITAndGrad:
 
     def test_vega_is_positive(self, atm_payer, model):
         grads = eqx.filter_grad(lambda m: hw_swaption_price(atm_payer, m))(model)
-        assert float(grads.volatility) > 0.0
+        assert float(grads.volatility[0]) > 0.0
 
     def test_grad_wrt_strike_is_negative_for_payer(self, atm_payer, model):
         """A payer swaption is a decreasing function of its strike."""

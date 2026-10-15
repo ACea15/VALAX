@@ -2,7 +2,8 @@ r"""G2++ calibration to a European swaption surface.
 
 Unlike Hull-White's two parameters, G2++ has five free numbers -- the two
 mean-reversion speeds :math:`a, b`, the two factor volatilities
-:math:`\sigma, \eta`, and the correlation :math:`\rho` -- because the shift
+:math:`\sigma, \eta` (fitted as :math:`\sigma` and the ratio
+:math:`r = \eta/\sigma`), and the correlation :math:`\rho` -- because the shift
 :math:`\varphi(t)` is pinned by the exact-fit condition to the initial curve.
 That extra freedom is exactly what buys the **decorrelation** a one-factor
 model cannot produce, so G2++ is typically calibrated jointly to an ATM /
@@ -41,7 +42,11 @@ from valax.pricing.multicurve import with_discount_curve
 from valax.curves.discount import DiscountCurve
 from valax.instruments.rates import Swaption
 from valax.models.g2pp import G2PPModel
+from valax.models.short_rate import as_buckets
 from valax.pricing.analytic.g2pp_swaptions import g2pp_swaption_price
+
+#: G2++ fields that hold one value per volatility bucket.
+_BUCKETED = ("volatility_x", "volatility_ratio")
 
 
 def g2pp_swaption_prices(
@@ -83,12 +88,18 @@ def calibrate_g2pp(
     curve_id: str | None = None,
     name: str = "g2pp",
 ) -> CalibrationResult:
-    r"""Fit G2++ :math:`(a, b, \sigma, \eta, \rho)` to a swaption surface.
+    r"""Fit G2++ :math:`(a, b, \sigma, r, \rho)` to a swaption surface.
 
     A weighted least-squares level (:func:`~valax.calibration.basket.basket_fit_level`)
     on Brigo-Mercurio prices: the quotes are the target prices, the curves
     the upstream input, and any ``fixed_params`` held-fixed inputs whose
     sensitivities are reported.
+
+    The second factor's volatility is fitted through the **ratio**
+    :math:`r = \eta / \sigma` (field ``volatility_ratio``), so
+    :math:`\eta = r\sigma` is ``result.value.volatility_y``. The fit is over
+    the model's volatility buckets as given by ``initial_guess`` (one bucket,
+    a constant model, by default).
 
     **Single- and dual-curve.** Passing ``forward_curve`` makes ``curve`` the
     *discount* (e.g. OIS) curve and projects the underlying swaps' floating
@@ -103,14 +114,16 @@ def calibrate_g2pp(
         curve: Initial discount curve; G2++ is exact-fitted to it, so it is
             *not* a calibration degree of freedom.
         initial_guess: Starting model.  Defaults to
-            :math:`a = 0.5, b = 0.1, \sigma = 0.01, \eta = 0.008,
-            \rho = -0.7` (well-separated mean reversions to avoid the
-            :math:`a = b` degeneracy).
+            :math:`a = 0.5, b = 0.1, \sigma = 0.01, r = 0.8` (so
+            :math:`\eta = 0.008`), :math:`\rho = -0.7` (well-separated mean
+            reversions to avoid the :math:`a = b` degeneracy).
         fixed_params: Optional mapping of parameter name to a value to hold
-            fixed (e.g. ``{"mean_reversion_x": 0.5}``).  A common workflow is
-            to pin the two mean reversions and fit only the vols and
-            correlation, since :math:`(a, b)` are weakly identified by the ATM
-            surface alone.
+            fixed (e.g. ``{"mean_reversion_x": 0.5}``; the parameter names
+            are ``mean_reversion_x``, ``mean_reversion_y``, ``volatility_x``,
+            ``volatility_ratio``, ``correlation``).  A scalar volatility value
+            is promoted to one bucket.  A common workflow is to pin the two
+            mean reversions and fit only the vols and correlation, since
+            :math:`(a, b)` are weakly identified by the ATM surface alone.
         weights: Per-quote residual weights.  Default: uniform.
         relative: Divide each residual by its market price (default).
         settings: Solver settings; defaults to
@@ -144,7 +157,7 @@ def calibrate_g2pp(
             mean_reversion_x=jnp.asarray(0.5),
             mean_reversion_y=jnp.asarray(0.1),
             volatility_x=jnp.asarray(0.01),
-            volatility_y=jnp.asarray(0.008),
+            volatility_ratio=jnp.asarray(0.8),
             correlation=jnp.asarray(-0.7),
         )
     initial_guess = dataclasses.replace(
@@ -153,6 +166,12 @@ def calibrate_g2pp(
     )
     if settings is None:
         settings = dataclasses.replace(BASKET_SETTINGS, max_steps=512)
+    if fixed_params is not None:
+        # Volatility fields are bucket arrays: promote a scalar to one bucket.
+        fixed_params = {
+            k: as_buckets(jnp.asarray(v)) if k in _BUCKETED else v
+            for k, v in fixed_params.items()
+        }
 
     def bind(model: G2PPModel, inp: LevelInputs) -> G2PPModel:
         return with_discount_curve(model, inp.upstream[0])

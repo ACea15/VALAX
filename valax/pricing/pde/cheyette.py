@@ -81,9 +81,12 @@ from valax.models.cheyette import (
     cheyette_gaussian_mean,
     cheyette_gaussian_mean_2f,
     cheyette_market_df,
+    cheyette_mean_variance_rate,
+    cheyette_mean_variance_rates_2f,
     cheyette_y_gaussian,
     cheyette_y_gaussian_2f,
 )
+from valax.models.short_rate import is_constant
 from valax.models.g2pp import G2PPModel
 from valax.models.hull_white import HullWhiteModel, hw_alpha_average
 from valax.pricing.pde.boundary import (
@@ -162,6 +165,10 @@ def _hw_equivalent(model: CheyetteModel) -> HullWhiteModel:
     can be reused verbatim — which is also what makes the :math:`\beta = 0`
     reduction exact at the operator level.
 
+    The twin carries the same volatility buckets (``volatility_times``), so
+    with a piecewise-constant :math:`\sigma(t)` its exact step averages carry
+    the piecewise convexity too.
+
     Args:
         model: One-factor Cheyette model.
 
@@ -172,6 +179,7 @@ def _hw_equivalent(model: CheyetteModel) -> HullWhiteModel:
         mean_reversion=model.mean_reversion,
         volatility=model.volatility,
         initial_curve=model.initial_curve,
+        volatility_times=model.volatility_times,
     )
 
 
@@ -208,6 +216,14 @@ def cheyette_operator_stack(
     collapses to the constant :math:`\sigma^2` and this reduces bit-for-bit to
     :func:`~valax.pricing.pde.coefficients.hw_operator_stack`.
 
+    With a piecewise-constant level :math:`\sigma(t)` row ``m`` diffuses at
+    :math:`\overline{\sigma^2}_m\,\max(1 + \beta(\tilde x + m), 0)^2`, where
+    :math:`\overline{\sigma^2}_m` is the exact time average of
+    :math:`\sigma(t)^2` over the step
+    (:func:`~valax.models.cheyette.cheyette_mean_variance_rate`), so a step
+    straddling a bucket breakpoint carries the step's exact variance rate; the
+    mean :math:`m` and :math:`\alpha_{\mathrm{Ch}}` are the piecewise ones.
+
     Args:
         model: One-factor Cheyette model.
         grid: The centred-factor (:math:`\tilde x`) grid.
@@ -219,7 +235,6 @@ def cheyette_operator_stack(
         ``(n_time, n)``.
     """
     kappa = model.mean_reversion
-    sigma = model.volatility
     beta = model.skew
     x = grid.nodes
 
@@ -232,15 +247,31 @@ def cheyette_operator_stack(
 
     drift = -kappa * x
 
-    def _row_operator(
-        alpha: Float[Array, ""], m: Float[Array, ""]
+    if is_constant(model.volatility):
+        sigma = model.volatility[0]
+
+        def _row_operator(
+            alpha: Float[Array, ""], m: Float[Array, ""]
+        ) -> Operator1D:
+            sigma_r = jnp.maximum(sigma * (1.0 + beta * (x + m)), 0.0)
+            return build_operator_1d(
+                grid, drift=drift, diffusion=sigma_r**2, discount=x + alpha
+            )
+
+        return jax.vmap(_row_operator)(alphas, m_mid)
+
+    # Piecewise sigma(t): exact step average of sigma^2 times the state factor.
+    var_rates = cheyette_mean_variance_rate(model, k * dt, (k + 1) * dt)
+
+    def _row_operator_tv(
+        alpha: Float[Array, ""], m: Float[Array, ""], var_rate: Float[Array, ""]
     ) -> Operator1D:
-        sigma_r = jnp.maximum(sigma * (1.0 + beta * (x + m)), 0.0)
+        state = jnp.maximum(1.0 + beta * (x + m), 0.0)
         return build_operator_1d(
-            grid, drift=drift, diffusion=sigma_r**2, discount=x + alpha
+            grid, drift=drift, diffusion=var_rate * state**2, discount=x + alpha
         )
 
-    return jax.vmap(_row_operator)(alphas, m_mid)
+    return jax.vmap(_row_operator_tv)(alphas, m_mid, var_rates)
 
 
 def _cheyette_coupon_bond_values(
@@ -682,6 +713,12 @@ def _g2pp_equivalent(model: CheyetteModel2F) -> G2PPModel:
     G2++ :math:`\varphi(t)` of this twin, so its exact per-step discount can be
     reused verbatim — and the :math:`(\beta_1, \beta_2) = 0` reduction is exact.
 
+    Both models parameterise the second level as a ratio on shared buckets
+    (:math:`\eta = r\sigma`, :math:`\sigma_2 = r\sigma_1`), so the twin carries
+    the same ``volatility_1``, ``volatility_ratio`` and ``volatility_times``;
+    with piecewise-constant levels its exact step discount carries the
+    piecewise convexity.
+
     Args:
         model: Two-factor Cheyette model.
 
@@ -692,9 +729,10 @@ def _g2pp_equivalent(model: CheyetteModel2F) -> G2PPModel:
         mean_reversion_x=model.mean_reversion_1,
         mean_reversion_y=model.mean_reversion_2,
         volatility_x=model.volatility_1,
-        volatility_y=model.volatility_2,
+        volatility_ratio=model.volatility_ratio,
         correlation=model.correlation,
         initial_curve=model.initial_curve,
+        volatility_times=model.volatility_times,
     )
 
 
@@ -740,13 +778,27 @@ def cheyette_operator_2d(
         ref_time: Time at which the Gaussian-limit means are frozen (typically
             the horizon).
 
+    This time-independent operator is for a one-bucket (constant
+    :math:`\sigma_1, r`) model; piecewise-constant levels make the diffusion
+    time dependent — use :func:`cheyette_operator_rows_2d`.
+
     Returns:
         The assembled :class:`~valax.pricing.pde.operators2d.Operator2D`.
+
+    Raises:
+        ValueError: If the model has more than one volatility bucket.
     """
+    if not (
+        is_constant(model.volatility_1) and is_constant(model.volatility_ratio)
+    ):
+        raise ValueError(
+            "cheyette_operator_2d builds the constant-volatility operator; a "
+            "piecewise-constant CheyetteModel2F needs cheyette_operator_rows_2d."
+        )
     k1 = model.mean_reversion_1
     k2 = model.mean_reversion_2
-    s1 = model.volatility_1
-    s2 = model.volatility_2
+    s1 = model.volatility_1[0]
+    s2 = model.volatility_ratio[0] * s1
     b1 = model.skew_1
     b2 = model.skew_2
     rho = model.correlation
@@ -775,6 +827,85 @@ def cheyette_operator_2d(
         mixed=mixed,
         discount=discount,
     )
+
+
+def cheyette_operator_rows_2d(
+    model: CheyetteModel2F,
+    grid: Grid2D,
+    *,
+    ref_time: Float[Array, ""],
+    expiry: Float[Array, ""],
+    n_time: int,
+) -> Callable[[Int[Array, ""]], Operator2D]:
+    r"""Per-step frozen-``y`` 2F operators for piecewise-constant levels.
+
+    Backward step ``m`` (``m = 0`` nearest expiry) spans forward time
+    ``[k dt, (k+1) dt]`` with ``k = n_time - m - 1``. Its operator is that of
+    :func:`cheyette_operator_2d` with the levels replaced by their **exact
+    step averages**
+    (:func:`~valax.models.cheyette.cheyette_mean_variance_rates_2f`):
+
+    .. math::
+
+        \tfrac12\overline{\sigma_1^2}_m\,s_1^2\,V_{\tilde x_1\tilde x_1}
+        + \tfrac12\overline{\sigma_2^2}_m\,s_2^2\,V_{\tilde x_2\tilde x_2}
+        + \overline{\rho\sigma_1\sigma_2}_m\,s_1 s_2\,V_{\tilde x_1\tilde x_2},
+        \qquad s_i = \max\bigl(1 + \beta_i(\tilde x_i + m_i), 0\bigr),
+
+    so a step straddling a bucket breakpoint carries the step's exact variance
+    and covariance rates; at :math:`\beta_i = 0` these are exactly the G2++
+    rows (:func:`~valax.pricing.pde.coefficients.g2pp_operator_rows`). The
+    Gaussian-limit means :math:`m_i` are frozen at ``ref_time`` as in the
+    constant operator. Each row is assembled inside the ADI time loop
+    (:func:`~valax.pricing.pde.schemes2d.solve_backward_2d` accepts a function
+    of the step index), so memory stays that of one operator.
+
+    Args:
+        model: Two-factor Cheyette model.
+        grid: The centred-factor :math:`(\tilde x_1, \tilde x_2)` grid.
+        ref_time: Time at which the Gaussian-limit means are frozen.
+        expiry: Horizon ``T`` in year fractions (``dt = T / n_time``).
+        n_time: Number of backward time steps.
+
+    Returns:
+        A function mapping the backward step index ``m`` (traced scalar) to
+        that step's :class:`~valax.pricing.pde.operators2d.Operator2D`.
+    """
+    k1 = model.mean_reversion_1
+    k2 = model.mean_reversion_2
+    b1 = model.skew_1
+    b2 = model.skew_2
+
+    dt = expiry / n_time
+    k = n_time - jnp.arange(n_time) - 1
+    var1, var2, cov12 = cheyette_mean_variance_rates_2f(model, k * dt, (k + 1) * dt)
+
+    m1, m2 = cheyette_gaussian_mean_2f(model, ref_time)
+
+    x1 = grid.x.nodes[:, jnp.newaxis]  # (n_x, 1)
+    x2 = grid.y.nodes[jnp.newaxis, :]  # (1, n_y)
+
+    state1 = jnp.maximum(1.0 + b1 * (x1 + m1), 0.0)  # (n_x, 1)
+    state2 = jnp.maximum(1.0 + b2 * (x2 + m2), 0.0)  # (1, n_y)
+    state1_sq = state1**2
+    state2_sq = state2**2
+    state12 = state1 * state2                         # (n_x, n_y)
+    drift_x = -k1 * x1
+    drift_v = -k2 * x2
+    discount = x1 + x2
+
+    def row(m: Int[Array, ""]) -> Operator2D:
+        return build_operator_2d(
+            grid,
+            diff_x=var1[m] * state1_sq,
+            drift_x=drift_x,
+            diff_v=var2[m] * state2_sq,
+            drift_v=drift_v,
+            mixed=cov12[m] * state12,
+            discount=discount,
+        )
+
+    return row
 
 
 def _cheyette_coupon_bond_values_2f(
@@ -922,9 +1053,19 @@ def _solve_cheyette_2f(
         x=centred_state_grid(std_x, n=config.n_x, half_width=config.x_range),
         y=centred_state_grid(std_y, n=config.n_y, half_width=config.x_range),
     )
-    operator = apply_linearity_bc_2d(
-        cheyette_operator_2d(model, grid, ref_time=horizon), grid
-    )
+    if is_constant(model.volatility_1) and is_constant(model.volatility_ratio):
+        operator = apply_linearity_bc_2d(
+            cheyette_operator_2d(model, grid, ref_time=horizon), grid
+        )
+    else:
+        # Piecewise sigma_1(t), r(t): one operator per backward step with the
+        # exact step-average diffusion, assembled inside the ADI time loop.
+        rows = cheyette_operator_rows_2d(
+            model, grid, ref_time=horizon, expiry=horizon, n_time=config.n_time
+        )
+
+        def operator(m):
+            return apply_linearity_bc_2d(rows(m), grid)
 
     dt = horizon / config.n_time
     phi_disc = _phi_step_discounts(_g2pp_equivalent(model), dt, config.n_time)
@@ -1283,23 +1424,98 @@ def cheyette_exact_operator_2d(
     upwinding** for stability, added to the ``A2`` bands produced with
     ``diff_v = drift_v = 0``.
 
+    This time-independent operator is for a one-bucket (constant
+    :math:`\sigma`) model; a piecewise-constant :math:`\sigma(t)` makes it
+    time dependent — use :func:`cheyette_exact_operator_rows`.
+
     Args:
-        model: One-factor Cheyette model.
+        model: One-factor Cheyette model (one volatility bucket).
         grid: The tensor-product ``(x, y)`` grid.
 
     Returns:
         The assembled exact-``y`` :class:`Operator2D` (``x`` diffusion + drift on
         ``A1``, upwinded ``y`` advection on ``A2``; no mixed term).
+
+    Raises:
+        ValueError: If the model has more than one volatility bucket.
     """
-    kappa = model.mean_reversion
-    sigma = model.volatility
+    if not is_constant(model.volatility):
+        raise ValueError(
+            "cheyette_exact_operator_2d builds the constant-volatility "
+            "operator; a piecewise-constant CheyetteModel needs "
+            "cheyette_exact_operator_rows."
+        )
+    sigma = model.volatility[0]
     beta = model.skew
 
     x = grid.x.nodes[:, jnp.newaxis]  # (n_x, 1)
-    y = grid.y.nodes[jnp.newaxis, :]  # (1, n_y)
 
     sigma_r = jnp.maximum(sigma * (1.0 + beta * x), 0.0)  # (n_x, 1)
     sig2 = sigma_r**2                                     # (n_x, 1)
+    return _exact_operator_from_sig2(model, grid, sig2)
+
+
+def cheyette_exact_operator_rows(
+    model: CheyetteModel,
+    grid: Grid2D,
+    *,
+    expiry: Float[Array, ""],
+    n_time: int,
+) -> Callable[[Int[Array, ""]], Operator2D]:
+    r"""Per-step exact-``y`` operators for a piecewise-constant :math:`\sigma(t)`.
+
+    Backward step ``m`` (``m = 0`` nearest expiry) spans forward time
+    ``[k dt, (k+1) dt]`` with ``k = n_time - m - 1``. Its local variance is
+    :math:`\sigma_r^2 = \overline{\sigma^2}_m\,\max(1 + \beta x, 0)^2` with
+    :math:`\overline{\sigma^2}_m` the exact step average of :math:`\sigma(t)^2`
+    (:func:`~valax.models.cheyette.cheyette_mean_variance_rate`), used both in
+    the ``x`` diffusion and in the ``y`` drift :math:`\sigma_r^2 - 2\kappa y`
+    of :func:`cheyette_exact_operator_2d`. Each row is assembled inside the ADI
+    time loop (:func:`~valax.pricing.pde.schemes2d.solve_backward_2d` accepts
+    a function of the step index), so memory stays that of one operator.
+
+    Args:
+        model: One-factor Cheyette model.
+        grid: The tensor-product ``(x, y)`` grid.
+        expiry: Horizon ``T`` in year fractions (``dt = T / n_time``).
+        n_time: Number of backward time steps.
+
+    Returns:
+        A function mapping the backward step index ``m`` (traced scalar) to
+        that step's :class:`Operator2D`.
+    """
+    dt = expiry / n_time
+    k = n_time - jnp.arange(n_time) - 1
+    var_rates = cheyette_mean_variance_rate(model, k * dt, (k + 1) * dt)
+    x = grid.x.nodes[:, jnp.newaxis]  # (n_x, 1)
+    state2 = jnp.maximum(1.0 + model.skew * x, 0.0) ** 2  # (n_x, 1)
+
+    def row(m: Int[Array, ""]) -> Operator2D:
+        return _exact_operator_from_sig2(model, grid, var_rates[m] * state2)
+
+    return row
+
+
+def _exact_operator_from_sig2(
+    model: CheyetteModel,
+    grid: Grid2D,
+    sig2: Float[Array, "n_x 1"],
+) -> Operator2D:
+    r"""Exact-``y`` operator for a given local variance :math:`\sigma_r(x)^2`.
+
+    Args:
+        model: One-factor Cheyette model (mean reversion).
+        grid: The tensor-product ``(x, y)`` grid.
+        sig2: Local variance per ``x`` node.
+
+    Returns:
+        The assembled exact-``y`` :class:`Operator2D` with the ``x`` linearity
+        fold applied.
+    """
+    kappa = model.mean_reversion
+
+    x = grid.x.nodes[:, jnp.newaxis]  # (n_x, 1)
+    y = grid.y.nodes[jnp.newaxis, :]  # (1, n_y)
 
     diff_x = jnp.broadcast_to(sig2, grid.shape)                 # (n_x, n_y)
     drift_x = jnp.broadcast_to(y - kappa * x, grid.shape)       # (n_x, n_y)
@@ -1370,13 +1586,26 @@ def _exact_y_grid(
         config: 2-D grid configuration (``n_x``, ``n_y``, ``x_range``, ``y_max``).
         horizon: Horizon in year fractions.
 
+    With a piecewise-constant :math:`\sigma(t)` the Gaussian accumulator is no
+    longer monotone (it relaxes towards :math:`\sigma_j^2 / 2\kappa` inside
+    bucket :math:`j`), so the ``y`` axis is scaled by its peak over
+    :math:`[0, T]`, attained at a breakpoint or at :math:`T`.
+
     Returns:
         The tensor-product :class:`Grid2D`.
     """
     ybar = cheyette_y_gaussian(model, horizon)
     std_x = jnp.sqrt(ybar)
     x = centred_state_grid(std_x, n=config.n_x, half_width=config.x_range)
-    y = uniform_linear_grid(-0.25 * ybar, config.y_max * ybar, n=config.n_y)
+    if is_constant(model.volatility):
+        y = uniform_linear_grid(-0.25 * ybar, config.y_max * ybar, n=config.n_y)
+    else:
+        nodes = jnp.minimum(
+            jnp.concatenate([model.volatility_times, jnp.reshape(horizon, (1,))]),
+            horizon,
+        )
+        ypeak = jnp.max(cheyette_y_gaussian(model, nodes))
+        y = uniform_linear_grid(-0.25 * ypeak, config.y_max * ypeak, n=config.n_y)
     return Grid2D(x=x, y=y)
 
 
@@ -1405,7 +1634,12 @@ def _solve_cheyette_exact(
         The price at the curve reference date.
     """
     grid = _exact_y_grid(model, config, horizon)
-    operator = cheyette_exact_operator_2d(model, grid)
+    if is_constant(model.volatility):
+        operator = cheyette_exact_operator_2d(model, grid)
+    else:
+        operator = cheyette_exact_operator_rows(
+            model, grid, expiry=horizon, n_time=config.n_time
+        )
 
     dt = horizon / config.n_time
     t_levels = jnp.arange(config.n_time + 1) * dt

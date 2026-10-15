@@ -22,6 +22,7 @@ signals → root cause → fix → the generalisable lesson.
 | [3](#3-degenerate-fixtures-hide-first-order-errors-midpoint-sampling-of-a-kinked-curve) | Midpoint-sampled `alpha(t)` stalled Hull-White's convergence | A flat-curve fixture is degenerate — it can make a first-order term vanish identically |
 | [4](#4-measure-the-convergence-order-not-the-error-cashflow-date-snapping) | Coupon-date snapping swamped a second-order scheme | Small absolute error ≠ correct; and agreeing with an engine that shares your approximation is not validation |
 | [5](#5-a-value-correct-guard-with-no-derivative-jnpwhere-on-a-removable-singularity) | `jnp.where` pinned Hagan's `z/x(z)` to a constant at the money | A guard can be exact in value and empty in derivative; and two adjoints agreeing proves nothing if they share the broken primitive |
+| [6](#6-graph-size-is-a-cost-an-unrolled-series-made-a-gradient-compile-for-seven-minutes) | An expanded double-sum series in the piecewise G2++ variance term | In traced code, graph size is a cost of its own — invisible to value tests and run-time benchmarks |
 
 ## Runnable reproductions
 
@@ -37,6 +38,7 @@ diverges: the point is to *observe* the failure, not to avoid it.
 |---|---|
 | [`01_sabr_vol_convention_mismatch.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/01_sabr_vol_convention_mismatch.py) | — (calibration-convention mismatch; no PDE counterpart here) |
 | [`02_where_guard_kills_the_derivative.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/02_where_guard_kills_the_derivative.py) | [entry 5](#5-a-value-correct-guard-with-no-derivative-jnpwhere-on-a-removable-singularity) |
+| [`03_unrolled_series_compile_time.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/03_unrolled_series_compile_time.py) | [entry 6](#6-graph-size-is-a-cost-an-unrolled-series-made-a-gradient-compile-for-seven-minutes) |
 
 ---
 
@@ -578,3 +580,142 @@ Corollaries:
 A runnable reproduction, with the broken and fixed guards side by side and the
 knobs to re-break it, is
 [`examples/pitfalls/02_where_guard_kills_the_derivative.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/02_where_guard_kills_the_derivative.py).
+
+---
+
+## 6. Graph size is a cost: an unrolled series made a gradient compile for seven minutes
+
+**Context.** The piecewise-constant G2++ volatilities σ(t), η(t) of Phase 4
+(`valax/models/g2pp.py`). The variance term $V(t, T)$ is evaluated bucket by
+bucket through
+
+$$
+H(s) = \int_0^s \bigl(1 - e^{-pu}\bigr)\bigl(1 - e^{-qu}\bigr)\,du ,
+$$
+
+for the rate pairs $(a, a)$, $(b, b)$, $(a, b)$ at both ends of each bucket's
+window. On short windows the closed form
+$s - \frac{1-e^{-ps}}{p} - \frac{1-e^{-qs}}{q} + \frac{1-e^{-(p+q)s}}{p+q}$
+cancels catastrophically (relative error $\sim\epsilon/(ps)^2$), so below
+$(p+q)s = 1$ it switches to the series
+
+$$
+H(s) = s\sum_{n \ge 3} \frac{(-1)^{n+1}}{n!}
+       \sum_{j=1}^{n-2}\binom{n-1}{j}(ps)^j (qs)^{n-1-j},
+$$
+
+whose inner terms are all positive. It was written exactly like that: two
+nested Python loops to $n = 24$. Found by example 18, not by a test.
+
+### Symptom
+
+Example 18's quote-risk step for one per-trade G2++ Bermudan, bootstrapped
+with three σ buckets and priced on the 2-D ADI PDE, did not finish in ten
+minutes. Every value was right. Every model test, including quadrature
+oracles at $10^{-12}$, passed. Compiled, the 3-bucket Bermudan *ran* in 2.8 ms
+against 2.6 ms at constant vol.
+
+| 3-bucket G2++ Bermudan (41×41×40) | constant vol | before | after |
+|---|---|---|---|
+| value: HLO lines | 4,645 | 94,812 | 7,811 |
+| value: compile + run | 0.6 s | 6.3 s | 0.8 s |
+| ∂V/∂(model, market) through `price`: compile + run | 1.9 s | **427 s** | **4.1 s** |
+| run time once compiled | 2.6 ms | 2.8 ms | — |
+
+### The misleading signals (what it was *not*)
+
+1. **"The PDE time loop is unrolled."** The obvious suspect for a compile-time
+   blow-up that scales with the model's time dependence. It was not: the 2-D
+   stepper runs `lax.scan` with the per-step operator built inside the loop
+   body, so it is traced once regardless of `n_time`. Measured directly: the
+   gradient compile was 9.4 s at `n_time` 10, 20 and 40 alike.
+2. **"The calibrated market curve, or `price()`'s curve binding."** A probe
+   with a hand-built flat curve bound into the model compiled in 9.5 s; the
+   same trade through `price()` on the calibrated market took 427 s. But both
+   lowered to **the same graph** — 99,503 HLO lines either way — so the curve
+   was not the cause. Why two graphs of the same size compiled 40× apart was
+   not isolated: the line count is a proxy for compile cost, not a predictor
+   of it. The fix removed both.
+3. **"Run-time benchmarks would have caught it."** They had been run:
+   `scripts/bench_coterminal_bootstrap.py` timed the bootstrap and the PDE
+   pricings, all in milliseconds. A benchmark that warms up excludes exactly
+   the cost that was exploding.
+
+### Root cause
+
+JAX traces Python. A `for` loop over a static range is unrolled into the
+graph, so a formula's trace- and compile-time cost is its operation count *as
+written*, not as it runs. The double sum is ~1,000 operations per call (1,502
+HLO lines). $V$ called it **six** times, and the G2++ bond price calls $V$
+three times for every exercise and payment date. The bucketed price lowered to
+20× the constant one. XLA compile time grows with graph size, and in the
+reverse-mode graph of a PDE with loops and exercise events it grew far faster
+than linearly. In isolation the same bloat costs 4–5×, growing linearly with
+call sites (the reproduction script measures it).
+
+### The fix
+
+Two changes, both exact up to round-off:
+
+1. **A recurrence instead of the expanded inner sum.** With $x = ps$,
+   $y = qs$, the inner sum is $A_k = (x+y)^k - x^k - y^k$ ($k = n-1$), and
+
+   $$
+   A_{k+1} = (x+y)\,A_k + xy\,\bigl(x^{k-1} + y^{k-1}\bigr), \qquad A_1 = 0,
+   $$
+
+   whose terms are all non-negative, so there is no cancellation. It is as
+   accurate as the binomial sum at a handful of operations per term instead
+   of $k$ (325 HLO lines per call instead of 1,502). New against old:
+   $2.2\times 10^{-16}$ relative. Both are within $8.9\times 10^{-14}$ of a
+   60-digit evaluation over $s \in [10^{-6}, 30]$ and seven rate pairs.
+2. **One broadcast call instead of six.** The three rate pairs and two window
+   ends are stacked into one `(pair, end, …, bucket)` array and $H$ is
+   evaluated once. Elementwise, so every entry is computed exactly as before,
+   but the series is traced once (1,882 → 341 lines in the reproduction).
+
+The piecewise `g2pp_V` went from 1,712 to 380 HLO lines (constant: 140). The
+constant-vol path was not touched; golden values are bit-identical.
+
+### The generalisable lesson
+
+> **In traced code, graph size is a cost of its own, and value tests and
+> run-time benchmarks are blind to it. A formula costs what it says, not what
+> it computes.**
+
+Corollaries:
+
+- **Write series as recurrences** (a running term, Horner, a three-term
+  recurrence), never as expanded sums. The recurrence is usually also the
+  better-conditioned form.
+- **Batch repeated elementwise calls.** $k$ calls trace the function $k$
+  times; one call on a stacked, broadcast array traces it once and computes
+  identical elements.
+- **Roll long loops** (`lax.scan`, `fori_loop`); unroll only short, fixed
+  ones that benefit from fusion.
+- **Compile time is a deliverable.** Time first calls, not only warm ones,
+  especially for reverse mode through a solver, where graph size is amplified.
+
+### The debugging playbook
+
+1. **Find out *where* the time goes before theorising.** A periodic stack dump
+   (`faulthandler.dump_traceback_later(150, repeat=True)`) showed the process
+   inside `jax._src.compiler.backend_compile_and_load`, under
+   `quote_risk_adjoint`'s `filter_grad`. Not computing, compiling.
+2. **Reduce to value vs gradient, constant vs bucketed.** Timing the four
+   combinations isolated the cost to "gradient × buckets".
+3. **Census the graph instead of compiling it.** `jit(f).lower(x).as_text()`
+   costs no XLA compilation. Counting its lines across variants (curve type,
+   `price()` vs direct recipe) eliminated suspects in seconds, then the same
+   census per model primitive (`g2pp_V`, bond price, φ integral, covariance,
+   diffusion rates) put the bulk in `g2pp_V`'s series.
+4. **Fix, re-census, re-time**, and compare the new values with the old over a
+   wide grid against an independent high-precision reference.
+5. **Guard the size, not the time.** Compile time is noisy and slow to test.
+   `tests/test_models/test_g2pp_piecewise.py::test_piecewise_variance_term_graph_stays_small`
+   lowers the piecewise $V$ (no compile, sub-second) and asserts it stays under
+   5× the constant one. It is 2.7× now and was 12× before.
+
+A runnable reproduction, with both writings of the series, the HLO census,
+compile timings and the broadcast trick, is
+[`examples/pitfalls/03_unrolled_series_compile_time.py`](https://github.com/ACea15/VALAX/blob/main/examples/pitfalls/03_unrolled_series_compile_time.py).

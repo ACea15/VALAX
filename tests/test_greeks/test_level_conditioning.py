@@ -255,9 +255,9 @@ def hull_white_level():
             return 0.5 * jnp.sum(resid * resid)
 
         theta = (
-            jnp.array([truth.mean_reversion, truth.volatility])
+            jnp.array([truth.mean_reversion, truth.volatility[0]])
             if free_mean_reversion
-            else jnp.array([truth.volatility])
+            else jnp.array([truth.volatility[0]])
         )
         return CalibrationLevel(
             residual_fn=lambda th, quotes: jax.grad(sse)(th, quotes),

@@ -52,6 +52,7 @@ from valax.models.g2pp import (
     G2PPModel,
     g2pp_B,
     g2pp_bond_price,
+    g2pp_forward_measure_moments,
     g2pp_market_df,
 )
 from valax.models.short_rate import require_initial_curve
@@ -100,7 +101,10 @@ def _forward_measure_moments(
 
     Under the :math:`T`-forward measure the factors :math:`x(T), y(T)` are
     jointly Gaussian.  Returns :math:`(\mu_x, \mu_y, \sigma_x, \sigma_y,
-    \rho_{xy})` following Brigo & Mercurio (2006), eq. (4.31).
+    \rho_{xy})` following Brigo & Mercurio (2006), eq. (4.31), generalised to
+    piecewise-constant volatilities by
+    :func:`~valax.models.g2pp.g2pp_forward_measure_moments` (the one
+    implementation; the constant case runs the original closed form there).
 
     Args:
         model: G2++ model.
@@ -109,31 +113,7 @@ def _forward_measure_moments(
     Returns:
         Tuple ``(mu_x, mu_y, sigma_x, sigma_y, rho_xy)``.
     """
-    a = model.mean_reversion_x
-    b = model.mean_reversion_y
-    sigma = model.volatility_x
-    eta = model.volatility_y
-    rho = model.correlation
-    T = expiry_time
-
-    sigma_x = sigma * jnp.sqrt((1.0 - jnp.exp(-2.0 * a * T)) / (2.0 * a))
-    sigma_y = eta * jnp.sqrt((1.0 - jnp.exp(-2.0 * b * T)) / (2.0 * b))
-    rho_xy = (
-        rho * sigma * eta / ((a + b) * sigma_x * sigma_y)
-        * (1.0 - jnp.exp(-(a + b) * T))
-    )
-
-    M_x = (
-        (sigma**2 / a**2 + rho * sigma * eta / (a * b)) * (1.0 - jnp.exp(-a * T))
-        - (sigma**2 / (2.0 * a**2)) * (1.0 - jnp.exp(-2.0 * a * T))
-        - (rho * sigma * eta / (b * (a + b))) * (1.0 - jnp.exp(-(a + b) * T))
-    )
-    M_y = (
-        (eta**2 / b**2 + rho * sigma * eta / (a * b)) * (1.0 - jnp.exp(-b * T))
-        - (eta**2 / (2.0 * b**2)) * (1.0 - jnp.exp(-2.0 * b * T))
-        - (rho * sigma * eta / (a * (a + b))) * (1.0 - jnp.exp(-(a + b) * T))
-    )
-    return -M_x, -M_y, sigma_x, sigma_y, rho_xy
+    return g2pp_forward_measure_moments(model, expiry_time)
 
 
 def _critical_y(
@@ -160,18 +140,47 @@ def _critical_y(
         a failed boundary surfaces as a non-finite price (and, inside a
         calibration, as a named non-finite residual) instead of a silently
         wrong one.
-    """
-    def residual(y: Float[Array, ""], args) -> Float[Array, ""]:
-        return jnp.sum(lambdas0 * jnp.exp(-B_b * y)) - par_value
 
-    sol = optx.root_find(
-        residual,
-        optx.Newton(rtol=1e-12, atol=1e-12),
-        jnp.zeros((), dtype=lambdas0.dtype),
-        max_steps=100,
-        throw=False,
+    Notes:
+        **Guarded**, as :func:`~valax.pricing.analytic.hull_white_swaptions.hw_critical_rate`:
+        a gradient-free probe solve decides ``ok``, and the differentiable
+        solve runs on ``where(ok, real input, detached stand-in)``, so a
+        failure is NaN instead of a runtime raise from the implicit
+        derivative of a failed solve, and a converged boundary (value and
+        gradient) is exactly the unguarded one.
+    """
+
+    def solve(lam, bb, pv):
+        def residual(y: Float[Array, ""], args) -> Float[Array, ""]:
+            return jnp.sum(lam * jnp.exp(-bb * y)) - pv
+
+        return optx.root_find(
+            residual,
+            optx.Newton(rtol=1e-12, atol=1e-12),
+            jnp.zeros((), dtype=lambdas0.dtype),
+            max_steps=100,
+            throw=False,
+        )
+
+    detach = jax.lax.stop_gradient
+    par_value = jnp.asarray(par_value, dtype=lambdas0.dtype)
+    probe = solve(detach(lambdas0), detach(B_b), detach(par_value))
+    ok = (probe.result == optx.RESULTS.successful) & jnp.isfinite(probe.value)
+    # Stand-in on the failure path only: unit coefficients (detached), so
+    # sum(exp(-B y)) = V has a root. Only `lambdas0` (already per Gauss-Hermite
+    # node) is switched on `ok`: switching the shared `B_b` / `V` on the
+    # per-node flag would batch them under the pricer's vmap and change the
+    # compiled Newton loop's rounding (measured: 1 ulp in the price). They are
+    # sanitised on their own finiteness instead — an identity when finite.
+    safe_lambdas = jnp.where(ok, lambdas0, detach(jnp.ones_like(lambdas0)))
+    safe_b = jnp.where(jnp.isfinite(B_b), B_b, detach(jnp.ones_like(B_b)))
+    safe_par = jnp.where(jnp.isfinite(par_value), par_value, 1.0)
+    sol = solve(safe_lambdas, safe_b, safe_par)
+    # `where`, not a NaN multiplier (a NaN cotangent would raise in the
+    # implicit-derivative solve): the failure is signalled by the NaN value.
+    return jnp.where(
+        ok & (sol.result == optx.RESULTS.successful), sol.value, jnp.nan
     )
-    return jnp.where(sol.result == optx.RESULTS.successful, sol.value, jnp.nan)
 
 
 def g2pp_swaption_price(
@@ -195,6 +204,12 @@ def g2pp_swaption_price(
     :func:`~valax.pricing.multicurve.apply_swap_basis`, so the semi-analytic
     price stays consistent with them.  The floating leg is assumed to pay on
     the fixed schedule.
+
+    The formula holds unchanged for piecewise-constant volatilities
+    :math:`\sigma(t), \eta(t)`: the factors stay Gaussian and the bond stays
+    affine in them, so only the :math:`T`-forward moments
+    (:func:`~valax.models.g2pp.g2pp_forward_measure_moments`) and the bond
+    coefficients (:func:`~valax.models.g2pp.g2pp_bond_price`) change.
 
     Args:
         swaption: Swaption contract (``is_payer`` selects payer vs receiver).

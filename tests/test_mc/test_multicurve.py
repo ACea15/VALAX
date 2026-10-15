@@ -92,7 +92,7 @@ def g2pp(ois) -> G2PPModel:
         mean_reversion_x=jnp.array(0.50),
         volatility_x=jnp.array(0.010),
         mean_reversion_y=jnp.array(0.10),
-        volatility_y=jnp.array(0.006),
+        volatility_ratio=jnp.array(0.6),
         correlation=jnp.array(-0.70),
         initial_curve=ois,
         curve_id=_OIS_ID,

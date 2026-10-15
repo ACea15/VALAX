@@ -52,7 +52,7 @@ def model(curve):
         mean_reversion_x=jnp.array(0.50),
         mean_reversion_y=jnp.array(0.10),
         volatility_x=jnp.array(0.010),
-        volatility_y=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.8),
         correlation=jnp.array(-0.70),
         initial_curve=curve,
     )
@@ -139,7 +139,7 @@ class TestCorrelationSensitivity:
         def price_at(rho):
             m = G2PPModel(
                 mean_reversion_x=jnp.array(0.50), mean_reversion_y=jnp.array(0.10),
-                volatility_x=jnp.array(0.010), volatility_y=jnp.array(0.008),
+                volatility_x=jnp.array(0.010), volatility_ratio=jnp.array(0.8),
                 correlation=jnp.array(rho), initial_curve=curve,
             )
             return float(g2pp_swaption_price(s, m))
@@ -163,8 +163,9 @@ class TestAutodiffJIT:
         # can dominate, making the first factor's local vega negative.
         assert jnp.isfinite(grads.volatility_x)
         assert jnp.isfinite(grads.correlation)
-        # The second-factor vega is robustly positive here.
-        assert float(grads.volatility_y) > 0.0
+        # The second-factor vega is robustly positive here. With eta = r*sigma,
+        # dV/dr = sigma * dV/deta at fixed sigma, so it carries the same sign.
+        assert float(grads.volatility_ratio[0]) > 0.0
 
 
 class TestForwardCurve:

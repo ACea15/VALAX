@@ -31,7 +31,12 @@ dy(t) = -b\,y(t)\,dt + \eta\,dW_2(t), \quad y(0) = 0,
 $$
 
 The five free parameters are the mean-reversion speeds \(a, b\), the factor
-volatilities \(\sigma, \eta\), and the correlation \(\rho \in (-1, 1)\). The
+volatilities \(\sigma, \eta\), and the correlation \(\rho \in (-1, 1)\).
+`G2PPModel` does not take \(\eta\) directly. Its fields are `volatility_x`
+(\(\sigma\)) and `volatility_ratio` (\(\lambda = \eta/\sigma\)), and \(\eta\) is
+the read-only property `volatility_y`. Both volatilities may be piecewise
+constant in time on shared buckets (§9). The formulas on this page are written
+for the constant case. The
 shift \(\varphi\) is **not** free — it is pinned by the exact-fit condition,
 
 $$
@@ -43,8 +48,9 @@ $$
 
 so that the model reprices the initial discount curve \(P^M(0, \cdot)\) by
 construction. The factors \(x, y\) are then zero-mean Ornstein–Uhlenbeck
-processes with time-independent coefficients — the parameterisation every
-numerical scheme wants (`g2pp_phi`).
+processes whose coefficients carry no curve dependence (and are constant in
+time for constant volatilities) — the parameterisation every numerical scheme
+wants (`g2pp_phi`).
 
 The model stays affine/Gaussian, so the zero-coupon bond is closed-form given
 the two factors (`g2pp_bond_price`):
@@ -158,7 +164,13 @@ measure moments of \((x(T), y(T))\), and for each \(x\) the exercise boundary
 evaluates the outer integral with **64-node Gauss–Hermite quadrature** and
 finds \(\bar y(x)\) with an `optimistix` Newton root-find at each node. Because
 the root-find is implicitly differentiable, `jax.grad` flows through the
-boundary without unrolling the iterations.
+boundary without unrolling the iterations. The root-find is guarded in the same
+way as the Hull–White critical rate, so a failed boundary gives a NaN price and
+NaN gradient rather than a runtime error inside `jit` / `vmap`
+([Hull–White Swaptions §4](hull-white-swaptions.md#4-finding-rstar)). With a
+piecewise-constant \(\sigma(t), \eta(t)\) the formula is unchanged. Only the
+moments \((\mu_x, \mu_y, \sigma_x, \sigma_y, \rho_{xy})\) and the bond
+coefficients (through \(V\)) change (§9).
 
 Discounting comes from the model's `initial_curve` — bound from the
 `MarketState` by `valax.price` (or explicitly with `bind_curves` for a kernel
@@ -187,7 +199,10 @@ $$
 `generate_g2pp_paths` draws the increment by Cholesky-factoring that matrix once
 and applying it to standard normals — the two-factor analogue of the exact
 Hull–White scheme. The scheme is unbiased in the factor marginals at any step
-size.
+size. With piecewise-constant volatilities the step covariance depends on where
+the step starts (`g2pp_state_covariance`), so it is factored once **per step**.
+It stays exact across a bucket breakpoint, and the whole deterministic drift
+\(\int\varphi\) is then integrated exactly (§9).
 
 **Exact-forward discounting.** The deterministic forward part of the drift is
 integrated *exactly* over each step — it telescopes to the market
@@ -260,6 +275,8 @@ available via `settings=SolverSettings(method="levenberg_marquardt", ...)`.
 | Synthetic calibration round-trip | vols/\(\rho\) recovered | Pricer + transforms + residual assembly |
 | CMS steepener \(+\) flattener | `= 0` | Sign / discounting conventions |
 
+Validation with time-dependent volatilities is listed in §9.
+
 ---
 
 ## 8 · PDE (2-D finite differences)
@@ -318,6 +335,45 @@ Registered recipes (via `pde_price_dispatch`): `FixedRateBond` (the option-free
 PDE agrees with the analytic §3 price to a few \(10^{-3}\), and both the
 European and Bermudan agree with QuantLib's independent `ql.FdG2SwaptionEngine`
 to within its ~1% grid tolerance.
+
+With piecewise-constant volatilities the diffusion block is no longer constant.
+`g2pp_operator_rows` builds one operator per backward step from the exact step
+averages of \(\sigma^2\), \(\eta^2\) and \(\rho\sigma\eta\)
+(`g2pp_diffusion_rates`), and assembles it inside the ADI loop. The constant
+`g2pp_operator_2d` raises for more than one bucket. The \(\varphi\) factoring
+above is unchanged, and its step integral now comes from the exact-fit identity
+\(\int_0^t\varphi = -\ln P^M(0,t) + \tfrac12 V(0,t)\) (§9).
+
+---
+
+## 9 · Time-dependent volatility
+
+\(\sigma(t)\) and the ratio \(\lambda(t)\) are piecewise constant on shared
+buckets, with \(\eta(t) = \lambda(t)\,\sigma(t)\). The ratio parametrisation
+lets a per-trade co-terminal bootstrap fit one bucketed field (\(\sigma\)) while
+\(\lambda\), \(\rho\), \(a\) and \(b\) stay fixed. Every Gaussian quantity on
+this page then becomes a closed-form sum of decayed integrals: \(V(t,T)\)
+(evaluated bucket by bucket, with a cancellation-free series on short windows),
+\(\varphi\), its integral, the conditional covariance, and the forward-measure
+moments. The derivations live in one place,
+[Time-Dependent Volatility §5](time-dependent-volatility.md#5-g2-with-time-dependent-volatility).
+A one-bucket model runs the constant formulas above bit for bit.
+
+**Validation.** No QuantLib oracle exists for a time-dependent two-factor G2
+model. The piecewise model is therefore checked against:
+
+- Gauss-Legendre quadrature of \(V\), \(\varphi\) and the covariances;
+- the exact-fit identity \(P^M(0,t) = e^{-\int_0^t\varphi + \frac12 V(0,t)}\);
+- the tower property;
+- Monte Carlo (within \(2\,\)stderr) and the PDE;
+- its **one-factor limit** (\(\lambda = 0\), \(\rho = 0\)), which reproduces
+  piecewise Hull–White.
+
+The tests are `tests/test_models/test_g2pp_piecewise.py`,
+`tests/test_pricing/test_g2pp_piecewise_swaptions.py`,
+`tests/test_pde/test_g2pp_piecewise.py` and `tests/test_mc/test_g2pp_paths.py`.
+The one-factor limit ties the piecewise model back to the QuantLib-validated
+Hull–White.
 
 ---
 

@@ -130,7 +130,7 @@ class TestRoundTrip1F:
             engine="frozen", config=CFG_FROZEN_1F,
             settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=200),
         ).value
-        assert float(fit.volatility) == pytest.approx(0.012, rel=1e-2)
+        assert float(fit.volatility[0]) == pytest.approx(0.012, rel=1e-2)
         assert float(fit.skew) == pytest.approx(0.25, abs=1e-2)
 
     def test_full_fit_reprices(self, curve, strike_slice):
@@ -210,7 +210,7 @@ class TestRoundTrip1FCapletSlice:
             engine="frozen", config=CFG_FROZEN_1F,
             settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=200),
         ).value
-        assert float(fit.volatility) == pytest.approx(0.012, rel=2e-2)
+        assert float(fit.volatility[0]) == pytest.approx(0.012, rel=2e-2)
         assert float(fit.skew) == pytest.approx(0.25, abs=2e-2)
 
     def test_autodiff_flows_through_caplet_pde(self, curve):
@@ -252,7 +252,7 @@ class TestRoundTrip1FExactEngine:
             engine="exact", config=CFG_EXACT_1F,
             settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=150),
         ).value
-        assert float(fit.volatility) == pytest.approx(0.011, rel=2e-2)
+        assert float(fit.volatility[0]) == pytest.approx(0.011, rel=2e-2)
         assert float(fit.skew) == pytest.approx(0.2, abs=2e-2)
 
 
@@ -270,16 +270,17 @@ class TestRoundTrip2F:
             mean_reversion_1=jnp.array(0.5),
             mean_reversion_2=jnp.array(0.1),
             volatility_1=jnp.array(0.011),
-            volatility_2=jnp.array(0.007),
+            volatility_ratio=jnp.array(0.007) / jnp.array(0.011),
             skew_1=jnp.array(0.1),
             skew_2=jnp.array(0.05),
             correlation=jnp.array(-0.5),
             initial_curve=curve,
         )
         market = cheyette_pde_prices(true, insts, "frozen", CFG_FROZEN_2F)
+        # Guess sigma_1 = sigma_2 = 0.009, i.e. ratio sigma_2 / sigma_1 = 1.
         guess = eqx.tree_at(
-            lambda m: (m.volatility_1, m.volatility_2), true,
-            (jnp.array(0.009), jnp.array(0.009)),
+            lambda m: (m.volatility_1, m.volatility_ratio), true,
+            (jnp.array([0.009]), jnp.array([0.009]) / jnp.array([0.009])),
         )
         fit = calibrate_cheyette_2f(
             insts, market, curve,
@@ -291,8 +292,8 @@ class TestRoundTrip2F:
             config=CFG_FROZEN_2F,
             settings=SolverSettings(method="bfgs", rtol=1e-10, atol=1e-10, max_steps=200),
         ).value
-        assert float(fit.volatility_1) == pytest.approx(0.011, rel=2e-2)
-        assert float(fit.volatility_2) == pytest.approx(0.007, rel=3e-2)
+        assert float(fit.volatility_1[0]) == pytest.approx(0.011, rel=2e-2)
+        assert float(fit.volatility_2[0]) == pytest.approx(0.007, rel=3e-2)
 
 
 # ── Guards ───────────────────────────────────────────────────────────

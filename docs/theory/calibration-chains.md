@@ -306,6 +306,33 @@ the same amount moves each basket vol by that amount, so the total cube vega
 equals the summed basket profile (§7.7 states the same identity for a
 vega-scaled residual, where $\lambda_{m,k}$ itself is the vega).
 
+**The co-terminal bootstrap.** With $n$ basket instruments and fewer than $n$
+constant parameters the level is a least-squares compromise. Giving the model
+a piecewise-constant volatility with one bucket per co-terminal, with
+breakpoints at the expiries ([Time-Dependent
+Volatility](time-dependent-volatility.md)), makes it **square and
+lower-triangular**: co-terminal $k$ expires at $T_k$ and so reads only
+$\sigma_1, \dots, \sigma_k$,
+
+$$
+\frac{\partial r_k}{\partial \sigma_j} = 0 \quad (j > k), \qquad
+r_k(\sigma_1, \dots, \sigma_k) = 0 \quad (k = 1, \dots, n),
+$$
+
+a `root` level with exact repricing. It is solved bucket by bucket: $\sigma_k$
+is one scalar Newton root with $\sigma_{1..k-1}$ already known, and the
+earlier roots are passed as solver arguments so autodiff differentiates
+through every stage. The adjoint is still the single transposed solve of §I.4
+(upper-triangular, by back-substitution), and $\lambda_m$ now has exactly one
+entry per exercise date, the trade's exposure to the co-terminal of that
+date. A target that the earlier buckets already overprice has no root; the
+triangular structure names that bucket as the cause of the failure and leaves
+the buckets before it exact. Why it is solved bucket by bucket rather than
+jointly is recorded in the architecture (D14,
+[decisions](../architecture/calibration-pricing-risk.md#3-decisions)); its
+assumptions and measured limitations are in the
+[register](../applications/calibration-register.md#per-trade-co-terminal-bootstrap).
+
 ## Part II — How VALAX implements the chain
 
 | Piece | VALAX symbol | Status |
@@ -844,6 +871,34 @@ $$
 The vector lambda\_m reads directly as the Bermudan's vega profile across its co-terminals. It then flows to the SABR node parameters through the cube interpolation (theta\_v-bar = sum\_k lambda\_m,k dsigma\_cube,k/dtheta\_v), and on to quotes through 7.5.
 
 **Curve contribution from calibration.** The VJP of R\_m seeded with lambda\_m passes through V^mod (model curve fit, basis spreads) and through V^tgt (annuities, forward swap rates, basket strikes, moneyness of the cube lookup): the paths 1 to 5 of Audit 6.4.
+
+**In VALAX: relative instead of vega-scaled, with the same risk.** The
+co-terminal bootstrap (`swaption_basket_node(mode="coterminal_bootstrap")`,
+§I.10) uses the relative price residual
+$R^{\mathrm{rel}}_{m,k} = (V^{\mathrm{mod}}_k - V^{\mathrm{tgt}}_k)/|V^{\mathrm{tgt}}_k|$.
+For a **square** level this changes nothing a user sees. The two residuals
+differ by a positive diagonal rescaling,
+
+$$
+R^{\mathcal V}_m = S\,R^{\mathrm{rel}}_m, \qquad
+S = \operatorname{diag}\!\big(|V^{\mathrm{tgt}}_k| / \mathcal V_k\big),
+$$
+
+so they have the same root. At that root $R^{\mathrm{rel}}_m = 0$, which
+kills the derivative of $S$ itself, so every derivative of the residual scales
+the same way: $\partial R^{\mathcal V}_m = S\,\partial R^{\mathrm{rel}}_m$.
+The adjoint systems then give
+$\lambda^{\mathcal V}_m = S^{-1}\lambda^{\mathrm{rel}}_m$, and every
+sensitivity $\lambda_m^{\top}\,\partial R_m/\partial x$ is identical. Only
+the units of $\lambda_m$ differ. VALAX reports the profile as
+$\partial V/\partial T_k$ through the target shifts of §I.10 and converts it
+by each basket option's vega,
+$\partial V/\partial \sigma_{\mathrm{cube},k} = \mathcal V_k\,\partial V/\partial T_k$,
+which is the $\lambda_{m,k}$ of the vega-scaled form above (example 14 prints
+both views and checks their sum against the total cube vega). The scaling
+still matters for one thing: it sets what the solver's stopping tolerance
+means (Newton to $10^{-12}$ in relative price). For a least-squares level the
+equivalence does not hold, because the weights change the minimiser.
 
 ### 7.8 Equity autocallable (Monte Carlo through local vol)
 

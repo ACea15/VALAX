@@ -36,6 +36,7 @@ Factories provided here span the three tiers of market:
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Callable, Mapping, Sequence
 
 import equinox as eqx
@@ -1050,6 +1051,280 @@ def coterminal_swaptions(
     return tuple(basket)
 
 
+#: Modes of :func:`swaption_basket_node`.
+BASKET_MODES = ("least_squares", "coterminal_bootstrap")
+
+
+def _basket_target(
+    inputs: LevelInputs, k: int, cube_id: str, target_keys: tuple
+) -> Float[Array, ""]:
+    """Target price of basket instrument ``k``: off the cube, plus its shift."""
+    from valax.core.resolve import discount_id_of, forward_id_of
+    from valax.pricing.analytic.rates_smile import swaption_price
+
+    market = inputs.upstream
+    inst = inputs.data["basket"][k]
+    fwd_id = forward_id_of(inst)
+    t = swaption_price(
+        inst, market.curve(discount_id_of(inst)), market.surfaces[cube_id],
+        None if fwd_id is None else market.curve(fwd_id),
+    )
+    if target_keys:
+        t = t + inputs.fixed[target_keys[k]]
+    return t
+
+
+def _concrete_ints(x: Any) -> Any:
+    """``x`` as a numpy int array, or ``None`` when it is traced."""
+    import numpy as np
+
+    try:
+        return np.asarray(x).astype(np.int64)
+    except (TypeError, jax.errors.TracerArrayConversionError,
+            jax.errors.ConcretizationTypeError):
+        return None
+
+
+def _exercise_labels(name: str, basket: tuple) -> tuple[str, ...]:
+    """``"exercise YYYY-MM-DD"`` per basket instrument (eager; positional if traced).
+
+    Also enforces, when the expiries are concrete, that they increase
+    strictly — each bucket must end at its own instrument's expiry.
+    """
+    import datetime
+
+    import numpy as np
+
+    expiries = [_concrete_ints(inst.expiry_date) for inst in basket]
+    if any(e is None for e in expiries):
+        return tuple(f"exercise #{k + 1}" for k in range(len(basket)))
+    days = np.array([int(e) for e in expiries])
+    if np.any(np.diff(days) <= 0):
+        raise ValueError(
+            f"swaption_basket_node({name!r}): a co-terminal bootstrap needs "
+            f"strictly increasing expiries (one volatility bucket ends at each), "
+            f"got ordinals {days.tolist()}."
+        )
+    epoch = datetime.date(1970, 1, 1)
+    return tuple(
+        f"exercise {(epoch + datetime.timedelta(days=int(d))).isoformat()}"
+        for d in days
+    )
+
+
+def _bucket_times(inputs: LevelInputs) -> Float[Array, " n_minus_1"]:
+    """Bucket breakpoints: the basket expiries but the last, in model time.
+
+    Year fractions from the reference date of the curve the model is bound
+    to, in the instruments' day count — the coordinate the engines read.
+    """
+    from valax.core.binding import curve_requirements
+    from valax.dates.daycounts import year_fraction
+
+    basket, template = inputs.data["basket"], inputs.data["template"]
+    curve_id = next(iter(curve_requirements(template, basket[0]).values()))
+    ref = inputs.upstream.curve(curve_id).reference_date
+    if len(basket) == 1:
+        return jnp.zeros((0,))
+    return jnp.stack([
+        year_fraction(ref, inst.expiry_date, inst.day_count) for inst in basket[:-1]
+    ])
+
+
+def _coterminal_normal_vol(
+    inputs: LevelInputs, k: int, cube_id: str
+) -> Float[Array, ""]:
+    """Normal (Bachelier) vol the cube quotes for basket instrument ``k``.
+
+    Read at the instrument's own coordinate and live forward, as
+    :func:`~valax.pricing.analytic.rates_smile.swaption_price` does; a
+    lognormal quote is converted with :math:`\\sigma_N \\approx \\sigma\\,S`.
+    """
+    from valax.core.resolve import discount_id_of, forward_id_of
+    from valax.dates.daycounts import year_fraction
+    from valax.pricing.analytic.swaptions import swaption_forward_and_annuity
+
+    market = inputs.upstream
+    inst = inputs.data["basket"][k]
+    curve = market.curve(discount_id_of(inst))
+    fwd_id = forward_id_of(inst)
+    S, _ = swaption_forward_and_annuity(
+        inst, curve, None if fwd_id is None else market.curve(fwd_id)
+    )
+    cube = market.surfaces[cube_id]
+    T = year_fraction(curve.reference_date, inst.expiry_date, inst.day_count)
+    tenor = year_fraction(inst.expiry_date, inst.fixed_dates[-1], inst.day_count)
+    v = cube(inst.strike, T, tenor, forward=S)
+    return v if getattr(cube, "is_normal", False) else v * S
+
+
+@functools.singledispatch
+def _bootstrap_seed(template: Any, normal_vol: Float[Array, " n"]) -> Float[Array, " n"]:
+    """Starting value of a model's bucketed volatility from basket normal vols.
+
+    A short-rate volatility and the normal vol of the swaptions it prices are
+    of the same order (equal for a one-factor Gaussian model in the limit of
+    no mean reversion), which is all a Newton seed needs. Models whose bucket
+    parameter is scaled differently register their own map.
+    """
+    return normal_vol
+
+
+def _two_factor_bootstrap_seed(template: Any, normal_vol: Float[Array, " n"]) -> Float[Array, " n"]:
+    """Two factors (G2++, Cheyette 2F at zero skew): the rate's instantaneous
+    normal vol is :math:`\\sigma_1\\sqrt{1 + r^2 + 2\\rho r}`.
+
+    With the ratio :math:`r` and correlation :math:`\\rho` held fixed, the
+    first factor's volatility is seeded so the combined vol matches.
+    """
+    r = jnp.ravel(jnp.asarray(template.volatility_ratio))[0]
+    rho = jnp.asarray(template.correlation)
+    return normal_vol / jnp.sqrt(jnp.maximum(1.0 + r * r + 2.0 * rho * r, 1e-8))
+
+
+def _register_bootstrap_seeds() -> None:
+    from valax.models.cheyette import CheyetteModel2F
+    from valax.models.g2pp import G2PPModel
+
+    _bootstrap_seed.register(G2PPModel, _two_factor_bootstrap_seed)
+    _bootstrap_seed.register(CheyetteModel2F, _two_factor_bootstrap_seed)
+
+
+_register_bootstrap_seeds()
+
+
+def _coterminal_bootstrap_node(
+    name: str,
+    *,
+    template: eqx.Module,
+    basket: tuple,
+    cube_id: str,
+    transforms: dict,
+    fixed_fields: dict,
+    target_keys: tuple,
+    weights: Any,
+    relative: bool,
+    method: str,
+    config: Any,
+    settings: SolverSettings | None,
+) -> CalibrationNode:
+    """The ``mode="coterminal_bootstrap"`` branch of :func:`swaption_basket_node`."""
+    from valax.calibration.solve import triangular_root_level
+
+    n = len(basket)
+    if weights is not None:
+        raise ValueError(
+            f"swaption_basket_node({name!r}): a co-terminal bootstrap is a "
+            f"square root level that reprices every instrument exactly; "
+            f"weights have no meaning there. Drop them or use "
+            f"mode='least_squares'."
+        )
+    if len(transforms) != 1:
+        raise ValueError(
+            f"swaption_basket_node({name!r}): a co-terminal bootstrap fits one "
+            f"bucketed volatility field, got transforms for {sorted(transforms)}."
+        )
+    from valax.models.short_rate import volatility_bucket_fields
+
+    (field, spec), = transforms.items()
+    bucketed = volatility_bucket_fields(template)
+    if not bucketed:
+        raise TypeError(
+            f"swaption_basket_node({name!r}): {type(template).__name__} has no "
+            f"piecewise-constant volatility (volatility_times); it cannot be "
+            f"bootstrapped."
+        )
+    if field not in bucketed:
+        raise ValueError(
+            f"swaption_basket_node({name!r}): a co-terminal bootstrap fits a "
+            f"bucketed volatility field of {type(template).__name__} "
+            f"({', '.join(bucketed)}), not {field!r}."
+        )
+    held = tuple(f for f in bucketed if f != field)
+    v0 = jnp.ravel(jnp.asarray(getattr(template, field)))
+    if v0.shape[0] not in (1, n):
+        raise ValueError(
+            f"swaption_basket_node({name!r}): template {field} has "
+            f"{v0.shape[0]} buckets; a bootstrap of {n} instruments needs 1 "
+            f"(a fallback seed broadcast to every bucket) or {n}."
+        )
+    fallback = jnp.broadcast_to(v0, (n,))
+    labels = target_keys or _exercise_labels(name, basket)
+    data = _trade_data(basket, template, None)
+
+    def with_fixed(model: Any, inputs: LevelInputs) -> Any:
+        """The template with its held-fixed fields set from ``p``."""
+        for f, key in fixed_fields.items():
+            model = eqx.tree_at(
+                lambda m, _f=f: getattr(m, _f), model, inputs.fixed[key],
+                is_leaf=lambda x: x is None,
+            )
+        return model
+
+    def assemble(theta: Float[Array, " n"], inputs: LevelInputs) -> Any:
+        model = with_fixed(inputs.data["template"], inputs)
+        model = eqx.tree_at(
+            lambda m: getattr(m, field), model, spec.from_unconstrained(theta)
+        )
+        model = eqx.tree_at(
+            lambda m: m.volatility_times, model, _bucket_times(inputs)
+        )
+        # Every other bucketed field (e.g. a G2++ volatility ratio held
+        # fixed) is broadcast to the same buckets, so the model stays
+        # shape-consistent (tree_at bypasses the model's own check).
+        for f in held:
+            value = jnp.ravel(jnp.asarray(getattr(model, f)))
+            model = eqx.tree_at(
+                lambda m, _f=f: getattr(m, _f), model,
+                jnp.broadcast_to(value, (n,)) if value.shape[0] == 1 else value,
+            )
+        return model
+
+    def bucket_residual(
+        k: int, theta: Float[Array, " n"], inputs: LevelInputs
+    ) -> Float[Array, ""]:
+        from valax.core.pricing import price
+
+        model = assemble(theta, inputs)
+        inst = inputs.data["basket"][k]
+        p = price(inst, model, inputs.upstream, method=method, config=config).price
+        t = _basket_target(inputs, k, cube_id, target_keys)
+        scale = jnp.maximum(jnp.abs(t), 1e-8) if relative else 1.0
+        return (p - t) / scale
+
+    provenance = _basket_provenance(template, basket, method, config)
+
+    def calibrate_fn(inputs: LevelInputs):
+        inputs = _with_data(inputs, data)
+        # Seed each bucket at its own co-terminal's cube normal vol (the
+        # implied-vol starting point): a fixed seed far below it lands an
+        # in-the-money co-terminal on its flat, zero-vega intrinsic plateau,
+        # where Newton overshoots out of the pricer's domain. Detached: the
+        # seed is not a risk input.
+        seed = jnp.stack([
+            _coterminal_normal_vol(inputs, k, cube_id) for k in range(n)
+        ])
+        seed = jax.lax.stop_gradient(
+            jnp.where(jnp.isfinite(seed) & (seed > 0.0), seed, fallback)
+        )
+        theta0 = spec.to_unconstrained(jax.lax.stop_gradient(
+            _bootstrap_seed(with_fixed(inputs.data["template"], inputs), seed)
+        ))
+        return triangular_root_level(
+            name, bucket_residual, theta0, inputs, assemble,
+            settings, labels=labels, provenance=provenance,
+        )
+
+    return CalibrationNode(
+        name=name,
+        quote_keys=(),
+        fixed_keys=tuple(dict.fromkeys([*fixed_fields.values(), *target_keys])),
+        calibrate_fn=calibrate_fn,
+        install_fn=None,
+        needs_upstream=True,
+    )
+
+
 def swaption_basket_node(
     name: str,
     *,
@@ -1064,6 +1339,7 @@ def swaption_basket_node(
     method: str = "analytic",
     config: Any = None,
     settings: SolverSettings | None = None,
+    mode: str = "least_squares",
 ) -> CalibrationNode:
     r"""A pricing model fitted per trade to a swaption basket, off the cube.
 
@@ -1103,6 +1379,21 @@ def swaption_basket_node(
     ``"modelling_bias"`` for Cheyette's frozen-``y`` PDE, which
     :func:`~valax.calibration.result.check_engine` then binds to that engine.
 
+    **Two modes.** ``"least_squares"`` fits the template's ``transforms``
+    fields (constant in time) to the basket — the right tool for a basket
+    with more instruments than parameters (a smile, a global basket), but a
+    compromise on a co-terminal strip. ``"coterminal_bootstrap"`` instead
+    gives the single transformed volatility field **one bucket per basket
+    instrument**, with breakpoints at the basket's expiries
+    (``volatility_times``, set from the — possibly traced — basket), so
+    instrument :math:`k` reads buckets :math:`1..k` only: a square,
+    lower-triangular ``root`` level that reprices every instrument exactly,
+    whose :math:`\lambda_m` maps one-to-one onto the exercise dates. It is
+    solved bucket by bucket by
+    :func:`~valax.calibration.solve.triangular_root_level`, each bucket
+    seeded at its co-terminal's cube normal volatility; a failed bucket is
+    named, and the first failure reported as the root cause.
+
     Args:
         name: Node name.
         template: Model providing structure and every field not calibrated;
@@ -1118,13 +1409,20 @@ def swaption_basket_node(
         method: Pricing method of the basket under the model.
         config: Pricing config of the basket.
         settings: Solver settings; defaults to
-            :data:`~valax.calibration.basket.BASKET_SETTINGS`.
+            :data:`~valax.calibration.basket.BASKET_SETTINGS` (least squares)
+            or Newton at 1e-12 (bootstrap).
+        mode: ``"least_squares"`` or ``"coterminal_bootstrap"`` (static).
 
     Returns:
         A model-scope :class:`~valax.calibration.chain.CalibrationNode`.
 
     Raises:
-        ValueError: If ``target_keys`` does not match the basket length.
+        ValueError: If ``target_keys`` does not match the basket length, the
+            mode is unknown, or a bootstrap is mis-specified
+            (weights given, not exactly one transformed field, a template
+            volatility of the wrong length, or concrete basket expiries that
+            are not strictly increasing).
+        TypeError: If a bootstrap template has no ``volatility_times``.
     """
     from valax.calibration.basket import BASKET_SETTINGS
 
@@ -1136,8 +1434,20 @@ def swaption_basket_node(
             f"swaption_basket_node({name!r}): {len(targets_keyed)} target keys "
             f"for {n} basket instruments."
         )
+    if mode not in BASKET_MODES:
+        raise ValueError(
+            f"swaption_basket_node({name!r}): mode must be one of "
+            f"{BASKET_MODES}, got {mode!r}."
+        )
     transforms = dict(transforms)
     fixed_fields = dict(fixed_fields or {})
+    if mode == "coterminal_bootstrap":
+        return _coterminal_bootstrap_node(
+            name, template=template, basket=basket, cube_id=cube_id,
+            transforms=transforms, fixed_fields=fixed_fields,
+            target_keys=targets_keyed, weights=weights, relative=relative,
+            method=method, config=config, settings=settings,
+        )
     settings = BASKET_SETTINGS if settings is None else settings
     # The basket, its weights and the template may be traced (a node built
     # inside ``eqx.filter_vmap`` per trade): they travel as ``inputs.data``
@@ -1150,22 +1460,9 @@ def swaption_basket_node(
     assemble = _model_assembler(transforms, fixed_fields)
 
     def targets(inputs: LevelInputs) -> Float[Array, " n"]:
-        from valax.core.resolve import discount_id_of, forward_id_of
-        from valax.pricing.analytic.rates_smile import swaption_price
-
-        market = inputs.upstream
-        cube = market.surfaces[cube_id]
-        out = []
-        for k, inst in enumerate(inputs.data["basket"]):
-            fwd_id = forward_id_of(inst)
-            t = swaption_price(
-                inst, market.curve(discount_id_of(inst)), cube,
-                None if fwd_id is None else market.curve(fwd_id),
-            )
-            if targets_keyed:
-                t = t + inputs.fixed[targets_keyed[k]]
-            out.append(t)
-        return jnp.stack(out)
+        return jnp.stack([
+            _basket_target(inputs, k, cube_id, targets_keyed) for k in range(n)
+        ])
 
     def residual_fn(theta: dict, inputs: LevelInputs) -> Float[Array, " n"]:
         from valax.core.pricing import price
@@ -1200,6 +1497,7 @@ def swaption_basket_node(
 
 
 __all__ = [
+    "BASKET_MODES",
     "EXACT_SETTINGS",
     "FIT_SETTINGS",
     "QUOTE_FORMS",

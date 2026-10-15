@@ -49,6 +49,7 @@ References:
 
 from __future__ import annotations
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optimistix as optx
@@ -64,8 +65,9 @@ from valax.models.hull_white import (
     hw_bond_price,
     hw_instantaneous_forward,
     hw_market_df,
+    hw_short_rate_variance,
 )
-from valax.models.short_rate import require_initial_curve
+from valax.models.short_rate import is_constant, require_initial_curve
 from valax.pricing.multicurve import (
     apply_swap_basis,
     model_swap_leg_basis,
@@ -133,24 +135,69 @@ def hw_critical_rate(
         — a failed decomposition surfaces as a non-finite price (inside a
         calibration, a named non-finite residual) instead of a silently wrong
         one.
+
+    Notes:
+        **Guarded.** Differentiating through a *failed* root-find would make
+        its implicit derivative solve a non-finite system, which raises at
+        runtime inside ``jit`` / ``vmap`` (one absurd iterate of a
+        calibration would abort the whole batch). So a gradient-free probe
+        solve decides ``ok`` first, and the differentiable solve then runs on
+        ``where(ok, real input, detached well-posed stand-in)``: on the
+        healthy path every input is the real one, so the price *and* its
+        gradient are exactly those of the unguarded solve; on failure the
+        solve sees the stand-in and the result is NaN.
     """
     if initial_guess is None:
         initial_guess = hw_instantaneous_forward(model, expiry_time)
 
-    def residual(r: Float[Array, ""], args) -> Float[Array, ""]:
-        bond = jnp.sum(
-            cashflows * hw_bond_price(model, r, expiry_time, cashflow_times)
-        )
-        return bond - par_value
+    def solve(m, c, pv, guess):
+        def residual(r: Float[Array, ""], args) -> Float[Array, ""]:
+            bond = jnp.sum(c * hw_bond_price(m, r, expiry_time, cashflow_times))
+            return bond - pv
 
-    sol = optx.root_find(
-        residual,
-        optx.Newton(rtol=1e-12, atol=1e-12),
-        initial_guess,
-        max_steps=100,
-        throw=False,
+        return optx.root_find(
+            residual,
+            optx.Newton(rtol=1e-12, atol=1e-12),
+            guess,
+            max_steps=100,
+            throw=False,
+        )
+
+    detach = jax.lax.stop_gradient
+    par_value = jnp.asarray(par_value)
+    probe = solve(
+        jax.tree.map(detach, model), detach(cashflows), detach(par_value),
+        detach(initial_guess),
     )
-    return jnp.where(sol.result == optx.RESULTS.successful, sol.value, jnp.nan)
+    ok = (probe.result == optx.RESULTS.successful) & jnp.isfinite(probe.value)
+
+    # A benign problem with the same structure: moderate parameters, finite
+    # flows. Only ever read on the failure path, and detached there.
+    stand_in = eqx.tree_at(
+        lambda m: (m.mean_reversion, m.volatility),
+        model,
+        (jnp.full_like(model.mean_reversion, 0.05),
+         jnp.full_like(model.volatility, 0.01)),
+    )
+    safe_model = jax.tree.map(
+        lambda x, s: jnp.where(ok, x, detach(s)), model, stand_in
+    )
+    safe_cashflows = jnp.where(
+        ok, cashflows, detach(jnp.where(jnp.isfinite(cashflows), cashflows, 1.0))
+    )
+    safe_par = jnp.where(ok, par_value, 1.0)
+    safe_guess = jnp.where(
+        ok, initial_guess,
+        detach(jnp.where(jnp.isfinite(initial_guess), initial_guess, 0.0)),
+    )
+    sol = solve(safe_model, safe_cashflows, safe_par, safe_guess)
+    # A `where`, not a NaN multiplier: a NaN cotangent would reach the
+    # implicit-derivative linear solve and raise there. The failed entry's own
+    # gradient is therefore masked to zero — the failure is signalled by the
+    # NaN *value*, which makes every price built on it (and its gradient) NaN.
+    return jnp.where(
+        ok & (sol.result == optx.RESULTS.successful), sol.value, jnp.nan
+    )
 
 
 def hw_zcb_option_price(
@@ -178,6 +225,11 @@ def hw_zcb_option_price(
 
         ZBP = X P(0,T)\,\Phi(-h + \sigma_p) - P(0,S)\,\Phi(-h)
 
+    With a piecewise-constant :math:`\sigma(t)` only the bond-price volatility
+    changes, to :math:`\sigma_p = B(T, S)\sqrt{\int_0^T \sigma(u)^2
+    e^{-2a(T-u)}\,du}` (the variance of the state at the expiry), so the
+    whole Jamshidian decomposition carries over unchanged.
+
     Args:
         model: Hull-White model.
         expiry_time: Option expiry :math:`T` in year fractions.
@@ -189,16 +241,21 @@ def hw_zcb_option_price(
         Option price for each maturity, as of the reference date.
     """
     a = model.mean_reversion
-    sigma = model.volatility
 
     df_expiry = hw_market_df(model, expiry_time)
     df_maturity = hw_market_df(model, maturity_times)
 
     # Standard deviation of ln P(T, S) under the T-forward measure.
-    variance_factor = jnp.sqrt(
-        (1.0 - jnp.exp(-2.0 * a * expiry_time)) / (2.0 * a)
-    )
-    sigma_p = sigma * variance_factor * hw_B(a, maturity_times - expiry_time)
+    if is_constant(model.volatility):
+        sigma = model.volatility[0]
+        variance_factor = jnp.sqrt(
+            (1.0 - jnp.exp(-2.0 * a * expiry_time)) / (2.0 * a)
+        )
+        sigma_p = sigma * variance_factor * hw_B(a, maturity_times - expiry_time)
+    else:
+        sigma_p = jnp.sqrt(hw_short_rate_variance(model, expiry_time)) * hw_B(
+            a, maturity_times - expiry_time
+        )
     sigma_p = jnp.maximum(sigma_p, _MIN_SIGMA_P)
 
     h = (

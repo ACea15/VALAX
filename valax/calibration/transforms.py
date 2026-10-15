@@ -103,7 +103,7 @@ G2PP_TRANSFORMS: dict[str, TransformSpec] = {
     "mean_reversion_x": positive(),
     "mean_reversion_y": positive(),
     "volatility_x": positive(),
-    "volatility_y": positive(),
+    "volatility_ratio": positive(),
     "correlation": correlation(),
 }
 
@@ -117,7 +117,7 @@ CHEYETTE_2F_TRANSFORMS: dict[str, TransformSpec] = {
     "mean_reversion_1": positive(),
     "mean_reversion_2": positive(),
     "volatility_1": positive(),
-    "volatility_2": positive(),
+    "volatility_ratio": positive(),
     "skew_1": free(),
     "skew_2": free(),
     "correlation": correlation(),

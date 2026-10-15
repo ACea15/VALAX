@@ -56,7 +56,7 @@ def _g2pp(curve, rho=-0.5):
         mean_reversion_x=jnp.array(0.50),
         mean_reversion_y=jnp.array(0.10),
         volatility_x=jnp.array(0.012),
-        volatility_y=jnp.array(0.009),
+        volatility_ratio=jnp.array(0.75),
         correlation=jnp.array(rho),
         initial_curve=curve,
     )
@@ -69,7 +69,7 @@ def _cheyette_2f(curve, rho=-0.5):
         mean_reversion_1=jnp.array(0.50),
         mean_reversion_2=jnp.array(0.10),
         volatility_1=jnp.array(0.012),
-        volatility_2=jnp.array(0.009),
+        volatility_ratio=jnp.array(0.009) / jnp.array(0.012),
         skew_1=jnp.array(0.0),
         skew_2=jnp.array(0.0),
         correlation=jnp.array(rho),

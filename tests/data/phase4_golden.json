@@ -1,0 +1,1207 @@
+{
+ "auto_methods": {
+  "AmericanOption|BlackScholesModel": {
+   "auto": "lattice",
+   "available": [
+    "lattice",
+    "pde"
+   ]
+  },
+  "AsianOption|BlackScholesModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "AsianOption|HestonModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "AsianOption|LocalVolModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "AsianOption|SLVModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "BermudanSwaption|CheyetteModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "BermudanSwaption|CheyetteModel2F": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "BermudanSwaption|G2PPModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "BermudanSwaption|HullWhiteModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "BermudanSwaption|LMMModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "CMSSpreadSwap|CheyetteModel2F": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "CMSSpreadSwap|G2PPModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "CallableBond|CheyetteModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "CallableBond|CheyetteModel2F": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "CallableBond|G2PPModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "CallableBond|HullWhiteModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "Caplet|CheyetteModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "Caplet|CheyetteModel2F": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "Caplet|G2PPModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "Caplet|HullWhiteModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "Caplet|LMMModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "Cap|CheyetteModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "Cap|CheyetteModel2F": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "Cap|G2PPModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "Cap|HullWhiteModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "Cap|LMMModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "DigitalOption|BlackScholesModel": {
+   "auto": "analytic",
+   "available": [
+    "analytic",
+    "pde"
+   ]
+  },
+  "EquityBarrierOption|BlackScholesModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "EquityBarrierOption|HestonModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "EquityBarrierOption|LocalVolModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "EquityBarrierOption|SLVModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "EuropeanOption|BlackScholesModel": {
+   "auto": "analytic",
+   "available": [
+    "analytic",
+    "lattice",
+    "pde",
+    "mc"
+   ]
+  },
+  "EuropeanOption|HestonModel": {
+   "auto": "analytic",
+   "available": [
+    "analytic",
+    "pde",
+    "mc"
+   ]
+  },
+  "EuropeanOption|LocalVolModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "EuropeanOption|SLVModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "FixedRateBond|CheyetteModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "FixedRateBond|CheyetteModel2F": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "FixedRateBond|G2PPModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "FixedRateBond|HullWhiteModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "FixedRateBond|NoneType": {
+   "auto": "analytic",
+   "available": [
+    "analytic"
+   ]
+  },
+  "FloatingRateBond|CheyetteModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "FloatingRateBond|CheyetteModel2F": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "FloatingRateBond|G2PPModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "FloatingRateBond|HullWhiteModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "FloatingRateBond|NoneType": {
+   "auto": "analytic",
+   "available": [
+    "analytic"
+   ]
+  },
+  "InterestRateSwap|NoneType": {
+   "auto": "analytic",
+   "available": [
+    "analytic"
+   ]
+  },
+  "LookbackOption|BlackScholesModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "LookbackOption|HestonModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "LookbackOption|LocalVolModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "LookbackOption|SLVModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "OISSwap|NoneType": {
+   "auto": "analytic",
+   "available": [
+    "analytic"
+   ]
+  },
+  "PuttableBond|CheyetteModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "PuttableBond|CheyetteModel2F": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "PuttableBond|G2PPModel": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "PuttableBond|HullWhiteModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "SpreadOption|MultiAssetGBMModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "Swaption|CheyetteModel": {
+   "auto": "pde",
+   "available": [
+    "pde",
+    "mc"
+   ]
+  },
+  "Swaption|CheyetteModel2F": {
+   "auto": "pde",
+   "available": [
+    "pde"
+   ]
+  },
+  "Swaption|G2PPModel": {
+   "auto": "analytic",
+   "available": [
+    "analytic",
+    "pde",
+    "mc"
+   ]
+  },
+  "Swaption|HullWhiteModel": {
+   "auto": "analytic",
+   "available": [
+    "analytic",
+    "pde"
+   ]
+  },
+  "Swaption|LMMModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "VarianceSwap|BlackScholesModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "VarianceSwap|HestonModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "VarianceSwap|LocalVolModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "VarianceSwap|SLVModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  },
+  "WorstOfBasketOption|MultiAssetGBMModel": {
+   "auto": "mc",
+   "available": [
+    "mc"
+   ]
+  }
+ },
+ "meta": {
+  "created_by": "scripts/capture_phase4_golden.py",
+  "jax_version": "0.9.2",
+  "numpy_version": "2.4.3",
+  "python_version": "3.13.12",
+  "x64": true
+ },
+ "values": {
+  "cheyette.bond_price": {
+   "hex": [
+    "0x1.e7078b0a726a6p-1",
+    "0x1.affeacbbd7b0dp-1",
+    "0x1.c407b0e6673ebp-1"
+   ],
+   "shape": [
+    3
+   ],
+   "values": [
+    "0.951229424500714",
+    "0.8437398890781381",
+    "0.8828711777929333"
+   ]
+  },
+  "cheyette.grad.pde_frozen_payer.mean_reversion": {
+   "hex": [
+    "-0x1.c7361236fa40ap-5"
+   ],
+   "shape": [],
+   "values": [
+    "-0.05556777532166997"
+   ]
+  },
+  "cheyette.grad.pde_frozen_payer.skew": {
+   "hex": [
+    "-0x1.76331ec37713dp-14"
+   ],
+   "shape": [],
+   "values": [
+    "-8.921615795238077e-05"
+   ]
+  },
+  "cheyette.grad.pde_frozen_payer.volatility": {
+   "hex": [
+    "0x1.adbb94e692716p+0"
+   ],
+   "shape": [],
+   "values": [
+    "1.6786435187263513"
+   ]
+  },
+  "cheyette.price.mc.payer": {
+   "hex": [
+    "0x1.615157839d492p-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.04312960713006321"
+   ]
+  },
+  "cheyette.price.mc.payer.stderr": {
+   "hex": [
+    "0x1.41b52b5681470p-11"
+   ],
+   "shape": [],
+   "values": [
+    "0.0006136087275200441"
+   ]
+  },
+  "cheyette.price.pde_exact.payer": {
+   "hex": [
+    "0x1.5d9cd6f81957fp-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.04267732607039942"
+   ]
+  },
+  "cheyette.price.pde_frozen.bermudan": {
+   "hex": [
+    "0x1.908cf760dfa6ep-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.0488953429803488"
+   ]
+  },
+  "cheyette.price.pde_frozen.payer": {
+   "hex": [
+    "0x1.5dcf62217513fp-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.042701427136906826"
+   ]
+  },
+  "cheyette.y_gaussian": {
+   "hex": [
+    "0x0.0p+0",
+    "0x1.9e3b1ed0cf22dp-16",
+    "0x1.8f240b598377dp-14",
+    "0x1.7c262f97f7769p-13",
+    "0x1.4449def89418dp-12",
+    "0x1.9c951f2d1be62p-12",
+    "0x1.4b69c904b4c2dp-11",
+    "0x1.6e60200c7a46dp-11"
+   ],
+   "shape": [
+    8
+   ],
+   "values": [
+    "0.0",
+    "2.4690087971667385e-05",
+    "9.516258196404048e-05",
+    "0.0001812692469220182",
+    "0.0003092656693626454",
+    "0.00039346934028736656",
+    "0.0006321205588285577",
+    "0.0006988057880877981"
+   ]
+  },
+  "cheyette2f.grad.pde_frozen_payer.correlation": {
+   "hex": [
+    "0x1.dbe1be5d4fe55p-9"
+   ],
+   "shape": [],
+   "values": [
+    "0.0036306900862255556"
+   ]
+  },
+  "cheyette2f.grad.pde_frozen_payer.mean_reversion_1": {
+   "hex": [
+    "0x1.3905ceaaab906p-9"
+   ],
+   "shape": [],
+   "values": [
+    "0.0023881735590612933"
+   ]
+  },
+  "cheyette2f.grad.pde_frozen_payer.mean_reversion_2": {
+   "hex": [
+    "-0x1.3c238fdd6ce57p-6"
+   ],
+   "shape": [],
+   "values": [
+    "-0.01929558800993755"
+   ]
+  },
+  "cheyette2f.grad.pde_frozen_payer.skew_1": {
+   "hex": [
+    "-0x1.2ce37b553a0d0p-19"
+   ],
+   "shape": [],
+   "values": [
+    "-2.2417947699201516e-06"
+   ]
+  },
+  "cheyette2f.grad.pde_frozen_payer.skew_2": {
+   "hex": [
+    "-0x1.40e40a0ecc07cp-15"
+   ],
+   "shape": [],
+   "values": [
+    "-3.825316172478916e-05"
+   ]
+  },
+  "cheyette2f.grad.pde_frozen_payer.volatility_1": {
+   "hex": [
+    "-0x1.8a10200948a2cp-4"
+   ],
+   "shape": [],
+   "values": [
+    "-0.09620678438344815"
+   ]
+  },
+  "cheyette2f.grad.pde_frozen_payer.volatility_2": {
+   "hex": [
+    "0x1.7d2d23a35f25ap-1"
+   ],
+   "shape": [],
+   "values": [
+    "0.7444850098541551"
+   ]
+  },
+  "cheyette2f.price.mc.fixed_bond": {
+   "hex": [
+    "0x1.a0d14f6e41265p+6"
+   ],
+   "shape": [],
+   "values": [
+    "104.20440456650392"
+   ]
+  },
+  "cheyette2f.price.mc.fixed_bond.stderr": {
+   "hex": [
+    "0x1.6b248518074ccp-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.044328937481830616"
+   ]
+  },
+  "cheyette2f.price.pde_frozen.payer": {
+   "hex": [
+    "0x1.277af95fe023fp-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.036069380817029366"
+   ]
+  },
+  "g2pp.V": {
+   "hex": [
+    "0x1.b5e7e542d68dcp-17",
+    "0x1.fd0c8ce755f56p-11",
+    "0x1.6574cb51e861ep-14",
+    "0x1.8cbe8894d7accp-8"
+   ],
+   "shape": [
+    4
+   ],
+   "values": [
+    "1.3050611078636543e-05",
+    "0.0009709339619048223",
+    "8.522420583159009e-05",
+    "0.006053837151596308"
+   ]
+  },
+  "g2pp.bond_price": {
+   "hex": [
+    "0x1.e7078b0a726a6p-1",
+    "0x1.bfc7ebf7e50adp-1",
+    "0x1.a6db03523b63cp-1"
+   ],
+   "shape": [
+    3
+   ],
+   "values": [
+    "0.951229424500714",
+    "0.8745721569162207",
+    "0.8258896863823746"
+   ]
+  },
+  "g2pp.grad.analytic_payer.correlation": {
+   "hex": [
+    "0x1.cee9afdba78e2p-9"
+   ],
+   "shape": [],
+   "values": [
+    "0.0035317446871224603"
+   ]
+  },
+  "g2pp.grad.analytic_payer.mean_reversion_x": {
+   "hex": [
+    "0x1.2c5b84325d346p-9"
+   ],
+   "shape": [],
+   "values": [
+    "0.0022915457604376936"
+   ]
+  },
+  "g2pp.grad.analytic_payer.mean_reversion_y": {
+   "hex": [
+    "-0x1.388aca1f3144cp-6"
+   ],
+   "shape": [],
+   "values": [
+    "-0.01907605875455358"
+   ]
+  },
+  "g2pp.grad.analytic_payer.volatility_x": {
+   "hex": [
+    "-0x1.75161a1c0e5e9p-4"
+   ],
+   "shape": [],
+   "values": [
+    "-0.09108553122577913"
+   ]
+  },
+  "g2pp.grad.analytic_payer.volatility_y": {
+   "hex": [
+    "0x1.7affeb394c7c9p-1"
+   ],
+   "shape": [],
+   "values": [
+    "0.7402337558216853"
+   ]
+  },
+  "g2pp.price.analytic.payer": {
+   "hex": [
+    "0x1.27afe27cf201ep-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.03609461055708628"
+   ]
+  },
+  "g2pp.price.analytic.receiver": {
+   "hex": [
+    "0x1.6a0f1a774c4d4p-10"
+   ],
+   "shape": [],
+   "values": [
+    "0.0013811454680985784"
+   ]
+  },
+  "g2pp.price.mc.payer": {
+   "hex": [
+    "0x1.259e61c2a79f7p-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.03584212392637547"
+   ]
+  },
+  "g2pp.price.mc.payer.stderr": {
+   "hex": [
+    "0x1.8d0fb2b3a656dp-12"
+   ],
+   "shape": [],
+   "values": [
+    "0.0003786671834205755"
+   ]
+  },
+  "g2pp.price.pde.bermudan": {
+   "hex": [
+    "0x1.414af4492268dp-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.039220311279746324"
+   ]
+  },
+  "g2pp.price.pde.payer": {
+   "hex": [
+    "0x1.277f7550f0d51p-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.03607151902499573"
+   ]
+  },
+  "hw.alpha": {
+   "hex": [
+    "0x1.5810624dd2f06p-6",
+    "0x1.581d541bbdb12p-6",
+    "0x1.cb880a73fc96ep-6",
+    "0x1.fedf16e181761p-6",
+    "0x1.33c714ca8de81p-5",
+    "0x1.5bfc0afd6120ap-5",
+    "0x1.b2f7248639d3dp-5",
+    "0x1.baf3fbebdc266p-5"
+   ],
+   "shape": [
+    8
+   ],
+   "values": [
+    "0.02099999999999993",
+    "0.021003086220811325",
+    "0.028047571380690632",
+    "0.031181118340121276",
+    "0.03757051525866207",
+    "0.042478581871396484",
+    "0.05309636243492342",
+    "0.05407141879448289"
+   ]
+  },
+  "hw.alpha_average": {
+   "hex": [
+    "0x1.68b6081e9f3c1p-6",
+    "0x1.b0bec5c97511bp-6",
+    "0x1.1f418659707afp-5",
+    "0x1.898f13238c624p-5"
+   ],
+   "shape": [
+    4
+   ],
+   "values": [
+    "0.022016055993379306",
+    "0.026412671233473888",
+    "0.03506542434799031",
+    "0.048041856175029346"
+   ]
+  },
+  "hw.bond_price": {
+   "hex": [
+    "0x1.f559084327b2fp-1",
+    "0x1.bcb8baf43f60ep-1",
+    "0x1.8e673f7c98341p-1",
+    "0x1.dfb1892a135d8p-1"
+   ],
+   "shape": [
+    4
+   ],
+   "values": [
+    "0.9791948873497399",
+    "0.8685968802598738",
+    "0.7781314696877432",
+    "0.9369013656484482"
+   ]
+  },
+  "hw.critical_rate": {
+   "hex": [
+    "0x1.63d5c170b2a78p-6"
+   ],
+   "shape": [],
+   "values": [
+    "0.02171844378134799"
+   ]
+  },
+  "hw.grad.jamshidian_payer.mean_reversion": {
+   "hex": [
+    "-0x1.c827c6102e0e0p-5"
+   ],
+   "shape": [],
+   "values": [
+    "-0.055683028070633744"
+   ]
+  },
+  "hw.grad.jamshidian_payer.volatility": {
+   "hex": [
+    "0x1.af8673f4c17dcp+0"
+   ],
+   "shape": [],
+   "values": [
+    "1.6856453392551805"
+   ]
+  },
+  "hw.grad.pde_bermudan.mean_reversion": {
+   "hex": [
+    "-0x1.f7060638ace7bp-5"
+   ],
+   "shape": [],
+   "values": [
+    "-0.061404239798688"
+   ]
+  },
+  "hw.grad.pde_bermudan.volatility": {
+   "hex": [
+    "0x1.2c0e2547ff1d3p+1"
+   ],
+   "shape": [],
+   "values": [
+    "2.3441816903634645"
+   ]
+  },
+  "hw.grad.tree_callable.mean_reversion": {
+   "hex": [
+    "0x1.807ec7ab084aap+1"
+   ],
+   "shape": [],
+   "values": [
+    "3.003869017135533"
+   ]
+  },
+  "hw.grad.tree_callable.volatility": {
+   "hex": [
+    "-0x1.1e2d2913ed4bap+7"
+   ],
+   "shape": [],
+   "values": [
+    "-143.08820402404473"
+   ]
+  },
+  "hw.jamshidian.payer": {
+   "hex": [
+    "0x1.5e2119cd6577ap-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.04274039306180462"
+   ]
+  },
+  "hw.jamshidian.receiver": {
+   "hex": [
+    "0x1.0706c090b75c8p-7"
+   ],
+   "shape": [],
+   "values": [
+    "0.008026927972816802"
+   ]
+  },
+  "hw.paths.log_df_sample": {
+   "hex": [
+    "-0x1.fdc1b56d97104p-10",
+    "-0x1.d7d21f9f309fbp-4",
+    "-0x1.241857e86a97dp-2",
+    "-0x1.0b09c9ea9a630p-9",
+    "-0x1.3505849476283p-4",
+    "-0x1.4fe5257c00bbep-3",
+    "-0x1.1aa37bdd3d805p-9",
+    "-0x1.70a259e1be7a2p-4",
+    "-0x1.baf6aeb97be30p-3",
+    "-0x1.2d5aec54d24f3p-9",
+    "-0x1.5bbdf00972dc2p-5",
+    "-0x1.eb8f3aa1aea93p-4"
+   ],
+   "shape": [
+    4,
+    3
+   ],
+   "values": [
+    "-0.0019445673928180649",
+    "-0.11519062378196303",
+    "-0.28524911266381264",
+    "-0.0020373400669100525",
+    "-0.07544471539530133",
+    "-0.16401128086735456",
+    "-0.0021563614560546917",
+    "-0.08999858007510267",
+    "-0.21629082206298866",
+    "-0.0022991574755094556",
+    "-0.04244896776398434",
+    "-0.12000964072187008"
+   ]
+  },
+  "hw.paths.mean_df_last": {
+   "hex": [
+    "0x1.b6dd1591abdd4p-1"
+   ],
+   "shape": [],
+   "values": [
+    "0.8571554889985529"
+   ]
+  },
+  "hw.paths.mean_short_rate_last": {
+   "hex": [
+    "0x1.583653ff94987p-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.042018093165682883"
+   ]
+  },
+  "hw.paths.short_rates_sample": {
+   "hex": [
+    "0x1.5810624dd2f06p-6",
+    "0x1.2521c07b29e3fp-6",
+    "0x1.028099d0202f6p-4",
+    "0x1.80a73e6ca414fp-4",
+    "0x1.5810624dd2f06p-6",
+    "0x1.4388167caf072p-6",
+    "0x1.7b55bdca3537cp-6",
+    "0x1.5e132aedad56cp-5",
+    "0x1.5810624dd2f06p-6",
+    "0x1.6a88535b46d07p-6",
+    "0x1.66d3e4543317bp-5",
+    "0x1.04e6eda0b2c20p-4",
+    "0x1.5810624dd2f06p-6",
+    "0x1.9952ec863ad59p-6",
+    "0x1.35c54c24fa50ap-6",
+    "0x1.6fa4541690fa9p-5"
+   ],
+   "shape": [
+    4,
+    4
+   ],
+   "values": [
+    "0.02099999999999993",
+    "0.01789134785636137",
+    "0.06311092456054354",
+    "0.09390949615977216",
+    "0.02099999999999993",
+    "0.01974680133820112",
+    "0.023152766553568224",
+    "0.04273374924143067",
+    "0.02099999999999993",
+    "0.022127229121093907",
+    "0.04380220981110746",
+    "0.06369679282504181",
+    "0.02099999999999993",
+    "0.024983149510189182",
+    "0.018906902656373105",
+    "0.04487816260782946"
+   ]
+  },
+  "hw.price.analytic.payer": {
+   "hex": [
+    "0x1.5e2119cd6577ap-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.04274039306180462"
+   ]
+  },
+  "hw.price.analytic.receiver": {
+   "hex": [
+    "0x1.0706c090b75c8p-7"
+   ],
+   "shape": [],
+   "values": [
+    "0.008026927972816802"
+   ]
+  },
+  "hw.price.mc.callable": {
+   "hex": [
+    "0x1.97de6c655c4e4p+6"
+   ],
+   "shape": [],
+   "values": [
+    "101.96721037269486"
+   ]
+  },
+  "hw.price.mc.callable.stderr": {
+   "hex": [
+    "0x1.8be7c1528bd70p-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.048328282912161735"
+   ]
+  },
+  "hw.price.mc.fixed_bond": {
+   "hex": [
+    "0x1.a04e63920c6aep+6"
+   ],
+   "shape": [],
+   "values": [
+    "104.07655170632162"
+   ]
+  },
+  "hw.price.mc.fixed_bond.stderr": {
+   "hex": [
+    "0x1.5b4ab32e3806fp-4"
+   ],
+   "shape": [],
+   "values": [
+    "0.08478803627395036"
+   ]
+  },
+  "hw.price.mc.puttable": {
+   "hex": [
+    "0x1.a47d801b7eb44p+6"
+   ],
+   "shape": [],
+   "values": [
+    "105.1225590034565"
+   ]
+  },
+  "hw.price.mc.puttable.stderr": {
+   "hex": [
+    "0x1.08c98fa553bccp-4"
+   ],
+   "shape": [],
+   "values": [
+    "0.06464534865993626"
+   ]
+  },
+  "hw.price.pde.bermudan": {
+   "hex": [
+    "0x1.91008903dbf99p-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.04895045052296538"
+   ]
+  },
+  "hw.price.pde.callable": {
+   "hex": [
+    "0x1.97ee52dec1638p+6"
+   ],
+   "shape": [],
+   "values": [
+    "101.98273799949027"
+   ]
+  },
+  "hw.price.pde.cap": {
+   "hex": [
+    "0x1.4356a1bc00e4fp-6"
+   ],
+   "shape": [],
+   "values": [
+    "0.019735010093439972"
+   ]
+  },
+  "hw.price.pde.fixed_bond": {
+   "hex": [
+    "0x1.a0d1f90bcdf1dp+6"
+   ],
+   "shape": [],
+   "values": [
+    "104.20505159801947"
+   ]
+  },
+  "hw.price.pde.payer": {
+   "hex": [
+    "0x1.5e2ccf22e0497p-5"
+   ],
+   "shape": [],
+   "values": [
+    "0.042745976031264"
+   ]
+  },
+  "hw.price.pde.puttable": {
+   "hex": [
+    "0x1.a542cd64cb082p+6"
+   ],
+   "shape": [],
+   "values": [
+    "105.31523663987358"
+   ]
+  },
+  "hw.price.pde.receiver": {
+   "hex": [
+    "0x1.0736956f55528p-7"
+   ],
+   "shape": [],
+   "values": [
+    "0.008032629934556626"
+   ]
+  },
+  "hw.short_rate_variance": {
+   "hex": [
+    "0x0.0p+0",
+    "0x1.9e3b1ed0cf22dp-16",
+    "0x1.8f240b598377dp-14",
+    "0x1.7c262f97f7769p-13",
+    "0x1.4449def89418dp-12",
+    "0x1.9c951f2d1be62p-12",
+    "0x1.4b69c904b4c2dp-11",
+    "0x1.6e60200c7a46dp-11"
+   ],
+   "shape": [
+    8
+   ],
+   "values": [
+    "0.0",
+    "2.4690087971667385e-05",
+    "9.516258196404048e-05",
+    "0.0001812692469220182",
+    "0.0003092656693626454",
+    "0.00039346934028736656",
+    "0.0006321205588285577",
+    "0.0006988057880877981"
+   ]
+  },
+  "hw.tree.callable": {
+   "hex": [
+    "0x1.97e618d586aaap+6"
+   ],
+   "shape": [],
+   "values": [
+    "101.97470410952033"
+   ]
+  },
+  "hw.tree.puttable": {
+   "hex": [
+    "0x1.a5440248a4103p+6"
+   ],
+   "shape": [],
+   "values": [
+    "105.31641496182787"
+   ]
+  },
+  "hw.zcb_option.call": {
+   "hex": [
+    "0x1.2ca4915bb6f80p-8",
+    "0x1.a8e49bc86f640p-7",
+    "0x1.79096c0359b20p-6"
+   ],
+   "shape": [
+    3
+   ],
+   "values": [
+    "0.004587445724350547",
+    "0.01296670538510647",
+    "0.023012500268488556"
+   ]
+  },
+  "hw.zcb_option.put": {
+   "hex": [
+    "0x1.4d55e32c44500p-8",
+    "0x1.9ec71563704c0p-7",
+    "0x1.e58dddf96da40p-7"
+   ],
+   "shape": [
+    3
+   ],
+   "values": [
+    "0.005086296045434979",
+    "0.012658009952135507",
+    "0.01481793726530356"
+   ]
+  }
+ }
+}

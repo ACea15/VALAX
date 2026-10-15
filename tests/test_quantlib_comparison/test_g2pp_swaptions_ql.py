@@ -95,7 +95,7 @@ def setup(request):
         mean_reversion_x=jnp.asarray(a),
         mean_reversion_y=jnp.asarray(b),
         volatility_x=jnp.asarray(sig),
-        volatility_y=jnp.asarray(eta),
+        volatility_ratio=jnp.asarray(eta) / jnp.asarray(sig),
         correlation=jnp.asarray(rho),
         initial_curve=curve,
     )

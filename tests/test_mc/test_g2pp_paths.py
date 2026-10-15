@@ -11,7 +11,12 @@ import jax.numpy as jnp
 import equinox as eqx
 import pytest
 
-from valax.models.g2pp import G2PPModel, g2pp_market_df, g2pp_factor_covariance
+from valax.models.g2pp import (
+    G2PPModel,
+    g2pp_factor_covariance,
+    g2pp_market_df,
+    g2pp_state_covariance,
+)
 from valax.pricing.mc.g2pp_paths import generate_g2pp_paths, G2PPPathResult
 from valax.curves.discount import DiscountCurve
 from valax.dates.daycounts import ymd_to_ordinal
@@ -62,7 +67,7 @@ def model(ref_date):
         mean_reversion_x=jnp.array(0.50),
         mean_reversion_y=jnp.array(0.10),
         volatility_x=jnp.array(0.010),
-        volatility_y=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.8),
         correlation=jnp.array(-0.70),
         initial_curve=_flat_curve(ref_date),
     )
@@ -101,7 +106,7 @@ class TestZCBRepricing:
     def test_steep_curve(self, ref_date):
         model = G2PPModel(
             mean_reversion_x=jnp.array(0.50), mean_reversion_y=jnp.array(0.10),
-            volatility_x=jnp.array(0.010), volatility_y=jnp.array(0.008),
+            volatility_x=jnp.array(0.010), volatility_ratio=jnp.array(0.8),
             correlation=jnp.array(-0.70), initial_curve=_steep_curve(ref_date),
         )
         res = generate_g2pp_paths(model, T=8.0, n_steps=96, n_paths=_N_PATHS, key=jax.random.PRNGKey(2))
@@ -128,6 +133,62 @@ class TestFactorMoments:
         assert float(jnp.var(y)) == pytest.approx(float(cov_closed[1, 1]), rel=2e-2)
         cov_xy = float(jnp.mean(x * y) - x.mean() * y.mean())
         assert cov_xy == pytest.approx(float(cov_closed[0, 1]), rel=3e-2)
+
+
+def _piecewise(curve, vols=(0.012, 0.008, 0.015), ratios=(0.8, 0.6, 0.9), times=(1.0, 2.5)):
+    return G2PPModel(
+        mean_reversion_x=jnp.array(0.50), mean_reversion_y=jnp.array(0.10),
+        volatility_x=jnp.asarray(vols), volatility_ratio=jnp.asarray(ratios),
+        correlation=jnp.array(-0.70), initial_curve=curve,
+        volatility_times=jnp.asarray(times),
+    )
+
+
+class TestPiecewiseVolatility:
+    """sigma(t), eta(t) piecewise constant: per-step exact covariance."""
+
+    def test_zcb_repricing_steep_curve(self, ref_date):
+        model = _piecewise(_steep_curve(ref_date))
+        res = generate_g2pp_paths(model, T=6.0, n_steps=72, n_paths=_N_PATHS, key=jax.random.PRNGKey(5))
+        for col, T in [(24, 2.0), (36, 3.0), (72, 6.0)]:
+            df = jnp.exp(res.log_discount_factors[:, col])
+            mc = float(df.mean())
+            stderr = float(df.std() / jnp.sqrt(_N_PATHS))
+            analytic = float(g2pp_market_df(model, jnp.array(T)))
+            assert abs(mc - analytic) < 3.0 * stderr + 1e-4
+
+    def test_factor_covariance_across_breakpoints(self, ref_date):
+        """Columns straddling the breakpoints carry the exact covariance."""
+        model = _piecewise(_flat_curve(ref_date))
+        # 0.7-year steps: steps straddle both breakpoints (1.0 and 2.5).
+        res = generate_g2pp_paths(model, T=4.2, n_steps=6, n_paths=_N_PATHS, key=jax.random.PRNGKey(6))
+        for col in (2, 4, 6):
+            t = 0.7 * col
+            x, y = res.factor_x[:, col], res.factor_y[:, col]
+            cov = g2pp_state_covariance(model, jnp.array(0.0), jnp.array(t))
+            assert float(jnp.var(x)) == pytest.approx(float(cov[0, 0]), rel=2e-2)
+            assert float(jnp.var(y)) == pytest.approx(float(cov[1, 1]), rel=2e-2)
+            assert float(jnp.mean(x * y)) == pytest.approx(float(cov[0, 1]), rel=3e-2)
+
+    def test_equal_buckets_match_constant_factors(self, model):
+        """Two equal buckets draw the same factor paths as the constant model."""
+        split = _piecewise(model.initial_curve, (0.010, 0.010), (0.8, 0.8), (2.0,))
+        key = jax.random.PRNGKey(7)
+        const_res = generate_g2pp_paths(model, T=5.0, n_steps=_N_STEPS, n_paths=2000, key=key)
+        split_res = generate_g2pp_paths(split, T=5.0, n_steps=_N_STEPS, n_paths=2000, key=key)
+        for f in ("factor_x", "factor_y", "short_rates"):
+            assert jnp.allclose(getattr(split_res, f), getattr(const_res, f), rtol=1e-11, atol=1e-15)
+        # The deterministic drift is integrated exactly here (trapezoid for
+        # the constant path's convexity): equal to O(dt^2) convexity terms.
+        assert jnp.allclose(
+            split_res.log_discount_factors, const_res.log_discount_factors, atol=1e-8
+        )
+
+    def test_jit(self, ref_date):
+        model = _piecewise(_flat_curve(ref_date))
+        f = eqx.filter_jit(lambda m, k: generate_g2pp_paths(m, T=5.0, n_steps=_N_STEPS, n_paths=500, key=k))
+        res = f(model, jax.random.PRNGKey(8))
+        assert jnp.all(jnp.isfinite(res.log_discount_factors))
 
 
 class TestJIT:

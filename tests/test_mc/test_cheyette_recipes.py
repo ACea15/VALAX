@@ -70,7 +70,7 @@ def model_2f(curve):
         mean_reversion_1=jnp.array(0.50),
         mean_reversion_2=jnp.array(0.10),
         volatility_1=jnp.array(0.010),
-        volatility_2=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.008) / jnp.array(0.010),
         skew_1=jnp.array(-2.0),
         skew_2=jnp.array(1.5),
         correlation=jnp.array(-0.70),
@@ -268,7 +268,7 @@ class TestCMSSpread:
         for rho in [-0.9, -0.3, 0.5]:
             m = CheyetteModel2F(
                 mean_reversion_1=jnp.array(0.50), mean_reversion_2=jnp.array(0.10),
-                volatility_1=jnp.array(0.010), volatility_2=jnp.array(0.008),
+                volatility_1=jnp.array(0.010), volatility_ratio=jnp.array(0.008) / jnp.array(0.010),
                 skew_1=jnp.array(-2.0), skew_2=jnp.array(1.5),
                 correlation=jnp.array(rho), initial_curve=curve,
             )

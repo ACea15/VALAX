@@ -89,7 +89,9 @@ def true_model(curve) -> G2PPModel:
         mean_reversion_x=jnp.asarray(_TRUE["mean_reversion_x"]),
         mean_reversion_y=jnp.asarray(_TRUE["mean_reversion_y"]),
         volatility_x=jnp.asarray(_TRUE["volatility_x"]),
-        volatility_y=jnp.asarray(_TRUE["volatility_y"]),
+        # eta = r * sigma: build the ratio from the true eta.
+        volatility_ratio=jnp.asarray(_TRUE["volatility_y"])
+        / jnp.asarray(_TRUE["volatility_x"]),
         correlation=jnp.asarray(_TRUE["correlation"]),
         initial_curve=curve,
     )
@@ -117,13 +119,13 @@ class TestRoundTrip:
                 mean_reversion_x=jnp.asarray(0.5),
                 mean_reversion_y=jnp.asarray(0.1),
                 volatility_x=jnp.asarray(0.011),
-                volatility_y=jnp.asarray(0.008),
+                volatility_ratio=jnp.asarray(0.008) / jnp.asarray(0.011),
                 correlation=jnp.asarray(-0.5),
                 initial_curve=curve,
             ),
         ).value
-        assert float(fitted.volatility_x) == pytest.approx(_TRUE["volatility_x"], rel=2e-2)
-        assert float(fitted.volatility_y) == pytest.approx(_TRUE["volatility_y"], rel=2e-2)
+        assert float(fitted.volatility_x[0]) == pytest.approx(_TRUE["volatility_x"], rel=2e-2)
+        assert float(fitted.volatility_y[0]) == pytest.approx(_TRUE["volatility_y"], rel=2e-2)
         assert float(fitted.correlation) == pytest.approx(_TRUE["correlation"], abs=2e-2)
 
     def test_full_fit_reprices_surface(self, swaptions, market_prices, curve):

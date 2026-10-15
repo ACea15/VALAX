@@ -44,11 +44,13 @@ short-rate volatility. VALAX uses a **displaced-diffusion / linear** local
 volatility (`cheyette_local_vol`),
 
 $$
-\sigma_r(t, x) = \sigma\,(1 + \beta\,x),
+\sigma_r(t, x) = \sigma(t)\,(1 + \beta\,x),
 $$
 
-where $\sigma$ sets the level and the skew parameter $\beta$ tilts the
-volatility with the state. Negative $\beta$ lowers volatility as rates rise (a
+where $\sigma(t)$ sets the level and the skew parameter $\beta$ tilts the
+volatility with the state. The level is piecewise constant in time, one value
+per bucket, and a constant level is a single bucket (§10). Formulas on this
+page are written for the constant case, $\sigma(t) \equiv \sigma$. Negative $\beta$ lowers volatility as rates rise (a
 normal-to-lognormal interpolation); $\beta = 0$ recovers the constant Gaussian
 volatility.
 
@@ -195,6 +197,11 @@ Gaussian and the model **reduces to G2++** — the two-factor accumulators becom
 deterministic and reproduce the G2++ covariance term
 (`cheyette_y_gaussian_2f`), so the affine bond matches `g2pp_bond_price` to
 machine precision under the same non-centred state map (`cheyette_gaussian_mean_2f`).
+
+`CheyetteModel2F` parametrises the second level as a ratio of the first, as
+G2++ does. Its fields are `volatility_1` ($\sigma_1$) and `volatility_ratio`
+($\lambda = \sigma_2/\sigma_1$), and $\sigma_2$ is the read-only property
+`volatility_2`.
 
 The decorrelation-sensitive showcase is the `CMSSpreadSwap` steepener /
 flattener, registered for the two-factor model.
@@ -408,6 +415,47 @@ for the frozen-$y$ engine, whose parameters are valid only on that engine
 `settings=SolverSettings(...)`. Because
 the PDE sits inside the optimiser loop, use a moderate grid and a small
 instrument set, reusing the mesh across iterations.
+
+---
+
+## 10 · Time-dependent volatility
+
+The level $\sigma(t)$ (one factor) and the pair $(\sigma_1(t), \lambda(t))$
+(two factors, $\sigma_2 = \lambda\sigma_1$) are piecewise constant on buckets,
+using the same convention as Hull–White and G2++. What changes:
+
+- **Frozen $y$.** $\bar y(t) = \int_0^t \sigma(u)^2 e^{-2\kappa(t-u)}\,du$ is
+  exactly the Hull–White state variance with $a = \kappa$, and $m(t)$ is the
+  Hull–White convexity. Both come from a Gaussian twin (Hull–White in one
+  factor, G2++ in two) built on the same buckets. The frozen-$y$ discount and its
+  exact step average are therefore the twin's.
+- **Diffusion.** Each PDE step and each Monte-Carlo step uses the exact time
+  average of $\sigma^2$ over the step, times the state factor
+  $(1 + \beta x)^2$ (`cheyette_mean_variance_rate`, and
+  `cheyette_mean_variance_rates_2f` in two factors).
+- **Exact-$y$ PDE.** The operator becomes time dependent. Use
+  `cheyette_exact_operator_rows`, because the constant-only
+  `cheyette_exact_operator_2d` raises for more than one bucket. The $y$ axis is
+  scaled by the peak of $\bar y$ over the horizon rather than by $\bar y(T)$,
+  since $\bar y$ is no longer monotone.
+
+The formulas are in
+[Time-Dependent Volatility §6](time-dependent-volatility.md#6-cheyette-with-time-dependent-volatility).
+A one-bucket model runs the constant formulas bit for bit.
+
+**Validation.**
+
+| Oracle | Agreement | Test |
+|---|---|---|
+| 1F, $\beta = 0$ vs piecewise Hull–White | round-off | `tests/test_models/test_cheyette_piecewise.py` |
+| 1F exact-$y$ PDE refinement | about first order (upwinded $y$ axis) | `tests/test_pde/test_cheyette_piecewise.py` |
+| 1F frozen vs exact $y$ at $\beta = 0.5$ | gap below the exact grid's own error | same |
+| 1F Monte Carlo | within MC error | `tests/test_mc/test_cheyette_piecewise_paths.py` |
+| 2F, $\beta_i = 0$ vs piecewise G2++ | round-off | `tests/test_models/test_cheyette2f_piecewise.py`, `tests/test_pde/test_cheyette2f_piecewise.py`, `tests/test_mc/test_cheyette2f_piecewise_paths.py` |
+
+In two factors, the Gaussian-limit means at very short $t$ are limited to about
+$2.4\times10^{-13}$ relative by cancellation. The constant formula has the same
+limit.
 
 ---
 

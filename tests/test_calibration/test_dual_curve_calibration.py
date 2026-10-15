@@ -110,7 +110,7 @@ def _truth_g2pp(curve: DiscountCurve) -> G2PPModel:
         mean_reversion_x=jnp.array(0.50),
         mean_reversion_y=jnp.array(0.10),
         volatility_x=jnp.array(0.011),
-        volatility_y=jnp.array(0.007),
+        volatility_ratio=jnp.array(0.007) / jnp.array(0.011),
         correlation=jnp.array(-0.70),
         initial_curve=curve,
     )
@@ -130,7 +130,7 @@ class TestSingleCurveNonRegression:
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08),
             forward_curve=None,
         ).value
-        assert float(default.volatility) == float(explicit.volatility)
+        assert float(default.volatility[0]) == float(explicit.volatility[0])
 
     def test_hull_white_recovers_sigma_single_curve(self, ois, surface):
         """The pre-existing round-trip still holds."""
@@ -139,7 +139,7 @@ class TestSingleCurveNonRegression:
         fitted = calibrate_hull_white(
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08)
         ).value
-        assert float(fitted.volatility) == pytest.approx(0.012, rel=1e-4)
+        assert float(fitted.volatility[0]) == pytest.approx(0.012, rel=1e-4)
 
     def test_projection_equal_to_discount_is_single_curve(self, ois, surface):
         truth = _truth_hw(ois)
@@ -151,7 +151,7 @@ class TestSingleCurveNonRegression:
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08),
             forward_curve=ois,
         ).value
-        assert float(same.volatility) == float(single.volatility)
+        assert float(same.volatility[0]) == float(single.volatility[0])
 
 
 # ── Gate 2: dual-curve round-trip ─────────────────────────────────────
@@ -167,7 +167,7 @@ class TestDualCurveRoundTrip:
             fixed_mean_reversion=jnp.array(0.08),
             forward_curve=projection,
         ).value
-        assert float(fitted.volatility) == pytest.approx(0.012, rel=1e-4)
+        assert float(fitted.volatility[0]) == pytest.approx(0.012, rel=1e-4)
         # The fitted model is curve-free: the discount curve it is exact-fitted
         # to is bound from the market at pricing time, not embedded.
         assert fitted.initial_curve is None
@@ -184,8 +184,8 @@ class TestDualCurveRoundTrip:
             },
             forward_curve=projection,
         ).value
-        assert float(fitted.volatility_x) == pytest.approx(0.011, rel=5e-3)
-        assert float(fitted.volatility_y) == pytest.approx(0.007, rel=5e-3)
+        assert float(fitted.volatility_x[0]) == pytest.approx(0.011, rel=5e-3)
+        assert float(fitted.volatility_y[0]) == pytest.approx(0.007, rel=5e-3)
         assert float(fitted.correlation) == pytest.approx(-0.70, rel=5e-2)
 
 
@@ -209,9 +209,9 @@ class TestBasisMatters:
             surface, targets, ois, fixed_mean_reversion=jnp.array(0.08),
             forward_curve=projection,
         ).value
-        assert float(right.volatility) == pytest.approx(0.012, rel=1e-4)
+        assert float(right.volatility[0]) == pytest.approx(0.012, rel=1e-4)
         # The single-curve fit must miss, and by a margin far beyond solver noise.
-        assert abs(float(wrong.volatility) - 0.012) > 0.1 * 0.012
+        assert abs(float(wrong.volatility[0]) - 0.012) > 0.1 * 0.012
 
     def test_dual_curve_fit_reprices_its_targets(self, ois, projection, surface):
         truth = _truth_hw(ois)
@@ -268,7 +268,7 @@ class TestVolsToPrices:
         # One factor cannot fit a whole surface exactly; require the fit to be
         # in the right ballpark rather than exact.
         assert jnp.all(jnp.abs(model_prices - targets) / targets < 0.35)
-        assert float(fitted.volatility) > 0.0
+        assert float(fitted.volatility[0]) > 0.0
 
 
 # ── Model-market binding ──────────────────────────────────────────────
@@ -322,7 +322,7 @@ class TestCurveIdBinding:
             rebound.initial_curve.discount_factors,
             _flat_curve(0.04).discount_factors,
         )
-        assert float(rebound.volatility) == float(fitted.volatility)
+        assert float(rebound.volatility[0]) == float(fitted.volatility[0])
 
 
 # ── Honest refusal where the engine cannot do it ──────────────────────

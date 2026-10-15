@@ -112,7 +112,7 @@ def _model(curve, rho=-0.70):
         mean_reversion_x=jnp.array(0.50),
         mean_reversion_y=jnp.array(0.10),
         volatility_x=jnp.array(0.010),
-        volatility_y=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.8),
         correlation=jnp.array(rho),
         initial_curve=curve,
     )
@@ -258,7 +258,7 @@ class TestFixedRateBondExactFit:
             mean_reversion_x=jnp.array(0.30),
             mean_reversion_y=jnp.array(0.05),
             volatility_x=jnp.array(0.015),
-            volatility_y=jnp.array(0.004),
+            volatility_ratio=jnp.array(0.004) / jnp.array(0.015),
             correlation=jnp.array(0.40),
             initial_curve=flat_curve,
         )

@@ -148,7 +148,8 @@ Status: ✅ shipped via `pde_price_dispatch` · 🟡 in progress (design-stage).
 
 The short-rate rows above are the equity-facing subset; the Hull-White / G2++ /
 Cheyette PDE also prices fixed-rate bonds, caplets/caps, European and Bermudan
-swaptions, and CMS-spread swaps (see §5.6 below and [API: Pricing](../api/pricing.md)).
+swaptions, and CMS-spread swaps (see §5.6 below and [API: Pricing](../api/pricing.md)),
+all with piecewise-constant volatility \(\sigma(t)\) ([§5.8](#58-time-dependent-volatility)).
 
 ### 5.3 Early exercise
 
@@ -277,8 +278,10 @@ price = pde_price_dispatch(bermudan_swaption, hw_model, config).price
 Three things differ from the equity recipes, each for a concrete reason:
 
 - **The mesh is in the centred state \(x\)**, not the short rate, using
-  \(r(t) = x(t) + \alpha(t)\). The drift and diffusion are then
-  time-independent and the state starts at the origin, so `n_spot` counts state
+  \(r(t) = x(t) + \alpha(t)\). The drift is then time-independent, the
+  diffusion is too for a constant \(\sigma\) (with \(\sigma(t)\) it varies
+  per step only — see [§5.8](#58-time-dependent-volatility)), and the state
+  starts at the origin, so `n_spot` counts state
   nodes and `spot_range` is a half-width in standard deviations of the short
   rate at the horizon. No `stop_gradient` scaffolding is needed: the read-off
   point \(x = 0\) is fixed.
@@ -361,6 +364,97 @@ no), and a trade that resolves a distinct projection curve the recipe/model
 cannot use **raises** rather than being silently priced single-curve — e.g.
 the G2++ CMS-spread recipe, which rebuilds its par swap rates from the model's
 own bond strip, or any Cheyette recipe.
+
+## 5.8 Time-dependent volatility
+
+Every short-rate PDE recipe accepts a **piecewise-constant volatility**: the
+volatility fields are arrays of buckets with interior breakpoints
+`volatility_times` (`HullWhiteModel(a, volatility=[...], volatility_times=[...])`,
+`G2PPModel(..., volatility_x=[...], volatility_ratio=[...], ...)` with
+\(\eta = \text{ratio}\cdot\sigma\), `CheyetteModel(kappa, volatility=[...], skew, ...)`,
+`CheyetteModel2F(..., volatility_1=[...], volatility_ratio=[...], ...)`). The
+time grid stays uniform (`n_time` steps to the horizon); what changes is that
+each backward step diffuses at the **exact step average** of the variance
+rates, so a step straddling a breakpoint carries the right variance. A
+one-bucket model takes the original constant-operator path, unchanged. The
+maths is in [Time-Dependent Volatility](../theory/time-dependent-volatility.md).
+
+| Model | Grid | Operator for \(\sigma(t)\) | Constant-only builder (raises `ValueError` for > 1 bucket) | Measured accuracy |
+|---|---|---|---|---|
+| `HullWhiteModel` | 1-D CN | `hw_operator_stack` — stacked rows, step-averaged \(\sigma^2\) | — | second order to Jamshidian even for a 5× steep \(\sigma(t)\); finest grid (401 × 240) \(1.4\times10^{-5}\) relative |
+| `G2PPModel` | 2-D ADI | `g2pp_operator_rows` — one operator per step, assembled inside the ADI loop (step averages of \(\sigma^2, \eta^2, \rho\sigma\eta\)) | `g2pp_operator_2d` | converges to Brigo–Mercurio: \(-3.2\times10^{-3}\), \(-1.1\times10^{-3}\), \(-4.3\times10^{-4}\) on 61²×50 / 111²×90 / 161²×140 |
+| `CheyetteModel` (frozen-\(y\)) | 1-D CN | `cheyette_operator_stack` | — | at \(\beta = 0\) equals the Hull-White PDE to round-off (\(\le 3.3\times10^{-16}\)) |
+| `CheyetteModel` (exact-\(y\), `cheyette_exact_price`) | 2-D | `cheyette_exact_operator_rows` | `cheyette_exact_operator_2d` | ~first order (upwinded \(y\) axis), same rate as constant \(\sigma\): \(-8.2\times10^{-3}\) … \(-7.2\times10^{-4}\) on 41 … 321 \(x\)-nodes |
+| `CheyetteModel2F` (frozen-\(y\)) | 2-D ADI | `cheyette_operator_rows_2d` | `cheyette_operator_2d` | at \(\beta_i = 0\) equals the G2++ PDE to round-off |
+
+The recipes choose the right builder themselves; the "constant-only" column
+matters only if you assemble operators by hand. Evidence:
+`tests/test_pde/test_{hull_white,g2pp,cheyette,cheyette2f}_piecewise.py`.
+
+Bermudan swaption through the front door, on a 3-bucket Hull-White model,
+with a bucketed vega:
+
+```python
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import equinox as eqx
+import jax.numpy as jnp
+
+from valax.core.market_state import MarketState
+from valax.core.pricing import price
+from valax.curves.discount import DiscountCurve
+from valax.dates.daycounts import ymd_to_ordinal
+from valax.instruments.rates import BermudanSwaption
+from valax.models import HullWhiteModel
+from valax.pricing.pde import PDEConfig
+
+ref = int(ymd_to_ordinal(2026, 1, 1))
+pillars = jnp.array([ref + 365 * k for k in range(21)], dtype=jnp.int32)
+curve = DiscountCurve(
+    pillar_dates=pillars,
+    discount_factors=jnp.exp(-0.035 * (pillars - ref) / 365.0),
+    reference_date=jnp.int32(ref),
+    day_count="act_365",
+)
+market = MarketState.single_curve(curve)
+
+# Curve-free model (price() binds the market curve); sigma(t) in three buckets.
+model = HullWhiteModel(
+    mean_reversion=jnp.array(0.05),
+    volatility=jnp.array([0.012, 0.008, 0.015]),
+    volatility_times=jnp.array([1.0, 3.0]),
+)
+days = lambda years: jnp.array([ref + 365 * y for y in years], dtype=jnp.int32)
+bermudan = BermudanSwaption(
+    exercise_dates=days(range(2, 7)), fixed_dates=days(range(3, 8)),
+    strike=jnp.array(0.035), notional=jnp.array(1.0), is_payer=True,
+    day_count="act_365",
+)
+config = PDEConfig(n_spot=401, n_time=600, spot_range=6.0)
+
+
+@eqx.filter_jit
+def bermudan_pde(m):
+    return price(bermudan, m, market, method="pde", config=config).price
+
+
+print(f"Bermudan, PDE: {float(bermudan_pde(model)):.8f}")
+vega = eqx.filter_grad(bermudan_pde)(model).volatility
+print("Bermudan vega by bucket:", jnp.round(vega, 6))
+```
+
+```text
+Bermudan, PDE: 0.02995125
+Bermudan vega by bucket: [0.931533 1.023886 0.636331]
+```
+
+`n_time=600` over the 6Y horizon puts every annual exercise date exactly on a
+level (exercise dates snap to the nearest level); with `n_time=400` the same
+trade priced 0.02995486. The general Hull-White tree prices this trade at
+0.02994999 (Richardson 600/1200 steps) — see
+[Lattice → Swaptions on the tree](lattice.md#swaptions-on-the-tree).
 
 ## 6. When to use PDE
 

@@ -89,7 +89,7 @@ def g2pp_model(curve, rho=-0.70):
         mean_reversion_x=jnp.array(0.50),
         mean_reversion_y=jnp.array(0.10),
         volatility_x=jnp.array(0.010),
-        volatility_y=jnp.array(0.008),
+        volatility_ratio=jnp.array(0.8),  # eta = 0.8 * sigma = 0.008
         correlation=jnp.array(rho),
         initial_curve=curve,
     )
@@ -128,9 +128,9 @@ def ql_g2_setup(model, rate):
     g2 = ql.G2(
         disc,
         float(model.mean_reversion_x),
-        float(model.volatility_x),
+        float(model.volatility_x[0]),
         float(model.mean_reversion_y),
-        float(model.volatility_y),
+        float(model.volatility_y[0]),
         float(model.correlation),
     )
     return disc, g2

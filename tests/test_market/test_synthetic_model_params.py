@@ -70,7 +70,7 @@ class TestHullWhite:
         )
         m = sample_hull_white_params(seed_registry, curve)
         assert float(m.mean_reversion) > 0
-        assert float(m.volatility) > 0
+        assert float(m.volatility[0]) > 0
 
 
 class TestMultiAssetGBM:

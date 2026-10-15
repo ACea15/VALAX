@@ -172,7 +172,7 @@ class TestFixedInputsIsALensNotAStore:
 
     def test_inject_leaves_everything_else_alone(self, model):
         updated = MEAN_REVERSION.inject(model, jnp.array([0.2]))
-        assert float(updated.volatility) == float(model.volatility)
+        assert float(updated.volatility[0]) == float(model.volatility[0])
         assert updated.curve_id == model.curve_id
         assert np.array_equal(
             np.asarray(updated.initial_curve.discount_factors),

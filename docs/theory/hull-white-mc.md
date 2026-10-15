@@ -10,7 +10,8 @@ dr(t) = [\theta(t) - a\,r(t)]\,dt + \sigma\,dW(t)
 $$
 
 where $a > 0$ is the mean-reversion speed, $\sigma > 0$ is the
-short-rate volatility, and $\theta(t)$ is a deterministic time-dependent
+short-rate volatility (constant here; a piecewise-constant $\sigma(t)$ is
+covered in [§2](#piecewise-constant-volatility)), and $\theta(t)$ is a deterministic time-dependent
 drift calibrated to exactly fit the initial term structure.  The process
 $\{r(t)\}$ is an **Ornstein-Uhlenbeck (OU) process** with a
 time-varying level $\theta(t)/a$.
@@ -101,6 +102,27 @@ The conditional mean $\mu_i$ has a transparent interpretation:
 - The formula ensures the exact-fit property: the model ZCB price
   $P(t, T | r)$ recovers $P^M(0, T)$ when the short rate equals the
   initial forward $f^M(0, 0)$.
+
+### Piecewise-constant volatility
+
+With a bucketed $\sigma(t)$ the transition is still exactly Gaussian. Two
+things change:
+
+- the step variance is no longer the same for every step. It becomes the
+  exact window
+  $v_i = V(t_i, t_{i+1}) = \int_{t_i}^{t_{i+1}} \sigma(u)^2 e^{-2a(t_{i+1}-u)}\,du$
+  (`hw_state_variance`), evaluated in closed form and exact even when the step
+  straddles a bucket breakpoint;
+- $\alpha(t)$ takes the piecewise convexity term
+  $(I_a(t) - I_{2a}(t))/a$ in place of $\frac{\sigma^2}{2a^2}(1 - e^{-at})^2$.
+
+The mean $\mu_i$ and the numeraire of §4 are unchanged, so the scheme has zero
+discretisation error in the marginals for any step size and any breakpoint
+placement. Both formulas are derived in
+[Time-Dependent Volatility §3](time-dependent-volatility.md#3-hull-white-with-piecewise-constant-volatility).
+Zero-coupon bonds and the Jamshidian swaption are recovered within
+$2\,$stderr (`tests/test_mc/test_hull_white_piecewise_paths.py`). A one-bucket
+model runs the constant formulas below bit for bit.
 
 ---
 
@@ -228,7 +250,10 @@ Return HullWhitePathResult(short_rates=r, log_discount_factors=ldf)
 ```
 
 The inner loop is compiled with `jax.lax.scan` for efficiency and full
-JIT compatibility.
+JIT compatibility. This is the constant-$\sigma$ algorithm. With a
+piecewise-constant $\sigma(t)$, `sqrt(v)` becomes a per-step array
+$\sqrt{V(t_i, t_{i+1})}$ and `alpha` uses the piecewise convexity
+([§2](#piecewise-constant-volatility)).
 
 ---
 

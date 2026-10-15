@@ -58,6 +58,16 @@ the initial curve (the same discipline as Hull-White's ``hw_alpha_average``; a
 midpoint sample would inject a curved-forward bias). The per-step factor and the
 Bermudan exercise projection both plug into the stepper's ``event_fn`` seam.
 
+Piecewise-constant volatility
+-----------------------------
+With bucketed :math:`\sigma(t)` and :math:`\eta(t) = r(t)\sigma(t)` the
+diffusion block varies in time: each backward step uses the exact step averages
+of :math:`\sigma^2, \eta^2, \rho\sigma\eta`
+(:func:`~valax.pricing.pde.coefficients.g2pp_operator_rows`, assembled inside the
+ADI loop), and the per-step :math:`\varphi` discount differences the closed-form
+:math:`\int_0^t\varphi = -\ln P^M(0,t) + \tfrac12 V(0,t)`. A one-bucket model
+takes the original constant-operator path.
+
 Boundaries
 ----------
 Neither factor axis has a closed-form far-field value once the instrument
@@ -124,9 +134,11 @@ from valax.models.g2pp import (
     g2pp_bond_price,
     g2pp_factor_covariance,
     g2pp_market_df,
+    g2pp_phi_integral,
 )
+from valax.models.short_rate import is_constant
 from valax.pricing.pde.boundary import Boundary2D, apply_linearity_bc_2d
-from valax.pricing.pde.coefficients import g2pp_operator_2d
+from valax.pricing.pde.coefficients import g2pp_operator_2d, g2pp_operator_rows
 from valax.pricing.pde.config import PDEConfig2D
 from valax.pricing.pde.dispatch import PDEResult, register
 from valax.pricing.pde.grids import Grid2D, centred_state_grid, read_off_2d
@@ -331,6 +343,11 @@ def _phi_step_discounts(
     Doing this exactly (rather than sampling :math:`\varphi` at a midpoint) is
     what preserves the model's exact fit to the initial curve.
 
+    With piecewise-constant volatilities the same exactness comes from the
+    exact-fit identity :math:`\int_0^t \varphi = -\ln P^M(0, t) + \tfrac12
+    V(0, t)` (:func:`~valax.models.g2pp.g2pp_phi_integral`), differenced
+    across each step.
+
     Args:
         model: G2++ model carrying the initial curve and parameters.
         dt: Time-step size in year fractions.
@@ -339,13 +356,17 @@ def _phi_step_discounts(
     Returns:
         The ``n_time`` per-step discount factors, indexed by forward level.
     """
+    t = jnp.arange(n_time + 1) * dt  # level boundaries t_0 .. t_{n_time}
+
+    if not (is_constant(model.volatility_x) and is_constant(model.volatility_ratio)):
+        phi_integral = g2pp_phi_integral(model, t)
+        return jnp.exp(-(phi_integral[1:] - phi_integral[:-1]))
+
     a = model.mean_reversion_x
     b = model.mean_reversion_y
-    sigma = model.volatility_x
-    eta = model.volatility_y
+    sigma = model.volatility_x[0]
+    eta = model.volatility_ratio[0] * sigma
     rho = model.correlation
-
-    t = jnp.arange(n_time + 1) * dt  # level boundaries t_0 .. t_{n_time}
 
     log_df = jnp.log(g2pp_market_df(model, t))  # F(t) = ln P^M(0, t)
 
@@ -433,7 +454,17 @@ def _solve_g2pp(
         x=centred_state_grid(std_x, n=config.n_x, half_width=config.x_range),
         y=centred_state_grid(std_y, n=config.n_y, half_width=config.x_range),
     )
-    operator = apply_linearity_bc_2d(g2pp_operator_2d(model, grid), grid)
+    if is_constant(model.volatility_x) and is_constant(model.volatility_ratio):
+        operator = apply_linearity_bc_2d(g2pp_operator_2d(model, grid), grid)
+    else:
+        # Piecewise sigma(t), eta(t): one operator per backward step, with the
+        # exact step-average diffusion, assembled inside the ADI time loop.
+        rows = g2pp_operator_rows(
+            model, grid, expiry=horizon, n_time=config.n_time
+        )
+
+        def operator(m):
+            return apply_linearity_bc_2d(rows(m), grid)
 
     dt = horizon / config.n_time
     phi_disc = _phi_step_discounts(model, dt, config.n_time)  # (n_time,)

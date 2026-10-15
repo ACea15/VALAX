@@ -78,7 +78,7 @@ class TestRequirements:
         assert curve_requirements(pinned, sw) == {"initial_curve": "USD.ALT.OIS"}
         for model in (
             G2PPModel(mean_reversion_x=jnp.asarray(0.5), mean_reversion_y=jnp.asarray(0.1),
-                      volatility_x=jnp.asarray(0.01), volatility_y=jnp.asarray(0.008),
+                      volatility_x=jnp.asarray(0.01), volatility_ratio=jnp.asarray(0.8),
                       correlation=jnp.asarray(-0.5)),
             CheyetteModel(mean_reversion=jnp.asarray(0.05), volatility=jnp.asarray(0.01),
                           skew=jnp.asarray(0.0)),
@@ -128,7 +128,7 @@ class TestRisk:
             lambda mm: price(sw, mm[0], mm[1], method="pde", config=CFG).price
         )((_hw(), market))
         assert model_bar.initial_curve is None
-        assert jnp.isfinite(model_bar.volatility) and float(model_bar.volatility) != 0.0
+        assert jnp.isfinite(model_bar.volatility[0]) and float(model_bar.volatility[0]) != 0.0
         assert float(jnp.max(jnp.abs(
             market_bar.curve("USD.SOFR.OIS").discount_factors
         ))) > 0.0
