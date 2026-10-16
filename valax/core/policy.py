@@ -30,6 +30,7 @@ from valax.instruments.bonds import (
     FloatingRateBond,
     PuttableBond,
 )
+from valax.instruments.fx import FXForward, FXVanillaOption
 from valax.instruments.inflation import (
     InflationCapFloor,
     YearOnYearInflationSwap,
@@ -83,6 +84,8 @@ AUTO_METHODS: dict[tuple[type, type], str] = {
     (OISSwap, _NONE): "analytic",
     (MultiLegSwap, _NONE): "analytic",
     (CrossCurrencySwap, _NONE): "analytic",
+    (FXForward, _NONE): "analytic",
+    (FXVanillaOption, ImpliedVolModel): "analytic",
     (ZeroCouponInflationSwap, _NONE): "analytic",
     (YearOnYearInflationSwap, _NONE): "analytic",
     (InflationCapFloor, ImpliedVolModel): "analytic",

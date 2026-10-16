@@ -39,7 +39,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from valax.core.binding import sample_vol
+from valax.core.binding import instrument_horizon, project_rate, sample_vol
 from valax.core.pricing import PricingResult, register_pricer
 from valax.core.resolve import ResolvedMarket
 from valax.dates.daycounts import year_fraction
@@ -49,6 +49,7 @@ from valax.instruments.bonds import (
     FloatingRateBond,
     PuttableBond,
 )
+from valax.instruments.fx import FXForward, FXVanillaOption
 from valax.instruments.inflation import (
     InflationCapFloor,
     YearOnYearInflationSwap,
@@ -78,6 +79,7 @@ from valax.pricing.analytic.black_scholes import black_scholes_price
 from valax.pricing.analytic.bonds import fixed_rate_bond_price
 from valax.pricing.analytic.digital import digital_option_price
 from valax.pricing.analytic.floating import floating_rate_bond_price, ois_swap_price
+from valax.pricing.analytic.fx import fx_forward_price, garman_kohlhagen_price
 from valax.pricing.analytic.g2pp_swaptions import g2pp_swaption_price
 from valax.pricing.analytic.heston import heston_cos_price
 from valax.pricing.analytic.hull_white_swaptions import hw_swaption_price
@@ -374,6 +376,53 @@ def _inflation_cap_floor(
             instrument, resolved.inflation_curves[instrument.inflation_id],
             resolved.discount_curve, vols,
         ),
+        method="analytic",
+    )
+
+
+# ── FX (keyed FX spot, two discount curves) ──────────────────────────
+
+
+def _fx_inputs(instrument, resolved: ResolvedMarket):
+    """Spot and the two continuously-compounded rates to the trade's expiry.
+
+    The rates are each curve's zero rate at the expiry, so the kernels'
+    ``exp(-r T)`` discount factors are the curves' own.
+    """
+    (fx_id,) = instrument.fx_ids
+    domestic = resolved.curves[instrument.discount_id]
+    foreign = resolved.curves[instrument.foreign_discount_id]
+    horizon = instrument_horizon(instrument, domestic)
+    return (
+        resolved.fx_spots[fx_id],
+        project_rate(domestic, horizon),
+        project_rate(foreign, horizon),
+    )
+
+
+@register_pricer(FXForward, type(None), "analytic")
+def _fx_forward(*, instrument, model, market, resolved, config, key) -> PricingResult:
+    """FX forward by covered interest parity off the two curves."""
+    del model, market, config, key
+    spot, r_d, r_f = _fx_inputs(instrument, resolved)
+    return PricingResult(
+        price=fx_forward_price(instrument, spot, r_d, r_f), method="analytic",
+    )
+
+
+@register_pricer(FXVanillaOption, ImpliedVolModel, "analytic")
+def _fx_vanilla(*, instrument, model, market, resolved, config, key) -> PricingResult:
+    """FX vanilla option: Garman-Kohlhagen at the surface's vol.
+
+    The vol is read off the surface the ``ImpliedVolModel`` names at
+    ``(strike, expiry)``; a normal-vol source is refused
+    (:func:`~valax.core.binding.sample_vol`).
+    """
+    del market, config, key
+    spot, r_d, r_f = _fx_inputs(instrument, resolved)
+    vol = sample_vol(resolved.surface, instrument.strike, instrument.expiry)
+    return PricingResult(
+        price=garman_kohlhagen_price(instrument, spot, vol, r_d, r_f),
         method="analytic",
     )
 

@@ -620,6 +620,42 @@ the same operation, not separate calculations
 bootstrap's Jacobian as well as the pricer's, so it waits for
 [stage 9](#from-quotes-to-hedge-ratios), where the curve is built from quotes.
 
+### Every entry the trade touches: `market_risk`
+
+`curve_pillar_deltas` reports one curve. A trade that reads three — the tenor
+basis swap of [stage 5](#trades-that-read-more-than-two-curves) — needs all
+three, and you should not have to know which they are.
+[`market_risk`](../api/greeks.md#valax.greeks.market_risk) runs **one**
+backward pass through `price` and reports the gradient keyed by every market
+entry the trade *declares* — its curves (pillar deltas), spots, dividends, FX
+spots, inflation curves and surfaces:
+
+```python
+from valax.greeks import market_risk
+
+risk = market_risk(basis, None, basis_market)
+float(risk.price)            # -1,914.62
+risk.declared.curves         # ('USD.SOFR.OIS', 'USD.SOFR.3M', 'USD.SOFR.6M')
+risk.curves["USD.SOFR.3M"][:5]
+# [994,993, -30,453, -30,606, -41,586, -1,034,798]
+risk.curves["USD.SOFR.6M"][:5]
+# [-995,738, 30,522, 30,721, 41,804, 1,041,805]
+
+risk = market_risk(call, model, market)
+risk.declared.spots, float(risk.spots["_default_"])   # ('_default_',), 0.636831
+```
+
+The projection curves carry the large, nearly offsetting legs; the OIS curve
+only the discounting of their difference. What is *declared* is decided
+statically by
+[`declared_entries`](../api/core.md#valax.core.declared_entries) — the
+instrument's selectors plus the model's `curve_requirements` and surface
+reference — and the
+[route contract](#onboarding-checklist-a-new-instrument-or-route-in-the-library)
+checks, for every registered route, that the gradient is exactly zero outside
+that set. So the report is complete *and* truthful: nothing the price depends
+on is missing, and nothing it does not depend on is listed.
+
 ### One pass, many Greeks; and it all jits
 
 ```python
@@ -801,9 +837,52 @@ Rules that keep the registry honest:
   wanting a new `price(...)` argument, you probably want a `config` field or a
   new `method`.
 
-New numerics also need a home in the docs: add the row to the
-[coverage matrix](../applications/instrument-pricing.md), the recipe to the
-owning guide, and the symbol to the roadmap — see `AGENTS.md`.
+### Onboarding checklist: a new instrument or route in the library
+
+This is the one procedure for adding pricing coverage; every step is checked
+by a test, so a skipped step fails CI rather than shipping. Pricing *and*
+risk follow from it — there is no per-instrument risk code.
+
+1. **Instrument** — a data-only `eqx.Module` in `valax/instruments/`. Every
+   market entry it reads is named by a **static** selector:
+   `discount_id` / `forward_id`, each leg's ids, `foreign_discount_id`,
+   `inflation_id`, `underlying_id(s)`, or an `fx_ids` / `curves_touched`
+   property computed from static fields. Never infer an entry from traced
+   data (dates, amounts): which entries a trade reads must be known at trace
+   time ([D16](../architecture/calibration-pricing-risk.md#3-decisions)).
+   New fields get defaults so existing constructions stay valid.
+2. **Kernel** — the numerics as a pure function in `valax/pricing/<method>/`
+   taking plain curves / spots / vols (not the market), tested against its
+   oracle (closed form, QuantLib, another engine).
+3. **Adapter** — `@register_pricer(Instrument, Model, method)` in
+   `valax/core/adapters.py` (or an MC / PDE recipe naming the keyed views it
+   needs, `curves` / `spots`): read only `resolved` — `resolved.curves[id]`,
+   `resolved.fx_spots[id]`, `resolved.inflation_curves[id]`,
+   `resolved.surface`, `resolved.spot(s)` — and call the kernel. Refuse a
+   selector the kernel cannot honour (e.g. a projection curve it would
+   ignore) with a `ValueError`.
+4. **Policy** — the pair's `auto` method in `AUTO_METHODS` and, for a
+   numerical method, a default config, in `valax/core/policy.py`
+   (`tests/test_core/test_pricing_policy.py`).
+5. **Route sample** — one small trade in
+   `tests/test_core/route_samples.py` naming the market entries its price
+   must move with. The route contract (`tests/test_core/test_route_contract.py`)
+   then checks, for every method: it prices; it prices with the trade as a
+   traced `jit` argument; its market gradient is exactly zero outside
+   `declared_entries` and non-zero where the sample says; it batches under
+   `vmap`; and it prices with its default config. A registered pair without
+   a sample fails.
+6. **Bit-identity test** — the route equals the kernel on the same inputs
+   (e.g. `tests/test_core/test_fx_routes.py`).
+7. **Docs** — the coverage-matrix row and its `price()` routes cell
+   (`tests/test_docs/test_price_routes.py` checks it against the registry),
+   a runnable recipe on the owning instrument guide, the roadmap line, and
+   the API page — see `AGENTS.md` (definition of done).
+
+Risk then needs nothing more: `market_risk(instrument, model, market)`
+reports the sensitivity to every declared entry
+([§ 8](#every-entry-the-trade-touches-market_risk)), and quote risk through
+the calibration chain goes through the same `price()` call.
 
 ## 11. Failure modes and what they mean
 

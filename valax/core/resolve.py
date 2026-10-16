@@ -31,7 +31,7 @@ pricer:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 import equinox as eqx
 from jaxtyping import Float, Int
@@ -144,6 +144,10 @@ def forward_id_of(instrument: Any) -> str | None:
     """
     if hasattr(instrument, "forward_id"):
         return instrument.forward_id
+    if hasattr(instrument, "discount_id"):
+        # Explicit selectors and no projection selector: a curves_touched
+        # pair is (domestic, foreign) or similar, not (discount, forward).
+        return None
     touched = getattr(instrument, "curves_touched", None)
     if touched and len(touched) == 2 and touched[1] != touched[0]:
         return touched[1]
@@ -414,6 +418,93 @@ def resolve(
         discount_id=discount_id,
         forward_id=forward_id_of(instrument),
     )
+
+
+class DeclaredEntries(NamedTuple):
+    """Market entries one (instrument, model) pair reads, by slot (D16).
+
+    Every id is decided by static fields of the instrument and the model, so
+    this is known before (and independently of) any numerics. It is the
+    exact set the pair's price may depend on: a gradient of the price with
+    respect to the market is structurally zero outside it.
+
+    Attributes:
+        curves: Curve ids — the instrument's (:func:`curve_ids_of`) and the
+            model's declared curve fields (``curve_requirements``).
+        spots: Asset ids whose spot is read.
+        dividends: Asset ids whose dividend yield is read.
+        fx_spots: FX pair ids.
+        inflation_curves: Inflation-curve ids.
+        surfaces: Surface ids (the model's ``surface_id``, or the market's
+            default surface when it has one and the model names none).
+    """
+
+    curves: tuple[str, ...]
+    spots: tuple[str, ...]
+    dividends: tuple[str, ...]
+    fx_spots: tuple[str, ...]
+    inflation_curves: tuple[str, ...]
+    surfaces: tuple[str, ...]
+
+
+def declared_entries(
+    instrument: Any, model: Any, market: MarketState
+) -> DeclaredEntries:
+    """Every market entry ``price(instrument, model, market)`` may read.
+
+    The same rules as :func:`resolve` plus the model's declared curve fields
+    (:func:`~valax.core.binding.curve_requirements`, including keyed
+    families), so risk reports (:func:`valax.greeks.market_risk`) and the
+    route contract test can be driven by the declaration rather than by
+    knowledge of each pricer.
+
+    Args:
+        instrument: Any instrument pytree.
+        model: Any model pytree, or ``None``.
+        market: The calibrated market (decides the default-surface rule).
+
+    Returns:
+        The :class:`DeclaredEntries`.
+    """
+    from valax.core.binding import curve_requirements
+
+    curve_ids = list(curve_ids_of(instrument))
+    if model is not None:
+        for requirement in curve_requirements(model, instrument).values():
+            ids = (requirement,) if isinstance(requirement, str) else tuple(
+                requirement.values()
+            )
+            curve_ids.extend(ids)
+    asset_ids = tuple(
+        _market_key(market.spots, a) for a in underlying_ids_of(instrument)
+    ) if _reads_spot(instrument, market) else ()
+    surface_id = surface_id_of(model)
+    if surface_id is not None:
+        surfaces: tuple[str, ...] = (surface_id,)
+    elif DEFAULT_ID in market.surfaces:
+        surfaces = (DEFAULT_ID,)
+    else:
+        surfaces = ()
+    curve_table = market.curves.curves
+    return DeclaredEntries(
+        curves=tuple(dict.fromkeys(_market_key(curve_table, c) for c in curve_ids)),
+        spots=asset_ids,
+        dividends=tuple(a for a in asset_ids if a in market.dividends),
+        fx_spots=fx_ids_of(instrument),
+        inflation_curves=inflation_ids_of(instrument),
+        surfaces=surfaces,
+    )
+
+
+def _market_key(table: dict, key: str) -> str:
+    """The key ``table`` actually files ``key`` under (sentinel rule).
+
+    ``MarketState`` resolves the ``"_default_"`` sentinel to the only entry
+    of a one-entry table, so a declared sentinel names that entry.
+    """
+    if key not in table and key == DEFAULT_ID and len(table) == 1:
+        return next(iter(table))
+    return key
 
 
 def _keyed(slot: dict, ids: tuple[str, ...], what: str) -> dict:

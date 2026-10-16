@@ -75,7 +75,10 @@ inflation curves a routed trade reads is decided by its static selectors
 (`discount_id`, `forward_id`, each leg's ids, `foreign_discount_id`,
 `inflation_id`, `underlying_ids`), so every route works under `jit` / `grad`
 with the trade as a traced argument. `tests/test_docs/test_price_routes.py` checks this
-column against the registry and the auto policy in both directions.
+column against the registry and the auto policy in both directions, and every
+listed route passes the route contract (`tests/test_core/test_route_contract.py`:
+default config, traced trade, `vmap`, market gradient only on the entries it
+declares; [checklist](../guide/tutorial-unified-pricing.md#onboarding-checklist-a-new-instrument-or-route-in-the-library)).
 Model labels: `curves` = `model=None` (curve discounting) · `BS`
 `BlackScholesModel` · `Heston` `HestonModel` · `LV` `LocalVolModel` · `SLV`
 `SLVModel` · `MA-GBM` `MultiAssetGBMModel` · `IV` `ImpliedVolModel` (market
@@ -155,8 +158,8 @@ vol surface by id) · `HW` `HullWhiteModel` · `G2++` `G2PPModel` · `Ch-1F`
 
 | Instrument | Method(s) | `price()` routes | Vol / model input | Calibration | Key assumptions | Status |
 |---|---|---|---|---|---|---|
-| [FX forward](#fx-forward) | Analytic | — | n-a (curves) | curve bootstrap | covered interest parity | ✅ |
-| [FX vanilla option](#fx-vanilla-option) | Analytic | — | constant (delta-quoted) | delta-smile → strike | Garman-Kohlhagen | ✅ |
+| [FX forward](#fx-forward) | Analytic | curves: **analytic** (domestic + foreign curve, keyed FX spot) | n-a (curves) | curve bootstrap | covered interest parity | ✅ |
+| [FX vanilla option](#fx-vanilla-option) | Analytic | IV: **analytic** (Garman-Kohlhagen at the surface vol) | constant (delta-quoted) | delta-smile → strike | Garman-Kohlhagen | ✅ |
 | [FX barrier option](#fx-barrier-option) | — | — | constant | — | Reiner-Rubinstein (planned) | 🟡 |
 | [Quanto option](#quanto-option) | — | — | constant + FX corr | — | fixed-FX domestic payout | 🟡 |
 | [TARF](#tarf) | — | — | constant | — | path-dependent target accrual | 🟡 |

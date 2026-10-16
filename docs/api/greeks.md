@@ -51,6 +51,18 @@ key-rate deltas onto FRTB tenor vertices.
 
 ::: valax.greeks.market_greeks
 
+### Every declared entry in one pass
+
+`market_risk` is the risk counterpart of `price()`: one backward pass, reported
+per declared market entry (every curve the trade or model reads, spots,
+dividends, FX spots, inflation curves, surfaces), keyed by id. The declared set
+is [`declared_entries`](core.md#valax.core.declared_entries); see
+[tutorial § 8](../guide/tutorial-unified-pricing.md#every-entry-the-trade-touches-market_risk).
+
+::: valax.greeks.market_risk
+
+::: valax.greeks.MarketRisk
+
 ## Quote-space (hedge-space) risk
 
 `curve_pillar_deltas` above answers "how does the price move if a *pillar

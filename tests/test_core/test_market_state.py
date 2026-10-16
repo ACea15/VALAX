@@ -99,6 +99,19 @@ class TestPytree:
         assert float(market.spot()) == 100.0
         assert float(shocked.spot()) == 110.0
 
+    def test_non_payer_among_payers_has_zero_dividend(self):
+        """An asset with a spot but no dividend entry is a non-payer even when
+        other assets carry dividends (found by the route contract test)."""
+        m = MarketState(
+            curves=CurveGraph(curves={DEFAULT_ID: _curve()}),
+            spots={"SPX": jnp.array(100.0), "SX5E": jnp.array(50.0)},
+            dividends={"SPX": jnp.array(0.015)},
+        )
+        assert float(m.dividend("SX5E")) == 0.0
+        assert float(m.dividend("SPX")) == pytest.approx(0.015)
+        with pytest.raises(KeyError):
+            m.dividend("NKY")       # an unknown asset is still an error
+
 
 # ── MarketData compatibility view (Q4) ───────────────────────────────
 

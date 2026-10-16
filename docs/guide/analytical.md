@@ -227,6 +227,51 @@ gamma = jax.grad(jax.grad(
 ))(spot)
 ```
 
+### Through `price()`
+
+On a `MarketState`, `FXForward` (`model=None`) and `FXVanillaOption`
+(`ImpliedVolModel(surface_id)`) take their inputs from the market by their
+static selectors: the FX spot from `fx_spots` under `currency_pair` without
+the `/`, the domestic rate off `discount_id` and the foreign rate off
+`foreign_discount_id` (each the curve's zero rate to the expiry, so the
+`exp(-r T)` discount factors are the curves' own), and — for the option — the
+lognormal vol off the named surface at `(strike, expiry)`. `market_risk`
+then reports both curves' pillar sensitivities, the FX delta and the vega
+under their ids:
+
+```python
+import jax
+import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+from valax.core import MarketState, price
+from valax.curves.discount import flat_curve
+from valax.curves.graph import CurveGraph
+from valax.greeks import market_risk
+from valax.instruments import FXVanillaOption
+from valax.models import ImpliedVolModel
+from valax.surfaces import ConstantVol
+
+market = MarketState(
+    curves=CurveGraph(curves={"USD.SOFR.OIS": flat_curve(0.05),
+                              "EUR.ESTR.OIS": flat_curve(0.03)}),
+    fx_spots={"EURUSD": jnp.asarray(1.10)},
+    surfaces={"EURUSD.VOL": ConstantVol(jnp.asarray(0.08))},
+)
+call = FXVanillaOption(
+    strike=jnp.array(1.12), expiry=jnp.array(0.5),
+    notional_foreign=jnp.array(1_000_000.0), currency_pair="EUR/USD",
+    discount_id="USD.SOFR.OIS", foreign_discount_id="EUR.ESTR.OIS",
+)
+model = ImpliedVolModel("EURUSD.VOL")
+print(f"price (USD): {float(price(call, model, market).price):,.2f}")
+risk = market_risk(call, model, market)
+print(f"FX delta   : {float(risk.fx_spots['EURUSD']):,.0f}")
+print(f"vega       : {float(risk.surfaces['EURUSD.VOL'].vol):,.0f}")
+print(sorted(risk.curves))       # ['EUR.ESTR.OIS', 'USD.SOFR.OIS']
+```
+
 !!! note "FX vs Equity: key differences"
     - **Two interest rates**: domestic $r_d$ and foreign $r_f$ (equity has one rate + dividend yield)
     - **Delta conventions**: FX uses spot, forward, and premium-adjusted (equity uses only spot delta)

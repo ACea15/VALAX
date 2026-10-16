@@ -12,6 +12,42 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — Phase 4 close-out (D17) — one onboarding contract; `market_risk`; FX through `price()`
+
+**Route contract.** `tests/test_core/route_samples.py` holds a sample for
+every registered (instrument, model) pair on one shared market with decoy
+entries, and `tests/test_core/test_route_contract.py` checks every registered
+(pair, method): finite price, default config, trade traced under
+`eqx.filter_jit`, `eqx.filter_vmap` over a stacked pair, and a market
+gradient that is finite, non-zero on the sample's entries and exactly zero
+outside the declared set. A registered pair without a sample fails (the four
+LMM routes are the named exceptions). No route needed an allow-listed
+deviation. The checklist for a new instrument or route is
+`docs/guide/tutorial-unified-pricing.md` § 10.
+
+**Declared entries and risk.** `valax.core.declared_entries` /
+`DeclaredEntries`: the market entries a (trade, model) pair may read — curves
+(instrument selectors + model `curve_requirements`), spots, dividends, FX
+spots, inflation curves, surfaces — from static fields only.
+`valax.greeks.market_risk` / `MarketRisk`: one backward pass through
+`price()`, reported per declared entry keyed by id (pillar deltas of every
+declared curve, so a tenor basis swap reports all three).
+
+**FX routes.** `FXForward × None` and `FXVanillaOption × ImpliedVolModel`
+(`analytic`), bit-identical to `fx_forward_price` / `garman_kohlhagen_price`.
+Both instruments gain static `discount_id` (domestic) and
+`foreign_discount_id` (default `"_default_"`), `curves_touched` and `fx_ids`
+(the pair without `/`).
+
+**Fixed.** `MarketState.dividend(asset)` raised `KeyError` for an asset with a
+spot but no dividend entry once any other asset had one; it now returns 0
+(an unknown asset still raises). Found by the route samples.
+
+**Changed.** `forward_id_of` returns `None` for an instrument that has a
+`discount_id` but no `forward_id`: a two-entry `curves_touched` is read as
+`(discount, forward)` only for instruments without selectors (the FX pair
+`(domestic, foreign)` is not a projection curve).
+
 ### Changed — Phase 4 (D16) — keyed market resolution; multi-index trades through `price()`
 
 **`ResolvedMarket` holds every entry a trade names, keyed by id.** New

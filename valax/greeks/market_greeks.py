@@ -400,6 +400,93 @@ def theta(
     return (bumped - base) / dt
 
 
+# ── Declared-entry risk report ───────────────────────────────────────
+
+
+class MarketRisk(eqx.Module):
+    """Price and its sensitivity to every market entry the trade declares.
+
+    Keyed by the ids of :func:`~valax.core.resolve.declared_entries` — the
+    instrument's curves (every one, not only the discount curve), spots,
+    dividends, FX spots, inflation curves, and the model's curve fields and
+    surface — so a newly routed instrument's risk report follows from its
+    static selectors, with no per-instrument code.
+
+    Attributes:
+        price: The price.
+        curves: ``curve_id -> ∂price/∂DF(pillar)``.
+        spots: ``asset_id -> ∂price/∂spot``.
+        dividends: ``asset_id -> ∂price/∂q``.
+        fx_spots: ``pair_id -> ∂price/∂FX spot``.
+        inflation_curves: ``id -> ∂price/∂forward CPI(pillar)``.
+        surfaces: ``surface_id -> gradient pytree of the surface``.
+        declared: The declared ids the report is keyed by.
+    """
+
+    price: Float[Array, ""]
+    curves: dict
+    spots: dict
+    dividends: dict
+    fx_spots: dict
+    inflation_curves: dict
+    surfaces: dict
+    declared: Any = eqx.field(static=True)
+
+
+def market_risk(
+    instrument: Any,
+    model: Any,
+    market: MarketState,
+    *,
+    method: str = "auto",
+    config: Any = None,
+    key: Any = None,
+) -> MarketRisk:
+    """One backward pass: the price's sensitivity to each declared entry.
+
+    The generic risk report of a ``price()`` route: whatever the instrument,
+    the entries it may depend on are its declared ones
+    (:func:`~valax.core.resolve.declared_entries`), and the market gradient
+    is structurally zero everywhere else. Bucket a curve's pillar deltas with
+    :func:`bucketed_curve_deltas`, or take quote-space risk through the
+    calibration chain (:func:`~valax.greeks.quote_risk.quote_risk_adjoint`).
+
+    Args:
+        instrument: A VALAX instrument pytree.
+        model: A VALAX model pytree, or ``None``.
+        market: The calibrated market.
+        method: Pricing method.
+        config: Method-specific numerical settings (``None``: the default).
+        key: PRNG key (MC only).
+
+    Returns:
+        A :class:`MarketRisk`.
+    """
+    from valax.core.resolve import declared_entries
+
+    declared = declared_entries(instrument, model, market)
+
+    def fn(m: MarketState) -> Float[Array, ""]:
+        return _price_scalar(
+            instrument, model, m, method=method, config=config, key=key
+        )
+
+    value, grad = eqx.filter_value_and_grad(fn)(market)
+    return MarketRisk(
+        price=value,
+        curves={c: grad.curves.curves[c].discount_factors for c in declared.curves},
+        spots={a: grad.spots[a] for a in declared.spots},
+        dividends={a: grad.dividends[a] for a in declared.dividends},
+        fx_spots={f: grad.fx_spots[f] for f in declared.fx_spots},
+        inflation_curves={
+            i: grad.inflation_curves[i].forward_cpis
+            for i in declared.inflation_curves
+        },
+        surfaces={s: grad.surfaces[s] for s in declared.surfaces},
+        declared=declared,
+    )
+
+
 # ── Aggregate convenience ────────────────────────────────────────────
 
 

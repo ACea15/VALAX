@@ -336,11 +336,34 @@ model field — the slot for multi-index / stochastic-basis models. With this,
 swaps and cap / floor (`inflation_id`, `discount_id`) and the multi-asset
 options (`underlying_ids`) price through `price()`.
 
+**D17 — Every route honours one onboarding contract, enforced by one test.**
+"Priceable through `price()`" is a checkable property, not a convention. Each
+registered (instrument, model) pair has a sample in
+`tests/test_core/route_samples.py`, built on one shared market that also
+holds unrelated decoy entries, and `tests/test_core/test_route_contract.py`
+checks every registered (pair, method): it prices finitely, with its default
+config and with the trade as a traced `eqx.filter_jit` argument; it batches
+under `eqx.filter_vmap`; and its market gradient is finite, non-zero on the
+entries the sample names and **exactly zero outside**
+`declared_entries(instrument, model, market)` — the instrument's selectors
+plus the model's `curve_requirements` and surface reference. A route whose
+pair has no sample fails the completeness test, so a new route cannot land
+outside the contract; deviations would be allow-listed with a reason, and the
+list is empty. Risk is reported over the same declared set:
+`market_risk(instrument, model, market)` returns, from one backward pass, the
+pillar deltas of every declared curve and the gradients of every declared
+spot, dividend, FX spot, inflation curve and surface, keyed by id. Pricing and
+risk of a new instrument therefore need no new risk code — the checklist is
+[tutorial § 10](../guide/tutorial-unified-pricing.md#onboarding-checklist-a-new-instrument-or-route-in-the-library).
+Writing the samples found one real bug (`MarketState.dividend` raised for a
+non-paying asset once any other asset paid one); `FXForward` and
+`FXVanillaOption` were the first trades onboarded through the checklist.
+
 ## 4. Extending the framework
 
 | To add… | You provide | It then works with |
 | --- | --- | --- |
-| **Instrument** | An `eqx.Module` (data only, static selectors such as `discount_id`) and `@register_pricer` adapters | `price`, both risk paths, `price_fit_node` baskets |
+| **Instrument** | An `eqx.Module` (data only, static selectors such as `discount_id`), `@register_pricer` adapters reading only `resolved`, a policy entry and a route sample that passes the route contract (D17; checklist in [tutorial § 10](../guide/tutorial-unified-pricing.md#onboarding-checklist-a-new-instrument-or-route-in-the-library)) | `price`, `market_risk`, both risk paths, `price_fit_node` baskets |
 | **Model** | An `eqx.Module` with no embedded market objects (scalar fields left `None` are bound from the market; curve fields declared by registering `curve_requirements` and left `None`) plus pricers; a `basis_overlay` registration if it prices a distinct projection curve by the deterministic overlay | `price`, `price_fit_node` / `swaption_basket_node` calibration at either scope, stacking under `vmap` |
 | **Numerical method** | A config class and pricers registered under the method name; a `CalibrationProvenance` for fits on it (`engine_kind="modelling_bias"` if its parameters are engine-bound) | `price(..., method=...)`, calibration through `price_fit_node(method=...)`, `check_engine` |
 | **Calibration level** | A node factory: residual ``(θ, inputs) → vector``, `assemble` ``(θ, inputs) → object``, `install` ``(market, object) → market`` (or none), routed through `solve_level` (one solve), `solve_batched_level` (one solve per labelled node) or `explicit_level` (explicit map or fixed point), with a `SolverSettings` default | `calibrate_market`, both risk paths, diagnostics, named failures, conditioning |

@@ -17,8 +17,10 @@ from valax.core.market_state import (
     validate_surface_id,
 )
 from valax.core.resolve import (
+    DeclaredEntries,
     ResolvedMarket,
     curve_ids_of,
+    declared_entries,
     fx_ids_of,
     inflation_ids_of,
     resolve,
@@ -51,6 +53,8 @@ __all__ = [
     "MarketState",
     "validate_surface_id",
     "ResolvedMarket",
+    "DeclaredEntries",
+    "declared_entries",
     "curve_ids_of",
     "fx_ids_of",
     "inflation_ids_of",

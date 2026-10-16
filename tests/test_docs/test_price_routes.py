@@ -27,6 +27,7 @@ from valax.instruments.bonds import (
     FloatingRateBond,
     PuttableBond,
 )
+from valax.instruments.fx import FXForward, FXVanillaOption
 from valax.instruments.inflation import (
     InflationCapFloor,
     YearOnYearInflationSwap,
@@ -114,6 +115,8 @@ ROWS: dict[str, type] = {
     "zero-coupon-inflation-swap-zcis": ZeroCouponInflationSwap,
     "year-on-year-inflation-swap-yyis": YearOnYearInflationSwap,
     "inflation-cap-floor": InflationCapFloor,
+    "fx-forward": FXForward,
+    "fx-vanilla-option": FXVanillaOption,
     "bermudan-swaption": BermudanSwaption,
     "fixed-rate-bond": FixedRateBond,
     "floating-rate-note": FloatingRateBond,

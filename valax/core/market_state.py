@@ -449,7 +449,10 @@ class MarketState(eqx.Module):
         try:
             return self._lookup_asset(self.dividends, asset_id, "dividend")
         except KeyError:
-            if not self.dividends:
+            key = DEFAULT_ID if asset_id is None else asset_id
+            # An asset the market holds a spot for but no dividend entry is a
+            # non-payer, whether or not other assets carry dividends.
+            if not self.dividends or key in self.spots:
                 return jnp.asarray(0.0)
             raise
 

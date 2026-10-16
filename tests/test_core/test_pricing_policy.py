@@ -68,6 +68,8 @@ ADDED_SINCE_GOLDEN = {
     "ZeroCouponInflationSwap|NoneType": "analytic",
     "YearOnYearInflationSwap|NoneType": "analytic",
     "InflationCapFloor|ImpliedVolModel": "analytic",
+    "FXForward|NoneType": "analytic",
+    "FXVanillaOption|ImpliedVolModel": "analytic",
 }
 
 

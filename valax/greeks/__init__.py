@@ -57,6 +57,8 @@ from valax.greeks.quote_risk import (
     reconcile_quote_risk,
 )
 from valax.greeks.market_greeks import (
+    MarketRisk,
+    market_risk,
     bucketed_curve_deltas,
     curve_pillar_deltas,
     dual_delta,
@@ -78,6 +80,8 @@ __all__ = [
     "dual_delta",
     "theta",
     "market_greeks",
+    "MarketRisk",
+    "market_risk",
     # Quote-space (hedge-space) risk via the implicit function theorem
     "CalibrationLevel",
     "LevelAdjoint",

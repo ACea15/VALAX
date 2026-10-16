@@ -137,6 +137,18 @@ traced `jit` argument; `discount_curve` / `forward_curve` are views of
 
 ::: valax.core.inflation_ids_of
 
+`declared_entries` is the union of those readers with the model's
+`curve_requirements` and surface reference, canonicalised against a market: the
+set of entries a route may read. It is what
+[`market_risk`](greeks.md#valax.greeks.market_risk) reports on and what the
+route contract
+([tutorial § 10](../guide/tutorial-unified-pricing.md#onboarding-checklist-a-new-instrument-or-route-in-the-library))
+checks the gradient against.
+
+::: valax.core.declared_entries
+
+::: valax.core.DeclaredEntries
+
 ## Model binding — constants or market-sourced
 
 Pricing is four layers, and a model parameter may be supplied at either of

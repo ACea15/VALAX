@@ -17,7 +17,9 @@ costs 1.10 USD.
       (instrument defined; analytical barrier pricing TBD). See
       `valax/pricing/analytic/fx.py` for Garman-Kohlhagen pricing, forward valuation,
       implied vol inversion, and strike↔delta conversion in all three delta
-      conventions.
+      conventions. `FXForward` and `FXVanillaOption` also price through
+      `valax.price` (keyed FX spot, domestic and foreign curves) —
+      [Analytical § through `price()`](analytical.md#through-price).
     - **Planned**: Quanto, TARF, FX Swap (see [Roadmap Tier 3.3](../roadmap.md#33-fx-derivatives)).
 
 ## Quanto Option

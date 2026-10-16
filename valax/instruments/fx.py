@@ -30,7 +30,10 @@ class FXForward(eqx.Module):
         expiry: Time to maturity in year fractions.
         notional_foreign: Amount in foreign currency.
         is_buy: True = buy foreign / sell domestic.
-        currency_pair: E.g., ``"EUR/USD"`` (static, not traced).
+        currency_pair: E.g., ``"EUR/USD"`` (static, not traced). Also the FX
+            spot key ``price()`` reads: the pair without the ``/``.
+        discount_id: Domestic discount curve (static).
+        foreign_discount_id: Foreign discount curve (static).
     """
 
     strike: Float[Array, ""]
@@ -38,6 +41,18 @@ class FXForward(eqx.Module):
     notional_foreign: Float[Array, ""]
     is_buy: bool = eqx.field(static=True, default=True)
     currency_pair: str = eqx.field(static=True, default="FOR/DOM")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    foreign_discount_id: str = eqx.field(static=True, default="_default_")
+
+    @property
+    def curves_touched(self) -> tuple[str, ...]:
+        """``(domestic, foreign)`` discount curve ids, de-duplicated."""
+        return tuple(dict.fromkeys((self.discount_id, self.foreign_discount_id)))
+
+    @property
+    def fx_ids(self) -> tuple[str, ...]:
+        """The FX spot key: ``currency_pair`` without the ``/``."""
+        return (self.currency_pair.replace("/", ""),)
 
 
 class FXVanillaOption(eqx.Module):
@@ -61,7 +76,10 @@ class FXVanillaOption(eqx.Module):
         notional_foreign: Notional in foreign currency.
         is_call: True for call (buy foreign), False for put (sell foreign).
         premium_currency: ``"domestic"`` or ``"foreign"`` (static).
-        currency_pair: E.g., ``"EUR/USD"`` (static).
+        currency_pair: E.g., ``"EUR/USD"`` (static). Also the FX spot key
+            ``price()`` reads: the pair without the ``/``.
+        discount_id: Domestic discount curve (static).
+        foreign_discount_id: Foreign discount curve (static).
     """
 
     strike: Float[Array, ""]
@@ -70,6 +88,18 @@ class FXVanillaOption(eqx.Module):
     is_call: bool = eqx.field(static=True, default=True)
     premium_currency: str = eqx.field(static=True, default="domestic")
     currency_pair: str = eqx.field(static=True, default="FOR/DOM")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    foreign_discount_id: str = eqx.field(static=True, default="_default_")
+
+    @property
+    def curves_touched(self) -> tuple[str, ...]:
+        """``(domestic, foreign)`` discount curve ids, de-duplicated."""
+        return tuple(dict.fromkeys((self.discount_id, self.foreign_discount_id)))
+
+    @property
+    def fx_ids(self) -> tuple[str, ...]:
+        """The FX spot key: ``currency_pair`` without the ``/``."""
+        return (self.currency_pair.replace("/", ""),)
 
 
 class FXBarrierOption(eqx.Module):
