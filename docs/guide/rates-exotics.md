@@ -30,10 +30,14 @@ CMS swaps, CMS caps/floors, and range accruals.
     | `zcis_price` / `yyis_price` / `inflation_cap_floor_price_black76` | `valax/pricing/analytic/inflation.py` | 1 curve for nominal discount + 1 `InflationCurve` for CPI projection |
     | `cms_swap_price` / `cms_cap_price` / `range_accrual_price` | `valax/pricing/analytic/rates_exotics.py` | 1 curve |
 
-    Threading a `CurveGraph` through these signatures (so a swap with a
-    3M-forecast leg can pull `graph["USD.SOFR.3M"]` for projection while
-    `graph["USD.SOFR.OIS"]` handles discounting) is the *MC-Pricing*
-    workstream — planned but not yet started.
+    Through `valax.price` the curves are resolved from a `MarketState` by
+    each trade's static ids instead — `discount_id` / `forward_id`, each
+    leg's ids, `CrossCurrencySwap.foreign_discount_id`, the inflation
+    instruments' `inflation_id`
+    ([D16](../architecture/calibration-pricing-risk.md#3-decisions)) — so a
+    multi-index trade gets every curve it names; which instruments are routed
+    is the coverage matrix's
+    [`price()` routes column](../applications/instrument-pricing.md#coverage-matrix).
 
 ## OIS Swap
 
@@ -160,6 +164,62 @@ xccy = CrossCurrencySwap(
     The notional exchange feature means cross-currency swaps have **significant
     FX exposure** at maturity, unlike single-currency swaps. The MTM of the
     notional re-exchange depends on how much the FX rate has moved since inception.
+
+**Through `price()`.** The domestic curve is the trade's `discount_id`, the
+foreign one its `foreign_discount_id`, and the spot (domestic per foreign) is
+`MarketState.fx_spots` under `currency_pair` without the `/` — all static, so
+the call jits with the trade traced and its gradient reports both curves'
+DV01 and the FX delta. Each leg projects off its own currency's discount
+curve, so a `forward_id` is refused rather than ignored:
+
+```python
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+from valax.core import MarketState, price
+from valax.curves.discount import DiscountCurve
+from valax.curves.graph import CurveGraph
+from valax.dates import generate_schedule, ymd_to_ordinal
+from valax.instruments import CrossCurrencySwap
+
+ref = int(ymd_to_ordinal(2025, 3, 15))
+
+
+def curve(rate):
+    pillars = jnp.array([ref + 365 * k for k in range(7)], dtype=jnp.int32)
+    return DiscountCurve(pillar_dates=pillars,
+                         discount_factors=jnp.exp(-rate * (pillars - ref) / 365.0),
+                         reference_date=jnp.int32(ref), day_count="act_365")
+
+
+market = MarketState(
+    curves=CurveGraph(curves={"USD.SOFR.OIS": curve(0.040),
+                              "EUR.ESTR.OIS": curve(0.025)}),
+    fx_spots={"EURUSD": jnp.asarray(1.087)},
+)
+xccy = CrossCurrencySwap(
+    start_date=jnp.int32(ref),
+    payment_dates=generate_schedule(2025, 6, 15, 2030, 3, 15, frequency=4).payment_dates,
+    maturity_date=jnp.int32(ymd_to_ordinal(2030, 3, 15)),
+    domestic_notional=jnp.array(50_000_000.0), foreign_notional=jnp.array(46_000_000.0),
+    basis_spread=jnp.array(-0.0015), currency_pair="EUR/USD", day_count="act_360",
+    exchange_notional=False,       # no exchange: the foreign leg carries FX risk
+    discount_id="USD.SOFR.OIS", foreign_discount_id="EUR.ESTR.OIS",
+)
+value = eqx.filter_jit(lambda s, m: price(s, None, m).price)
+print(f"NPV (USD): {float(value(xccy, market)):,.2f}")
+g = eqx.filter_grad(lambda m: value(xccy, m))(market)
+print(f"FX delta : {float(g.fx_spots['EURUSD']):,.2f} USD per unit of EURUSD")
+for cid, c in g.curves.curves.items():
+    print(f"dNPV/dDF summed, {cid}: {float(jnp.sum(c.discount_factors)):,.0f}")
+```
+
+With `exchange_notional=True` the notional exchanges cancel each leg's
+telescoped floating coupons, the NPV collapses to the basis-spread annuity
+on the domestic curve, and the FX delta is exactly zero.
 
 ---
 

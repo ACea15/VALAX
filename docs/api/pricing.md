@@ -844,11 +844,22 @@ See [Lattice guide § general tree](../guide/lattice.md#general-tree-for-piecewi
 
 European and Bermudan swaptions on either tree, with cell-averaged payoffs
 (`smooth_payoff=True`, default) giving monotone first-order convergence in
-`n_steps`. They are independent checks of Jamshidian and the PDE, reached by
-**direct call only** — not yet through `price()`. Usage, accuracy evidence and
-step-count guidance:
+`n_steps`. They are independent checks of Jamshidian and the PDE. Usage,
+accuracy evidence and step-count guidance:
 [Lattice guide § swaptions on the tree](../guide/lattice.md#swaptions-on-the-tree).
 
 ::: valax.pricing.lattice.hull_white_tree.swaption_tree_price
 
 ::: valax.pricing.lattice.hull_white_tree.bermudan_swaption_tree_price
+
+### Through `price()`: `TreeConfig`
+
+The four tree pricers above are routed through `valax.price(...,
+method="lattice")` for `CallableBond`, `PuttableBond`, `Swaption` and
+`BermudanSwaption` under `HullWhiteModel`, always on the general tree, with
+the half-width sized from the config alone (`⌈width_factor · n_steps⌉`) so
+the routes run on a traced model under `jit` / `grad`. `method="auto"` stays
+the PDE (bonds, Bermudan) or Jamshidian (European swaption). See
+[Lattice guide § through `price()`](../guide/lattice.md#hull-white-tree-through-price).
+
+::: valax.pricing.lattice.TreeConfig

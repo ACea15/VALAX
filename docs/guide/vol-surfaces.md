@@ -496,6 +496,67 @@ vol = surface(option.strike, option.expiry)
 price = black_scholes_price(option, spot, vol, rate, dividend)
 ```
 
+### Rates options off a surface through `price()`
+
+Caplets, caps and European swaptions are priced off a rates vol source in the
+market under `ImpliedVolModel(surface_id)` — a parameter-free "model" that
+names the surface. The source can be a `SwaptionCube`, an
+`OptionletVolSurface`, or a flat `ConstantVol` (`is_normal=True` for a
+Bachelier vol, else Black-76). Each instrument reads the vol at its own
+coordinate and live forward off the resolved curves, so the route equals the
+curve-aware kernel (`valax.pricing.analytic.rates_smile`) bit for bit, and
+its gradient lands on the curves and the surface:
+
+```python
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import equinox as eqx
+import jax.numpy as jnp
+
+from valax.core import MarketState, price
+from valax.curves.discount import DiscountCurve
+from valax.curves.graph import CurveGraph
+from valax.dates.daycounts import ymd_to_ordinal
+from valax.dates.schedule import generate_schedule
+from valax.instruments.rates import Swaption
+from valax.models import ImpliedVolModel
+from valax.surfaces import ConstantVol, SwaptionCube
+
+ref = int(ymd_to_ordinal(2025, 1, 1))
+pillars = jnp.array([int(ymd_to_ordinal(2025 + y, 1, 1)) for y in range(11)],
+                    dtype=jnp.int32)
+curve = DiscountCurve(pillar_dates=pillars,
+                      discount_factors=jnp.exp(-0.03 * (pillars - ref) / 365.0),
+                      reference_date=jnp.int32(ref))
+shape = (2, 2)
+cube = SwaptionCube(expiries=jnp.array([1.0, 2.0]), tenors=jnp.array([5.0, 10.0]),
+                    forwards=jnp.full(shape, 0.03), alphas=jnp.full(shape, 0.035),
+                    betas=jnp.full(shape, 0.5), rhos=jnp.full(shape, -0.25),
+                    nus=jnp.full(shape, 0.4))       # ~20% lognormal ATM
+market = MarketState(
+    curves=CurveGraph(curves={"_default_": curve}),
+    surfaces={"USD.SOFR.CUBE": cube,
+              "USD.SOFR.VOL": ConstantVol(jnp.asarray(0.009), is_normal=True)},
+)
+swaption = Swaption(
+    expiry_date=jnp.int32(ymd_to_ordinal(2026, 1, 1)),
+    fixed_dates=generate_schedule(2026, 1, 1, 2031, 1, 1, frequency=1).payment_dates,
+    strike=jnp.asarray(0.032), notional=jnp.asarray(1e6), is_payer=True)
+
+smile = price(swaption, ImpliedVolModel("USD.SOFR.CUBE"), market).price   # SABR cube
+flat_n = price(swaption, ImpliedVolModel("USD.SOFR.VOL"), market).price   # Bachelier 90 bp
+vega = eqx.filter_grad(eqx.filter_jit(
+    lambda m: price(swaption, ImpliedVolModel("USD.SOFR.CUBE"), m).price
+))(market).surfaces["USD.SOFR.CUBE"].alphas                              # (2, 2)
+```
+
+`swaption_basket_node` prices its basket targets through this same route,
+so a calibration target and a user's price off the cube cannot drift apart.
+CMS and range-accrual products still take the surface by direct call (see the
+coverage matrix's [`price()` routes column](../applications/instrument-pricing.md#coverage-matrix)).
+
 ### Surface Greeks via autodiff
 
 Because surfaces are differentiable pytrees, `jax.grad` flows through them:

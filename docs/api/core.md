@@ -31,9 +31,16 @@ walked through in
 ### Method selection
 
 Availability and preference are separate: the registry answers *what can be
-priced*, the policy table answers *what should be*. `method="auto"` takes the
-policy entry when there is one and it is available, else the first available
-method in `analytic → lattice → pde → mc`.
+priced*, the policy table answers *what should be*. Every registered pair has
+an explicit policy entry in `valax.core.policy` — its `auto` method and a
+default config for each of its numerical methods — and there is no fallback:
+`method="auto"` raises for a pair without one (only possible for a
+third-party registration), naming the pair and its methods. The config used
+is **explicit `config=` > the pair's default for that method > error**
+(`effective_config`), recorded on `PricingResult.config`
+([D15](../architecture/calibration-pricing-risk.md#3-decisions)). Which
+methods each instrument reaches, per model, is the coverage matrix's
+[`price()` routes column](../applications/instrument-pricing.md#coverage-matrix).
 
 ::: valax.core.price
 
@@ -44,6 +51,21 @@ method in `analytic → lattice → pde → mc`.
 ::: valax.core.available_methods
 
 ::: valax.core.registered_pricers
+
+### Default configs
+
+::: valax.core.effective_config
+
+::: valax.core.default_config
+
+::: valax.core.set_default_config
+
+::: valax.core.CONFIGLESS_METHODS
+
+::: valax.core.policy
+    options:
+      members:
+        - AUTO_METHODS
 
 ### Registering a pricer
 
@@ -97,6 +119,23 @@ resolution happens at trace time and stays out of the gradient path.
 ::: valax.core.resolve_dividend
 
 ::: valax.core.resolve_surface
+
+### Keyed views (D16)
+
+`ResolvedMarket` holds every entry a trade names, keyed by id — `curves`,
+`spots`, `fx_spots`, `inflation_curves` — decided by the instrument's static
+selectors only, so resolution happens at trace time and the trade may be a
+traced `jit` argument; `discount_curve` / `forward_curve` are views of
+`curves`. These readers say which ids a trade reads
+([D16](../architecture/calibration-pricing-risk.md#3-decisions)).
+
+::: valax.core.curve_ids_of
+
+::: valax.core.underlying_ids_of
+
+::: valax.core.fx_ids_of
+
+::: valax.core.inflation_ids_of
 
 ## Model binding — constants or market-sourced
 

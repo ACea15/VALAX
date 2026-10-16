@@ -12,6 +12,72 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — Phase 4 (D16) — keyed market resolution; multi-index trades through `price()`
+
+**`ResolvedMarket` holds every entry a trade names, keyed by id.** New
+fields `curves` (a `CurveGraph` of exactly the curves the trade reads,
+`curve_ids_of`), `spots` (`underlying_ids_of`, in the instrument's order),
+`fx_spots` (`fx_ids_of`), `inflation_curves` (`inflation_ids_of`), and static
+`discount_id` / `forward_id`; `discount_curve` / `forward_curve` are now
+properties over `curves` (the same objects, so single-index prices are
+bit-identical). Selection reads static fields only, so every route works with
+the trade traced under `jit` / `grad`. **Changed on purpose:**
+`forward_id_of` no longer takes `curves_touched[1]` of a trade touching three
+or more curves (a `MultiLegSwap` tenor basis swap used to resolve one
+projection curve and drop the other); a rates trade on a market that holds
+equity spots but none under `"_default_"` no longer raises a spot
+`KeyError`.
+
+**Recipes and models.** MC / PDE recipes receive `curves` / `spots` only by
+naming them; `price()` refuses a trade touching curves its recipe cannot
+take. `curve_requirements` values may be a mapping `{key: curve_id}`,
+binding a dict of curves into one model field.
+
+**New routes.** `MultiLegSwap × None` (tenor basis, amortising, seasoned;
+fixings from the market), `CrossCurrencySwap × None` (new static
+`foreign_discount_id`; FX spot keyed by `currency_pair` without the `/`; a
+`forward_id` is refused), `ZeroCouponInflationSwap` /
+`YearOnYearInflationSwap × None` and `InflationCapFloor × ImpliedVolModel`
+(new static `discount_id` / `inflation_id`), and the multi-asset MC recipes
+(`SpreadOption` / `WorstOfBasketOption` gain static `underlying_ids`, checked
+at construction). All new fields default so existing constructions are
+unchanged.
+
+### Changed (**breaking**) — Phase 4 (D15) — explicit pricing policy, default configs, new `price()` routes
+
+**`auto` is a policy, not a fallback.** Every registered `(instrument, model)`
+pair names its `auto` method in `valax.core.policy` (`AUTO_METHODS`); the
+global analytic → lattice → pde → mc fallback is removed. Every library
+`auto` choice is unchanged, but a **third-party pair registered without
+`set_auto_method` now raises on `method="auto"`** (explicit methods still
+work). Migration: call `set_auto_method(MyInstrument, MyModel, "...")` next to
+`register_pricer`.
+
+**Default configs.** `set_default_config`, `default_config`,
+`effective_config` and `CONFIGLESS_METHODS` (`valax.core`): `config=None`
+now works for every numerical method (it raised `AttributeError` for PDE and
+MC) — explicit `config=` > the pair's default > error. `PricingResult` gains
+a static `config` field (the config used; `None` for analytic), and
+calibration provenance records the effective config.
+
+**Short-rate MC honours `MCConfig.n_steps`** (Hull-White, G2++, Cheyette
+1F/2F). It was silently 100; a caller passing another step count now gets the
+price they asked for (the default `MCConfig(100_000, 100)` reproduces the old
+100-step prices bit for bit).
+
+**New routes.** `valax.models.ImpliedVolModel(surface_id)` prices `Caplet`,
+`Cap` and `Swaption` off a market vol source (`SwaptionCube`,
+`OptionletVolSurface`, `ConstantVol` normal or lognormal); `swaption_basket_node`
+prices its targets through it. The Hull-White tree is reachable as
+`method="lattice"` for callable / puttable bonds and European / Bermudan
+swaptions with `valax.pricing.lattice.TreeConfig` (general tree, half-width
+`ceil(width_factor * n_steps)`, factor 2, so it runs under `jit` / `grad`;
+`auto` unchanged). `callable_bond_price` / `puttable_bond_price` are now
+traceable (no `int()` on dates) and take `general=`; two call (put) dates
+snapping to one tree step keep the cheaper call (richer put) instead of the
+later one. The coverage matrix gains a `price()` routes column, checked
+against the registry by `tests/test_docs/test_price_routes.py`.
+
 ### Changed (**breaking**) — Phase 3 — unified calibrators, rates vol chain nodes, per-trade model calibration
 
 Every calibrator now has one shape: a level `R(theta; quotes, upstream, fixed) = 0`

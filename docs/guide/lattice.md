@@ -19,9 +19,9 @@ swaptions, with constant or piecewise-constant volatility \(\sigma(t)\).
 Every Hull-White row accepts a **piecewise-constant volatility** \(\sigma(t)\)
 (`HullWhiteModel(volatility=[...], volatility_times=[...])`): a one-bucket
 model runs the classical Hull & White (1994) tree, a multi-bucket model the
-[general tree](#general-tree-for-piecewise-constant-volatility). The two
-swaption rows are direct function calls only — see
-[the note below](#not-yet-reachable-through-valaxprice).
+[general tree](#general-tree-for-piecewise-constant-volatility). All four
+Hull-White rows are also reachable through `price(..., method="lattice")` —
+see [Hull-White tree through `price()`](#hull-white-tree-through-price).
 
 ## When to use a tree
 
@@ -386,16 +386,79 @@ The Bermudan extrapolate agrees with the PDE example in the
 to $4\times10^{-5}$ relative, and with a finer 801 × 1200 PDE (0.02995037) to
 $1.3\times10^{-5}$.
 
-#### Not yet reachable through `valax.price()`
+### Hull-White tree through `price()`
 
-The Hull-White tree pricers — `swaption_tree_price`,
-`bermudan_swaption_tree_price`, and likewise `callable_bond_price` /
-`puttable_bond_price` — are **direct function calls**. `price(...,
-method="lattice")` is registered only for the CRR equity pairs, so a rates
-trade sent there raises `ValueError: No lattice pricer registered for
-(BermudanSwaption, HullWhiteModel)`; use the PDE (`method="pde"`) for the
-front door. Registering the tree swaption pricers is planned for the next
-workstream.
+The four Hull-White tree pricers are routed through
+`valax.price(..., method="lattice")` for `CallableBond`, `PuttableBond`,
+`Swaption` and `BermudanSwaption` under `HullWhiteModel`, configured by a
+static `TreeConfig(n_steps=100, j_max=None, width_factor=2.0,
+smooth_payoff=True)` (the pair's default when `config=None`). `method="auto"`
+is unchanged — the PDE for the bonds and the Bermudan, Jamshidian for the
+European swaption — so the tree stays the independent check, now one keyword
+away. The routes differ from the direct calls in two ways:
+
+- **Always the general tree**, for a constant $\sigma$ too (`general=True` on
+  the direct functions does the same): its nearest-node branching is valid at
+  any half-width, which the classical tree's is not (beyond about
+  $0.816/(a\Delta t)$ its standard branching has negative probabilities). At
+  100 steps it is also slightly *closer* to Jamshidian than the classical
+  tree in the cases measured while choosing the default.
+- **The half-width comes from the config alone**:
+  $J = \lceil w \cdot n_\text{steps} \rceil$ with `width_factor` $w = 2$, so
+  no eager sizing of a concrete model is needed and the route runs on a traced
+  model under `eqx.filter_jit` and `jax.grad`. A step moves at most one level,
+  but where $\sigma(t)$ drops the finer levels need more nodes for the same
+  rates; the measured `hw_tree_width / n_steps` was ≤ 1.00 for a constant
+  $\sigma$, 1.17 for a 0.012 → 0.009 drop, 1.25–1.30 for ×1.5 zig-zags and ×2
+  humps, and 2.00 for a ×3 drop. Outer nodes beyond the reachable width
+  carry no probability mass, so they cost time, not accuracy; a tree too
+  narrow for its model is flagged invalid and prices NaN — raise
+  `width_factor` or pass `j_max` (e.g. the tight `hw_tree_width`).
+
+The bond routes price single-curve: a bond that resolves a projection curve
+distinct from its discount curve is refused (the swaption routes take the
+projection curve as a frozen tenor basis, like the PDE).
+
+```python
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import equinox as eqx
+import jax.numpy as jnp
+
+from valax.core import MarketState, price
+from valax.curves.discount import DiscountCurve
+from valax.dates.daycounts import ymd_to_ordinal
+from valax.instruments.rates import Swaption
+from valax.models import HullWhiteModel
+from valax.pricing.lattice import TreeConfig
+
+ref = int(ymd_to_ordinal(2025, 1, 1))
+pillars = jnp.array([int(ymd_to_ordinal(2025 + y, 1, 1)) for y in range(12)],
+                    dtype=jnp.int32)
+t = (pillars - ref) / 365.0
+market = MarketState.single_curve(DiscountCurve(
+    pillar_dates=pillars, discount_factors=jnp.exp(-0.03 * t),
+    reference_date=jnp.int32(ref), day_count="act_365"))
+swaption = Swaption(
+    expiry_date=pillars[2], fixed_dates=pillars[3:8], strike=jnp.asarray(0.03),
+    notional=jnp.asarray(1.0), day_count="act_365")
+# sigma(t) falls from 1.2% to 0.9% at 1Y: the tree needs J > n_steps there.
+model = HullWhiteModel(mean_reversion=jnp.asarray(0.05),
+                       volatility=jnp.asarray([0.012, 0.009, 0.011]),
+                       volatility_times=jnp.asarray([1.0, 3.0]))
+
+tree = price(swaption, model, market, method="lattice",
+             config=TreeConfig(n_steps=200))
+exact = price(swaption, model, market)            # auto: Jamshidian
+print(tree.price, exact.price, tree.config.half_width)
+# 0.0232907 vs 0.0232775 (first order in n_steps); J = 400, tight width 233
+
+# Traced model, default config: jit and bucketed vega with no j_max.
+value = lambda m: price(swaption, m, market, method="lattice").price
+vega = eqx.filter_grad(eqx.filter_jit(value))(model).volatility   # (3,)
+```
 
 ### Greeks and the `j_max` caveat
 

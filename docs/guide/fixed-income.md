@@ -580,6 +580,76 @@ print(basis.indices_touched)  # ('USD.SOFR', 'USD.LIBOR.3M')
 appearance, so they are deterministic rather than hash-dependent — which is what
 lets a caller assemble exactly the curves a trade needs before pricing it.
 
+### Legs through `price()`
+
+`price(swap, None, market)` routes a `MultiLegSwap` to `swap_pv` with every
+curve its legs name (`ResolvedMarket.curves`, keyed by id —
+[D16](../architecture/calibration-pricing-risk.md#3-decisions)) and the
+market's fixing history, valued at the discount curve's reference date. Which
+curves is fixed by the legs' static ids, so the same call works with the trade
+as a traced `jit` argument, its curve risk lands on exactly the curves it
+names, and trades sharing ids batch under `vmap`:
+
+```python
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+from valax.core import MarketState, price
+from valax.curves.discount import DiscountCurve
+from valax.curves.graph import CurveGraph
+from valax.dates.daycounts import ymd_to_ordinal
+from valax.instruments.legs import FloatingLeg, MultiLegSwap
+
+ref = int(ymd_to_ordinal(2026, 1, 1))
+
+
+def curve(short, slope):
+    pillars = jnp.array([ref + 365 * k for k in range(8)], dtype=jnp.int32)
+    t = (pillars - ref) / 365.0
+    return DiscountCurve(pillar_dates=pillars,
+                         discount_factors=jnp.exp(-(short + slope * t) * t),
+                         reference_date=jnp.int32(ref), day_count="act_365")
+
+
+market = MarketState(curves=CurveGraph(curves={
+    "USD.SOFR.OIS": curve(0.030, 0.002),
+    "USD.SOFR.3M": curve(0.033, 0.002),
+    "USD.SOFR.6M": curve(0.035, 0.002),
+}))
+starts = jnp.array([ref + 2 + 182 * k for k in range(10)], dtype=jnp.int32)
+ends = starts + 182
+
+
+def leg(forward_id, **kw):
+    return FloatingLeg(accrual_start_dates=starts, accrual_end_dates=ends,
+                       payment_dates=ends, notional=jnp.asarray(1e8),
+                       compounding="simple", fixing_dates=starts,
+                       index_id=forward_id, discount_id="USD.SOFR.OIS",
+                       forward_id=forward_id, **kw)
+
+
+def basis(spread):
+    """Receive 3M flat, pay 6M + spread: three curves."""
+    return MultiLegSwap(legs=(leg("USD.SOFR.3M", spread=jnp.asarray(0.0)),
+                              leg("USD.SOFR.6M", spread=spread, pay=True)))
+
+
+swap = basis(jnp.asarray(-0.0010))
+value = eqx.filter_jit(lambda s, m: price(s, None, m).price)
+print(f"basis swap PV : {float(value(swap, market)):,.2f}")
+risk = eqx.filter_grad(lambda m: value(swap, m))(market).curves.curves
+print({cid: float(jnp.sum(c.discount_factors)) for cid, c in risk.items()})
+pvs = eqx.filter_vmap(lambda s: value(basis(s), market))(
+    jnp.array([-0.002, -0.001, 0.0]))
+print(pvs)                      # one compiled program, three spreads
+```
+
+A seasoned leg reads its realised fixings from `market.fixings` by its
+`index_id`; the index id never selects a curve.
+
 !!! note "What the leg engine does not do yet"
     `MultiLegSwap` adds its legs' present values directly, so **every leg must
     discount in the same currency**. A cross-currency swap additionally needs an

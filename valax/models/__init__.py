@@ -2,6 +2,7 @@
 
 from valax.models.black_scholes import BlackScholesModel
 from valax.models.heston import HestonModel
+from valax.models.implied_vol import ImpliedVolModel
 from valax.models.lmm import (
     LMMModel,
     PiecewiseConstantVol,

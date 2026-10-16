@@ -52,6 +52,9 @@ class ZeroCouponInflationSwap(eqx.Module):
         is_inflation_receiver: True = receive inflation / pay fixed.
         index_lag: Publication lag of the CPI index in months.
         day_count: Day count convention.
+        discount_id: Nominal discount curve id (``MarketState.curves``).
+        inflation_id: Inflation (forward CPI) curve id
+            (``MarketState.inflation_curves``).
     """
 
     effective_date: Int[Array, ""]
@@ -62,6 +65,8 @@ class ZeroCouponInflationSwap(eqx.Module):
     is_inflation_receiver: bool = eqx.field(static=True, default=True)
     index_lag: int = eqx.field(static=True, default=3)
     day_count: str = eqx.field(static=True, default="act_act")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    inflation_id: str = eqx.field(static=True, default="_default_")
 
 
 class YearOnYearInflationSwap(eqx.Module):
@@ -89,6 +94,9 @@ class YearOnYearInflationSwap(eqx.Module):
         is_inflation_receiver: True = receive inflation / pay fixed.
         index_lag: Publication lag in months.
         day_count: Day count convention.
+        discount_id: Nominal discount curve id (``MarketState.curves``).
+        inflation_id: Inflation (forward CPI) curve id
+            (``MarketState.inflation_curves``).
     """
 
     effective_date: Int[Array, ""]
@@ -99,6 +107,8 @@ class YearOnYearInflationSwap(eqx.Module):
     is_inflation_receiver: bool = eqx.field(static=True, default=True)
     index_lag: int = eqx.field(static=True, default=3)
     day_count: str = eqx.field(static=True, default="act_act")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    inflation_id: str = eqx.field(static=True, default="_default_")
 
 
 class InflationCapFloor(eqx.Module):
@@ -122,6 +132,9 @@ class InflationCapFloor(eqx.Module):
         is_cap: True for inflation cap, False for inflation floor.
         index_lag: Publication lag in months.
         day_count: Day count convention.
+        discount_id: Nominal discount curve id (``MarketState.curves``).
+        inflation_id: Inflation (forward CPI) curve id
+            (``MarketState.inflation_curves``).
     """
 
     effective_date: Int[Array, ""]
@@ -132,3 +145,5 @@ class InflationCapFloor(eqx.Module):
     is_cap: bool = eqx.field(static=True, default=True)
     index_lag: int = eqx.field(static=True, default=3)
     day_count: str = eqx.field(static=True, default="act_act")
+    discount_id: str = eqx.field(static=True, default="_default_")
+    inflation_id: str = eqx.field(static=True, default="_default_")

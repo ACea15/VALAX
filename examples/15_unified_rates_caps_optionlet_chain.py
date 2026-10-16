@@ -21,12 +21,11 @@
      caplets read — exactly zero on the longer maturities — and the curve
      risk includes the strip's own dependence on the forwards.
 
-``price`` has no built-in (``Cap``, smile) pairing: caps are priced off an
-optionlet surface by :func:`~valax.pricing.analytic.rates_smile.cap_price`.
-The example plugs it in through the public extension point
-:func:`~valax.core.pricing.register_pricer` with a small surface-reading
-model (``OptionletSmile``), so ``price`` and the quote-risk functions built
-on it see an ordinary (instrument, model, market) triple.
+Caps are priced off the optionlet surface under
+:class:`~valax.models.ImpliedVolModel` — the market-quoted "model" that names
+the vol source by its id — so ``price`` and the quote-risk functions built on
+it see an ordinary (instrument, model, market) triple; the route is the
+curve-aware :func:`~valax.pricing.analytic.rates_smile.cap_price`.
 
 Run::
 
@@ -45,7 +44,7 @@ import numpy as np
 
 import valax
 from valax.calibration import CalibrationChain, calibrate_market
-from valax.core.pricing import PricingResult, price, register_pricer
+from valax.core.pricing import price
 from valax.dates.daycounts import year_fraction
 from valax.greeks import quote_risk_adjoint, quote_risk_autodiff, reconcile_quote_risk
 from valax.instruments.rates import Cap
@@ -56,6 +55,7 @@ from valax.market import (
     default_config,
     rates_vol_snapshot,
 )
+from valax.models import ImpliedVolModel
 from valax.pricing.analytic.caplets import cap_forwards, cap_price_bachelier
 from valax.pricing.analytic.rates_smile import cap_price
 from valax.surfaces.shifted import ShiftedVolSurface
@@ -72,42 +72,6 @@ def header(s: str) -> None:
     print(f"\n{'=' * 72}\n  {s}\n{'=' * 72}")
 
 
-# %% The (Cap, optionlet smile) pricer behind price()
-class OptionletSmile(eqx.Module):
-    """Model-free smile pricing: read the optionlet surface named ``surface_id``.
-
-    Attributes:
-        surface_id: Key of the optionlet vol surface in the ``MarketState``.
-    """
-
-    surface_id: str = eqx.field(static=True)
-
-
-@register_pricer(Cap, OptionletSmile, "analytic", overwrite=True)
-def _cap_off_optionlet_surface(*, instrument, model, market, resolved, config, key):
-    """Cap/floor off the resolved optionlet surface.
-
-    Each caplet reads the surface at its own (strike, expiry, live forward).
-
-    Args:
-        instrument: The ``Cap``.
-        model: The ``OptionletSmile`` (its surface is already in ``resolved``).
-        market: The ``MarketState`` (unused beyond ``resolved``).
-        resolved: Curves and surface bound to the trade.
-        config: Unused.
-        key: Unused.
-
-    Returns:
-        The analytic :class:`PricingResult`.
-    """
-    return PricingResult(
-        price=cap_price(
-            instrument, resolved.discount_curve, resolved.surface, resolved.forward_curve
-        ),
-        method="analytic",
-    )
-
-
 # Seed note: with only five noisy strikes per optionlet expiry, some draws push
 # a bucket's SABR ρ to −1 and the strict fit fails (named per expiry); this
 # seed gives an interior fit.
@@ -119,7 +83,7 @@ vol_spec = RatesVolSpec(
     cap_years=(1, 2, 3, 5),
     cap_strike_offsets_bp=(-100.0, -50.0, 0.0, 50.0, 100.0),
 )
-SMILE = OptionletSmile(surface_id=vol_spec.optionlet_id)
+SMILE = ImpliedVolModel(vol_spec.optionlet_id)  # caps off the optionlet surface
 
 # %% 1. Noisy synthetic quotes
 header("1. Synthetic rates + cap quotes (0.5 bp curves, 0.5 normal-vol bp caps)")

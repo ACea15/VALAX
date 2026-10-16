@@ -802,7 +802,8 @@ def _bermudan_lmm(
 #     n_steps (int): Number of time steps for path generation.
 #     T       (float): Horizon in year fractions (must cover bond maturity).
 #   Optional:
-#     n_steps defaults to 100 when not supplied.
+#     n_steps defaults to config.n_steps (MCConfig) when not supplied;
+#     before D15 it defaulted to 100 and MCConfig.n_steps was ignored.
 #
 # Multi-curve: the Hull-White and G2++ rates recipes below additionally take
 # `discount_curve` and (where a floating leg is projected) `forward_curve`,
@@ -888,7 +889,7 @@ def _fixed_bond_hw(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     discount_curve=None,
     **kwargs,
 ) -> MCResult:
@@ -904,11 +905,12 @@ def _fixed_bond_hw(
     Optional market args:
         T: Horizon in year fractions.  Defaults to the year fraction of
             the last payment date.
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
         discount_curve: Curve to discount on; re-fits the model to it
             (:func:`~valax.pricing.multicurve.with_discount_curve`).
             Defaults to the model's own ``initial_curve``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
@@ -938,7 +940,7 @@ def _floating_bond_hw(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     discount_curve=None,
     forward_curve=None,
     **kwargs,
@@ -968,11 +970,12 @@ def _floating_bond_hw(
 
     Optional market args:
         T: Horizon in year fractions (defaults to maturity).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
         discount_curve: Curve to discount on; re-fits the model to it.
         forward_curve: Projection curve for the floating coupons. ``None``
             (the default) projects off the discount curve.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
@@ -1132,7 +1135,7 @@ def _callable_bond_hw(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     smoothing: Float[Array, ""] | None = None,
     discount_curve=None,
     **kwargs,
@@ -1147,11 +1150,12 @@ def _callable_bond_hw(
 
     Optional market args:
         T: Horizon in year fractions (defaults to bond maturity).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
         smoothing: Sigmoid width for the exercise indicator, in currency
             units.  Defaults to 0.1 % of each call price.
         discount_curve: Curve to discount on; re-fits the model to it.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
@@ -1183,7 +1187,7 @@ def _puttable_bond_hw(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     smoothing: Float[Array, ""] | None = None,
     discount_curve=None,
     **kwargs,
@@ -1196,11 +1200,12 @@ def _puttable_bond_hw(
 
     Optional market args:
         T: Horizon in year fractions (defaults to bond maturity).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
         smoothing: Sigmoid width for the exercise indicator, in currency
             units.  Defaults to 0.1 % of each put price.
         discount_curve: Curve to discount on; re-fits the model to it.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
@@ -1268,7 +1273,7 @@ def _fixed_bond_g2pp(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     discount_curve=None,
     **kwargs,
 ) -> MCResult:
@@ -1276,9 +1281,10 @@ def _fixed_bond_g2pp(
 
     Optional market args:
         T: Horizon in year fractions (defaults to the last payment date).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
         discount_curve: Curve to discount on; re-fits the model to it.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
@@ -1305,7 +1311,7 @@ def _floating_bond_g2pp(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     discount_curve=None,
     forward_curve=None,
     **kwargs,
@@ -1319,11 +1325,12 @@ def _floating_bond_g2pp(
 
     Optional market args:
         T: Horizon in year fractions (defaults to maturity).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
         discount_curve: Curve to discount on; re-fits the model to it.
         forward_curve: Projection curve for the floating coupons. ``None``
             (the default) projects off the discount curve.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
@@ -1376,7 +1383,7 @@ def _swaption_g2pp(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     discount_curve=None,
     forward_curve=None,
     **kwargs,
@@ -1395,11 +1402,12 @@ def _swaption_g2pp(
 
     Optional market args:
         T: Horizon in year fractions (defaults to the option expiry).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
         discount_curve: Curve the swap discounts on; re-fits the model to it.
         forward_curve: Projection curve for the floating leg. ``None`` (the
             default) projects off the discount curve.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     model = with_discount_curve(model, discount_curve)
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
@@ -1498,7 +1506,7 @@ def _cms_spread_swap_g2pp(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     discount_curve=None,
     forward_curve=None,
     **kwargs,
@@ -1513,12 +1521,13 @@ def _cms_spread_swap_g2pp(
 
     Optional market args:
         T: Horizon in year fractions (defaults to the last payment date).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
         discount_curve: Curve the coupons discount on; re-fits the model.
         forward_curve: **Not supported yet.** The CMS rates are rebuilt from
             the model's own bond strip, so a distinct projection curve would
             be silently ignored; a distinct curve is rejected instead.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     model = with_discount_curve(model, discount_curve)
     require_single_curve(
         model.initial_curve, forward_curve, "The G2++ CMS-spread MC recipe"
@@ -1613,15 +1622,16 @@ def _fixed_bond_cheyette(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     **kwargs,
 ) -> MCResult:
     """Fixed-rate bond price under one-factor Cheyette short-rate MC.
 
     Optional market args:
         T: Horizon in year fractions (defaults to the last payment date).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
 
@@ -1647,7 +1657,7 @@ def _floating_bond_cheyette(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     **kwargs,
 ) -> MCResult:
     """Floating-rate note price under one-factor Cheyette short-rate MC.
@@ -1658,8 +1668,9 @@ def _floating_bond_cheyette(
 
     Optional market args:
         T: Horizon in year fractions (defaults to maturity).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
     face = instrument.face_value
@@ -1741,7 +1752,7 @@ def _caplet_cheyette(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     **kwargs,
 ) -> MCResult:
     """Caplet / floorlet under one-factor Cheyette short-rate MC.
@@ -1753,8 +1764,9 @@ def _caplet_cheyette(
 
     Optional market args:
         T: Horizon in year fractions (defaults to the accrual end date).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
 
@@ -1793,7 +1805,7 @@ def _cap_cheyette(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     **kwargs,
 ) -> MCResult:
     """Cap / floor strip under one-factor Cheyette short-rate MC.
@@ -1804,8 +1816,9 @@ def _cap_cheyette(
 
     Optional market args:
         T: Horizon in year fractions (defaults to the last accrual end date).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
 
@@ -1848,7 +1861,7 @@ def _swaption_cheyette(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     **kwargs,
 ) -> MCResult:
     """European swaption price under one-factor Cheyette short-rate MC.
@@ -1861,8 +1874,9 @@ def _swaption_cheyette(
 
     Optional market args:
         T: Horizon in year fractions (defaults to the option expiry).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
 
@@ -1932,15 +1946,16 @@ def _fixed_bond_cheyette2f(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     **kwargs,
 ) -> MCResult:
     """Fixed-rate bond price under two-factor Cheyette short-rate MC.
 
     Optional market args:
         T: Horizon in year fractions (defaults to the last payment date).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     ref = model.initial_curve.reference_date
     cf_times, cf_amounts = _hw_coupon_schedule(instrument, ref)
 
@@ -1966,15 +1981,16 @@ def _floating_bond_cheyette2f(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     **kwargs,
 ) -> MCResult:
     """Floating-rate note price under two-factor Cheyette short-rate MC.
 
     Optional market args:
         T: Horizon in year fractions (defaults to maturity).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
     face = instrument.face_value
@@ -2056,7 +2072,7 @@ def _cms_spread_swap_cheyette2f(
     config: MCConfig,
     key: jax.Array,
     T: float | None = None,
-    n_steps: int = 100,
+    n_steps: int | None = None,
     **kwargs,
 ) -> MCResult:
     """CMS-spread swap (steepener / flattener) under two-factor Cheyette MC.
@@ -2069,8 +2085,9 @@ def _cms_spread_swap_cheyette2f(
 
     Optional market args:
         T: Horizon in year fractions (defaults to the last payment date).
-        n_steps: Number of time steps (default 100).
+        n_steps: Number of time steps; defaults to ``config.n_steps``.
     """
+    n_steps = config.n_steps if n_steps is None else n_steps
     ref = model.initial_curve.reference_date
     day_count = instrument.day_count
 

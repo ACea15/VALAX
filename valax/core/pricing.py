@@ -37,9 +37,10 @@ Availability and preference are kept separate:
 * the **policy table** :data:`_AUTO_POLICY` answers *what should be*,
   pair by pair, and is populated by :func:`set_auto_method`.
 
-``method="auto"`` takes the policy entry when there is one and it is
-available, else the first available method in :data:`_METHOD_PRIORITY`
-(``analytic`` → ``lattice`` → ``pde`` → ``mc``: exact and cheap first).
+``method="auto"`` takes the pair's policy entry, and only that: every pair
+the library registers has one (:mod:`valax.core.policy`), and a pair with
+pricers but no entry is an error rather than a guess, so adding a pricer
+never silently changes what ``auto`` means for an existing pair.
 
 Growth happens in the dispatch, never in the signature: new methods and
 new ``(instrument, model)`` pairs register; ``price``'s parameters do not
@@ -49,10 +50,12 @@ layer, where the legacy dispatchers keep them.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from typing import Any, Callable
 
 import equinox as eqx
+import jax.numpy as jnp
 from jaxtyping import Float
 from jax import Array
 
@@ -82,6 +85,9 @@ class PricingResult(eqx.Module):
         method: The method actually used — ``"analytic"``, ``"lattice"``,
             ``"pde"``, or ``"mc"``.  Static field.
         diagnostics: Optional method-specific extras (pytree of arrays).
+        config: The config actually used — the caller's, else the pair's
+            default (:func:`effective_config`); ``None`` for a configless
+            analytic route.  Static field.
 
     Convenience:
         ``float(result)`` returns ``float(result.price)`` so the result
@@ -92,6 +98,7 @@ class PricingResult(eqx.Module):
     stderr: Float[Array, ""] | None = None
     method: str = eqx.field(static=True, default="")
     diagnostics: dict = eqx.field(default_factory=dict)
+    config: Any = eqx.field(static=True, default=None)
 
     def __float__(self) -> float:  # pragma: no cover - convenience
         return float(self.price)
@@ -103,8 +110,9 @@ class PricingResult(eqx.Module):
 #: The methods the unified layer knows about.
 METHODS = ("analytic", "lattice", "pde", "mc")
 
-#: Preference order used by ``method="auto"`` when no policy entry
-#: applies: exact-and-cheap first, sampling last.
+#: Order in which :func:`available_methods` lists methods (exact-and-cheap
+#: first, sampling last). Not a selection rule: ``method="auto"`` comes from
+#: the explicit policy of each pair (:mod:`valax.core.policy`).
 _METHOD_PRIORITY = METHODS
 
 #: ``(instrument_cls, model_cls, method) -> adapter``.  Populated by
@@ -114,6 +122,15 @@ _REGISTRY: dict[tuple[type, type, str], Callable[..., PricingResult]] = {}
 #: ``(instrument_cls, model_cls) -> method``.  The auto-selection policy,
 #: deliberately separate from the registry (Q2).
 _AUTO_POLICY: dict[tuple[type, type], str] = {}
+
+#: ``(instrument_cls, model_cls, method) -> config``: the default config of
+#: each pair's method (the config half of the policy), used when ``price``
+#: is called with ``config=None``.  Populated by :func:`set_default_config`.
+_DEFAULT_CONFIGS: dict[tuple[type, type, str], Any] = {}
+
+#: Methods that need no numerical config: ``config=None`` is valid for them
+#: when the pair registers no default.
+CONFIGLESS_METHODS = ("analytic",)
 
 #: Set once the analytic/lattice adapters and the legacy MC/PDE recipe
 #: registries have been imported.  Kept lazy so ``import valax`` does not
@@ -196,6 +213,105 @@ def set_auto_method(
     _AUTO_POLICY[(instrument_cls, model_cls)] = method
 
 
+def set_default_config(
+    instrument_cls: type,
+    model_cls: type,
+    method: str,
+    config: Any,
+) -> None:
+    """Declare the default config of one (instrument, model, method).
+
+    The config half of the pricing policy: ``price(..., config=None)`` uses
+    it, so every numerical method can be called without settings, and an
+    instrument that needs finer settings than its siblings gets its own.
+    Configs are all-static, so the default is part of the compiled program.
+
+    Args:
+        instrument_cls: Instrument pytree class.
+        model_cls: Model pytree class (``type(None)`` for model-free).
+        method: One of :data:`METHODS`.
+        config: The method's config (``PDEConfig``, ``MCConfig``, …).
+
+    Raises:
+        ValueError: If ``method`` is not a known method or ``config`` is
+            ``None``.
+    """
+    _validate_method(method)
+    if config is None:
+        raise ValueError("A default config cannot be None.")
+    _DEFAULT_CONFIGS[(instrument_cls, model_cls, method)] = config
+
+
+def default_config(instrument: Any, model: Any, method: str) -> Any:
+    """The registered default config of one (instrument, model, method).
+
+    Looked up through the instrument's base classes, as the pricers are.
+
+    Args:
+        instrument: Instrument pytree (or class).
+        model: Model pytree (or class), possibly ``None``.
+        method: A concrete method (not ``"auto"``).
+
+    Returns:
+        The default config, or ``None`` if none is registered.
+    """
+    _ensure_backends()
+    instrument_cls = instrument if isinstance(instrument, type) else type(instrument)
+    model_cls = model if isinstance(model, type) else type(model)
+    for cls in _instrument_bases(instrument_cls):
+        found = _DEFAULT_CONFIGS.get((cls, model_cls, method))
+        if found is not None:
+            return found
+    return None
+
+
+def effective_config(
+    instrument: Any,
+    model: Any,
+    method: str = "auto",
+    config: Any = None,
+) -> Any:
+    """The config :func:`price` actually uses for this call.
+
+    Precedence: an explicit ``config`` > the pair's registered default for
+    the method (:func:`set_default_config`) > ``None`` for a configless method
+    (:data:`CONFIGLESS_METHODS`) > error. Calibrations record this as their
+    engine provenance, so a fit priced with ``config=None`` is bound to the
+    grid it actually used.
+
+    Args:
+        instrument: Instrument pytree (or class).
+        model: Model pytree (or class), possibly ``None``.
+        method: The pricing method, or ``"auto"`` (resolved by the policy).
+        config: The caller's config, possibly ``None``.
+
+    Returns:
+        The config used, or ``None`` for a configless method without one.
+
+    Raises:
+        ValueError: If a method that needs a config has none registered for
+            the pair and none was passed.
+    """
+    _ensure_backends()
+    if method == "auto":
+        method = auto_method(instrument, model)
+    else:
+        _validate_method(method)
+    if config is not None:
+        return config
+    found = default_config(instrument, model, method)
+    if found is not None or method in CONFIGLESS_METHODS:
+        return found
+    instrument_cls = instrument if isinstance(instrument, type) else type(instrument)
+    model_cls = model if isinstance(model, type) else type(model)
+    raise ValueError(
+        f"No default {method} config is registered for "
+        f"({instrument_cls.__name__}, {model_cls.__name__}). Pass config=, or "
+        f"declare one with set_default_config({instrument_cls.__name__}, "
+        f"{model_cls.__name__}, {method!r}, ...)."
+    )
+
+
 def _ensure_backends() -> None:
     """Import the adapters and the legacy recipe registries once."""
     global _BACKENDS_LOADED
@@ -206,6 +322,7 @@ def _ensure_backends() -> None:
     from valax.core import adapters  # noqa: F401
     from valax.pricing import mc  # noqa: F401
     from valax.pricing import pde  # noqa: F401
+    from valax.core import policy  # noqa: F401  (after every registry)
 
     _BACKENDS_LOADED = True
 
@@ -275,6 +392,12 @@ def available_methods(instrument: Any, model: Any) -> tuple[str, ...]:
 def auto_method(instrument: Any, model: Any) -> str:
     """Resolve ``method="auto"`` for one (instrument, model) pair.
 
+    The answer comes from the pair's policy only (:func:`set_auto_method`,
+    looked up through the instrument's base classes; the library's entries
+    are in :mod:`valax.core.policy`). There is no fallback order: a pair
+    with pricers but no policy is an error, so adding a pricer never
+    silently changes what ``auto`` means for an existing pair.
+
     Args:
         instrument: Instrument pytree (or class).
         model: Model pytree (or class), possibly ``None``.
@@ -283,8 +406,9 @@ def auto_method(instrument: Any, model: Any) -> str:
         The chosen method name.
 
     Raises:
-        ValueError: If no method can price the pair.  The message lists
-            everything that is registered.
+        ValueError: If no method can price the pair (the message lists
+            everything that is registered), if the pair has no policy, or if
+            its policy names a method no pricer is registered for.
     """
     instrument_cls = instrument if isinstance(instrument, type) else type(instrument)
     model_cls = model if isinstance(model, type) else type(model)
@@ -298,9 +422,21 @@ def auto_method(instrument: Any, model: Any) -> str:
         )
     for cls in _instrument_bases(instrument_cls):
         preferred = _AUTO_POLICY.get((cls, model_cls))
-        if preferred is not None and preferred in methods:
-            return preferred
-    return methods[0]
+        if preferred is None:
+            continue
+        if preferred not in methods:
+            raise ValueError(
+                f"The auto policy of ({cls.__name__}, {model_cls.__name__}) "
+                f"names {preferred!r}, but only {methods} are registered for "
+                f"({instrument_cls.__name__}, {model_cls.__name__})."
+            )
+        return preferred
+    raise ValueError(
+        f"({instrument_cls.__name__}, {model_cls.__name__}) has pricers "
+        f"{methods} but no auto policy. Pass method= explicitly, or declare "
+        f"the default with set_auto_method({instrument_cls.__name__}, "
+        f"{model_cls.__name__}, ...)."
+    )
 
 
 def registered_pricers() -> list[tuple[str, str, str]]:
@@ -341,8 +477,11 @@ def _format_available() -> str:
 #: a wrong price with no signal.  Requiring the parameter by name makes
 #: multi-curve support an opt-in property of each recipe's signature, and
 #: :func:`valax.pricing.multicurve.require_single_curve` covers the payoffs
-#: that opt in only to reject.
-_EXPLICIT_ONLY_MARKET_ARGS = ("discount_curve", "forward_curve")
+#: that opt in only to reject.  The keyed views (D16) follow the same rule:
+#: ``curves`` (every curve the trade reads, a ``CurveGraph``) and ``spots``
+#: (every underlying's spot, stacked in the instrument's order) reach only
+#: recipes that name them.
+_EXPLICIT_ONLY_MARKET_ARGS = ("discount_curve", "forward_curve", "curves", "spots")
 
 
 def _recipe_market_args(recipe: Callable, resolved: ResolvedMarket) -> dict:
@@ -370,8 +509,12 @@ def _recipe_market_args(recipe: Callable, resolved: ResolvedMarket) -> dict:
         candidates["spot"] = resolved.spot
     candidates["discount_curve"] = resolved.discount_curve
     candidates["forward_curve"] = resolved.forward_curve
+    candidates["curves"] = resolved.curves
 
     parameters = inspect.signature(recipe).parameters
+    if "spots" in parameters and resolved.spots:
+        # Stacked in the instrument's ``underlying_ids`` order (dict order).
+        candidates["spots"] = jnp.stack(list(resolved.spots.values()))
     accepts_var_kwargs = any(
         p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
     )
@@ -408,6 +551,18 @@ def _price_via_legacy(
             f"Available (instrument, model, method) combinations:\n"
             f"{_format_available()}"
         )
+    if (
+        "spots" in inspect.signature(recipe).parameters
+        and not getattr(instrument, "underlying_ids", None)
+    ):
+        # A multi-asset recipe needs every underlying's spot in model order,
+        # which only the instrument's own static ids can say (D16).
+        raise ValueError(
+            f"The {method} recipe for ({type(instrument).__name__}, "
+            f"{type(model).__name__}) needs the spot of every asset: set "
+            f"{type(instrument).__name__}.underlying_ids to the asset ids "
+            f"(keys of MarketState.spots) in model order."
+        )
     market_args = _recipe_market_args(recipe, resolved)
     if (
         resolved.forward_curve is not None
@@ -422,6 +577,20 @@ def _price_via_legacy(
             f"the instrument resolves one distinct from its discount curve. "
             f"Drop the instrument's forward_id to price it single-curve, or "
             f"use a model / method that supports the projection curve."
+        )
+    extra = [
+        cid for cid in resolved.curves.keys()
+        if cid not in (resolved.discount_id, resolved.forward_id)
+    ]
+    if extra and "curves" not in market_args:
+        # A multi-index trade on a recipe that reads only the primary pair
+        # would be priced on a subset of its curves (D16).
+        raise ValueError(
+            f"The {method} recipe for ({type(instrument).__name__}, "
+            f"{type(model).__name__}) reads only the discount / projection "
+            f"pair, but the instrument also touches {extra}. A recipe that "
+            f"prices it must take every curve by naming `curves` in its "
+            f"signature."
         )
     # The dispatchers look the recipe up by *exact* type, so a selector
     # subclass (§_instrument_bases) is routed to the base class's recipe
@@ -493,8 +662,10 @@ def price(
         method: ``"analytic"``, ``"lattice"``, ``"pde"``, ``"mc"``, or
             ``"auto"`` (default) to let the policy table choose.
         config: Method-specific numerical settings (``PDEConfig``,
-            ``MCConfig``, ``BinomialConfig``); ``None`` uses that
-            method's default.
+            ``MCConfig``, ``BinomialConfig``, …); ``None`` uses the pair's
+            registered default for the method (:func:`effective_config`,
+            :mod:`valax.core.policy`). The config used is recorded on the
+            result.
         key: PRNG key — required for ``method="mc"``.
 
     Returns:
@@ -537,8 +708,20 @@ def price(
         adapter = _REGISTRY.get((cls, type(model), method))
         if adapter is not None:
             break
+    if adapter is None and method not in available_methods(instrument, model):
+        kind = "recipe" if method in ("mc", "pde") else "pricer"
+        raise ValueError(
+            f"No {method} {kind} registered for "
+            f"({type(instrument).__name__}, {type(model).__name__}).\n"
+            f"Available (instrument, model, method) combinations:\n"
+            f"{_format_available()}"
+        )
+
+    # The config actually used: the caller's, else the pair's default.
+    config = effective_config(instrument, model, method, config)
+
     if adapter is not None:
-        return adapter(
+        result = adapter(
             instrument=instrument,
             model=model,
             market=market,
@@ -546,15 +729,8 @@ def price(
             config=config,
             key=key,
         )
-
-    if method in ("mc", "pde"):
-        return _price_via_legacy(
+    else:
+        result = _price_via_legacy(
             instrument, model, resolved, method, config, key,
         )
-
-    raise ValueError(
-        f"No {method} pricer registered for "
-        f"({type(instrument).__name__}, {type(model).__name__}).\n"
-        f"Available (instrument, model, method) combinations:\n"
-        f"{_format_available()}"
-    )
+    return dataclasses.replace(result, config=config)

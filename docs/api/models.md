@@ -66,6 +66,20 @@ under the forward measure:
 
 ::: valax.models.SABRModel
 
+## Market implied vol (rates options)
+
+No dynamics: the market's quoting convention. `ImpliedVolModel(surface_id)`
+prices caplets, caps and European swaptions through `valax.price` at the
+implied vol read off the surface filed under `surface_id` — a
+`SwaptionCube`, an `OptionletVolSurface`, or a `ConstantVol` quoted normal
+(`is_normal=True`, Bachelier) or lognormal (Black-76) — at each instrument's
+own coordinate and live forward, by the curve-aware kernels of
+[`rates_smile`](pricing.md). It holds no numbers, so every sensitivity lands
+on the curves and the surface. `swaption_basket_node` prices its targets
+through it.
+
+::: valax.models.ImpliedVolModel
+
 ## Local vol (Dupire)
 
 State- and time-dependent diffusion calibrated to fit an implied-vol

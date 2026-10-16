@@ -20,6 +20,7 @@ from valax.core.pricing import (
     price,
     register_pricer,
     registered_pricers,
+    set_auto_method,
 )
 from valax.curves.discount import DiscountCurve
 from valax.curves.graph import CurveGraph
@@ -320,6 +321,12 @@ class TestPricingResult:
 
 class TestRegistration:
     def test_duplicate_registration_raises(self):
+        # Load the library's adapters first: run first in a worker (e.g.
+        # under ``pytest -n --dist load``), the registration below would
+        # otherwise succeed and make the later backend import fail.
+        from valax.core.pricing import _ensure_backends
+
+        _ensure_backends()
         with pytest.raises(ValueError, match="already registered"):
             register_pricer(EuropeanOption, BlackScholesModel, "analytic")(
                 lambda **_: PricingResult(price=jnp.array(0.0))
@@ -336,6 +343,8 @@ class TestRegistration:
                 method="analytic",
             )
 
+        # A new pair declares what ``auto`` means for it (no fallback order).
+        set_auto_method(_MyInstrument, type(None), "analytic")
         market = MarketState.single_curve(_curve())
         result = price(_MyInstrument(notional=jnp.array(100.0)), None, market)
         assert float(result.price) == pytest.approx(

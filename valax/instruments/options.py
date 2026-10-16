@@ -297,6 +297,13 @@ class WorstOfBasketOption(eqx.Module):
         notional: Notional amount.
         n_assets: Number of assets in the basket.
         is_call: True for call, False for put.
+        underlying_ids: Asset ids (keys of ``MarketState.spots``) in model
+            order, ``n_assets`` of them, or ``None``. Required to price
+            through ``price()``, which resolves the spots from them; direct
+            recipe calls pass ``spots`` themselves.
+
+    Raises:
+        ValueError: If ``underlying_ids`` does not name ``n_assets`` assets.
     """
 
     expiry: Float[Array, ""]
@@ -304,6 +311,15 @@ class WorstOfBasketOption(eqx.Module):
     notional: Float[Array, ""]
     n_assets: int = eqx.field(static=True, default=2)
     is_call: bool = eqx.field(static=True, default=False)
+    underlying_ids: Optional[tuple[str, ...]] = eqx.field(static=True, default=None)
+
+    def __check_init__(self):
+        if self.underlying_ids is not None and len(self.underlying_ids) != self.n_assets:
+            raise ValueError(
+                f"WorstOfBasketOption.underlying_ids names "
+                f"{len(self.underlying_ids)} assets but n_assets="
+                f"{self.n_assets}."
+            )
 
 
 class Cliquet(eqx.Module):
@@ -389,9 +405,24 @@ class SpreadOption(eqx.Module):
         strike: Spread strike (often zero for exchange options).
         notional: Notional amount.
         is_call: True for call on the spread, False for put.
+        underlying_ids: Asset ids (keys of ``MarketState.spots``) in model
+            order — ``S1`` first, ``S2`` second — or ``None``. Required to
+            price through ``price()``, which resolves the spots from them;
+            direct recipe calls pass ``spots`` themselves.
+
+    Raises:
+        ValueError: If ``underlying_ids`` names fewer than two assets.
     """
 
     expiry: Float[Array, ""]
     strike: Float[Array, ""]
     notional: Float[Array, ""]
     is_call: bool = eqx.field(static=True, default=True)
+    underlying_ids: Optional[tuple[str, ...]] = eqx.field(static=True, default=None)
+
+    def __check_init__(self):
+        if self.underlying_ids is not None and len(self.underlying_ids) < 2:
+            raise ValueError(
+                f"SpreadOption.underlying_ids needs at least two assets, got "
+                f"{self.underlying_ids!r}."
+            )

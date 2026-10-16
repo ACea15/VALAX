@@ -164,14 +164,34 @@ def key():
     return jax.random.PRNGKey(20260101)
 
 
+#: Independent keys pooled by the "MC within 2·stderr" checks. A single draw
+#: fails a 2σ check ~5% of the time by construction (seen at z = 2.17 once
+#: the recipes started honouring ``MCConfig.n_steps`` and the random stream
+#: changed); pooling keeps the 2σ criterion while shrinking σ by √N, so the
+#: oracle gets *tighter*. A step-count study found no discretisation bias
+#: (|z| < 1 at 6–400 steps, 8 × 200k paths).
+_POOL_KEYS = 8
+
+
+def _pooled(instrument, model, config, key):
+    """Mean MC price and its standard error over ``_POOL_KEYS`` keys."""
+    results = [
+        mc_price_dispatch(instrument, model, config, k)
+        for k in jax.random.split(key, _POOL_KEYS)
+    ]
+    mean = sum(float(r.price) for r in results) / _POOL_KEYS
+    stderr = math.sqrt(sum(float(r.stderr) ** 2 for r in results)) / _POOL_KEYS
+    return mean, stderr
+
+
 # ── Straight bonds vs analytic ────────────────────────────────────────
 
 class TestStraightBondRecipes:
     def test_fixed_bond_matches_analytic(self, fixed_bond, model, curve, mc_config, key):
         """Path-wise MC discounting must reproduce the analytic curve PV."""
-        res = mc_price_dispatch(fixed_bond, model, mc_config, key)
+        mc, stderr = _pooled(fixed_bond, model, mc_config, key)
         analytic = float(fixed_rate_bond_price(fixed_bond, curve))
-        assert abs(float(res.price) - analytic) < 2.0 * float(res.stderr)
+        assert abs(mc - analytic) < 2.0 * stderr
 
     def test_floating_bond_prices_to_par(self, floating_bond, model, mc_config, key):
         """A zero-spread FRN valued at a reset date is worth par exactly.
@@ -197,16 +217,16 @@ class TestTreeTriangulation:
         Any residual gap is pure MC noise, so this is the sharpest available
         check that both engines agree on the ex-coupon exercise convention.
         """
-        res = mc_price_dispatch(callable_bond_1cd, model, mc_config, key)
+        mc, stderr = _pooled(callable_bond_1cd, model, mc_config, key)
         tree = float(callable_bond_price(callable_bond_1cd, model, n_steps=_TREE_STEPS))
-        assert abs(float(res.price) - tree) < 2.0 * float(res.stderr)
+        assert abs(mc - tree) < 2.0 * stderr
 
     def test_puttable_single_put_matches_tree(
         self, puttable_bond_1pd, model, mc_config, key
     ):
-        res = mc_price_dispatch(puttable_bond_1pd, model, mc_config, key)
+        mc, stderr = _pooled(puttable_bond_1pd, model, mc_config, key)
         tree = float(puttable_bond_price(puttable_bond_1pd, model, n_steps=_TREE_STEPS))
-        assert abs(float(res.price) - tree) < 2.0 * float(res.stderr)
+        assert abs(mc - tree) < 2.0 * stderr
 
     def test_multi_call_mc_is_upper_bound(
         self, callable_bond_2cd, model, mc_config, key

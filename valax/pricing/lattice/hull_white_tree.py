@@ -141,18 +141,78 @@ def hw_tree_j_max(mean_reversion: float, dt: float) -> int:
 # ─────────────────────────────────────────────────────────────────────
 
 
+class TreeConfig(eqx.Module):
+    """Settings of the Hull-White tree routes of :func:`valax.price`.
+
+    All-static, like every pricing config. ``price(..., method="lattice")``
+    prices on the **general** tree (:func:`build_general_hull_white_tree`),
+    for a constant volatility too: its nearest-node branching is valid at any
+    half-width, so the default ``j_max=None`` sizes the tree from the config
+    alone, :math:`J = \\lceil w\\, n_\\text{steps} \\rceil` with
+    ``width_factor`` :math:`w`. That works on a traced model (under ``jit`` /
+    ``grad``); the outer nodes beyond the reachable width carry no
+    probability mass, so they cost time, not accuracy.
+
+    Why :math:`w = 2`: a step moves at most one level, but the level
+    spacing follows :math:`\\sigma(t)`, so where the volatility drops the
+    finer levels need more nodes to span the same rates — the reachable
+    width is roughly :math:`n_\\text{steps}\\,\\sigma_\\max/\\sigma_\\min`.
+    Measured with :func:`hw_tree_width` (width / ``n_steps``): constant
+    :math:`\\sigma` ≤ 1.00, a 0.012 → 0.009 drop 1.17, a ×1.5 zig-zag 1.25,
+    a ×2 hump 1.30, a ×3 drop 2.00. A tree too narrow for its model is
+    flagged invalid and prices NaN, never silently wrong: raise
+    ``width_factor`` or pass ``j_max`` (e.g. the tight
+    :func:`hw_tree_width`).
+
+    Attributes:
+        n_steps: Number of time steps to the horizon.
+        j_max: Tree half-width; ``None`` means
+            ``ceil(width_factor * n_steps)``.
+        width_factor: Half-width per time step used when ``j_max`` is
+            ``None`` (at least 1).
+        smooth_payoff: Cell-average kinked payoffs and exercise projections
+            (swaption routes; the bond routes take no smoothing).
+
+    Raises:
+        ValueError: If ``width_factor < 1``.
+    """
+
+    n_steps: int = eqx.field(static=True, default=100)
+    j_max: int | None = eqx.field(static=True, default=None)
+    width_factor: float = eqx.field(static=True, default=2.0)
+    smooth_payoff: bool = eqx.field(static=True, default=True)
+
+    def __check_init__(self):
+        if not self.width_factor >= 1.0:
+            raise ValueError(
+                f"TreeConfig.width_factor must be >= 1, got {self.width_factor}"
+            )
+
+    @property
+    def half_width(self) -> int:
+        """The tree half-width used: ``j_max``, or ``ceil(width_factor * n_steps)``."""
+        if self.j_max is not None:
+            return self.j_max
+        return int(np.ceil(self.width_factor * self.n_steps))
+
+
 def build_hull_white_tree(
     model: HullWhiteModel,
     T: float,
     n_steps: int = 100,
     j_max: int | None = None,
+    *,
+    general: bool = False,
 ) -> "HullWhiteTree | GeneralHullWhiteTree":
     """Build a Hull-White trinomial tree from *t* = 0 to *T*.
 
     A constant (one-bucket) volatility builds the classical Hull & White
-    (1994) tree below. A piecewise-constant :math:`\\sigma(t)` builds the
-    general tree of :func:`build_general_hull_white_tree` instead, whose
-    level spacing follows the volatility.
+    (1994) tree below. A piecewise-constant :math:`\\sigma(t)` — or
+    ``general=True`` — builds the general tree of
+    :func:`build_general_hull_white_tree` instead, whose level spacing
+    follows the volatility and whose nearest-node branching is valid at any
+    half-width (so a static ``j_max`` sized from the config alone, see
+    :class:`TreeConfig`, works on a traced model).
 
     Args:
         model: Hull-White model (carries initial curve and parameters).
@@ -539,6 +599,24 @@ def _snap_dates_to_steps(
     return jnp.round(times / dt).astype(jnp.int32)
 
 
+def _on_tree(steps: Int[Array, " m"], n_steps: int) -> Int[Array, " m"]:
+    """Step indices with off-tree ones sent past the end (``mode="drop"``).
+
+    Negative indices would otherwise wrap around in a scatter.
+    """
+    return jnp.where((steps >= 0) & (steps <= n_steps), steps, n_steps + 1)
+
+
+def _horizon(t: Float[Array, ""]) -> Float[Array, ""] | float:
+    """A concrete horizon as a Python ``float``, a traced one unchanged.
+
+    The classical tree was built from a Python-float horizon; keeping that
+    eagerly keeps its prices and gradients bit-identical, while a traced
+    horizon (under ``jit``) still flows through.
+    """
+    return t if isinstance(t, jax.core.Tracer) else float(t)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Callable bond pricing
 # ─────────────────────────────────────────────────────────────────────
@@ -548,6 +626,8 @@ def callable_bond_price(
     model: HullWhiteModel,
     n_steps: int = 100,
     j_max: int | None = None,
+    *,
+    general: bool = False,
 ) -> Float[Array, ""]:
     """Price a callable fixed-rate bond on a Hull-White trinomial tree.
 
@@ -557,6 +637,9 @@ def callable_bond_price(
     attractive.  This **reduces** the bond's value to the holder
     relative to an otherwise identical non-callable ("bullet") bond.
 
+    Traceable (event dates are scattered onto steps, never ``int()``-ed);
+    pass a static ``j_max`` to ``jit`` or differentiate it.
+
     Args:
         bond: Callable bond instrument.
         model: Hull-White model (initial curve provides discounting).
@@ -564,13 +647,19 @@ def callable_bond_price(
         j_max: Tree half-width — see :func:`hw_tree_j_max`.  Pass a
             pre-computed concrete ``int`` to enable ``eqx.filter_grad``
             through this function.
+        general: Static switch: price on the general tree even for a
+            constant volatility (as ``price()``'s lattice route does).
 
     Returns:
         Callable bond price (dirty price at ``settlement_date``).
     """
     ref = model.initial_curve.reference_date
-    maturity_time = float(year_fraction(ref, bond.payment_dates[-1], bond.day_count))
-    tree = build_hull_white_tree(model, maturity_time, n_steps, j_max=j_max)
+    maturity_time = _horizon(year_fraction(ref, bond.payment_dates[-1], bond.day_count))
+    if j_max is None:
+        j_max = _eager_j_max(model, maturity_time, n_steps, general)
+    tree = build_hull_white_tree(
+        model, maturity_time, n_steps, j_max=j_max, general=general
+    )
 
     n_states = 2 * tree.j_max + 1
     coupons = fixed_coupon_amounts(bond)
@@ -591,12 +680,11 @@ def callable_bond_price(
     # `coupons[k]` values directly (rather than a binary indicator times a
     # scalar) keeps jax.grad flowing through coupon_rate / face_value while
     # allowing the amounts to differ period by period, as day-count accrual
-    # requires.
-    coupon_at_step = jnp.zeros(n + 1)
-    for k in range(bond.payment_dates.shape[0]):
-        step_k = int(cpn_steps[k])
-        if 0 <= step_k <= n:
-            coupon_at_step = coupon_at_step.at[step_k].add(coupons[k])
+    # requires.  Dates off the tree are dropped (no `int()` on a date, so
+    # the pricer traces).
+    coupon_at_step = jnp.zeros(n + 1).at[_on_tree(cpn_steps, n)].add(
+        coupons, mode="drop"
+    )
 
     # Call prices are quoted *clean*; the continuation value they are compared
     # against is a PV of remaining cashflows and is therefore *dirty*. An
@@ -611,13 +699,11 @@ def callable_bond_price(
     # the PDE rather than drifting from it as the grids diverge.
     accrued_at_call = bond_accrued_interest_at_dates(bond, bond.call_dates)
 
-    call_price_at_step = jnp.full(n + 1, jnp.inf)
-    for k in range(bond.call_dates.shape[0]):
-        step_k = int(call_steps[k])
-        if 0 <= step_k <= n:
-            call_price_at_step = call_price_at_step.at[step_k].set(
-                bond.call_prices[k] * bond.face_value + accrued_at_call[k]
-            )
+    # Two call dates snapping to one step keep the cheaper call (the one the
+    # issuer would choose).
+    call_price_at_step = jnp.full(n + 1, jnp.inf).at[_on_tree(call_steps, n)].min(
+        bond.call_prices * bond.face_value + accrued_at_call, mode="drop"
+    )
 
     # Terminal value: face + final coupon (if maturity is a coupon date).
     values = jnp.full(n_states, 1.0) * bond.face_value + coupon_at_step[n]
@@ -654,6 +740,8 @@ def puttable_bond_price(
     model: HullWhiteModel,
     n_steps: int = 100,
     j_max: int | None = None,
+    *,
+    general: bool = False,
 ) -> Float[Array, ""]:
     """Price a puttable fixed-rate bond on a Hull-White trinomial tree.
 
@@ -663,6 +751,9 @@ def puttable_bond_price(
     valuable than the guaranteed redemption.  This **increases** the
     bond's value relative to a non-puttable bond.
 
+    Traceable like :func:`callable_bond_price`; pass a static ``j_max`` to
+    ``jit`` or differentiate it.
+
     Args:
         bond: Puttable bond instrument.
         model: Hull-White model.
@@ -670,13 +761,19 @@ def puttable_bond_price(
         j_max: Tree half-width — see :func:`hw_tree_j_max`.  Pass a
             pre-computed concrete ``int`` to enable ``eqx.filter_grad``
             through this function.
+        general: Static switch: price on the general tree even for a
+            constant volatility (as ``price()``'s lattice route does).
 
     Returns:
         Puttable bond price (dirty price at ``settlement_date``).
     """
     ref = model.initial_curve.reference_date
-    maturity_time = float(year_fraction(ref, bond.payment_dates[-1], bond.day_count))
-    tree = build_hull_white_tree(model, maturity_time, n_steps, j_max=j_max)
+    maturity_time = _horizon(year_fraction(ref, bond.payment_dates[-1], bond.day_count))
+    if j_max is None:
+        j_max = _eager_j_max(model, maturity_time, n_steps, general)
+    tree = build_hull_white_tree(
+        model, maturity_time, n_steps, j_max=j_max, general=general
+    )
 
     n_states = 2 * tree.j_max + 1
     coupons = fixed_coupon_amounts(bond)
@@ -689,23 +786,18 @@ def puttable_bond_price(
     )
 
     n = tree.n_steps
-    coupon_at_step = jnp.zeros(n + 1)
-    for k in range(bond.payment_dates.shape[0]):
-        step_k = int(cpn_steps[k])
-        if 0 <= step_k <= n:
-            coupon_at_step = coupon_at_step.at[step_k].add(coupons[k])
+    coupon_at_step = jnp.zeros(n + 1).at[_on_tree(cpn_steps, n)].add(
+        coupons, mode="drop"
+    )
 
     # Put prices are quoted clean; see `callable_bond_price` for why accrual
     # is added to the obstacle and why it is measured on the true put date.
     accrued_at_put = bond_accrued_interest_at_dates(bond, bond.put_dates)
 
-    put_price_at_step = jnp.full(n + 1, -jnp.inf)
-    for k in range(bond.put_dates.shape[0]):
-        step_k = int(put_steps[k])
-        if 0 <= step_k <= n:
-            put_price_at_step = put_price_at_step.at[step_k].set(
-                bond.put_prices[k] * bond.face_value + accrued_at_put[k]
-            )
+    # Two put dates snapping to one step keep the richer put.
+    put_price_at_step = jnp.full(n + 1, -jnp.inf).at[_on_tree(put_steps, n)].max(
+        bond.put_prices * bond.face_value + accrued_at_put, mode="drop"
+    )
 
     # Terminal value.
     values = jnp.full(n_states, 1.0) * bond.face_value + coupon_at_step[n]
@@ -803,6 +895,8 @@ def swaption_tree_price(
     j_max: int | None = None,
     forward_curve: DiscountCurve | None = None,
     smooth_payoff: bool = True,
+    *,
+    general: bool = False,
 ) -> Float[Array, ""]:
     """European swaption on the Hull-White trinomial tree.
 
@@ -829,6 +923,8 @@ def swaption_tree_price(
             (:mod:`~valax.pricing.pde.payoff_smoothing`, as the PDE does)
             instead of pointwise, which removes the lattice's oscillating
             convergence in ``n_steps``.
+        general: Static switch: price on the general tree even for a
+            constant volatility (as ``price()``'s lattice route does).
 
     Returns:
         The swaption price.
@@ -836,8 +932,8 @@ def swaption_tree_price(
     ref = model.initial_curve.reference_date
     horizon = year_fraction(ref, swaption.expiry_date, swaption.day_count)
     if j_max is None:
-        j_max = _eager_j_max(model, horizon, n_steps)
-    tree = build_hull_white_tree(model, horizon, n_steps, j_max=j_max)
+        j_max = _eager_j_max(model, horizon, n_steps, general)
+    tree = build_hull_white_tree(model, horizon, n_steps, j_max=j_max, general=general)
     basis = model_swap_leg_basis(
         model, forward_curve, swaption.expiry_date, swaption.fixed_dates
     )
@@ -855,6 +951,8 @@ def bermudan_swaption_tree_price(
     j_max: int | None = None,
     forward_curve: DiscountCurve | None = None,
     smooth_payoff: bool = True,
+    *,
+    general: bool = False,
 ) -> Float[Array, ""]:
     """Bermudan swaption on the Hull-White trinomial tree.
 
@@ -882,6 +980,8 @@ def bermudan_swaption_tree_price(
             node's cell (:mod:`~valax.pricing.pde.payoff_smoothing`, as the
             PDE does) instead of sampling them pointwise, which gives clean
             first-order convergence in ``n_steps``.
+        general: Static switch: price on the general tree even for a
+            constant volatility (as ``price()``'s lattice route does).
 
     Returns:
         The Bermudan swaption price.
@@ -890,8 +990,8 @@ def bermudan_swaption_tree_price(
     day_count = bermudan.day_count
     horizon = year_fraction(ref, bermudan.exercise_dates[-1], day_count)
     if j_max is None:
-        j_max = _eager_j_max(model, horizon, n_steps)
-    tree = build_hull_white_tree(model, horizon, n_steps, j_max=j_max)
+        j_max = _eager_j_max(model, horizon, n_steps, general)
+    tree = build_hull_white_tree(model, horizon, n_steps, j_max=j_max, general=general)
     levels = snap_to_levels(bermudan.exercise_dates, ref, day_count, tree.dt, n_steps)
 
     n_states = 2 * j_max + 1
@@ -913,8 +1013,10 @@ def bermudan_swaption_tree_price(
     return _roll_back(tree, terminal, (is_exercise, exercise_value), smooth_payoff)
 
 
-def _eager_j_max(model: HullWhiteModel, horizon, n_steps: int) -> int:
+def _eager_j_max(
+    model: HullWhiteModel, horizon, n_steps: int, general: bool = False
+) -> int:
     """Concrete tree half-width for an eager call (either tree)."""
-    if is_constant(model.volatility):
+    if is_constant(model.volatility) and not general:
         return hw_tree_j_max(float(model.mean_reversion), float(horizon) / n_steps)
     return hw_tree_width(model, float(horizon), n_steps)

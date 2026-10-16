@@ -4,6 +4,7 @@ from valax.pricing.lattice.binomial import binomial_price, BinomialConfig
 from valax.pricing.lattice.hull_white_tree import (
     GeneralHullWhiteTree,
     HullWhiteTree,
+    TreeConfig,
     bermudan_swaption_tree_price,
     build_general_hull_white_tree,
     build_hull_white_tree,

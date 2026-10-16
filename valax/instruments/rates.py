@@ -315,8 +315,15 @@ class CrossCurrencySwap(eqx.Module):
         foreign_notional: Notional in foreign currency.
         basis_spread: Spread added to the domestic floating leg (e.g., -0.002).
         exchange_notional: True if initial and final notional exchange occurs.
-        currency_pair: E.g., ``"EUR/USD"`` (static).
+        currency_pair: E.g., ``"EUR/USD"`` (static). Also the FX spot key:
+            ``price()`` reads ``MarketState.fx_spots`` under the pair
+            without the ``/`` (``"EURUSD"``), quoted domestic per foreign.
         day_count: Day count convention.
+        discount_id: Domestic discount (and projection) curve.
+        forward_id: Must stay ``None``: each currency's floating leg is
+            projected off its own discount curve, so a distinct projection
+            curve is refused by ``price()`` rather than ignored.
+        foreign_discount_id: Foreign discount (and projection) curve.
     """
 
     start_date: Int[Array, ""]
@@ -330,6 +337,17 @@ class CrossCurrencySwap(eqx.Module):
     day_count: str = eqx.field(static=True, default="act_360")
     discount_id: str = eqx.field(static=True, default="_default_")
     forward_id: Optional[str] = eqx.field(static=True, default=None)
+    foreign_discount_id: str = eqx.field(static=True, default="_default_")
+
+    @property
+    def curves_touched(self) -> tuple[str, ...]:
+        """``(domestic, foreign)`` discount curve ids, de-duplicated."""
+        return tuple(dict.fromkeys((self.discount_id, self.foreign_discount_id)))
+
+    @property
+    def fx_ids(self) -> tuple[str, ...]:
+        """The FX spot key: ``currency_pair`` without the ``/``."""
+        return (self.currency_pair.replace("/", ""),)
 
 
 class TotalReturnSwap(eqx.Module):

@@ -26,7 +26,7 @@ them.
 | [7](#7-models-that-reference-the-market) | Binding a model to a market curve | `curve_id`, `bind_curves` |
 | [8](#8-sensitivities-through-the-same-call) | Market / model / contract greeks | `market_greeks`, `curve_pillar_deltas` |
 | [9](#9-building-the-market-from-quotes) | Quotes → curves → `MarketState` | `bootstrap_curve_graph` |
-| [10](#10-extending-register-your-own-pricer) | Registering a new pricer | `register_pricer`, `set_auto_method` |
+| [10](#10-extending-register-your-own-pricer) | Registering a new pricer | `register_pricer`, `set_auto_method`, `set_default_config` |
 | [11](#11-failure-modes-and-what-they-mean) | Reading the error messages | — |
 
 !!! tip "Enable float64 first"
@@ -47,7 +47,7 @@ import jax.numpy as jnp
 
 from valax.core import (
     MarketState, PricingResult, auto_method, available_methods,
-    price, register_pricer, registered_pricers, resolve,
+    price, register_pricer, registered_pricers, resolve, set_auto_method,
 )
 from valax.curves import DiscountCurve
 from valax.curves.graph import CurveGraph
@@ -182,16 +182,33 @@ float(price(american, model, market).price)       # 6.086383
   in `valax/pricing/{mc,pde}/`, because those registries are *bridged* rather
   than duplicated — a recipe registered there is reachable through `price` the
   moment it lands.
-- **Preference** comes from a separate policy table. `method="auto"` takes the
-  policy entry when there is one and it is available, otherwise the first
-  available method in `analytic → lattice → pde → mc` (exact and cheap first).
+- **Preference** comes from a separate policy table, `valax.core.policy`:
+  every registered pair names its `auto` method there explicitly. There is no
+  fallback order — `method="auto"` on a pair without a policy (possible only
+  for a third-party registration) raises, naming the pair and its methods —
+  so adding a pricer can never silently change what `auto` means for an
+  existing pair.
 - An explicit `method=` always wins over the policy.
+- **Configs default per pair and method.** `config=None` means the pair's
+  default for the method used (e.g. `PDEConfig()`, `MCConfig(100_000, 100)`,
+  `TreeConfig()`; configless analytic engines take none). Explicit `config=`
+  wins; `effective_config(instrument, model, method, config)` tells you
+  what `price()` will use, and `PricingResult.config` records what it did
+  use:
 
-`registered_pricers()` lists every reachable triple — 88 of them at the time of
+```python
+from valax.core import effective_config
+
+res = price(american, model, market, method="pde")
+res.config == effective_config(american, model, "pde")   # True: PDEConfig()
+price(call, model, market).config                       # None (analytic)
+```
+
+`registered_pricers()` lists every reachable triple — 96 of them at the time of
 writing — which makes it a useful "what can this library price?" probe:
 
 ```python
-len(registered_pricers())    # 88
+len(registered_pricers())    # 96
 registered_pricers()[:3]
 # [('AmericanOption', 'BlackScholesModel', 'lattice'),
 #  ('AmericanOption', 'BlackScholesModel', 'pde'),
@@ -201,7 +218,16 @@ registered_pricers()[:3]
 For the curated, instrument-by-instrument view (with model inputs and
 calibration routes), read the
 [coverage matrix](../applications/instrument-pricing.md) — that page, not this
-one, is the authoritative map of what is priced by what.
+one, is the authoritative map of what is priced by what; its **`price()`
+routes** column lists, per instrument and model, the methods `price` reaches
+and the `auto` one, checked against the registry by a test.
+
+Rates options priced off a **market vol surface** use the parameter-free
+`ImpliedVolModel(surface_id)`, which names the surface in the market (a
+swaption cube, an optionlet surface, or a flat `ConstantVol`, normal or
+lognormal) — `price(swaption, ImpliedVolModel("USD.SOFR.CUBE"), market)`;
+the Hull-White tree is `method="lattice"` with a `TreeConfig`
+([Lattice guide](lattice.md#hull-white-tree-through-price)).
 
 ## 4. No model needed: curve-discounted trades
 
@@ -295,6 +321,62 @@ Curve ids follow the frozen alphabet `<CCY>.<INDEX>.<TENOR>[.<QUALIFIER>]`
 (`USD.SOFR.OIS`, `USD.LIBOR.3M`). Why the discount/projection split matters
 economically is [Why Multi-Curve?](why-multicurve.md); how the graph is solved
 is [Curves](curves.md#5-multi-curve-bootstrap).
+
+### Trades that read more than two curves
+
+A trade can read more curves than a discount / projection pair — a tenor basis
+swap as legs reads an OIS curve and *two* projection curves. `resolve` binds
+**every** curve the trade names into `resolved.curves`, a `CurveGraph` keyed by
+curve id, and the pair above is a view of it
+([D16](../architecture/calibration-pricing-risk.md#3-decisions)):
+
+```python
+from valax.core import curve_ids_of
+from valax.instruments.legs import FloatingLeg, MultiLegSwap
+
+basis_market = MarketState(curves=CurveGraph(curves={
+    "USD.SOFR.OIS": ois, "USD.SOFR.3M": proj,
+    "USD.SOFR.6M": flat_curve(0.0365),
+}))
+dates = REF + jnp.arange(1, 9, dtype=jnp.int32) * 182
+
+
+def leg(forward_id, **kw):
+    return FloatingLeg(accrual_start_dates=dates - 182, accrual_end_dates=dates,
+                       payment_dates=dates, notional=jnp.array(1e6),
+                       compounding="simple", fixing_dates=dates - 182,
+                       index_id=forward_id, discount_id="USD.SOFR.OIS",
+                       forward_id=forward_id, **kw)
+
+
+basis = MultiLegSwap(legs=(leg("USD.SOFR.3M", spread=jnp.array(0.0)),
+                           leg("USD.SOFR.6M", spread=jnp.array(-0.001), pay=True)))
+curve_ids_of(basis)          # ('USD.SOFR.OIS', 'USD.SOFR.3M', 'USD.SOFR.6M')
+r = resolve(basis, None, basis_market)
+tuple(r.curves.keys()), r.forward_curve   # all three; no single projection curve
+float(price(basis, None, basis_market).price)   # -1,914.62
+```
+
+Three rules make this safe under `jit` / `grad`:
+
+- **Which curves is decided by static fields only.** Every id is an
+  `eqx.field(static=True)` string, so resolution happens in Python at trace
+  time and the trade may be a traced argument. A 3M or a 6M trade *names*
+  its projection curve (`forward_id="USD.SOFR.3M"`); it is never inferred
+  from traced data such as dates. Distinct ids mean distinct compiled
+  programs, and `vmap` batches trades that share their ids.
+- **Only the named curves are bound.** A pricer reading a curve the trade did
+  not declare fails with a `KeyError`, so `curves_touched` stays truthful —
+  and the gradient with respect to the market lands on exactly those curves.
+- **A pricer must be able to take them.** An MC / PDE recipe receives the
+  keyed set only by naming `curves` in its signature, and `price()` refuses a
+  trade touching curves outside its pair on a recipe that cannot take them,
+  instead of pricing it on a subset.
+
+The same pattern covers the other keyed market slots: `spots` (multi-asset
+options name `underlying_ids`), `fx_spots` (a `CrossCurrencySwap` reads the
+pair in `currency_pair`) and `inflation_curves` (the inflation instruments'
+`inflation_id`); fixings stay keyed by index id and never pick a curve.
 
 ## 6. Many assets, one market
 
@@ -689,6 +771,8 @@ def _price_zcn(*, instrument, model, market, resolved, config, key):
     )
 
 
+set_auto_method(ZeroCouponNote, type(None), "analytic")   # its auto policy
+
 note = ZeroCouponNote(
     maturity_date=REF + jnp.int32(5 * 365), face_value=jnp.array(100.0)
 )
@@ -703,8 +787,13 @@ Rules that keep the registry honest:
   your pricer work on a single-curve *and* a multi-curve market unchanged. Note
   `ZeroCouponNote` above became multi-curve-capable purely by declaring
   `discount_id`.
-- Registering a duplicate raises unless you pass `overwrite=True`; state a
-  preferred engine with `set_auto_method(MyInstrument, MyModel, "pde")`.
+- Registering a duplicate raises unless you pass `overwrite=True`.
+- **State the pair's policy.** `set_auto_method(MyInstrument, MyModel,
+  "pde")` names its `auto` engine — without it `method="auto"` raises (an
+  explicit `method=` still works) — and a numerical method needs a default
+  config, `set_default_config(MyInstrument, MyModel, "pde", PDEConfig())`, or
+  `config=None` raises "No default pde config". The library's own pairs keep
+  theirs in `valax.core.policy`, where a test fails for a pair without one.
 - **Subclasses inherit pricers.** Resolution walks the MRO, so a subclass that
   only *adds* selectors reaches its base class's pricers, and a registration on
   the subclass still wins.
@@ -729,6 +818,8 @@ available.
 | Named a curve the market lacks | `KeyError: Curve 'USD.SOFR.OIS' not in MarketState (available: ['_default_']).` |
 | Equity trade on a rates-only market | `ValueError: Black-Scholes pricing needs a spot: the MarketState carries none for this instrument's underlying. …` |
 | Unregistered `(instrument, model)` pair | `ValueError: No pricer registered for (…)` + every registered triple |
+| `method="auto"` on a pair registered without `set_auto_method` | `ValueError` naming the pair: it has pricers but no auto policy, with its available methods |
+| `config=None` on a numerical method with no default (`set_default_config`) | `ValueError: No default … config for (…)` — pass `config=` or register a default |
 | Short-rate model built with `initial_curve=curve` | `ValueError: HullWhiteModel.initial_curve arrived pre-bound to a curve. price() binds it from the MarketState …` — drop `initial_curve` (set `curve_id` to pin a curve) |
 | Distinct projection curve on a model without the basis overlay (e.g. Cheyette) | `ValueError: CheyetteModel does not price a projection curve distinct from its discount curve …` |
 

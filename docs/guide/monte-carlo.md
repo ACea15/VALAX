@@ -155,33 +155,26 @@ the right variance (maths:
 
 A one-bucket model runs the original constant-parameter code.
 
-!!! warning "Known limitation: the short-rate recipes ignore `MCConfig.n_steps`"
-    Every Hull-White, G2++ and Cheyette (1F and 2F) recipe reads only
-    `config.n_paths` from `MCConfig`. The number of time steps is a separate
-    recipe keyword, `n_steps`, **defaulting to 100**, and the grid is uniform
-    on `[0, T]` (`T` is a second recipe keyword, defaulting per instrument —
-    the last payment date for bonds, the option expiry for a swaption): it
-    is not built from the event dates. Every event — coupon, fixing,
-    payment, expiry, exercise — is snapped to the *nearest* step by rounding
-    `t · n_steps / T`, so an event that does not sit on the grid is valued at
-    a shifted time.
+**The time grid.** Every Hull-White, G2++ and Cheyette (1F and 2F) recipe
+takes its step count from `MCConfig.n_steps` (Phase 4,
+[D15](../architecture/calibration-pricing-risk.md#3-decisions); before, it
+was a recipe keyword fixed at 100 that `price()` could not forward, so
+`MCConfig(n_steps=4)` and `MCConfig(n_steps=400)` gave bit-identical prices).
+Through `valax.price(..., method="mc")` with `config=None` the pair's default
+`MCConfig(n_paths=100_000, n_steps=100)` applies and is recorded on
+`PricingResult.config`; the former 100-step prices are reproduced bit for bit
+(`tests/test_mc/test_short_rate_mc_steps.py`). A direct call to
+`mc_price_dispatch` may still pass `n_steps=` as an explicit override.
 
-    Consequences, measured with `n_paths=20_000` and a fixed key:
-
-    - `MCConfig(n_steps=4)` and `MCConfig(n_steps=400)` give bit-identical
-      prices — both run 100 steps (checked for a Hull-White bond and for
-      G2++ and Cheyette European swaptions).
-    - Through `valax.price(..., method="mc", config=...)` the step count is
-      therefore **always 100**: `price()` has no way to forward the keyword.
-    - Calling the dispatcher directly, `mc_price_dispatch(trade, bound_model,
-      config, key, n_steps=400)` does change the grid (and with it the
-      draws): the same Hull-White bond moved from 101.9939 to 102.0379
-      (stderr 0.041).
-
-    Until the recipes honour `config.n_steps`, pass `n_steps=` (and `T=` if
-    needed) to `mc_price_dispatch` when the event dates are not multiples of
-    `T / 100`, or when the trapezoidal discount quadrature needs a finer
-    step.
+!!! note "Events snap to the uniform grid"
+    The grid is uniform on `[0, T]` (`T` a recipe keyword, defaulting per
+    instrument — the last payment date for bonds, the option expiry for a
+    swaption); it is not built from the event dates. Every event — coupon,
+    fixing, payment, expiry, exercise — is snapped to the *nearest* step by
+    rounding `t · n_steps / T`, so an event that does not sit on the grid is
+    valued at a shifted time. Choose `n_steps` so the event dates are
+    multiples of `T / n_steps` where that matters; placing events on the grid
+    is on the [roadmap](../roadmap.md#unified-calibration-pricing-and-risk).
 
 ### Multi-curve: OIS discounting with a separate projection curve
 
@@ -560,8 +553,8 @@ controls only the accuracy of the trapezoidal accumulation of
 \(\int_0^{t}r\,ds\) into `log_discount_factors`, which is what actually
 discounts cash flows — so choose it based on the discounting accuracy you
 need, not on the stability of the rate process. (Calling the generator
-directly, `n_steps` is the argument you pass; the dispatcher recipes take it
-as a keyword and ignore `MCConfig.n_steps` — see the warning in §2.)
+directly, `n_steps` is the argument you pass; the dispatcher recipes read it
+from `MCConfig.n_steps` — see [the time grid in §2](#time-dependent-volatility).)
 
 ```python
 from valax.pricing.mc import generate_hull_white_paths

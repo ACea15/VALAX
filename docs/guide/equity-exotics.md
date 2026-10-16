@@ -445,6 +445,48 @@ For a worst-of **put**, expect `dprice/drho < 0` — more diversification
 (lower correlation) means a higher probability that at least one asset
 performs badly, making downside protection more valuable.
 
+### Through `price()`: spots by `underlying_ids`
+
+`SpreadOption` and `WorstOfBasketOption` name their assets, in model order,
+in the static `underlying_ids`; `price()` reads those spots from
+`MarketState.spots` and hands them, stacked in that order, to the same MC
+recipe — bit-identical to the `mc_price_dispatch(..., spots=...)` call above
+for the same key and config. The ids are static, so the trade can be a traced
+`jit` argument and a gradient with respect to the market reports each asset's
+spot sensitivity under its own id ([D16](../architecture/calibration-pricing-risk.md#3-decisions)):
+
+```python
+import equinox as eqx
+
+from valax.core import MarketState, price
+from valax.curves.discount import flat_curve
+from valax.curves.graph import CurveGraph
+
+market = MarketState(
+    curves=CurveGraph(curves={"_default_": flat_curve(0.05)}),
+    spots={"AAPL": jnp.asarray(100.0), "MSFT": jnp.asarray(100.0),
+           "NVDA": jnp.asarray(100.0)},
+)
+wof = WorstOfBasketOption(
+    expiry=jnp.array(1.0), strike=jnp.array(1.0), notional=jnp.array(1_000_000.0),
+    n_assets=3, is_call=False, underlying_ids=("AAPL", "MSFT", "NVDA"),
+)
+cfg, key = MCConfig(n_paths=20_000, n_steps=20), jax.random.PRNGKey(0)
+res = price(wof, multi, market, config=cfg, key=key)          # auto: mc
+vegas = eqx.filter_grad(
+    lambda mdl: price(wof, mdl, market, config=cfg, key=key).price
+)(multi).vols
+print(f"{float(res.price):,.2f} ± {float(res.stderr):,.2f}", vegas)
+```
+
+A worst-of struck in return space (`S_T / S_0`) is scale-free, so its
+gradient with respect to `market.spots` is exactly zero; a spread option's is
+not (long `S1`, short `S2`).
+
+Without `underlying_ids`, `price()` refuses the trade and says which field to
+set; the ids are checked against `n_assets` (two at least for a spread) when
+the instrument is built.
+
 ---
 
 ## Cliquet / Ratchet

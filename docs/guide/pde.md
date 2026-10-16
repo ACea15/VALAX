@@ -128,6 +128,14 @@ price = float(result)          # PDEResult unwraps to a scalar
 available recipes if the pair is not registered — identical ergonomics to the
 MC dispatcher.
 
+Through `valax.price(..., method="pde")` the config is optional: `config=None`
+takes the pair's default from `valax.core.policy` — `PDEConfig()` for the 1-D
+equity and Hull-White grids, `PDEConfig2D()` for Heston and G2++, and for
+Cheyette 1F / 2F the calibrator's own frozen-y grids, so a Cheyette fit and a
+price both left at `config=None` share one grid (and `check_engine` accepts
+it). The grid used is recorded on `PricingResult.config`
+([D15](../architecture/calibration-pricing-risk.md#3-decisions)).
+
 ### 5.2 Coverage matrix
 
 Status: ✅ shipped via `pde_price_dispatch` · 🟡 in progress (design-stage).

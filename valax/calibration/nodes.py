@@ -805,9 +805,11 @@ def _basket_provenance(
 ):
     """Provenance of a basket fit priced through ``price`` (eager).
 
-    Resolves ``method="auto"`` per instrument with the pricing policy, then
-    asks :func:`~valax.calibration.result.engine_provenance` (dispatched on
-    the model type). A basket whose instruments resolve to different engines
+    Resolves ``method="auto"`` per instrument with the pricing policy, and
+    ``config=None`` to the pair's default config — the grid ``price`` will
+    actually use (:func:`~valax.core.pricing.effective_config`) — then asks
+    :func:`~valax.calibration.result.engine_provenance` (dispatched on the
+    model type). A basket whose instruments resolve to different engines
     records the most restrictive one.
 
     Args:
@@ -823,16 +825,17 @@ def _basket_provenance(
         calibrated, as before).
     """
     from valax.calibration.result import engine_provenance
-    from valax.core.pricing import auto_method
+    from valax.core.pricing import auto_method, effective_config
 
     try:
-        methods = dict.fromkeys(
-            auto_method(inst, template) if method == "auto" else method
+        engines = dict.fromkeys(
+            (m, effective_config(inst, template, m, config))
             for inst in basket
+            for m in [auto_method(inst, template) if method == "auto" else method]
         )
     except ValueError:
         return None
-    provs = [engine_provenance(template, m, config) for m in methods]
+    provs = [engine_provenance(template, m, cfg) for (m, cfg) in engines]
     if not provs:
         return None
     return max(provs, key=lambda p: _ENGINE_SEVERITY[p.engine_kind])
@@ -1058,17 +1061,19 @@ BASKET_MODES = ("least_squares", "coterminal_bootstrap")
 def _basket_target(
     inputs: LevelInputs, k: int, cube_id: str, target_keys: tuple
 ) -> Float[Array, ""]:
-    """Target price of basket instrument ``k``: off the cube, plus its shift."""
-    from valax.core.resolve import discount_id_of, forward_id_of
-    from valax.pricing.analytic.rates_smile import swaption_price
+    """Target price of basket instrument ``k``: off the cube, plus its shift.
 
-    market = inputs.upstream
+    Priced through :func:`~valax.core.pricing.price` under
+    ``ImpliedVolModel(cube_id)`` — the same route a user prices the
+    swaption off the cube with, so target and quote cannot drift apart.
+    """
+    from valax.core.pricing import price
+    from valax.models.implied_vol import ImpliedVolModel
+
     inst = inputs.data["basket"][k]
-    fwd_id = forward_id_of(inst)
-    t = swaption_price(
-        inst, market.curve(discount_id_of(inst)), market.surfaces[cube_id],
-        None if fwd_id is None else market.curve(fwd_id),
-    )
+    t = price(
+        inst, ImpliedVolModel(cube_id), inputs.upstream, method="analytic"
+    ).price
     if target_keys:
         t = t + inputs.fixed[target_keys[k]]
     return t

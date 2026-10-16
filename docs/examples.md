@@ -268,7 +268,8 @@ Highlights:
 ```python
 chain = CalibrationChain(nodes=(curve_node, vols.strip_node, vols.optionlet_node))
 calibrated = calibrate_market(chain, quotes, fixed, strict=True)
-pv = price(cap, OptionletSmile(surface_id="USD.OPTIONLET"), calibrated.market).price
+SMILE = ImpliedVolModel(vol_spec.optionlet_id)   # the optionlet surface's id
+pv = price(cap, SMILE, calibrated.market).price
 adj = quote_risk_adjoint(cap, SMILE, calibrated)
 ad = quote_risk_autodiff(cap, SMILE, chain, quotes, fixed)
 ```
@@ -276,7 +277,7 @@ ad = quote_risk_autodiff(cap, SMILE, chain, quotes, fixed)
 Highlights:
 
 - **Truth recovery** — noise-free quotes recover the strip and the curves to solver precision; with 0.5 bp noise the strip error and SABR RMSE are bounded by the noise.
-- **Book through `price()`** — on- and off-grid strikes and an unquoted maturity; cap − floor equals the forward strip to round-off. `price` has no built-in (`Cap`, smile) pairing yet, so the example registers one through the public extension point `register_pricer` (a surface-reading `OptionletSmile` model calling `cap_price`).
+- **Book through `price()`** — on- and off-grid strikes and an unquoted maturity; cap − floor equals the forward strip to round-off. The caps are priced under `ImpliedVolModel(surface_id)`, the built-in route that reads the named optionlet surface (`cap_price` underneath).
 - **Where the vega lands** — on the cap quotes the caplets read, and structurally zero on longer maturities; Σ quote vegas ≈ the parallel-surface vega. The curve risk includes the strip's own dependence on the forwards (compared against rho with the surface frozen).
 - **Adjoint vs autodiff vs FD** — reconciled with an absolute tolerance scaled to the largest sensitivity (the optionlet level is a non-zero-residual least-squares fit, where the two paths agree to ~1e-8 of scale), then checked against full-recalibration finite differences.
 

@@ -240,15 +240,22 @@ def sample_vol(
 
 
 @functools.singledispatch
-def curve_requirements(model: Any, instrument: Any) -> dict[str, str]:
+def curve_requirements(
+    model: Any, instrument: Any
+) -> dict[str, str | Mapping[str, str]]:
     """Curve-valued model fields bound from the market, and their curve ids.
 
     The binding contract of curve-driven models: ``{model_field: curve_id}``.
     :func:`bind_model` fills each listed field with ``market.curve(curve_id)``
     at pricing time. Models with no curve fields (the default) return ``{}``.
 
-    Register a new model type with ``@curve_requirements.register``; a model
-    driven by several curves (one per index) returns one entry per field.
+    A value may also be a mapping ``{key: curve_id}``: the field then holds
+    a **dict of curves**, ``{key: market.curve(curve_id)}`` — e.g. a
+    multi-curve model with one initial curve per modelled index, keyed by
+    index id. The keys are static pytree structure; the curves are traced
+    leaves, so gradients reach each market curve.
+
+    Register a new model type with ``@curve_requirements.register``.
 
     Args:
         model: A model pytree.
@@ -256,9 +263,16 @@ def curve_requirements(model: Any, instrument: Any) -> dict[str, str]:
             e.g. its ``discount_id``), or ``None``.
 
     Returns:
-        ``{field_name: curve_id}``.
+        ``{field_name: curve_id or {key: curve_id}}``.
     """
     return {}
+
+
+def _curves_for(requirement: str | Mapping[str, str], lookup) -> Any:
+    """One curve, or a dict of curves, for a field's requirement."""
+    if isinstance(requirement, str):
+        return lookup(requirement)
+    return {key: lookup(curve_id) for key, curve_id in requirement.items()}
 
 
 def _exact_fit_requirements(model: Any, instrument: Any) -> dict[str, str]:
@@ -289,14 +303,18 @@ def bind_curves(
         source: A ``MarketState`` (fields are looked up by the ids
             :func:`curve_requirements` declares) or a single
             :class:`~valax.curves.discount.DiscountCurve` (bound into every
-            declared field — the single-curve case).
+            declared field, and every entry of a keyed field — the
+            single-curve case).
         instrument: Instrument supplying default curve ids, or ``None``.
 
     Returns:
         The model with every declared curve field bound.
     """
-    for field, curve_id in curve_requirements(model, instrument).items():
-        curve = source if isinstance(source, DiscountCurve) else source.curve(curve_id)
+    def lookup(curve_id: str) -> DiscountCurve:
+        return source if isinstance(source, DiscountCurve) else source.curve(curve_id)
+
+    for field, requirement in curve_requirements(model, instrument).items():
+        curve = _curves_for(requirement, lookup)
         model = eqx.tree_at(
             lambda m, _f=field: getattr(m, _f), model, curve,
             is_leaf=lambda x: x is None,
@@ -307,23 +325,28 @@ def bind_curves(
 def _bind_curve_fields(model: Any, instrument: Any, market: Any) -> Any:
     """Fill declared curve fields from ``market``; refuse pre-bound ones."""
     requirements = curve_requirements(model, instrument)
-    for field, curve_id in requirements.items():
+    for field, requirement in requirements.items():
+        ids = (
+            repr(requirement) if isinstance(requirement, str)
+            else repr(dict(requirement))
+        )
         if getattr(model, field) is not None:
             raise ValueError(
                 f"{type(model).__name__}.{field} arrived pre-bound to a "
                 f"curve. price() binds it from the MarketState (curve "
-                f"{curve_id!r}) so the market is the single source of truth "
+                f"{ids}) so the market is the single source of truth "
                 f"for curve risk; construct the model with {field}=None (and "
                 f"set curve_id to pin a curve other than the instrument's "
                 f"discount curve)."
             )
         if market is None:
             raise ValueError(
-                f"{type(model).__name__} needs curve {curve_id!r} bound but no "
+                f"{type(model).__name__} needs curve {ids} bound but no "
                 f"MarketState was given."
             )
         model = eqx.tree_at(
-            lambda m, _f=field: getattr(m, _f), model, market.curve(curve_id),
+            lambda m, _f=field: getattr(m, _f), model,
+            _curves_for(requirement, market.curve),
             is_leaf=lambda x: x is None,
         )
     return model

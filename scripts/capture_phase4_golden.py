@@ -93,7 +93,12 @@ CURVE_ZEROS = (0.020, 0.021, 0.022, 0.025, 0.027, 0.031, 0.034, 0.038, 0.040)
 PDE_1D = PDEConfig(n_spot=101, n_time=60, spot_range=6.0, scheme=Scheme.CRANK_NICOLSON)
 PDE_2D = PDEConfig2D(n_x=41, n_y=41, n_time=30, x_range=6.0, scheme=Scheme.CRAIG_SNEYD)
 PDE_EXACT_Y = PDEConfig2D(n_x=41, n_y=31, n_time=36, x_range=6.0, y_max=3.0)
-MC_CONFIG = MCConfig(n_paths=4096, n_steps=50)
+#: Short-rate MC only. ``n_steps=100``: the values were captured when the
+#: short-rate recipes ignored ``MCConfig.n_steps`` and always used their
+#: 100-step keyword default (this said 50, silently unused). Since D15 the
+#: recipes read the config, so stating the step count actually used keeps the
+#: captured values bit-identical.
+MC_CONFIG = MCConfig(n_paths=4096, n_steps=100)
 
 TREE_STEPS = 60
 #: Concrete tree half-width: ``hw_tree_j_max(0.05, 5Y / 60)`` = 45, pinned so

@@ -202,8 +202,9 @@ from its discount curve is the `basis_overlay(model)` dispatch (Hull-White /
 G2++ yes, Cheyette no), so a trade that resolves a projection curve its model
 cannot accept raises instead of being priced single-curve. The requirements
 protocol is the extension point for multi-curve and stochastic-basis models
-(one initial curve per modelled index); a keyed set of forward curves in
-`ResolvedMarket` is still open (roadmap §5.6).
+(one initial curve per modelled index — a mapping-valued requirement binds
+a keyed dict of curves into one field, D16); the trade side, a keyed set of
+curves in `ResolvedMarket`, is D16.
 
 **D12 — A per-trade model is a model-scope level read off the calibrated
 market.** `swaption_basket_node` fits a model to one trade's basket (e.g.
@@ -261,6 +262,80 @@ every bucket failed under the wrong root cause (before the nested root-finds
 were guarded, it raised at runtime instead). Roots agreed to ≤ 1.4e-13. The
 evidence is in `scripts/bench_coterminal_bootstrap.py`.
 
+**D15 — `price()` is the one entry point, and every pair carries an explicit
+policy.** `method="auto"` used to fall back to a global order (analytic →
+lattice → pde → mc) for 56 of the 66 registered pairs, so a new pricer could
+silently change `auto` for a pair it touched; and `config=None` crashed the
+PDE and MC routes. Now every registered `(instrument, model)` pair has an
+explicit auto method **and** a default config for each of its numerical
+methods, both in one table, `valax.core.policy` (`AUTO_METHODS`, the
+`*_DEFAULTS` maps, `set_default_config`). The fallback is gone: a pair without
+a policy (only possible for a third-party registration) makes `auto` raise,
+naming the pair and its methods. The frozen map reproduces, pair for pair,
+what the fallback chose, so no `auto` price moved (pinned against the Phase 4
+golden file). Config resolution is **explicit `config=` > the pair's default
+for that method > error**, exposed as `effective_config(instrument, model,
+method, config)`; `PricingResult.config` records the config actually used
+(`None` only for configless analytic engines), and calibration provenance
+(`engine_provenance`, `swaption_basket_node`) records it too, so a fit on the
+default grid is bound to that grid. Defaults: `PDEConfig()` / `PDEConfig2D()`,
+the Cheyette calibrator's own frozen-y grids (so a fit and a price with
+`config=None` share one grid), `MCConfig(100_000, 100)` everywhere, and
+`TreeConfig()` for the Hull-White tree. The short-rate MC recipes now honour
+`MCConfig.n_steps` (they used a recipe kwarg, 100, whatever the config said).
+Two families of routes were added: `ImpliedVolModel(surface_id)` — a
+parameter-free "model" pricing caplets, caps and swaptions at the implied vol
+read off the named surface (cube, optionlet surface, or a `ConstantVol`
+quoted normal or lognormal), which `swaption_basket_node` now uses for its
+targets, bit-identical to the direct call — and the Hull-White tree under
+`method="lattice"` for callable / puttable bonds and European / Bermudan
+swaptions (auto unchanged). The tree routes run on the general tree with a
+half-width sized from the config alone, `J = ⌈2·n_steps⌉`, so they work on a
+traced model under `jit` / `grad`: a step moves at most one level, but where
+σ(t) drops the finer levels need more nodes for the same rates (measured
+width / `n_steps`: up to 1.17 for a 0.012 → 0.009 drop, 1.25–1.30 for ×1.5 /
+×2 zig-zags and humps, 2.00 for a ×3 drop); a narrower tree is flagged
+invalid and prices NaN. The coverage matrix's
+[`price()` routes column](../applications/instrument-pricing.md#coverage-matrix)
+is checked against the registry and the policy in both directions. Still not
+routed after D15: the LMM recipes (registered, not yet priceable — named in
+the matrix) and CMS / range-accrual products on `ImpliedVolModel`; the
+multi-index trades followed with D16.
+
+**D16 — A trade resolves every market entry it reads, keyed by id, from its
+static selectors.** `ResolvedMarket` used to hold one discount and one
+projection curve, and guessed the projection curve as `curves_touched[1]` —
+so a tenor basis swap as legs `(OIS, 3M, 6M)` silently lost its 6M curve. Now
+`resolve` binds **keyed views** of exactly the entries the trade names:
+`curves` (a `CurveGraph` sub-graph, `curve_ids_of`), `spots`
+(`underlying_ids_of`, in the instrument's order), `fx_spots` (`fx_ids_of`) and
+`inflation_curves` (`inflation_ids_of`). The discount / projection pair stays
+as **derived views** (`discount_curve` / `forward_curve` are properties over
+`curves`, the same objects as before, so every single-index price is
+bit-identical); the projection curve is read only from an explicit
+`forward_id` or a two-entry `curves_touched`, never guessed for three or more
+curves. The views hold only what the trade names — a pricer reading an
+undeclared entry fails with a `KeyError`, so a trade's declared dependencies
+cannot drift from what it reads. **Which entries is decided by static
+fields only** (`discount_id`, `forward_id`, each leg's ids,
+`foreign_discount_id`, `inflation_id`, `underlying_ids`): `resolve` runs at
+trace time, the values stay traced leaves of the market, and every route
+works under `jit` / `grad` with the trade as a traced argument — a 3M or a
+6M trade *names* its projection curve rather than having it inferred from
+traced dates, one compiled program per id combination, `vmap` over trades
+sharing their ids. Fixings stay keyed by index id and never select a curve
+(`indices_touched` names fixing histories only; the market holds no index →
+curve map). MC / PDE recipes receive the keyed views only by naming
+`curves` / `spots` in their signature (as for the curve pair, never through
+`**kwargs`), and `price()` refuses to run a trade touching curves outside its
+primary pair on a recipe that cannot take them. `curve_requirements` values
+may be a mapping `{key: curve_id}`, binding a **dict of curves** into one
+model field — the slot for multi-index / stochastic-basis models. With this,
+`MultiLegSwap` (tenor basis, amortising, seasoned), `CrossCurrencySwap`
+(domestic + `foreign_discount_id`, FX spot keyed by the pair), the inflation
+swaps and cap / floor (`inflation_id`, `discount_id`) and the multi-asset
+options (`underlying_ids`) price through `price()`.
+
 ## 4. Extending the framework
 
 | To add… | You provide | It then works with |
@@ -302,11 +377,9 @@ deliberately unconvergeable fit is reported (see
 
 Tracked on the [roadmap](../roadmap.md#unified-calibration-pricing-and-risk):
 richer synthetic quote noise; constrained (KKT) SVI and FX smile levels;
-credit and FX quote levels; reaching every pricer through `price` (the
-remaining rates pricers including the
-Hull-White tree, caps / swaptions off the cube surfaces, default configs); a
-keyed set of forward curves in `ResolvedMarket` for multi-index instruments
-(D11); derivative convergence of the numerical engines; the position /
+credit and FX quote levels; reaching the remaining pricers through `price`
+(the LMM recipes, CMS and range-accrual products on `ImpliedVolModel`; D15 /
+D16); derivative convergence of the numerical engines; the position /
 portfolio layer; a global piecewise σ(t) calibration on a user grid for
 portfolio / XVA simulation (D13). Hull-White, G2++ (multi-curve, 2-D PDE
 basket) and Cheyette 1F/2F (single-curve, frozen-y PDE basket) are all

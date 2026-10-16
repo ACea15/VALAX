@@ -183,3 +183,67 @@ inflation_cap = InflationCapFloor(
     Use inflation put-call parity to convert between caps and floors:
     $\text{Cap} - \text{Floor} = \text{YYIS}$ (at the same strike). This is useful
     for calibration and relative-value checks.
+
+---
+
+## Pricing through `price()`
+
+All three products are routed through `valax.price` on a `MarketState` that
+files inflation curves in `inflation_curves`: each instrument names its
+forward-CPI curve with `inflation_id` and its nominal discount curve with
+`discount_id` (both static, default `"_default_"`;
+[D16](../architecture/calibration-pricing-risk.md#3-decisions)). The swaps
+take `model=None`; the cap / floor takes `ImpliedVolModel(surface_id)` and
+reads a lognormal vol for each caplet at `(strike, fixing time)` — a flat
+`ConstantVol` reproduces `inflation_cap_floor_price_black76` with a scalar
+vol exactly, and a normal-vol source is refused. Gradients land on the
+named inflation curve's `forward_cpis` (IE01), the discount curve and the
+vol:
+
+```python
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+from valax.core import MarketState, price
+from valax.curves.discount import DiscountCurve
+from valax.curves.graph import CurveGraph
+from valax.curves.inflation import from_zc_rates
+from valax.dates import ymd_to_ordinal
+from valax.instruments import InflationCapFloor, ZeroCouponInflationSwap
+from valax.models import ImpliedVolModel
+from valax.surfaces import ConstantVol
+
+ref = int(ymd_to_ordinal(2025, 1, 15))
+pillars = jnp.array([ref + 365 * k for k in range(1, 11)], dtype=jnp.int32)
+market = MarketState(
+    curves=CurveGraph(curves={"USD.SOFR.OIS": DiscountCurve(
+        pillar_dates=jnp.concatenate([jnp.array([ref], dtype=jnp.int32), pillars]),
+        discount_factors=jnp.exp(-0.04 * jnp.arange(11.0)),
+        reference_date=jnp.int32(ref), day_count="act_365")}),
+    inflation_curves={"USD.CPI": from_zc_rates(
+        jnp.int32(ref), pillars, jnp.full(10, 0.025), jnp.asarray(311.2))},
+    surfaces={"USD.CPI.VOL": ConstantVol(jnp.asarray(0.30))},
+)
+ids = dict(discount_id="USD.SOFR.OIS", inflation_id="USD.CPI")
+zcis = ZeroCouponInflationSwap(
+    effective_date=jnp.int32(ref), maturity_date=pillars[4],
+    fixed_rate=jnp.array(0.024), notional=jnp.array(50e6),
+    base_cpi=jnp.array(311.2), **ids)
+# Starts on the first CPI pillar: before it the curve extrapolates flat, so a
+# period starting earlier would have a zero YoY forward (log(F/K) = -inf).
+cap = InflationCapFloor(
+    effective_date=pillars[0], payment_dates=pillars[1:6],
+    strike=jnp.array(0.03), notional=jnp.array(10e6),
+    base_cpi=jnp.array(311.2), **ids)
+
+print(f"ZCIS NPV : {float(price(zcis, None, market).price):,.2f}")
+cap_value = eqx.filter_jit(
+    lambda c, m: price(c, ImpliedVolModel("USD.CPI.VOL"), m).price)
+print(f"cap NPV  : {float(cap_value(cap, market)):,.2f}")
+g = eqx.filter_grad(lambda m: cap_value(cap, m))(market)
+print("IE01 by pillar:", g.inflation_curves["USD.CPI"].forward_cpis)
+print(f"vega     : {float(g.surfaces['USD.CPI.VOL'].vol):,.2f}")
+```

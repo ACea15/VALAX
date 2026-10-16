@@ -62,54 +62,74 @@ see [From Quotes to Risk](../guide/calibration-to-risk.md); which levels exist
 as chain nodes today is tracked on the
 [roadmap](../roadmap.md#unified-calibration-pricing-and-risk).
 
+The **`price()` routes** column lists what
+[`price(instrument, model, market, method=...)`](../guide/tutorial-unified-pricing.md)
+reaches, per model: `Model: methods`, with the `method="auto"` choice in
+**bold** (the explicit policy of `valax.core.policy`; every listed method has a
+default config, so `config=None` works). A **—** means the instrument is not
+routed through `price()` yet and is priced by calling its pricer directly
+(the *Method(s)* column); † marks a route that is registered but not yet
+priceable through `price()` (LMM: the adapter lands with the LMM rework —
+see the [roadmap](../roadmap.md)). Which curves, spots, FX spots and
+inflation curves a routed trade reads is decided by its static selectors
+(`discount_id`, `forward_id`, each leg's ids, `foreign_discount_id`,
+`inflation_id`, `underlying_ids`), so every route works under `jit` / `grad`
+with the trade as a traced argument. `tests/test_docs/test_price_routes.py` checks this
+column against the registry and the auto policy in both directions.
+Model labels: `curves` = `model=None` (curve discounting) · `BS`
+`BlackScholesModel` · `Heston` `HestonModel` · `LV` `LocalVolModel` · `SLV`
+`SLVModel` · `MA-GBM` `MultiAssetGBMModel` · `IV` `ImpliedVolModel` (market
+vol surface by id) · `HW` `HullWhiteModel` · `G2++` `G2PPModel` · `Ch-1F`
+`CheyetteModel` · `Ch-2F` `CheyetteModel2F` · `LMM` `LMMModel`.
+
 ### Equity options & exotics
 
-| Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
-|---|---|---|---|---|---|
-| [European](#european-option) | Analytic · MC · PDE · Lattice | constant · Heston · Dupire local vol · SLV | SABR / Heston / SLV / Dupire; as a chain: curves → SABR smile → Heston (`calibrate_market` / `calibrate_model`, quote risk via `chain_adjoint`) | GBM (or chosen model); continuous hedging | ✅ |
-| [American](#american-option) | PDE · Lattice | constant | — | early exercise; GBM | ✅ |
-| [Equity barrier](#equity-barrier-option) | MC · PDE | constant · Heston · local · SLV | as per model | continuous monitoring; sigmoid-smoothed | ✅ |
-| [Asian](#asian-option) | MC | constant · Heston · local · SLV | as per model | discrete averaging (arith/geo) | ✅ |
-| [Lookback](#lookback-option) | MC | constant · Heston · local · SLV | as per model | discrete extremum monitoring | ✅ |
-| [Variance swap](#variance-swap) | Analytic · MC | vol smile/surface | from surface | static replication; continuous sampling | ✅ |
-| [Digital](#digital-option) | Analytic · PDE | constant | — | GBM; Rannacher damping (PDE) | ✅ |
-| [Spread](#spread-option) | Analytic · MC | per-asset vols + correlation | per-asset SABR | 2-asset correlated GBM | ✅ |
-| [Worst-of basket](#worst-of-basket-option) | MC | per-asset vols + correlation | per-asset | n-asset correlated GBM | ✅ |
-| [Compound](#compound-option) | — | constant | — | Geske option-on-option | 🟡 |
-| [Chooser](#chooser-option) | — | constant | — | choice at intermediate date | 🟡 |
-| [Autocallable](#autocallable) | — | SLV (paths exist) | SLV | path-dependent autocall/KI | 🟡 |
-| [Cliquet](#cliquet) | — | constant/local | — | forward-start ratchet | 🟡 |
+| Instrument | Method(s) | `price()` routes | Vol / model input | Calibration | Key assumptions | Status |
+|---|---|---|---|---|---|---|
+| [European](#european-option) | Analytic · MC · PDE · Lattice | BS: **analytic**, lattice, pde, mc<br>Heston: **analytic**, pde, mc<br>LV: **pde**, mc<br>SLV: **mc** | constant · Heston · Dupire local vol · SLV | SABR / Heston / SLV / Dupire; as a chain: curves → SABR smile → Heston (`calibrate_market` / `calibrate_model`, quote risk via `chain_adjoint`) | GBM (or chosen model); continuous hedging | ✅ |
+| [American](#american-option) | PDE · Lattice | BS: **lattice**, pde | constant | — | early exercise; GBM | ✅ |
+| [Equity barrier](#equity-barrier-option) | MC · PDE | BS: **pde**, mc<br>Heston: **mc**<br>LV: **mc**<br>SLV: **mc** | constant · Heston · local · SLV | as per model | continuous monitoring; sigmoid-smoothed | ✅ |
+| [Asian](#asian-option) | MC | BS: **mc**<br>Heston: **mc**<br>LV: **mc**<br>SLV: **mc** | constant · Heston · local · SLV | as per model | discrete averaging (arith/geo) | ✅ |
+| [Lookback](#lookback-option) | MC | BS: **mc**<br>Heston: **mc**<br>LV: **mc**<br>SLV: **mc** | constant · Heston · local · SLV | as per model | discrete extremum monitoring | ✅ |
+| [Variance swap](#variance-swap) | Analytic · MC | BS: **mc**<br>Heston: **mc**<br>LV: **mc**<br>SLV: **mc** (replication: direct call) | vol smile/surface | from surface | static replication; continuous sampling | ✅ |
+| [Digital](#digital-option) | Analytic · PDE | BS: **analytic**, pde | constant | — | GBM; Rannacher damping (PDE) | ✅ |
+| [Spread](#spread-option) | Analytic · MC | MA-GBM: **mc** (spots by `underlying_ids`; Margrabe / Kirk: direct call) | per-asset vols + correlation | per-asset SABR | 2-asset correlated GBM | ✅ |
+| [Worst-of basket](#worst-of-basket-option) | MC | MA-GBM: **mc** (spots by `underlying_ids`) | per-asset vols + correlation | per-asset | n-asset correlated GBM | ✅ |
+| [Compound](#compound-option) | — | — | constant | — | Geske option-on-option | 🟡 |
+| [Chooser](#chooser-option) | — | — | constant | — | choice at intermediate date | 🟡 |
+| [Autocallable](#autocallable) | — | — | SLV (paths exist) | SLV | path-dependent autocall/KI | 🟡 |
+| [Cliquet](#cliquet) | — | — | constant/local | — | forward-start ratchet | 🟡 |
 
 ### Interest-rate derivatives
 
-| Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
-|---|---|---|---|---|---|
-| [Caplet](#caplet-floorlet) | Analytic · MC · PDE | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | single forward per period | ✅ |
-| [Cap / Floor](#cap-floor) | Analytic · MC · PDE | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | strip of independent caplets | ✅ |
-| [Interest-rate swap](#interest-rate-swap) | Analytic | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
-| [Swaption](#swaption) | Analytic · MC · PDE · Lattice (Hull-White analytic = Jamshidian, G2++ analytic = Brigo-Mercurio; both reachable through `price()` and its auto default. Hull-White tree: `swaption_tree_price`, a direct call, not yet routed through `price()`) | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette (constant or [piecewise-constant σ(t)](../theory/time-dependent-volatility.md)) · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube); as a chain: `swaption_cube_node` on the upstream curves · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)); per trade off the cube: `swaption_basket_node` | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
-| [CMS swap](#cms-swap) | Analytic | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
-| [CMS-spread swap](#cms-spread-swap) | MC · PDE | G2++ · Cheyette-2F | HW → swaption surface | 2-factor decorrelation (steepener / flattener) | ✅ |
-| [CMS cap / floor](#cms-cap-floor) | Analytic | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |
-| [Range accrual](#range-accrual) | Analytic | `OptionletVolSurface` / scalar | SABR | snapshot digital replication | ✅ |
-| [OIS swap](#ois-swap) | Analytic | n-a (curves) | curve bootstrap | compounded overnight leg | ✅ |
-| [Amortising swap](#amortising-swap) | Analytic | n-a (curves) | curve bootstrap | per-period notional factors | ✅ |
-| [Seasoned (part-accrued) swap](#seasoned-part-accrued-swap) | Analytic | n-a (curves + fixing history) | curve bootstrap | realised/projected cut-over at the valuation date | ✅ |
-| [Tenor basis swap](#tenor-basis-swap) | Analytic | n-a (curves) | curve bootstrap · `TenorBasisSwap` quote | one projection curve per leg | ✅ |
-| [Cross-currency swap](#cross-currency-swap) | Analytic | n-a (curves + FX spot) | joint curve bootstrap | telescoping under CIP | ✅ |
-| [Total return swap](#total-return-swap) | Analytic | n-a (curves) | curve bootstrap | self-financing asset | ✅ |
-| [Bermudan swaption](#bermudan-swaption) | MC · PDE · Lattice (Hull-White tree: `bermudan_swaption_tree_price`, a direct call, not yet routed through `price()`) | Hull-White · G2++ · Cheyette (constant or [piecewise-constant σ(t)](../theory/time-dependent-volatility.md)) · LMM | per trade (Hull-White, G2++, Cheyette 1F/2F; Cheyette single-curve): `coterminal_swaptions` + `swaption_basket_node` off the calibrated cube — `mode="coterminal_bootstrap"` gives one σ bucket per exercise date and reprices every co-terminal exactly, `mode="least_squares"` fits constant parameters — priced through `price(..., method="pde")` with quote risk via `chain_adjoint` ([how-to](../guide/calibration-to-risk.md#rates-per-trade-model-calibration)); LMM uncalibrated | early exercise | ✅ |
+| Instrument | Method(s) | `price()` routes | Vol / model input | Calibration | Key assumptions | Status |
+|---|---|---|---|---|---|---|
+| [Caplet](#caplet-floorlet) | Analytic · MC · PDE | IV: **analytic**<br>HW: **pde**<br>G2++: **pde**<br>Ch-1F: **pde**, mc<br>Ch-2F: **pde**<br>LMM: **mc**† | flat Black-76/Bachelier · `OptionletVolSurface` · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | single forward per period | ✅ |
+| [Cap / Floor](#cap-floor) | Analytic · MC · PDE | IV: **analytic**<br>HW: **pde**<br>G2++: **pde**<br>Ch-1F: **pde**, mc<br>Ch-2F: **pde**<br>LMM: **mc**† | flat · optionlet surface · LMM · short-rate (HW / G2++ / Cheyette) | `strip_caplet_vols` / `strip_optionlet_surface` (dual-curve cap→caplet strip + per-expiry SABR); as a chain: `caplet_strip_node` → `optionlet_sabr_node` on the upstream curves | strip of independent caplets | ✅ |
+| [Interest-rate swap](#interest-rate-swap) | Analytic | curves: **analytic** | n-a (curves) | curve bootstrap | replication of floating leg | ✅ |
+| [Swaption](#swaption) | Analytic · MC · PDE · Lattice (Hull-White analytic = Jamshidian, G2++ analytic = Brigo-Mercurio; Hull-White tree = `swaption_tree_price` on the general tree) | IV: **analytic**<br>HW: **analytic**, lattice, pde<br>G2++: **analytic**, pde, mc<br>Ch-1F: **pde**, mc<br>Ch-2F: **pde**<br>LMM: **mc**† | flat · `SwaptionCube` · Hull-White · G2++ · Cheyette (constant or [piecewise-constant σ(t)](../theory/time-dependent-volatility.md)) · LMM | `calibrate_swaption_cube_from_curves` / `_from_graph` (curve-aware SABR cube); as a chain: `swaption_cube_node` on the upstream curves · `swaption_implied_normal_vol` (premium quotes) · `calibrate_hull_white` / `calibrate_g2pp` (single- or [dual-curve](../guide/calibration.md#6-dual-curve-rates-calibration-ois-discounting)); per trade off the cube: `swaption_basket_node` | annuity numeraire; dual-curve via frozen tenor basis | ✅ |
+| [CMS swap](#cms-swap) | Analytic | — | `SwaptionCube` / scalar (convexity) | SABR cube | Hagan convexity adjustment | ✅ |
+| [CMS-spread swap](#cms-spread-swap) | MC · PDE | G2++: **pde**, mc<br>Ch-2F: **pde**, mc | G2++ · Cheyette-2F | HW → swaption surface | 2-factor decorrelation (steepener / flattener) | ✅ |
+| [CMS cap / floor](#cms-cap-floor) | Analytic | — | `SwaptionCube` / scalar (+ convexity) | SABR cube | Black-76/Bachelier + convexity | ✅ |
+| [Range accrual](#range-accrual) | Analytic | — | `OptionletVolSurface` / scalar | SABR | snapshot digital replication | ✅ |
+| [OIS swap](#ois-swap) | Analytic | curves: **analytic** | n-a (curves) | curve bootstrap | compounded overnight leg | ✅ |
+| [Amortising swap](#amortising-swap) | Analytic | curves: **analytic** (`MultiLegSwap`) | n-a (curves) | curve bootstrap | per-period notional factors | ✅ |
+| [Seasoned (part-accrued) swap](#seasoned-part-accrued-swap) | Analytic | curves: **analytic** (`MultiLegSwap`; fixings from the market) | n-a (curves + fixing history) | curve bootstrap | realised/projected cut-over at the valuation date | ✅ |
+| [Tenor basis swap](#tenor-basis-swap) | Analytic | curves: **analytic** (`MultiLegSwap`, every leg's curve) | n-a (curves) | curve bootstrap · `TenorBasisSwap` quote | one projection curve per leg | ✅ |
+| [Cross-currency swap](#cross-currency-swap) | Analytic | curves: **analytic** (domestic + foreign curve, keyed FX spot) | n-a (curves + FX spot) | joint curve bootstrap | telescoping under CIP | ✅ |
+| [Total return swap](#total-return-swap) | Analytic | — | n-a (curves) | curve bootstrap | self-financing asset | ✅ |
+| [Bermudan swaption](#bermudan-swaption) | MC · PDE · Lattice (Hull-White tree: `bermudan_swaption_tree_price` on the general tree) | HW: **pde**, lattice<br>G2++: **pde**<br>Ch-1F: **pde**<br>Ch-2F: **pde**<br>LMM: **mc**† | Hull-White · G2++ · Cheyette (constant or [piecewise-constant σ(t)](../theory/time-dependent-volatility.md)) · LMM | per trade (Hull-White, G2++, Cheyette 1F/2F; Cheyette single-curve): `coterminal_swaptions` + `swaption_basket_node` off the calibrated cube — `mode="coterminal_bootstrap"` gives one σ bucket per exercise date and reprices every co-terminal exactly, `mode="least_squares"` fits constant parameters — priced through `price(..., method="pde")` with quote risk via `chain_adjoint` ([how-to](../guide/calibration-to-risk.md#rates-per-trade-model-calibration)); LMM uncalibrated | early exercise | ✅ |
 
 ### Bonds & fixed income
 
-| Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
-|---|---|---|---|---|---|
-| [Zero-coupon bond](#zero-coupon-bond) | Analytic | n-a (curve) | curve bootstrap | single cash flow | ✅ |
-| [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | n-a · Hull-White · G2++ · Cheyette | curve / HW | day-count accrual per period | ✅ |
-| [Floating-rate bond](#floating-rate-note) | Analytic · MC | n-a (curves) · Hull-White · G2++ · Cheyette | curve / HW | par-reset replication | ✅ |
-| [Callable bond](#callable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE; σ(t) on the general tree) · G2++ · Cheyette (PDE) | HW→swaptions | issuer-optimal call, clean call price | ✅ |
-| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | Hull-White (tree / MC / PDE; σ(t) on the general tree) · G2++ · Cheyette (PDE) | HW→swaptions | holder-optimal put, clean put price | ✅ |
-| [Convertible bond](#convertible-bond) | — | equity-credit | — | equity conversion option | 🟡 |
+| Instrument | Method(s) | `price()` routes | Vol / model input | Calibration | Key assumptions | Status |
+|---|---|---|---|---|---|---|
+| [Zero-coupon bond](#zero-coupon-bond) | Analytic | — | n-a (curve) | curve bootstrap | single cash flow | ✅ |
+| [Fixed-rate bond](#fixed-rate-bond) | Analytic · MC · PDE | curves: **analytic**<br>HW: **pde**, mc<br>G2++: **pde**, mc<br>Ch-1F: **pde**, mc<br>Ch-2F: **pde**, mc | n-a · Hull-White · G2++ · Cheyette | curve / HW | day-count accrual per period | ✅ |
+| [Floating-rate bond](#floating-rate-note) | Analytic · MC | curves: **analytic**<br>HW: **mc**<br>G2++: **mc**<br>Ch-1F: **mc**<br>Ch-2F: **mc** | n-a (curves) · Hull-White · G2++ · Cheyette | curve / HW | par-reset replication | ✅ |
+| [Callable bond](#callable-bond) | Lattice · MC · PDE | HW: **pde**, lattice, mc<br>G2++: **pde**<br>Ch-1F: **pde**<br>Ch-2F: **pde** | Hull-White (tree / MC / PDE; σ(t) on the general tree) · G2++ · Cheyette (PDE) | HW→swaptions | issuer-optimal call, clean call price | ✅ |
+| [Puttable bond](#puttable-bond) | Lattice · MC · PDE | HW: **pde**, lattice, mc<br>G2++: **pde**<br>Ch-1F: **pde**<br>Ch-2F: **pde** | Hull-White (tree / MC / PDE; σ(t) on the general tree) · G2++ · Cheyette (PDE) | HW→swaptions | holder-optimal put, clean put price | ✅ |
+| [Convertible bond](#convertible-bond) | — | — | equity-credit | — | equity conversion option | 🟡 |
 
 !!! note "Conventions that apply to every row above"
     Coupons are sized from each period's **day-count year fraction**, never
@@ -133,29 +153,29 @@ as chain nodes today is tracked on the
 
 ### FX derivatives
 
-| Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
-|---|---|---|---|---|---|
-| [FX forward](#fx-forward) | Analytic | n-a (curves) | curve bootstrap | covered interest parity | ✅ |
-| [FX vanilla option](#fx-vanilla-option) | Analytic | constant (delta-quoted) | delta-smile → strike | Garman-Kohlhagen | ✅ |
-| [FX barrier option](#fx-barrier-option) | — | constant | — | Reiner-Rubinstein (planned) | 🟡 |
-| [Quanto option](#quanto-option) | — | constant + FX corr | — | fixed-FX domestic payout | 🟡 |
-| [TARF](#tarf) | — | constant | — | path-dependent target accrual | 🟡 |
-| [FX swap](#fx-swap) | — | n-a (curves) | curve bootstrap | near + far leg pair | 🟡 |
+| Instrument | Method(s) | `price()` routes | Vol / model input | Calibration | Key assumptions | Status |
+|---|---|---|---|---|---|---|
+| [FX forward](#fx-forward) | Analytic | — | n-a (curves) | curve bootstrap | covered interest parity | ✅ |
+| [FX vanilla option](#fx-vanilla-option) | Analytic | — | constant (delta-quoted) | delta-smile → strike | Garman-Kohlhagen | ✅ |
+| [FX barrier option](#fx-barrier-option) | — | — | constant | — | Reiner-Rubinstein (planned) | 🟡 |
+| [Quanto option](#quanto-option) | — | — | constant + FX corr | — | fixed-FX domestic payout | 🟡 |
+| [TARF](#tarf) | — | — | constant | — | path-dependent target accrual | 🟡 |
+| [FX swap](#fx-swap) | — | — | n-a (curves) | curve bootstrap | near + far leg pair | 🟡 |
 
 ### Credit derivatives
 
-| Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
-|---|---|---|---|---|---|
-| [CDS](#credit-default-swap-cds) | — (hazard curve ✅) | n-a (hazard curve) | `SurvivalCurve` from spreads (closed-form credit triangle, not a repricing bootstrap) | credit triangle; constant recovery | 🟡 |
-| [CDO tranche](#cdo-tranche) | — | Gaussian copula | base correlation | one-factor copula | 🟡 |
+| Instrument | Method(s) | `price()` routes | Vol / model input | Calibration | Key assumptions | Status |
+|---|---|---|---|---|---|---|
+| [CDS](#credit-default-swap-cds) | — (hazard curve ✅) | — | n-a (hazard curve) | `SurvivalCurve` from spreads (closed-form credit triangle, not a repricing bootstrap) | credit triangle; constant recovery | 🟡 |
+| [CDO tranche](#cdo-tranche) | — | — | Gaussian copula | base correlation | one-factor copula | 🟡 |
 
 ### Inflation derivatives
 
-| Instrument | Method(s) | Vol / model input | Calibration | Key assumptions | Status |
-|---|---|---|---|---|---|
-| [Zero-coupon inflation swap](#zero-coupon-inflation-swap-zcis) | Analytic | n-a (inflation curve) | algebraic (`from_zc_rates`) | index lag; single exchange | ✅ |
-| [Year-on-year inflation swap](#year-on-year-inflation-swap-yyis) | Analytic | n-a (inflation curve) | algebraic (`from_zc_rates`) | YoY convexity ignored | ✅ |
-| [Inflation cap / floor](#inflation-cap-floor) | Analytic | flat Black-76 | — | Black-76 on forward YoY | ✅ |
+| Instrument | Method(s) | `price()` routes | Vol / model input | Calibration | Key assumptions | Status |
+|---|---|---|---|---|---|---|
+| [Zero-coupon inflation swap](#zero-coupon-inflation-swap-zcis) | Analytic | curves: **analytic** (keyed inflation curve) | n-a (inflation curve) | algebraic (`from_zc_rates`) | index lag; single exchange | ✅ |
+| [Year-on-year inflation swap](#year-on-year-inflation-swap-yyis) | Analytic | curves: **analytic** (keyed inflation curve) | n-a (inflation curve) | algebraic (`from_zc_rates`) | YoY convexity ignored | ✅ |
+| [Inflation cap / floor](#inflation-cap-floor) | Analytic | IV: **analytic** (lognormal vol per caplet fixing) | flat Black-76 | — | Black-76 on forward YoY | ✅ |
 
 ---
 

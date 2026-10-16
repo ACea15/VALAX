@@ -139,6 +139,24 @@ class TestBasket:
             assert int(sw.fixed_dates[-1]) == int(trade.fixed_dates[-1])
             assert int(sw.fixed_dates[0]) > int(e)
 
+    def test_targets_are_priced_through_the_implied_vol_route(self, setup):
+        """``price(inst, ImpliedVolModel(cube_id), market)`` is the old direct
+        cube call bit for bit, and the target shift is added on top."""
+        from valax.calibration.level import LevelInputs
+        from valax.calibration.nodes import _basket_target
+
+        world, market = setup["world"], setup["calibrated"].market
+        keys = setup["target_keys"]
+        fixed = setup["fixed"].with_values({keys[1]: jnp.asarray(1e-4)})
+        inputs = LevelInputs(quotes=QuoteSet(), upstream=market, fixed=fixed,
+                             data={"basket": setup["basket"]})
+        disc, fwd = market.curve(world.discount_id), market.curve(world.forward_id)
+        cube = market.surfaces[world.spec.cube_id]
+        for k, sw in enumerate(setup["basket"]):
+            direct = swaption_price(sw, disc, cube, fwd) + fixed[keys[k]]
+            got = _basket_target(inputs, k, world.spec.cube_id, keys)
+            assert float(got) == float(direct)
+
     def test_jamshidian_is_reachable_and_matches_pde(self, setup):
         market = setup["calibrated"].market
         model = setup["model"].value
