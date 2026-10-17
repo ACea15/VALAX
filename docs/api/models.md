@@ -332,6 +332,11 @@ and \(\mu_i\) is the spot-measure drift. Path simulation uses
 log-Euler for guaranteed positivity; used by the Bermudan swaption
 pricer (Longstaff–Schwartz on LMM paths).
 
+The model is curve-free (`initial_curve=None`): `price()` binds the curve
+from the `MarketState` and the initial forwards are derived from it, and
+`build_lmm_model` returns a bound model for kernel-level calls
+([Monte Carlo § LMM through `price()`](../guide/monte-carlo.md#lmm-through-price)).
+
 ::: valax.models.LMMModel
 
 ::: valax.models.build_lmm_model

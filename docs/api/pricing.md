@@ -334,13 +334,15 @@ of available recipes if the pair is not registered.
 Typical `market_args`:
 
 - Equity recipes: `spot` (required).
-- LMM rate recipes: `forward_index` / `forward_indices` + `taus` (or
-  `exercise_indices` for Bermudan).
+- LMM rate recipes: none — the periods are mapped onto the bound model's
+  tenor grid from the instrument's dates (`lmm_period_indices`);
+  `forward_index` / `forward_indices` + `taus` (or `exercise_indices` for
+  Bermudan) override the mapping.
 - Optional per-recipe knobs: e.g. `annual_factor` for variance-swap
-  realization, `n_steps_per_period` for LMM, `lsm_config` for
-  Bermudan.
-- Short-rate recipes (Hull–White, G2++, Cheyette): `T` (horizon) and
-  `n_steps` (default 100). These recipes **ignore `MCConfig.n_steps`**; see
+  realization, `n_steps_per_period` for LMM (default: `MCConfig.n_steps`
+  over the grid segments), `lsm_config` for Bermudan.
+- Short-rate recipes (Hull–White, G2++, Cheyette): `T` (horizon); the step
+  count is `MCConfig.n_steps` (an explicit `n_steps` overrides it); see
   the [Monte Carlo guide § time-dependent volatility](../guide/monte-carlo.md#time-dependent-volatility).
 
 ::: valax.pricing.mc.mc_price_dispatch
@@ -432,6 +434,8 @@ branch.
 ::: valax.pricing.mc.LMMPathResult
 
 ::: valax.pricing.mc.generate_lmm_paths
+
+::: valax.pricing.mc.lmm_period_indices
 
 The Hull–White short-rate generator samples the **exact** conditional
 Ornstein–Uhlenbeck law rather than discretising the SDE, so it is unbiased in

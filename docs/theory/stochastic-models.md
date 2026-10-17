@@ -222,7 +222,9 @@ where $\eta(t)$ is the index of the first alive forward rate and $\delta_j$ is t
 
 **When to use:** Bermudan swaptions, CMS products, callable rate exotics — any product where the payoff depends on multiple points of the forward rate curve and/or has early exercise features.
 
-**VALAX implementation:** Full model in `valax/models/lmm.py`. Path generation in `valax/pricing/mc/lmm_paths.py`. Rate payoffs (caplet, cap, swaption) in `valax/pricing/mc/rate_payoffs.py`. Bermudan swaption pricing via Longstaff-Schwartz in `valax/pricing/mc/bermudan.py`.
+**Initial curve and payoffs.** The initial forwards are read from the discount curve the model is bound to, $F_i(0) = \big(P(0,T_i)/P(0,T_{i+1}) - 1\big)/\tau_i$, and the path-wise deflator is $P(0,T_0)\big/\prod_{j<k}(1+\tau_j F_j(T_j))$ at $T_k$ — the spot-LIBOR numéraire, so $\mathbb{E}[\text{deflator}]$ reprices the curve (the martingale test). A European swaption exercised at $T_0$ is a function of the forward curve **observed at $T_0$**: with $D_i = \prod_{j \le i} (1 + \tau_j F_j(T_0))^{-1}$, the payoff is $A\,(S - K)^+$ with $A = \sum_i \tau_i D_i$ and $S = (1 - D_{N-1})/A$; the later fixings $F_j(T_j)$ are information after the exercise decision. Rebonato's frozen-weight approximation, $\sigma_S^2 S_0^2 T_0 = \sum_{ij} \partial_i S\,\partial_j S\,F_iF_j\rho_{ij}\int_0^{T_0}\sigma_i\sigma_j\,dt$, gives the Black swap vol the simulation is validated against.
+
+**VALAX implementation:** Full model in `valax/models/lmm.py` — curve-free: `price()` binds the curve from the `MarketState` and maps the trade onto the tenor grid from its dates ([Monte Carlo § LMM through `price()`](../guide/monte-carlo.md#lmm-through-price)). Path generation in `valax/pricing/mc/lmm_paths.py`. Rate payoffs (caplet, cap, swaption) in `valax/pricing/mc/rate_payoffs.py`. Bermudan swaption pricing via Longstaff-Schwartz in `valax/pricing/mc/bermudan.py`.
 
 ### 2.7 Garman-Kohlhagen (FX Options)
 

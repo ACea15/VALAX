@@ -298,9 +298,9 @@ width / `n_steps`: up to 1.17 for a 0.012 → 0.009 drop, 1.25–1.30 for ×1.5 
 invalid and prices NaN. The coverage matrix's
 [`price()` routes column](../applications/instrument-pricing.md#coverage-matrix)
 is checked against the registry and the policy in both directions. Still not
-routed after D15: the LMM recipes (registered, not yet priceable — named in
-the matrix) and CMS / range-accrual products on `ImpliedVolModel`; the
-multi-index trades followed with D16.
+routed after D15: the LMM recipes (routed with D18) and CMS /
+range-accrual products on `ImpliedVolModel`; the multi-index trades followed
+with D16.
 
 **D16 — A trade resolves every market entry it reads, keyed by id, from its
 static selectors.** `ResolvedMarket` used to hold one discount and one
@@ -359,6 +359,31 @@ Writing the samples found one real bug (`MarketState.dividend` raised for a
 non-paying asset once any other asset paid one); `FXForward` and
 `FXVanillaOption` were the first trades onboarded through the checklist.
 
+**D18 — The LMM is curve-free, and its routes map trades onto its grid from
+the dates.** `LMMModel` used to embed its curve: `build_lmm_model` froze the
+initial forwards, `P(0, T_0)` and the factor loadings into model leaves, so
+curve risk was a model gradient and `price()` had no curve to bind. Now the
+model holds the tenor grid, the volatility and the correlation, with
+`initial_curve=None` and a static `curve_id` as the short-rate models do;
+`curve_requirements` binds the curve (the pinned id, else the trade's
+discount curve), every curve-derived quantity is a property of the bound
+model, and `price()` refuses a pre-bound one. `build_lmm_model(curve, …)`
+returns the bound model for kernel-level calls, bit-identical to the
+embedded one. The four recipes no longer take caller-supplied indices: the
+trade's periods are looked up on `tenor_dates` (`lmm_period_indices`, a
+traced `searchsorted`, so the trade may be a traced `jit` argument), dates
+off the grid raise when concrete and give a NaN price when traced, the
+trade's day count must be the curve's (one accrual per period serves the
+forward and the payoff), and the Euler grid spreads `MCConfig.n_steps` over
+the `N + 1` grid segments. The **grid stays a model choice**: deriving it
+from each trade would make the volatility matrix's shape a function of the
+trade and break stacking models across trades. Routing them found a kernel
+bug — the European swaption read each forward at its own later fixing
+instead of at expiry (+20% on a 2Y×4Y ATM payer, hidden behind an `xfail`);
+the payoff now uses the forward curve at expiry and matches Black at
+Rebonato's swap vol. With D18 every registered route prices through
+`price()` and passes the D17 contract.
+
 ## 4. Extending the framework
 
 | To add… | You provide | It then works with |
@@ -401,8 +426,8 @@ deliberately unconvergeable fit is reported (see
 Tracked on the [roadmap](../roadmap.md#unified-calibration-pricing-and-risk):
 richer synthetic quote noise; constrained (KKT) SVI and FX smile levels;
 credit and FX quote levels; reaching the remaining pricers through `price`
-(the LMM recipes, CMS and range-accrual products on `ImpliedVolModel`; D15 /
-D16); derivative convergence of the numerical engines; the position /
+(CMS and range-accrual products on `ImpliedVolModel`; D15 / D16); an LMM
+calibrator (D18); derivative convergence of the numerical engines; the position /
 portfolio layer; a global piecewise σ(t) calibration on a user grid for
 portfolio / XVA simulation (D13). Hull-White, G2++ (multi-curve, 2-D PDE
 basket) and Cheyette 1F/2F (single-curve, frozen-y PDE basket) are all

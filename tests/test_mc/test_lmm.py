@@ -2,6 +2,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from valax.models.lmm import (
@@ -26,7 +27,6 @@ from valax.pricing.mc.rate_payoffs import (
     swaption_mc_payoff,
 )
 from valax.pricing.analytic.caplets import caplet_price_black76
-from valax.pricing.analytic.swaptions import swaption_price_black76
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -417,8 +417,9 @@ class TestSwaptionMC:
         # Since we use the same paths, the difference should be very tight
         diff = p_payoffs - r_payoffs
 
-        # The diff should equal the path-wise swap value
-        F = result.forwards_at_fixing[:, indices]
+        # The diff should equal the path-wise swap value on the forward
+        # curve observed at expiry T_0.
+        F = result.forwards_at_tenors[:, 0, indices]
         taus = model.accrual_fractions
         accrual = 1.0 + taus[None, :] * F
         cum_accrual = jnp.cumprod(accrual, axis=1)
@@ -431,36 +432,96 @@ class TestSwaptionMC:
 
         assert jnp.allclose(diff, expected_diff, atol=1e-2)
 
-    @pytest.mark.xfail(reason="LMM spot-measure dynamics diverge from Black-76 terminal measure for multi-period swaptions")
-    def test_swaption_vs_black76_approximate(self, multi_fwd_model, flat_curve):
-        """LMM swaption MC should be approximately consistent with Black-76.
+    def test_swaption_vs_rebonato_black(self, multi_fwd_model, flat_curve):
+        """LMM swaption MC matches Black at Rebonato's swap-rate vol.
 
-        Not exact because the LMM swap rate distribution is not perfectly
-        lognormal. Allow 10% relative tolerance.
+        Rebonato's frozen-weight approximation gives the swap-rate lognormal
+        vol from the forward vols and correlations,
+
+        .. math::
+            \\sigma_S^2 T_0 = \\frac{1}{S_0^2} \\sum_{ij}
+            \\frac{\\partial S}{\\partial F_i} \\frac{\\partial S}{\\partial F_j}
+            F_i F_j \\rho_{ij} \\int_0^{T_0} \\sigma_i \\sigma_j \\, dt,
+
+        accurate to well under 1% of price for flat vols and high
+        correlation. Tolerance: 2 pooled standard errors plus a 0.25%-of-price
+        approximation band (measured |MC - Black| <= 0.6 stderr at all three
+        strikes; the pre-fix payoff, which read each forward at its own later
+        fixing, was ~+20%).
         """
+        from jax.scipy.stats import norm
+
         model = multi_fwd_model
-        n_paths = 100_000
-        result = generate_lmm_paths(model, 10, n_paths, jax.random.PRNGKey(777))
         N = model.initial_forwards.shape[0]
+        tau = model.accrual_fractions
+        F0 = model.initial_forwards
+        T0 = model.tenor_times[0]
+        rho = model.loading_matrix @ model.loading_matrix.T
+        sigma = 0.20  # the fixture's flat forward vol
 
-        swaption = Swaption(
-            expiry_date=model.tenor_dates[0],
-            fixed_dates=model.tenor_dates[1:],
-            strike=jnp.array(0.05),
-            notional=jnp.array(1_000_000.0),
-            is_payer=True,
-            day_count=model.day_count,
+        def swap_rate(F):
+            disc = 1.0 / jnp.cumprod(1.0 + tau * F)
+            return (1.0 - disc[-1]) / jnp.sum(tau * disc)
+
+        S0 = swap_rate(F0)
+        dS = jax.grad(swap_rate)(F0)
+        vol_S = jnp.sqrt(
+            jnp.sum(dS[:, None] * dS[None, :] * F0[:, None] * F0[None, :] * rho)
+        ) * sigma / S0
+        annuity = flat_curve(model.tenor_dates[0]) * jnp.sum(
+            tau / jnp.cumprod(1.0 + tau * F0)
         )
+
+        results = [
+            generate_lmm_paths(model, 10, 50_000, jax.random.PRNGKey(k))
+            for k in range(4)
+        ]
         indices = jnp.arange(N, dtype=jnp.int32)
-        mc_payoffs = swaption_mc_payoff(result, swaption, indices, model.accrual_fractions)
-        mc_price = float(jnp.mean(mc_payoffs))
+        for K in (0.05, float(S0), 0.06):
+            d1 = (jnp.log(S0 / K) + 0.5 * vol_S**2 * T0) / (vol_S * jnp.sqrt(T0))
+            d2 = d1 - vol_S * jnp.sqrt(T0)
+            black = float(1e6 * annuity * (S0 * norm.cdf(d1) - K * norm.cdf(d2)))
 
-        analytical = float(swaption_price_black76(swaption, flat_curve, jnp.array(0.20)))
+            swaption = Swaption(
+                expiry_date=model.tenor_dates[0],
+                fixed_dates=model.tenor_dates[1:],
+                strike=jnp.array(K),
+                notional=jnp.array(1_000_000.0),
+                is_payer=True,
+                day_count=model.day_count,
+            )
+            payoffs = jnp.concatenate([
+                swaption_mc_payoff(r, swaption, indices, tau) for r in results
+            ])
+            mc = float(jnp.mean(payoffs))
+            stderr = float(jnp.std(payoffs) / jnp.sqrt(payoffs.shape[0]))
+            assert abs(mc - black) < 2.0 * stderr + 0.0025 * black, (
+                f"K={K:.4%}: MC={mc:.2f} ± {stderr:.2f}, "
+                f"Black(Rebonato vol {float(vol_S):.4%})={black:.2f}"
+            )
 
-        # Approximate: LMM and Black-76 won't match exactly
-        rel_err = abs(mc_price - analytical) / abs(analytical) if analytical != 0 else abs(mc_price)
-        assert rel_err < 0.15, (
-            f"Swaption: MC={mc_price:.2f}, Black76={analytical:.2f}, rel_err={rel_err:.2%}"
+    def test_swaption_equals_tail_swap_exercise(self, multi_fwd_model):
+        """European payoff = the Bermudan kernel's exercise value at T_0."""
+        from valax.pricing.mc.bermudan import _tail_swap_value
+
+        model = multi_fwd_model
+        result = generate_lmm_paths(model, 5, 2_000, jax.random.PRNGKey(5))
+        N = model.initial_forwards.shape[0]
+        K = jnp.array(0.05)
+        swaption = Swaption(
+            expiry_date=model.tenor_dates[0], fixed_dates=model.tenor_dates[1:],
+            strike=K, notional=jnp.array(1_000_000.0), is_payer=True,
+        )
+        european = swaption_mc_payoff(
+            result, swaption, jnp.arange(N, dtype=jnp.int32),
+            model.accrual_fractions,
+        )
+        exercise, _ = _tail_swap_value(
+            result.forwards_at_tenors[:, 0, :], model.accrual_fractions,
+            jnp.array(0, dtype=jnp.int32), K, jnp.array(1_000_000.0), True,
+        )
+        np.testing.assert_allclose(
+            european, exercise * result.discount_factors[:, 0], rtol=1e-12,
         )
 
 

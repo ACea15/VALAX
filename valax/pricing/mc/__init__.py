@@ -37,7 +37,11 @@ from valax.pricing.mc.engine import mc_price, mc_price_with_stderr
 # Path generators
 from valax.pricing.mc.paths import generate_gbm_paths, generate_heston_paths
 from valax.pricing.mc.sabr_paths import generate_sabr_paths
-from valax.pricing.mc.lmm_paths import LMMPathResult, generate_lmm_paths
+from valax.pricing.mc.lmm_paths import (
+    LMMPathResult,
+    generate_lmm_paths,
+    lmm_period_indices,
+)
 from valax.pricing.mc.hull_white_paths import HullWhitePathResult, generate_hull_white_paths
 from valax.pricing.mc.g2pp_paths import G2PPPathResult, generate_g2pp_paths
 from valax.pricing.mc.cheyette_paths import (
@@ -87,6 +91,7 @@ __all__ = [
     "generate_heston_paths",
     "generate_sabr_paths",
     "generate_lmm_paths",
+    "lmm_period_indices",
     "generate_hull_white_paths",
     "generate_g2pp_paths",
     "generate_correlated_gbm_paths",

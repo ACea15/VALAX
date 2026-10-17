@@ -124,16 +124,11 @@ ROWS: dict[str, type] = {
     "puttable-bond": PuttableBond,
 }
 
-#: Registered (instrument, model, method) routes ``price()`` cannot run yet:
-#: the LMM recipes need the LMM adapter (deferred to the LMM rework). Named
-#: so the matrix marks them (†) instead of advertising them as working. (The
-#: two multi-asset recipes left this list with the keyed spots of D16.)
-KNOWN_UNPRICEABLE = {
-    (Caplet, LMMModel, "mc"),
-    (Cap, LMMModel, "mc"),
-    (Swaption, LMMModel, "mc"),
-    (BermudanSwaption, LMMModel, "mc"),
-}
+#: Registered (instrument, model, method) routes ``price()`` cannot run yet,
+#: named so the matrix marks them (†) instead of advertising them as working.
+#: Empty: the multi-asset recipes left it with the keyed spots of D16 and the
+#: four LMM routes with the LMM adapter of D18.
+KNOWN_UNPRICEABLE: set[tuple[type, type, str]] = set()
 
 
 def _library(cls: type) -> bool:

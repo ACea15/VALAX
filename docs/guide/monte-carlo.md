@@ -103,12 +103,99 @@ not yet wired), 🟠 = needs a new path generator, 🔴 = needs major infra.
 
 | Instrument | `LMMModel` | Notes |
 |-----------|:---:|---|
-| `Caplet` | ✓ | Caller provides `forward_index` + `tau` |
-| `Cap` | ✓ | Caller provides `forward_indices` + `taus` |
-| `Swaption` (European) | ✓ | |
-| `BermudanSwaption` | ✓ | Longstaff-Schwartz, `stderr = 0.0` sentinel |
+| `Caplet` | ✓ | Period = one forward period of the tenor grid |
+| `Cap` | ✓ | Every caplet period on the grid |
+| `Swaption` (European) | ✓ | Swap periods = consecutive grid periods from expiry |
+| `BermudanSwaption` | ✓ | Longstaff-Schwartz, `stderr = 0.0` sentinel; exercise dates on the grid, swap ends at the last tenor date |
 | `CMSSwap` / `CMSCapFloor` | 🟠 | Replication payoff needs to be added |
 | `RangeAccrual` | 🟠 | Full daily-observation MC on LMM |
+
+### LMM through `price()`
+
+The `LMMModel` is **curve-free**, like the short-rate models: it holds the
+tenor grid \(T_0 < \dots < T_N\), the forward volatilities and the
+correlation, and `price()` binds its initial curve from the `MarketState` —
+the trade's discount curve, or the one named by `curve_id`
+([D18](../architecture/calibration-pricing-risk.md#3-decisions)). The
+initial forwards \(F_i(0)\) and \(P(0, T_0)\) are read from that curve, so
+curve risk lands on the market. The recipe maps the trade onto the grid from
+its **dates**: forward \(i\) covers \([T_i, T_{i+1}]\) and fixes at \(T_i\),
+and the Euler grid spreads `MCConfig.n_steps` over the \(N + 1\) grid
+segments:
+
+```python
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import equinox as eqx
+import jax.numpy as jnp
+
+from valax.core import MarketState, price
+from valax.curves import DiscountCurve
+from valax.dates import ymd_to_ordinal
+from valax.greeks import market_risk
+from valax.instruments.rates import BermudanSwaption, Caplet, Swaption
+from valax.models.lmm import ExponentialCorrelation, LMMModel, PiecewiseConstantVol
+from valax.pricing.mc import MCConfig
+
+REF = jnp.int32(int(ymd_to_ordinal(2026, 1, 2)))
+days = jnp.arange(0, 11 * 365, 365, dtype=jnp.int32)
+curve = DiscountCurve(pillar_dates=REF + days,
+                      discount_factors=jnp.exp(-0.035 * days / 365.0),
+                      reference_date=REF, day_count="act_365")
+market = MarketState.single_curve(curve)
+
+# The model: an annual tenor grid T_0..T_5, flat 20% forward vols, no curve.
+tenor = REF + jnp.arange(1, 7, dtype=jnp.int32) * 365
+lmm = LMMModel(
+    tenor_dates=tenor,
+    vol_structure=PiecewiseConstantVol(vols=jnp.full((5, 5), 0.20)),
+    corr_structure=ExponentialCorrelation(beta=jnp.array(0.1)),
+)
+
+# Trades whose periods are periods of that grid, in the curve's day count.
+caplet = Caplet(fixing_date=tenor[1], start_date=tenor[1], end_date=tenor[2],
+                strike=jnp.array(0.035), notional=jnp.array(1e6),
+                day_count="act_365")
+payer = Swaption(expiry_date=tenor[1], fixed_dates=tenor[2:],
+                 strike=jnp.array(0.035), notional=jnp.array(1e6),
+                 day_count="act_365")
+bermudan = BermudanSwaption(exercise_dates=tenor[1:5], fixed_dates=tenor[2:],
+                            strike=jnp.array(0.035), notional=jnp.array(1e6),
+                            day_count="act_365")
+
+cfg = MCConfig(n_paths=50_000, n_steps=60)   # 10 steps per grid segment
+key = jax.random.PRNGKey(0)
+price(caplet, lmm, market, config=cfg, key=key)     #  3,889.90 ± 28.48
+price(payer, lmm, market, config=cfg, key=key)      # 13,924.19 ± 99.17
+price(bermudan, lmm, market, config=cfg, key=key)   # 16,541.18 (stderr 0)
+
+risk = market_risk(payer, lmm, market, config=cfg, key=key)
+risk.curves["_default_"][:7]    # ∂V/∂P(0, t) per pillar, on the market curve
+# [0, 184, 582,776, -15,925, -21,462, -24,859, -586,942]
+
+npv = eqx.filter_jit(lambda t: price(t, lmm, market, config=cfg, key=key).price)
+npv(payer)                      # 13,924.19 — the trade as a traced argument
+```
+
+Three rules keep the mapping honest:
+
+- **Periods must be grid periods.** A trade date off `tenor_dates` raises a
+  `ValueError` when the dates are concrete and gives a **NaN** price under
+  `jit`, where they are traced. Build the model's grid from the trade's
+  schedule. A caplet's `fixing_date` lag is not modelled: forward \(i\) fixes
+  at \(T_i\).
+- **One accrual convention.** The trade's `day_count` must equal the bound
+  curve's — the recipe uses one accrual per period for both the forward
+  definition and the payoff — or `price()` raises.
+- **Single-curve.** The LMM has no tenor-basis overlay, so a trade naming a
+  distinct `forward_id` is refused, not priced off the discount curve.
+
+The pre-D18 recipe arguments (`forward_index(es)`, `tau(s)`,
+`exercise_indices`, `n_steps_per_period`) still override the mapping in a
+direct `mc_price_dispatch` call on a bound model. There is no LMM
+calibrator yet (see the [calibration register](../applications/calibration-register.md#lmm)).
 
 ### Fixed income (stochastic rates)
 
@@ -515,11 +602,16 @@ fwd_paths, vol_paths = generate_sabr_paths(
 ### LMM
 
 Simulates $N$ correlated forward rates under the spot LIBOR measure.
-Uses log-Euler for positivity:
+Uses log-Euler for positivity. The generator needs a model **bound** to its
+curve — `build_lmm_model(curve, tenor_dates, vol, corr)` or
+`bind_curves(lmm, curve)`; `price()` binds it for you
+([LMM through `price()`](#lmm-through-price)):
 
 ```python
+from valax.models.lmm import build_lmm_model
 from valax.pricing.mc import generate_lmm_paths
 
+lmm_model = build_lmm_model(curve, tenor_dates, vol_structure, corr_structure)
 result = generate_lmm_paths(
     lmm_model,
     n_steps_per_period=20,
@@ -599,7 +691,12 @@ autodiff Greeks whenever the payoff is (or is smoothed to be) continuous.
 
 Rate payoffs consume the `LMMPathResult` and the instrument, and take
 extra args that map the instrument's accrual periods to the LMM tenor
-structure (indices + accrual fractions).
+structure (indices + accrual fractions). `lmm_period_indices(tenor_dates,
+start_dates, end_dates)` derives the indices from the dates (with an
+on-grid flag); the recipes call it, so through `price()` you never pass them.
+The European swaption's swap rate is built from the forward curve observed
+at expiry, \(F_j(T_0)\) (before D18 it read each forward at its own later
+fixing and overpriced a 2Y×4Y ATM payer by ~20%).
 
 | Function | Instrument | Extra args |
 |----------|-----------|-----------|

@@ -74,6 +74,7 @@ from valax.models import (
     MultiAssetGBMModel,
     SLVModel,
 )
+from valax.models.lmm import ExponentialCorrelation, PiecewiseConstantVol
 from valax.pricing.lattice import TreeConfig
 from valax.pricing.lattice.binomial import BinomialConfig
 from valax.pricing.mc import MCConfig
@@ -493,10 +494,48 @@ for _icls, _ibuild in _RATES_INSTRUMENTS.items():
     for _mcls, _mbuild in _SHORT_RATE.items():
         SAMPLES[(_icls, _mcls)] = _rates(_ibuild, _mbuild)
 
-#: Registered routes ``price()`` cannot run yet (the LMM adapter lands with
-#: the LMM rework). They are named, never sampled silently.
-KNOWN_UNPRICEABLE = {(Caplet, LMMModel), (Cap, LMMModel), (Swaption, LMMModel),
-                     (BermudanSwaption, LMMModel)}
+# Rates under the LMM (curve-free). Every period sits on the model's annual
+# tenor grid T_k = REF + k years, k = 1..5, and the Bermudan's swap ends at
+# its last date — the LMM recipes map the trade onto the grid from the dates.
+_LMM_GRID = _years(1, 2, 3, 4, 5)
+
+
+def lmm():
+    return LMMModel(tenor_dates=_LMM_GRID,
+                    vol_structure=PiecewiseConstantVol(vols=jnp.full((4, 4), 0.2)),
+                    corr_structure=ExponentialCorrelation(beta=jnp.asarray(0.1)))
+
+
+def lmm_caplet():
+    return Caplet(fixing_date=_LMM_GRID[1], start_date=_LMM_GRID[1],
+                  end_date=_LMM_GRID[2], strike=jnp.asarray(0.03),
+                  notional=jnp.asarray(1.0), day_count=DC)
+
+
+def lmm_cap():
+    return Cap(fixing_dates=_LMM_GRID[:-1], start_dates=_LMM_GRID[:-1],
+               end_dates=_LMM_GRID[1:], strike=jnp.asarray(0.03),
+               notional=jnp.asarray(1.0), day_count=DC)
+
+
+def lmm_swaption():
+    return Swaption(expiry_date=_LMM_GRID[1], fixed_dates=_LMM_GRID[2:],
+                    strike=jnp.asarray(0.03), notional=jnp.asarray(1.0), day_count=DC)
+
+
+def lmm_bermudan():
+    return BermudanSwaption(exercise_dates=_LMM_GRID[1:4], fixed_dates=_LMM_GRID[2:],
+                            strike=jnp.asarray(0.03), notional=jnp.asarray(1.0),
+                            day_count=DC)
+
+
+for _icls, _ibuild in {Caplet: lmm_caplet, Cap: lmm_cap, Swaption: lmm_swaption,
+                       BermudanSwaption: lmm_bermudan}.items():
+    SAMPLES[(_icls, LMMModel)] = _rates(_ibuild, lmm)
+
+#: Registered routes ``price()`` cannot run yet, named so they are never
+#: sampled silently. Empty: the LMM routes, the last ones, landed with D18.
+KNOWN_UNPRICEABLE: set[tuple[type, type]] = set()
 
 
 def cheap(config: Any) -> Any:

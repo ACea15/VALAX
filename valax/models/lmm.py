@@ -157,38 +157,90 @@ def compute_loading_matrix(
 # ── LMM Model ────────────────────────────────────────────────────────
 
 class LMMModel(eqx.Module):
-    """LIBOR Market Model (BGM) parameters.
+    """LIBOR Market Model (BGM): tenor structure, volatility, correlation.
 
-    Stores the initial forward rates, tenor structure, volatility and
-    correlation parameterizations, and precomputed factor loading matrix.
+    The model is **curve-free**: the initial forward curve is market data,
+    not a model parameter. Like the exact-fit short-rate models, it carries
+    ``initial_curve=None`` and a static ``curve_id``; :func:`valax.price`
+    binds ``initial_curve`` from the ``MarketState`` at pricing time (the
+    curve named by ``curve_id``, else the instrument's discount curve), so
+    curve risk is reported once, on the market. Every curve-derived quantity
+    — the initial forwards :math:`F_i(0)`, accruals, tenor times,
+    :math:`P(0, T_0)`, the factor loadings — is a property computed from the
+    bound curve; reading one on an unbound model raises.
+
+    Kernel-level calls (:func:`~valax.pricing.mc.generate_lmm_paths`) need a
+    bound model: build it with :func:`build_lmm_model` or bind one with
+    :func:`valax.core.binding.bind_curves`.
 
     Attributes:
-        initial_forwards: Initial simply-compounded forward rates F_i(0), shape (N,).
-        tenor_dates: Ordinal dates [T_0, T_1, ..., T_N], shape (N+1,).
-                     Forward i covers [T_i, T_{i+1}].
+        tenor_dates: Ordinal dates [T_0, T_1, ..., T_N]. Forward i covers
+            [T_i, T_{i+1}] and fixes at T_i.
         vol_structure: Volatility parameterization (callable eqx.Module).
         corr_structure: Correlation parameterization (eqx.Module with .matrix()).
-        loading_matrix: Precomputed factor loading L, shape (N, k).
-        accrual_fractions: Year fractions tau_i = yf(T_i, T_{i+1}), shape (N,).
-        tenor_times: Year fractions from reference date to each T_i, shape (N+1,).
+        initial_curve: The discount curve the forwards are read from;
+            ``None`` until bound.
         n_factors: Number of Brownian factors (k <= N). None means full rank.
         measure: Pricing measure: "spot" (default).
-        reference_date: Valuation date (ordinal).
-        day_count: Day count convention.
+        curve_id: Market curve to bind; ``None`` binds the instrument's
+            discount curve.
     """
 
-    initial_forwards: Float[Array, " n_forwards"]
     tenor_dates: Int[Array, " n_tenors"]
     vol_structure: eqx.Module
     corr_structure: eqx.Module
-    loading_matrix: Float[Array, "n_forwards k"]
-    accrual_fractions: Float[Array, " n_forwards"]
-    tenor_times: Float[Array, " n_tenors"]
-    initial_df: Float[Array, ""]  # DF(0, T_0) from curve to first tenor
+    initial_curve: DiscountCurve | None = None
     n_factors: int | None = eqx.field(static=True, default=None)
     measure: str = eqx.field(static=True, default="spot")
-    reference_date: Int[Array, ""] = None
-    day_count: str = eqx.field(static=True, default="act_360")
+    curve_id: str | None = eqx.field(static=True, default=None)
+
+    def _curve(self) -> DiscountCurve:
+        """The bound curve, or a ``ValueError`` naming how to bind one."""
+        from valax.models.short_rate import require_initial_curve
+
+        return require_initial_curve(self)
+
+    @property
+    def day_count(self) -> str:
+        """Day count of the forward accruals (the bound curve's)."""
+        return self._curve().day_count
+
+    @property
+    def reference_date(self) -> Int[Array, ""]:
+        """Valuation date (ordinal) of the bound curve."""
+        return self._curve().reference_date
+
+    @property
+    def accrual_fractions(self) -> Float[Array, " n_forwards"]:
+        """Year fractions tau_i = yf(T_i, T_{i+1})."""
+        return year_fraction(
+            self.tenor_dates[:-1], self.tenor_dates[1:], self.day_count
+        )
+
+    @property
+    def initial_forwards(self) -> Float[Array, " n_forwards"]:
+        """F_i(0) = (P(0, T_i) / P(0, T_{i+1}) - 1) / tau_i from the curve."""
+        curve = self._curve()
+        df_starts = curve(self.tenor_dates[:-1])
+        df_ends = curve(self.tenor_dates[1:])
+        return (df_starts / df_ends - 1.0) / self.accrual_fractions
+
+    @property
+    def tenor_times(self) -> Float[Array, " n_tenors"]:
+        """Year fractions from the reference date to each T_i."""
+        curve = self._curve()
+        return year_fraction(curve.reference_date, self.tenor_dates, curve.day_count)
+
+    @property
+    def initial_df(self) -> Float[Array, ""]:
+        """P(0, T_0), the discount factor to the first tenor date."""
+        return self._curve()(self.tenor_dates[0])
+
+    @property
+    def loading_matrix(self) -> Float[Array, "n_forwards k"]:
+        """Factor loadings L of the correlation at the forward start times."""
+        corr_matrix = self.corr_structure.matrix(self.tenor_times[:-1])
+        return compute_loading_matrix(corr_matrix, self.n_factors)
 
 
 # ── Drift and Diffusion for diffrax ──────────────────────────────────
@@ -308,52 +360,32 @@ def build_lmm_model(
     n_factors: int | None = None,
     measure: str = "spot",
 ) -> LMMModel:
-    """Construct an LMMModel from a discount curve and tenor schedule.
+    """Construct an LMMModel **bound** to a discount curve (kernel-level use).
 
-    Extracts initial forward rates and accrual fractions from the curve,
-    builds the correlation matrix and factor loading matrix.
+    The initial forwards, accruals, tenor times and factor loadings are
+    derived from ``curve`` (see :class:`LMMModel`). Use the result to call
+    :func:`~valax.pricing.mc.generate_lmm_paths` and the payoff kernels
+    directly. To price through :func:`valax.price`, construct the model
+    curve-free instead — ``LMMModel(tenor_dates, vol_structure,
+    corr_structure)`` — so the curve is bound from the ``MarketState``;
+    ``price`` refuses a pre-bound model.
 
     Args:
-        curve: Discount curve for computing initial forward rates.
-        tenor_dates: Ordinal dates [T_0, ..., T_N], shape (N+1,).
+        curve: Discount curve the initial forward rates are read from.
+        tenor_dates: Ordinal dates [T_0, ..., T_N].
         vol_structure: Volatility parameterization (PiecewiseConstantVol or RebonatoVol).
         corr_structure: Correlation parameterization with a .matrix() method.
         n_factors: Number of PCA factors. None = full rank (Cholesky).
         measure: Pricing measure ("spot").
 
     Returns:
-        Fully initialized LMMModel.
+        The LMMModel with ``initial_curve=curve``.
     """
-    # Accrual fractions: tau_i = yf(T_i, T_{i+1})
-    taus = year_fraction(tenor_dates[:-1], tenor_dates[1:], curve.day_count)
-
-    # Initial forward rates from the curve: F_i(0) = (DF(T_i)/DF(T_{i+1}) - 1) / tau_i
-    df_starts = curve(tenor_dates[:-1])
-    df_ends = curve(tenor_dates[1:])
-    initial_forwards = (df_starts / df_ends - 1.0) / taus
-
-    # Tenor times in year fractions from reference date
-    tenor_times = year_fraction(curve.reference_date, tenor_dates, curve.day_count)
-
-    # DF from reference date to first tenor date
-    initial_df = curve(tenor_dates[0])
-
-    # Build correlation matrix and loading matrix
-    tenor_times_fwd = tenor_times[:-1]
-    corr_matrix = corr_structure.matrix(tenor_times_fwd)
-    loading_matrix = compute_loading_matrix(corr_matrix, n_factors)
-
     return LMMModel(
-        initial_forwards=initial_forwards,
         tenor_dates=tenor_dates,
         vol_structure=vol_structure,
         corr_structure=corr_structure,
-        loading_matrix=loading_matrix,
-        accrual_fractions=taus,
-        tenor_times=tenor_times,
-        initial_df=initial_df,
+        initial_curve=curve,
         n_factors=n_factors,
         measure=measure,
-        reference_date=curve.reference_date,
-        day_count=curve.day_count,
     )

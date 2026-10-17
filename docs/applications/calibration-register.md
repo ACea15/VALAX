@@ -322,8 +322,11 @@ below.
 
 ### LMM
 
-No calibrator exists (`LMMModel` is priced uncalibrated; it also still embeds its
-curve). Tracked on the [roadmap](../roadmap.md#unified-calibration-pricing-and-risk).
+No calibrator exists: `LMMModel` is priced with hand-set volatility and
+correlation. Its curve is market data — curve-free since D18, bound by
+`price()` from the `MarketState` like the short-rate models — so a future
+calibrator fits only the volatility / correlation and returns a curve-free
+model. Tracked on the [roadmap](../roadmap.md#26-libor-market-model-lmm-bgm).
 
 ## Generic and market-input levels
 

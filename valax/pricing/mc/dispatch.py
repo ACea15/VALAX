@@ -132,8 +132,7 @@ def register(
 
     The decorated function must accept the keyword arguments
     ``instrument``, ``model``, ``config``, ``key`` and whatever
-    ``market_args`` the recipe needs (e.g. ``spot`` for equity models,
-    ``taus`` + ``forward_indices`` for LMM rate payoffs).
+    ``market_args`` the recipe needs (e.g. ``spot`` for equity models).
 
     Two ``market_args`` are special: ``discount_curve`` and
     ``forward_curve``.  The unified :func:`valax.core.pricing.price`
@@ -223,9 +222,11 @@ def mc_price_dispatch(
             examples:
 
             - Equity recipes: ``spot`` (scalar spot price).
-            - LMM rate recipes: ``forward_index`` / ``forward_indices``
-              and ``taus`` (tenor mapping), plus the model carries its
-              own initial curve.
+            - LMM rate recipes: none — the periods are mapped onto the
+              model's tenor grid from the instrument's dates, and the model
+              must be bound to its curve (``build_lmm_model`` /
+              ``bind_curves``); ``forward_index(es)`` / ``taus`` /
+              ``exercise_indices`` override the mapping.
 
     Returns:
         :class:`MCResult` with ``price``, ``stderr``, and ``n_paths``.

@@ -111,7 +111,7 @@ from valax.pricing.multicurve import (
     require_single_curve,
     with_discount_curve,
 )
-from valax.pricing.mc.lmm_paths import generate_lmm_paths
+from valax.pricing.mc.lmm_paths import generate_lmm_paths, lmm_period_indices
 from valax.pricing.mc.local_vol_paths import generate_local_vol_paths
 from valax.pricing.mc.multi_asset_paths import generate_correlated_gbm_paths
 from valax.pricing.mc.paths import generate_gbm_paths, generate_heston_paths
@@ -543,12 +543,63 @@ def _varswap_slv(
 # ─────────────────────────────────────────────────────────────────────
 # Rates recipes (LMM)
 #
-# LMM-based recipes need the instrument's payoff period mapped to the
-# LMM tenor structure. The caller passes ``forward_index`` (caplet) or
-# ``forward_indices`` + ``taus`` (cap, swaption, Bermudan) via
-# ``market_args``. Automatic date-to-index resolution is a planned
-# follow-up.
+# The instrument's periods are mapped onto the model's tenor grid from the
+# dates (``lmm_period_indices``): forward i covers [T_i, T_{i+1}] and fixes
+# at T_i. Every period must be a grid period — dates off the grid raise when
+# concrete and give a NaN price under ``jit`` — and the trade's day count
+# must be the model's (the bound curve's), so one accrual convention serves
+# both the forward definition and the payoff. The Euler grid takes
+# ``MCConfig.n_steps`` spread over the N + 1 grid segments. Explicit
+# ``forward_index`` / ``forward_indices`` / ``exercise_indices`` / ``taus`` /
+# ``n_steps_per_period`` (the pre-D18 market args) still override.
 # ─────────────────────────────────────────────────────────────────────
+
+
+def _lmm_check_day_count(instrument, model: LMMModel) -> None:
+    """Refuse a trade whose accrual convention differs from the model's."""
+    if instrument.day_count != model.day_count:
+        raise ValueError(
+            f"{type(instrument).__name__}.day_count={instrument.day_count!r} "
+            f"differs from the LMM's forward accrual convention "
+            f"{model.day_count!r} (the bound curve's day count). The LMM "
+            f"recipes use one accrual per grid period for both the forward "
+            f"definition and the payoff; build the trade (or the curve) with "
+            f"the same day count."
+        )
+
+
+def _lmm_require_on_grid(on_grid, instrument, what: str) -> None:
+    """Raise eagerly for dates off the tenor grid (NaN guard under jit)."""
+    if not isinstance(on_grid, jax.core.Tracer) and not bool(on_grid):
+        raise ValueError(
+            f"{type(instrument).__name__} {what} are not on the LMMModel "
+            f"tenor grid: every period must be [T_i, T_(i+1)] of "
+            f"model.tenor_dates (forward i fixes at T_i). Build the model's "
+            f"tenor_dates from the trade's schedule."
+        )
+
+
+def _lmm_steps_per_period(
+    model: LMMModel, config: MCConfig, n_steps_per_period: int | None,
+) -> int:
+    """Euler steps per grid segment: ``MCConfig.n_steps`` over N + 1 segments."""
+    if n_steps_per_period is not None:
+        return n_steps_per_period
+    n_segments = model.tenor_dates.shape[0]  # [0, T_0] plus N periods
+    return max(1, -(-config.n_steps // n_segments))
+
+
+def _lmm_result(cashflows, config: MCConfig, on_grid) -> MCResult:
+    """Mean / stderr of pre-discounted cashflows; NaN when off the grid."""
+    price = jnp.mean(cashflows)
+    stderr = jnp.std(cashflows) / jnp.sqrt(
+        jnp.array(config.n_paths, dtype=cashflows.dtype),
+    )
+    return MCResult(
+        price=jnp.where(on_grid, price, jnp.nan),
+        stderr=jnp.where(on_grid, stderr, jnp.nan),
+        n_paths=config.n_paths,
+    )
 
 
 @register(Caplet, LMMModel)
@@ -558,35 +609,48 @@ def _caplet_lmm(
     model,
     config,
     key,
-    forward_index: int,
-    tau: Float[Array, ""],
-    n_steps_per_period: int = 20,
+    forward_index: Int[Array, ""] | None = None,
+    tau: Float[Array, ""] | None = None,
+    n_steps_per_period: int | None = None,
     **kwargs,
 ) -> MCResult:
     """Caplet / floorlet under the LIBOR Market Model.
 
-    Required market args:
-        forward_index: Index of the forward rate in the LMM tenor
-            structure that corresponds to the caplet's accrual period.
-        tau: Accrual fraction for the caplet period.
+    The caplet's ``[start_date, end_date]`` must be one forward period of
+    ``model.tenor_dates``; the forward fixes at ``start_date`` (a fixing lag
+    in ``fixing_date`` is not modelled).
 
-    Optional:
-        n_steps_per_period: Number of Euler steps between consecutive
-            tenor dates.  Default 20.
+    Args:
+        instrument: The caplet.
+        model: A bound :class:`~valax.models.lmm.LMMModel`.
+        config: ``MCConfig``; ``n_steps`` is spread over the grid segments.
+        key: PRNG key.
+        forward_index: Override of the forward index (else from the dates).
+        tau: Override of the accrual (else the model's for that forward).
+        n_steps_per_period: Override of the Euler steps per grid segment.
+        **kwargs: Unused market arguments.
+
+    Returns:
+        The price, its standard error and the path count.
     """
+    on_grid = jnp.array(True)
+    if forward_index is None:
+        _lmm_check_day_count(instrument, model)
+        forward_index, on_grid = lmm_period_indices(
+            model.tenor_dates, instrument.start_date, instrument.end_date,
+        )
+        _lmm_require_on_grid(on_grid, instrument, "start_date / end_date")
+    if tau is None:
+        tau = model.accrual_fractions[forward_index]
     result = generate_lmm_paths(
         model,
-        n_steps_per_period=n_steps_per_period,
+        n_steps_per_period=_lmm_steps_per_period(model, config, n_steps_per_period),
         n_paths=config.n_paths,
         key=key,
     )
-    cashflows = caplet_mc_payoff(result, instrument, forward_index, tau)
     # rate_payoffs return cashflows already discounted to 0 via path DFs.
-    price = jnp.mean(cashflows)
-    stderr = jnp.std(cashflows) / jnp.sqrt(
-        jnp.array(config.n_paths, dtype=cashflows.dtype),
-    )
-    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+    cashflows = caplet_mc_payoff(result, instrument, forward_index, tau)
+    return _lmm_result(cashflows, config, on_grid)
 
 
 @register(Cap, LMMModel)
@@ -596,24 +660,46 @@ def _cap_lmm(
     model,
     config,
     key,
-    forward_indices: Int[Array, " n_caplets"],
-    taus: Float[Array, " n_caplets"],
-    n_steps_per_period: int = 20,
+    forward_indices: Int[Array, " n_caplets"] | None = None,
+    taus: Float[Array, " n_caplets"] | None = None,
+    n_steps_per_period: int | None = None,
     **kwargs,
 ) -> MCResult:
-    """Cap / floor strip under the LIBOR Market Model."""
+    """Cap / floor strip under the LIBOR Market Model.
+
+    Each caplet period ``[start_dates[k], end_dates[k]]`` must be a forward
+    period of ``model.tenor_dates``.
+
+    Args:
+        instrument: The cap / floor.
+        model: A bound :class:`~valax.models.lmm.LMMModel`.
+        config: ``MCConfig``; ``n_steps`` is spread over the grid segments.
+        key: PRNG key.
+        forward_indices: Override of the forward indices (else from dates).
+        taus: Override of the accruals (else the model's).
+        n_steps_per_period: Override of the Euler steps per grid segment.
+        **kwargs: Unused market arguments.
+
+    Returns:
+        The price, its standard error and the path count.
+    """
+    on_grid = jnp.array(True)
+    if forward_indices is None:
+        _lmm_check_day_count(instrument, model)
+        forward_indices, on_grid = lmm_period_indices(
+            model.tenor_dates, instrument.start_dates, instrument.end_dates,
+        )
+        _lmm_require_on_grid(on_grid, instrument, "start_dates / end_dates")
+    if taus is None:
+        taus = model.accrual_fractions[forward_indices]
     result = generate_lmm_paths(
         model,
-        n_steps_per_period=n_steps_per_period,
+        n_steps_per_period=_lmm_steps_per_period(model, config, n_steps_per_period),
         n_paths=config.n_paths,
         key=key,
     )
     cashflows = cap_mc_payoff(result, instrument, forward_indices, taus)
-    price = jnp.mean(cashflows)
-    stderr = jnp.std(cashflows) / jnp.sqrt(
-        jnp.array(config.n_paths, dtype=cashflows.dtype),
-    )
-    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+    return _lmm_result(cashflows, config, on_grid)
 
 
 @register(Swaption, LMMModel)
@@ -623,30 +709,50 @@ def _swaption_lmm(
     model,
     config,
     key,
-    forward_indices: Int[Array, " n_periods"],
-    taus: Float[Array, " n_periods"],
-    n_steps_per_period: int = 20,
+    forward_indices: Int[Array, " n_periods"] | None = None,
+    taus: Float[Array, " n_periods"] | None = None,
+    n_steps_per_period: int | None = None,
     **kwargs,
 ) -> MCResult:
     """European swaption under LMM.
 
-    Required market args:
-        forward_indices: Indices of the forwards spanning the underlying
-            swap in the LMM tenor structure.
-        taus: Accrual fractions for each swap period.
+    The underlying swap's periods ``[expiry_date, fixed_dates[0]]``,
+    ``[fixed_dates[0], fixed_dates[1]]``, … must be consecutive forward
+    periods of ``model.tenor_dates``.
+
+    Args:
+        instrument: The swaption.
+        model: A bound :class:`~valax.models.lmm.LMMModel`.
+        config: ``MCConfig``; ``n_steps`` is spread over the grid segments.
+        key: PRNG key.
+        forward_indices: Override of the forwards spanning the swap.
+        taus: Override of the swap-period accruals (else the model's).
+        n_steps_per_period: Override of the Euler steps per grid segment.
+        **kwargs: Unused market arguments.
+
+    Returns:
+        The price, its standard error and the path count.
     """
+    on_grid = jnp.array(True)
+    if forward_indices is None:
+        _lmm_check_day_count(instrument, model)
+        starts = jnp.concatenate([
+            jnp.atleast_1d(instrument.expiry_date), instrument.fixed_dates[:-1],
+        ])
+        forward_indices, on_grid = lmm_period_indices(
+            model.tenor_dates, starts, instrument.fixed_dates,
+        )
+        _lmm_require_on_grid(on_grid, instrument, "expiry_date / fixed_dates")
+    if taus is None:
+        taus = model.accrual_fractions[forward_indices]
     result = generate_lmm_paths(
         model,
-        n_steps_per_period=n_steps_per_period,
+        n_steps_per_period=_lmm_steps_per_period(model, config, n_steps_per_period),
         n_paths=config.n_paths,
         key=key,
     )
     cashflows = swaption_mc_payoff(result, instrument, forward_indices, taus)
-    price = jnp.mean(cashflows)
-    stderr = jnp.std(cashflows) / jnp.sqrt(
-        jnp.array(config.n_paths, dtype=cashflows.dtype),
-    )
-    return MCResult(price=price, stderr=stderr, n_paths=config.n_paths)
+    return _lmm_result(cashflows, config, on_grid)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -752,40 +858,74 @@ def _bermudan_lmm(
     model,
     config,
     key,
-    exercise_indices: Int[Array, " n_exercise"],
-    taus: Float[Array, " N"],
+    exercise_indices: Int[Array, " n_exercise"] | None = None,
+    taus: Float[Array, " N"] | None = None,
     lsm_config: LSMConfig | None = None,
-    n_steps_per_period: int = 20,
+    n_steps_per_period: int | None = None,
     **kwargs,
 ) -> MCResult:
     """Bermudan swaption via Longstaff-Schwartz on LMM paths.
 
-    Required market args:
-        exercise_indices: Tenor indices of the Bermudan exercise dates.
-        taus: Accrual fractions for each forward period.
+    Exercising at ``exercise_dates[e] = T_k`` enters the tail swap paying
+    fixed on every grid date ``T_(k+1), …, T_N``, so the underlying swap —
+    periods ``[exercise_dates[0], fixed_dates[0]]``, ``[fixed_dates[0],
+    fixed_dates[1]]``, … — must be consecutive forward periods of
+    ``model.tenor_dates`` ending at its last date, and every exercise date
+    must be a grid date.
 
-    Optional:
-        lsm_config: :class:`LSMConfig` for the regression (default
-            cubic polynomial basis).
+    Standard error is reported as ``0.0``: the continuation-value regression
+    makes a path-wise variance estimate unreliable; use across-seed
+    dispersion instead.
 
-    Notes:
-        Standard-error estimation is set to ``0.0`` — the LSM
-        continuation-value regression makes a path-wise variance
-        estimate unreliable. Run multiple independent simulations and
-        compute across-seed dispersion for a practical uncertainty
-        bound.
+    Args:
+        instrument: The Bermudan swaption.
+        model: A bound :class:`~valax.models.lmm.LMMModel`.
+        config: ``MCConfig``; ``n_steps`` is spread over the grid segments.
+        key: PRNG key.
+        exercise_indices: Override of the exercise tenor indices.
+        taus: Override of the accrual of every forward (else the model's).
+        lsm_config: :class:`LSMConfig` for the regression (default cubic
+            polynomial basis).
+        n_steps_per_period: Override of the Euler steps per grid segment.
+        **kwargs: Unused market arguments.
+
+    Returns:
+        The price, a zero standard error and the path count.
     """
+    on_grid = jnp.array(True)
+    tenor = model.tenor_dates
+    if exercise_indices is None:
+        _lmm_check_day_count(instrument, model)
+        exercise_indices = jnp.clip(
+            jnp.searchsorted(tenor, instrument.exercise_dates),
+            0, tenor.shape[0] - 2,
+        ).astype(jnp.int32)
+        starts = jnp.concatenate([
+            instrument.exercise_dates[:1], instrument.fixed_dates[:-1],
+        ])
+        _, swap_on_grid = lmm_period_indices(tenor, starts, instrument.fixed_dates)
+        on_grid = (
+            jnp.all(tenor[exercise_indices] == instrument.exercise_dates)
+            & swap_on_grid
+            & (instrument.fixed_dates[-1] == tenor[-1])
+        )
+        _lmm_require_on_grid(
+            on_grid, instrument,
+            "exercise_dates / fixed_dates (swap ending at the last tenor date)",
+        )
+    if taus is None:
+        taus = model.accrual_fractions
     cfg = lsm_config if lsm_config is not None else LSMConfig()
     result = generate_lmm_paths(
         model,
-        n_steps_per_period=n_steps_per_period,
+        n_steps_per_period=_lmm_steps_per_period(model, config, n_steps_per_period),
         n_paths=config.n_paths,
         key=key,
     )
     price = bermudan_swaption_lsm(result, instrument, exercise_indices, taus, cfg)
     return MCResult(
-        price=price,
-        stderr=jnp.array(0.0, dtype=price.dtype),
+        price=jnp.where(on_grid, price, jnp.nan),
+        stderr=jnp.where(on_grid, jnp.array(0.0, dtype=price.dtype), jnp.nan),
         n_paths=config.n_paths,
     )
 

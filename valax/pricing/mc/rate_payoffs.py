@@ -82,27 +82,33 @@ def swaption_mc_payoff(
     """European swaption payoff under LMM MC, discounted to time 0.
 
     At the swaption expiry (= swap start T_0), computes the swap rate
-    from realized forwards:
+    from the forward curve observed **at expiry**, F_j(T_0):
 
+        DF(T_0, T_{i+1}) = 1 / prod_{j=0}^{i} (1 + tau_j * F_j(T_0))
         annuity = sum_i tau_i * DF(T_0, T_{i+1})
         swap_rate = (1 - DF(T_0, T_N)) / annuity
 
     Payoff = notional * annuity * max(+/-(swap_rate - K), 0) * DF(0, T_0)
 
+    The later forwards' own fixings F_j(T_j) are information after the
+    exercise decision and must not enter the payoff.
+
     Args:
         result: LMM path result.
         swaption: Swaption instrument.
-        forward_indices: Indices of forwards spanning the underlying swap.
+        forward_indices: Indices of the contiguous forwards spanning the
+            underlying swap; ``forward_indices[0]`` is the forward starting
+            at the swaption expiry.
         taus: Accrual fractions for each swap period.
 
     Returns:
         Discounted payoff per path, shape (n_paths,).
     """
-    # Forward rates at their fixing dates
-    F = result.forwards_at_fixing[:, forward_indices]
+    # Forward curve at the expiry T_0 (row forward_indices[0] of the panel).
+    F = result.forwards_at_tenors[:, forward_indices[0], :][:, forward_indices]
 
     # Relative discount factors from swap start to each payment date:
-    # DF(T_0, T_{i+1}) = 1 / prod_{j=0}^{i} (1 + tau_j * F_j(T_j))
+    # DF(T_0, T_{i+1}) = 1 / prod_{j=0}^{i} (1 + tau_j * F_j(T_0))
     accrual = 1.0 + taus[None, :] * F
     cum_accrual = jnp.cumprod(accrual, axis=1)
     rel_df = 1.0 / cum_accrual

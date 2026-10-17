@@ -79,6 +79,7 @@ from valax.dates.daycounts import ordinal_from_year_fraction, year_fraction
 from valax.models.cheyette import CheyetteModel, CheyetteModel2F
 from valax.models.g2pp import G2PPModel
 from valax.models.hull_white import HullWhiteModel
+from valax.models.lmm import LMMModel
 from valax.surfaces.leverage import LeverageGrid
 from valax.surfaces.swaption_cube import SwaptionCube
 
@@ -276,13 +277,15 @@ def _curves_for(requirement: str | Mapping[str, str], lookup) -> Any:
 
 
 def _exact_fit_requirements(model: Any, instrument: Any) -> dict[str, str]:
-    """Short-rate models: the initial curve is the pinned id, else discount."""
+    """Curve-fitted models: the initial curve is the pinned id, else discount."""
     from valax.core.resolve import discount_id_of
 
     return {"initial_curve": model.curve_id or discount_id_of(instrument)}
 
 
-for _cls in (HullWhiteModel, G2PPModel, CheyetteModel, CheyetteModel2F):
+# The exact-fit short-rate models, and the LMM (its initial forwards are
+# read from the curve, D18).
+for _cls in (HullWhiteModel, G2PPModel, CheyetteModel, CheyetteModel2F, LMMModel):
     curve_requirements.register(_cls, _exact_fit_requirements)
 
 

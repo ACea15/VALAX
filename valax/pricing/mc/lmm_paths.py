@@ -13,10 +13,45 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import diffrax
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from jax import Array
 
 from valax.models.lmm import LMMModel, LMMDrift, LMMDiffusion
+
+
+def lmm_period_indices(
+    tenor_dates: Int[Array, " n_tenors"],
+    start_dates: Int[Array, "*periods"],
+    end_dates: Int[Array, "*periods"],
+) -> tuple[Int[Array, "*periods"], Bool[Array, ""]]:
+    """Map accrual periods onto the LMM forwards, from the dates.
+
+    Forward ``i`` covers ``[T_i, T_{i+1}]`` of the model's tenor grid, so a
+    period ``[start, end]`` is forward ``i`` exactly when ``start == T_i``
+    and ``end == T_{i+1}``. The lookup is a traced ``searchsorted``, so it
+    works with the instrument and the model as traced arguments; whether
+    every period sits on the grid is returned as a traced flag rather than
+    raised.
+
+    Args:
+        tenor_dates: The model's tenor dates ``T_0 < … < T_N`` (ordinals).
+        start_dates: Period start dates (ordinals), any shape.
+        end_dates: Period end dates (ordinals), same shape.
+
+    Returns:
+        ``(indices, on_grid)``: the forward index of each period (clipped to
+        ``[0, N-1]``) and whether **every** period is exactly a forward
+        period of the grid.
+    """
+    n_forwards = tenor_dates.shape[0] - 1
+    indices = jnp.clip(
+        jnp.searchsorted(tenor_dates, start_dates), 0, n_forwards - 1
+    ).astype(jnp.int32)
+    on_grid = jnp.all(
+        (tenor_dates[indices] == start_dates)
+        & (tenor_dates[indices + 1] == end_dates)
+    )
+    return indices, on_grid
 
 
 class LMMPathResult(eqx.Module):

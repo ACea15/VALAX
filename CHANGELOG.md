@@ -12,6 +12,36 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — Phase 4 (D18) — curve-free LMM; the four LMM routes through `price()`
+
+**`LMMModel` is curve-free.** Fields are now `tenor_dates`, `vol_structure`,
+`corr_structure`, `initial_curve=None`, static `n_factors`, `measure`,
+`curve_id`. `initial_forwards`, `accrual_fractions`, `tenor_times`,
+`initial_df`, `loading_matrix`, `reference_date` and `day_count` are
+properties of the bound curve; reading one on an unbound model raises.
+`curve_requirements(LMMModel)` binds the pinned `curve_id`, else the trade's
+discount curve; `price()` refuses a pre-bound model. `build_lmm_model(curve,
+…)` keeps its signature and returns the bound model, so its paths and prices
+are bit-identical. **Changed on purpose:** the factor loadings now derive
+from `corr_structure` on every use, so correlation gradients reach the
+paths (they were a frozen leaf).
+
+**Routes.** `Caplet`, `Cap`, `Swaption`, `BermudanSwaption` × `LMMModel`
+price through `price()` (`mc`): the periods are mapped onto `tenor_dates`
+from the trade's dates (new `valax.pricing.mc.lmm_period_indices`; off-grid
+dates raise when concrete and price NaN when traced; the trade's day count
+must equal the curve's). `forward_index(es)`, `tau(s)` and `exercise_indices`
+are optional overrides. **Changed on purpose:** `n_steps_per_period` now
+defaults to `MCConfig.n_steps` spread over the `N + 1` grid segments, not a
+fixed 20 (equal for the default `MCConfig(…, 100)` on a 4-forward grid);
+passing it still overrides.
+
+**Fixed.** `swaption_mc_payoff` built the swap rate from each forward's own
+later fixing `F_j(T_j)` instead of the forward curve at expiry `F_j(T_0)`,
+overpricing a 2Y×4Y ATM payer by ~20% (21,360 vs 17,855); the `xfail` that
+attributed the gap to measure differences is replaced by a test against
+Black at Rebonato's swap vol (within 0.6 stderr at three strikes).
+
 ### Added — Phase 4 close-out (D17) — one onboarding contract; `market_risk`; FX through `price()`
 
 **Route contract.** `tests/test_core/route_samples.py` holds a sample for
