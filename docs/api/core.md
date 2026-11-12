@@ -84,10 +84,15 @@ registry honest:
 
 The calibrated market: a [`CurveGraph`](curves.md#curve-graph), keyed vol
 surfaces, spots, dividends, fixings, and the credit / inflation / FX
-corners. It **generalises** [`MarketData`](market.md#core-market-state)
-rather than renaming it — one curve becomes a keyed graph, one scalar vol
-per asset becomes a dict of full surfaces — and keeps a two-way view onto
-it for one deprecation cycle (`from_market_data` / `to_market_data`).
+corners. It is the market object [`price`](#the-unified-signature) and the
+keyed risk layer ([API → Risk](risk.md)) take; `MarketState.single_curve`
+and `MarketState.flat` build the one-curve and constant-parameter ends of
+the spectrum in the same container. It **generalises** the legacy
+[`MarketData`](market.md#core-market-state) rather than renaming it — one
+curve becomes a keyed graph, one scalar vol per asset becomes a dict of
+full surfaces — and keeps a two-way view onto it (`from_market_data` /
+`to_market_data`) only for the one deprecation cycle before `MarketData`
+is removed.
 
 Surface identifiers follow the frozen alphabet
 `<UNDERLYING>.<KIND>[.<QUALIFIER>]` with `KIND` one of `VOL`, `LV`,
@@ -234,7 +239,10 @@ pv_kernel = hw_swaption_price(swaption, bound)
   — the same API as a walkthrough, with runnable examples and the failure
   modes explained.
 - [API → Pricing](pricing.md) — the pricers `price` dispatches to.
-- [API → Market Data](market.md) — the legacy `MarketData` container and
-  the synthetic-market generators.
+- [API → Market Data](market.md) — `KeyedScenario`, quote sets, the
+  synthetic-market generators, and the legacy `MarketData` container
+  (scheduled for removal).
+- [API → Risk](risk.md) — keyed shocks, generators, repricing and ladders
+  on a `MarketState`.
 - [API → Curves](curves.md) — `CurveGraph` and the joint bootstrap that
   builds it.

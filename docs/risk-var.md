@@ -82,10 +82,19 @@ Three things follow, and they are the reason the port matters:
   −0.207 on a zero scenario whose true P&L is 0, against a +1.16 P&L for
   a genuine spot move.
 
-!!! note "What has not moved yet"
-    [Sensitivity ladders](risk-ladders.md), the scenario generators in
-    `valax.risk.scenarios`, and `parametric_var`'s covariance layout are
-    still positional and still take a `MarketData`. Tracked in the
+!!! note "The rest of the keyed stack"
+    Distributions of keyed scenarios come from the keyed generators over a
+    per-curve `KeyedFactorLayout`
+    ([Scenarios § Keyed generators](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout));
+    ladders, the per-block waterfall and delta-normal VaR with an additive
+    per-curve decomposition are `keyed_ladder`, `keyed_waterfall_report`,
+    `keyed_parametric_var` and `keyed_component_var`
+    ([Sensitivity Ladders § Keyed ladders](risk-ladders.md#keyed-ladders-on-a-marketstate)).
+    What has **not** moved yet: the FRTB PLA vector pair below
+    (`hypothetical_pnl_vector` / `risk_theoretical_pnl_vector`),
+    `pnl_attribution` and the flat `parametric_var` still take a
+    `MarketData`, and portfolio aggregation above the group primitives is
+    not built. Tracked in the
     [roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 !!! warning "A shock that cannot reach the price says so"
@@ -119,7 +128,12 @@ Three things follow, and they are the reason the port matters:
     The rest of this page documents the `MarketData` / `MarketScenario`
     path, frozen for one deprecation cycle. It cannot be re-expressed in
     terms of the section above: a `pricing_fn` is an opaque callable
-    carrying no model, and `price` needs one.
+    carrying no model, and `price` needs one. Keyed counterparts:
+    full revaluation → `group_scenario_pnl` (above); parametric VaR →
+    `keyed_parametric_var` / `keyed_component_var`; P&L attribution →
+    `keyed_waterfall_report`. The P&L-vector pair at the end has no keyed
+    counterpart yet (port pending). `value_at_risk` and
+    `expected_shortfall` act on a P&L array and serve both paths.
 
 The end-to-end VaR workflow: generate scenarios, reprice the portfolio under each one via `jax.vmap`, compute risk measures on the P&L vector.
 
@@ -199,6 +213,14 @@ All sensitivities are computed via `jax.grad` and `jax.hessian` — no finite di
 Every risk metric in VALAX — VaR, ES, backtests, the FRTB PLA test — reduces to a single primitive: a **P&L vector** of length $N$, with one entry per scenario or per historical day. Once you have the vector, the metrics are just sample statistics.
 
 For the theoretical framing of HPL / RTPL / APL and why these three series are kept separate, see [Models & Theory § 7.5](theory/risk-measures.md#75-pl-vectors-hypothetical-risk-theoretical-actual).
+
+!!! note "Still on the flat path"
+    The three helpers below take a `pricing_fn` and a `MarketData`, and
+    `risk_theoretical_pnl_vector` consumes the positional
+    `SensitivityLadder`. On a `MarketState`, the HPL vector is
+    `group_scenario_pnl` ([above](#repricing-through-price)); porting the
+    RTPL/HPL pair onto `KeyedLadder` is open on the
+    [roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 ### Hypothetical P&L (full revaluation)
 

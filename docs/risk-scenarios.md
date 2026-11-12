@@ -1,6 +1,6 @@
 # Scenarios & Shocks
 
-*How VALAX builds market scenarios, shocks curves and other risk factors, and repackages everything into a single `MarketData` pytree ready for pricing. For the systems-level picture read [Risk: End-to-End](risk-overview.md) first; for the underlying maths see [Models & Theory § 7](theory/risk-measures.md#7-risk-measures).*
+*How VALAX builds market scenarios, shocks curves and other risk factors, and returns a shocked `MarketState` ready for `price(instrument, model, market)`. For the systems-level picture read [Risk: End-to-End](risk-overview.md) first; for the underlying maths see [Models & Theory § 7](theory/risk-measures.md#7-risk-measures).*
 
 VALAX provides scenario generation, multi-curve shocks, and Value-at-Risk computation — all built on `jax.vmap` for massively parallel portfolio repricing.
 
@@ -9,7 +9,24 @@ VALAX provides scenario generation, multi-curve shocks, and Value-at-Risk comput
 
 ## Market Data Container
 
-`MarketData` bundles all market state into a single pytree:
+The market object is [`MarketState`](api/core.md#marketstate): a
+multi-curve `CurveGraph` plus identifier-keyed surfaces, spots and
+dividends, and the container `price()` takes. Its scenario layer is
+[§ Keyed scenarios on a `MarketState`](#keyed-scenarios-on-a-marketstate)
+below; `MarketState.flat(rate, spot=..., vol=..., dividend=...)` builds a
+constant single-curve market in one line.
+
+!!! warning "Legacy flat path"
+    The rest of this section, [§ Scenarios](#scenarios) and
+    [§ Applying Scenarios](#applying-scenarios) — `MarketData`,
+    `MarketScenario`, the flat generators and `apply_scenario` — document
+    the positional container scheduled for removal after one deprecation
+    cycle. [§ Curve Shocks](#curve-shocks) is shared: the keyed path
+    applies the same zero-rate bump per named curve. `MarketState.to_market_data()` projects onto it and
+    `MarketState.from_market_data(...)` lifts it; `keyed_from_market_scenario`
+    lifts a `MarketScenario` into a `KeyedScenario`.
+
+The legacy `MarketData` bundles the market into a single positional pytree:
 
 ```python
 from valax.market import MarketData
@@ -42,7 +59,7 @@ Because `MarketData` is a pytree with differentiable leaves (spots, vols, divide
 
 ## Scenarios
 
-A `MarketScenario` represents **additive changes** to risk factors — not absolute levels:
+A `MarketScenario` (legacy; keyed counterpart `KeyedScenario`) represents **additive changes** to risk factors — not absolute levels:
 
 ```python
 from valax.market import MarketScenario
@@ -59,7 +76,7 @@ For spot shocks, set `multiplicative=True` to interpret them as returns: `new_sp
 
 ### Scenario Generation
 
-Three methods for producing scenario sets:
+Three methods for producing flat scenario sets (keyed counterparts: `keyed_parametric_scenarios`, `keyed_historical_scenarios`, `keyed_stress_scenario` and friends, [below](#keyed-generators-and-the-per-curve-covariance-layout)):
 
 **Parametric (Monte Carlo)** — correlated samples from a multivariate distribution:
 
@@ -146,7 +163,7 @@ Structured shocks are just specific patterns of per-pillar bumps:
 
 ## Applying Scenarios
 
-`apply_scenario` applies all shocks at once and returns a new `MarketData`:
+On the legacy flat path, `apply_scenario` applies all shocks at once and returns a new `MarketData` (keyed counterpart: `shock(state, keyed_scenario)` → a new `MarketState`):
 
 ```python
 from valax.risk import apply_scenario

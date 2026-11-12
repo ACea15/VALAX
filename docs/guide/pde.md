@@ -14,8 +14,9 @@ bumping.
     under Black–Scholes, European under local vol), 2-D Heston European (ADI), and the
     full short-rate PDE (Hull-White / G2++ / Cheyette across bonds, caps, swaptions,
     Bermudans and CMS-spread; §5.6). The remaining 2-D items (American Heston, SLV,
-    spread) are in progress — see the per-row status in the §5.2 coverage matrix and
-    the [PDE design doc](../architecture/pde-design.md) and
+    spread) are planned — see the *PDE* column of the
+    [coverage matrix](../applications/instrument-pricing.md#coverage-matrix), the
+    [PDE design doc](../architecture/pde-design.md) and
     [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences) for the math.
 
 ## 1. The Black-Scholes PDE
@@ -97,11 +98,13 @@ gamma = jax.grad(jax.grad(lambda s: pde_price(option, s, vol, rate, div, config)
 
 ## 5. The multivariate subsystem
 
-!!! note "Mostly shipped — a few 2-D rows still in progress"
+!!! note "Mostly shipped — a few 2-D recipes still planned"
     Most of the multivariate subsystem below ships today via `pde_price_dispatch`
-    (see the per-row status in the [coverage matrix](#52-coverage-matrix)). A few
-    2-D rows — American Heston, SLV, and spread options — remain in progress and
-    their signatures may still change. Track status in the
+    (status per instrument: the *PDE* column of the
+    [coverage matrix](../applications/instrument-pricing.md#coverage-matrix)). A
+    few 2-D recipes — American Heston, SLV, and spread options — are planned
+    ([roadmap §5.4](../roadmap.md#54-multi-dimensional-pde-solvers)) and their
+    signatures may still change. Delivery phases are in the
     [design doc](../architecture/pde-design.md#10-delivery-phases).
 
 The multivariate subsystem generalises the 1-D solver along three axes:
@@ -136,28 +139,30 @@ price both left at `config=None` share one grid (and `check_engine` accepts
 it). The grid used is recorded on `PricingResult.config`
 ([D15](../architecture/calibration-pricing-risk.md#3-decisions)).
 
-### 5.2 Coverage matrix
+### 5.2 Recipe details
 
-Status: ✅ shipped via `pde_price_dispatch` · 🟡 in progress (design-stage).
+**What the PDE engine covers** — which instruments, under which models, and
+which 2-D recipes are planned (American Heston, SLV, two-asset spread) — is
+stated once, in the *PDE* and *`price()` routes* columns of the
+[coverage matrix](../applications/instrument-pricing.md#coverage-matrix),
+checked against the registry. This table gives the engine-specific details of
+the shipped equity and Hull-White bond recipes:
 
-| Instrument | Model | Dimension | Scheme | Exercise | Status | Cross-checked against |
-|---|---|---|---|---|:---:|---|
-| `EuropeanOption` | `BlackScholesModel` | 1-D | Crank–Nicolson | European | ✅ | analytic BS |
-| `AmericanOption` | `BlackScholesModel` | 1-D | CN + penalty | American | ✅ | binomial (`american=True`) |
-| `DigitalOption` | `BlackScholesModel` | 1-D | CN + Rannacher | European | ✅ | tight call-spread proxy |
-| `EquityBarrierOption` | `BlackScholesModel` | 1-D | CN + absorbing BC | European | ✅ | MC within `2·stderr` |
-| `EuropeanOption` | `HestonModel` | 2-D `(S,v)` | ADI (Craig–Sneyd) | European | ✅ | Heston COS, QuantLib FD |
-| `AmericanOption` | `HestonModel` | 2-D `(S,v)` | ADI + penalty | American | 🟡 | MC / QuantLib FD |
-| `EuropeanOption` | `LocalVolModel` | 1-D | CN | European | ✅ | Dupire MC |
-| `EuropeanOption` | `SLVModel` | 2-D `(S,v)` | ADI | European | 🟡 | SLV MC |
-| `SpreadOption` | `MultiAssetGBMModel` | 2-D `(S₁,S₂)` | ADI | European | 🟡 | Margrabe / Kirk |
-| `CallableBond` | `HullWhiteModel` | 1-D `r` | CN + projection | Bermudan | ✅ | Hull–White tree |
-| `PuttableBond` | `HullWhiteModel` | 1-D `r` | CN + projection | Bermudan | ✅ | Hull–White tree |
+| Instrument | Model | Dimension | Scheme | Exercise | Cross-checked against |
+|---|---|---|---|---|---|
+| `EuropeanOption` | `BlackScholesModel` | 1-D | Crank–Nicolson | European | analytic BS |
+| `AmericanOption` | `BlackScholesModel` | 1-D | CN + penalty | American | binomial (`american=True`) |
+| `DigitalOption` | `BlackScholesModel` | 1-D | CN + Rannacher | European | tight call-spread proxy |
+| `EquityBarrierOption` | `BlackScholesModel` | 1-D | CN + absorbing BC | European | MC within `2·stderr` |
+| `EuropeanOption` | `HestonModel` | 2-D `(S,v)` | ADI (Craig–Sneyd) | European | Heston COS, QuantLib FD |
+| `EuropeanOption` | `LocalVolModel` | 1-D | CN | European | Dupire MC |
+| `CallableBond` | `HullWhiteModel` | 1-D `r` | CN + projection | Bermudan | Hull–White tree |
+| `PuttableBond` | `HullWhiteModel` | 1-D `r` | CN + projection | Bermudan | Hull–White tree |
 
-The short-rate rows above are the equity-facing subset; the Hull-White / G2++ /
-Cheyette PDE also prices fixed-rate bonds, caplets/caps, European and Bermudan
-swaptions, and CMS-spread swaps (see §5.6 below and [API: Pricing](../api/pricing.md)),
-all with piecewise-constant volatility \(\sigma(t)\) ([§5.8](#58-time-dependent-volatility)).
+The Hull-White / G2++ / Cheyette PDE also prices fixed-rate bonds,
+caplets/caps, European and Bermudan swaptions, CMS-spread swaps and
+callable/puttable bonds under the two-factor models (see §5.6 below), all with
+piecewise-constant volatility \(\sigma(t)\) ([§5.8](#58-time-dependent-volatility)).
 
 ### 5.3 Early exercise
 

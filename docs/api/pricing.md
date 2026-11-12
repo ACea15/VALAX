@@ -736,24 +736,25 @@ triangulation used across the tests and the `examples/comparisons/` scripts.
 
 ::: valax.pricing.reconcile.EngineQuote
 
-## Short-rate engine coverage matrix
+## Short-rate engines
 
-Which numerical engines can price each vanilla-rates instrument under each
-short-rate model. **A** = analytic (closed form), **P** = finite-difference
-PDE, **M** = Monte Carlo, **T** = Hull–White trinomial tree (direct call, not
-yet through `price()`), **Q** = QuantLib comparison available. Every engine
-listed accepts piecewise-constant volatility \(\sigma(t)\).
+Which engine prices each rates instrument under each short-rate model
+(Hull–White, G2++, Cheyette 1F / 2F) is stated once, in the solver and
+*`price()` routes* columns of the
+[coverage matrix](../applications/instrument-pricing.md#interest-rate-derivatives)
+(bonds: [here](../applications/instrument-pricing.md#bonds-fixed-income)),
+checked against the registry. Every short-rate engine accepts
+piecewise-constant volatility \(\sigma(t)\). Two facts the matrix does not
+carry:
 
-| Instrument                       | Hull–White | G2++      | Cheyette 1F | Cheyette 2F |
-|----------------------------------|------------|-----------|-------------|-------------|
-| Fixed-rate bond                  | A P M      | A P M     | P M         | P M         |
-| Floating-rate note               | A M        | A M       | M           | M           |
-| Caplet / floorlet                | A P (Q)    | P         | P M         | P           |
-| Cap / floor                      | A P Q      | P         | P M         | P           |
-| European swaption                | A P T Q    | A P M Q   | P M         | P           |
-| Bermudan swaption                | P T Q      | P Q       | P           | P           |
-| Callable / puttable bond         | P M T Q    | P         | P           | P           |
-| CMS-spread swap                  | —          | P M       | —           | P M         |
+- **Kernel-level closed forms beyond `price()`.** Under Hull–White, caplets and
+  caps also have a closed form by direct call (`hw_zcb_option_price`); a
+  fixed-rate bond or FRN under an exact-fit short-rate model prices at its
+  curve value (the `curves` analytic route).
+- **QuantLib comparisons** (`tests/test_quantlib_comparison/`) exist under
+  Hull–White for caps / floors (and caplets via the cap), European and
+  Bermudan swaptions and callable / puttable bonds, and under G2++ for European
+  and Bermudan swaptions.
 
 **Multi-curve.** The Hull–White and G2++ engines accept a trade's own
 `discount_curve` and `forward_curve` (see

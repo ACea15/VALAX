@@ -5,12 +5,17 @@ VALAX provides two recombining-lattice pricing engines: a Cox-Ross-Rubinstein
 short-rate bonds with embedded optionality and for European / Bermudan
 swaptions, with constant or piecewise-constant volatility \(\sigma(t)\).
 
-## Coverage matrix
+## Recipe details
+
+**What the lattice engines cover** is stated once, in the *Lattice* and
+*`price()` routes* columns of the
+[coverage matrix](../applications/instrument-pricing.md#coverage-matrix),
+checked against the registry. This table gives the engine-specific details:
 
 | Instrument | Model | Dimension | Scheme | Exercise | Cross-checked against |
 |---|---|---|---|---|---|
 | `EuropeanOption` | `BlackScholesModel` | 1-D | CRR binomial | European | analytic BS |
-| `EuropeanOption` | `BlackScholesModel` | 1-D | CRR binomial | American | PDE (`AmericanOption`, CN + penalty) |
+| `AmericanOption` (kernel: `binomial_price(..., american=True)` on a `EuropeanOption`) | `BlackScholesModel` | 1-D | CRR binomial | American | PDE (`AmericanOption`, CN + penalty) |
 | `CallableBond` | `HullWhiteModel` | 1-D `r` | trinomial | Bermudan (call dates) | PDE / MC |
 | `PuttableBond` | `HullWhiteModel` | 1-D `r` | trinomial | Bermudan (put dates) | PDE / MC |
 | `Swaption` | `HullWhiteModel` | 1-D `r` | trinomial | European | Jamshidian (`hw_swaption_price`) |

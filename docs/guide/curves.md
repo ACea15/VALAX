@@ -757,14 +757,16 @@ print(f"  PV_swap      = {float(pv_par_swap):+,.4f} USD   (≈ 0 by construction
    against `fitted_curve_quotes(...)`, labelled by `result.labels` — a
    per-instrument fit table in each quote's native units. That's what a
    desk sees on the calibration sign-off sheet.
-5. Pricing against the graph goes through the optional dual-curve
-   seam: every analytic rates pricer accepts a `forward_curve`
-   argument (defaulting to the discount curve, i.e. the classic
-   single-curve behaviour), and the `*_from_graph` wrappers in
+5. Pricing against the graph: wrap it in a `MarketState(curves=graph)`
+   and call `price(trade, model, market)` — the trade's
+   `discount_id` / `forward_id` selectors pick its curves
+   ([Tutorial § 5](tutorial-unified-pricing.md#5-selectors-single-curve-for-free-multi-curve-on-purpose)).
+   At the kernel layer, every analytic rates pricer accepts a
+   `forward_curve` argument (defaulting to the discount curve, i.e. the
+   classic single-curve behaviour), and the `*_from_graph` wrappers in
    `valax.pricing.analytic.graph_pricing` resolve curve identifiers
    on the graph and delegate — as `ois_swap_price_from_graph` does
-   above.  Explicit `DiscountCurve` signatures remain the primary
-   API; the graph route is opt-in (see §8).
+   above. Both layers are public API (see §8).
 
 ### 5.3 What a sequential build cannot do
 
@@ -941,11 +943,16 @@ pricing inflation swaps and caps/floors against a built curve, see
 
 ## 8. What is not yet implemented
 
-!!! note "Multi-curve pricing is **opt-in**: single-curve remains the default"
+!!! note "Multi-curve pricing is **opt-in per trade**: single-curve is the zero-configuration default"
     VALAX ships production-grade multi-curve *calibration*
     (`bootstrap_curve_graph`, `CurveGraph`, `quote_jacobian`, and the
-    `CalibrationResult` build diagnostics) **and** an optional dual-curve pricing seam
-    (the MC-Pricing workstream).  The analytic rates pricers in
+    `CalibrationResult` build diagnostics) **and** multi-curve pricing.
+    The front door is `price(trade, model, market)` on a `MarketState`
+    holding the graph: a trade's static `discount_id` / `forward_id`
+    selectors name its curves, and a trade with no selectors on
+    `MarketState.single_curve(curve)` prices single-curve
+    ([Tutorial § 5](tutorial-unified-pricing.md#5-selectors-single-curve-for-free-multi-curve-on-purpose)).
+    Underneath, the analytic rates pricers in
     `floating.py`, `caplets.py`, `swaptions.py`, and `rates_exotics.py`
     accept an optional `forward_curve: DiscountCurve | None = None`
     argument: `None` (the default) reproduces the classic single-curve
@@ -957,16 +964,23 @@ pricing inflation swaps and caps/floors against a built curve, see
 
     **How to consume a calibrated graph:**
 
-    - Directly: `swap_price(swap, graph["USD.SOFR.OIS"],
+    - Through `price()`: `price(swap, None, MarketState(curves=graph))`
+      with `swap` carrying `discount_id="USD.SOFR.OIS"`,
+      `forward_id="USD.SOFR.3M"`.
+    - Directly (kernel layer): `swap_price(swap, graph["USD.SOFR.OIS"],
       forward_curve=graph["USD.SOFR.3M"])`.
     - Via the thin wrappers in `valax.pricing.analytic.graph_pricing`:
       `swap_price_from_graph(swap, graph, "USD.SOFR.OIS", "USD.SOFR.3M")`
       — pure delegation, no numeric logic (see §5.2 step 6 for a worked
       example).
-    - Risk: bump individual graph curves with
+    - Risk: shock any named curve of a `MarketState` with a
+      `KeyedScenario` via `valax.risk.shock` (built on
       `valax.risk.shocks.bump_graph_curve` / `parallel_graph_shift` /
-      `key_rate_graph_bump`, and carry a graph on
-      `MarketData.curve_graph` (optional field, defaults to `None`).
+      `key_rate_graph_bump`, which also work on a bare graph), and measure
+      with `valax.greeks.market_risk` or the keyed ladders
+      ([API → Risk](../api/risk.md#keyed-shocks-on-a-marketstate)). The
+      legacy `MarketData.curve_graph` field only carries a graph and is
+      removed with `MarketData`.
 
     Note that `InterestRateSwap` / `Swaption` carry no separate float
     schedule, so their dual-curve floating legs use the fixed schedule as

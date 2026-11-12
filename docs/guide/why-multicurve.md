@@ -94,15 +94,19 @@ Multiple curves are not just a pricing nicety — each is an independent
   [`quote_jacobian`](../api/curves.md#valax.curves.quote_jacobian)
   delivers in one implicit-adjoint solve.
 
-On the risk side, `MarketData` already carries an optional
-[`curve_graph`](../api/curves.md#valax.curves.CurveGraph) and the
-`CurveGraph`-aware `bump_*` primitives (`bump_graph_curve`,
-`parallel_graph_shift`, `key_rate_graph_bump`) shock any named curve;
-routing these through `apply_scenario` / `MarketScenario` for full
-per-curve scenario sets is the remaining step (see the
-[Risk Factors roadmap](../risk-factors.md#4-roadmap)). The scenario and
-shock mechanics themselves live in
-[Scenarios & Shocks](../risk-scenarios.md).
+On the risk side this is built: a `KeyedScenario` applied by
+`valax.risk.shock` moves any named curve of a `MarketState`'s graph (OIS,
+projection, or a pure basis move), the keyed generators draw whole
+per-curve scenario sets from a `KeyedFactorLayout`, repricing goes
+through `price()`, and `keyed_ladder` / `keyed_component_var` report each
+curve's — and the basis's — own DV01 and VaR share. The mechanics live in
+[Scenarios & Shocks](../risk-scenarios.md#keyed-scenarios-on-a-marketstate)
+and [Sensitivity Ladders](../risk-ladders.md#keyed-ladders-on-a-marketstate);
+the legacy positional `MarketScenario` / `apply_scenario` path on
+`MarketData` can only move the default curve. What is still open
+(credit / inflation / FX keyed shocks, node-level vega, the FRTB PLA
+vectors) is tracked on the
+[roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 ## Why sequential bootstrap breaks down
 

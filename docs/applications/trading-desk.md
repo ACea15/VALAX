@@ -1,5 +1,7 @@
 # Front-Office Trading — the Differentiable Pricing Core
 
+[← Applications overview](index.md#3-the-audience-map-ranked-by-fit-today) · one of five audience pages
+
 *How VALAX serves a front-office desk running an **in-house trading platform**: not as the strategy and not as the execution gateway, but as the differentiable **pricing-and-risk core** that values a universe of products consistently and — the part that is actually novel — exposes exact **gradients that cross into the decision layer**, at intraday cadence, on CPU or GPU.*
 
 Before the pitch, the honest framing of *what is and isn't novel here*, because it changes what the page is even about:
@@ -98,18 +100,20 @@ That single pattern is the trading-desk incarnation of deep hedging ([Quant Rese
 
 The intraday loop's core operation is: *given the current market, price every product I might quote or hold, and do it again a few seconds later.* That is precisely the operation JAX is built to make cheap.
 
-A pricer written as a pure function `V(instrument, market) → price` composes into a batched, compiled kernel:
+Because `price(instrument, model, market)` is a pure function, it composes into a batched, compiled kernel:
 
 ```python
-import jax
 import equinox as eqx
 from jaxtyping import Array, Float
+from valax.core import price
 
 @eqx.filter_jit
-def price_book(instruments, market) -> Float[Array, " n_products"]:
-    # one compiled kernel prices the entire universe
-    return jax.vmap(price_one, in_axes=(0, None))(instruments, market)
+def price_book(instruments, model, market) -> Float[Array, " n_products"]:
+    # one compiled kernel prices the entire universe against one MarketState
+    return eqx.filter_vmap(lambda inst: price(inst, model, market).price)(instruments)
 ```
+
+`valax.risk.group_prices(instruments, model, market)` is this function, packaged.
 
 The mechanics — `vmap` collapsing the product loop into an array axis, `@eqx.filter_jit` compiling once and running many, the identical kernel on CPU/GPU/TPU, and scenario grids as just another `vmap` axis — are the `FO` view of [Applications § 2.2](index.md#22-batch-at-scale-vmap-jit-gpu).
 
@@ -204,6 +208,7 @@ This is the section to read twice. A differentiable pricing engine is a *compone
 - **Costs usually dominate model edge on liquid products.** Spreads, market impact, fees, and hedging costs routinely exceed any model-vs-market residual on the products where the residual is measurable. The strategy layer — not the pricer — must model these, which is one reason it belongs in a separate system.
 - **Pricing, strategy, and execution are three separate engineering problems.** VALAX is a strong answer to the first and a useful input to the risk side of the third (hedging). It is *not* an answer to "what is my edge, how big do I size, and how do I get filled". Keep those in the separate repo where they belong.
 - **Calibration drift can masquerade as signal.** Intraday recalibration can jump; the resulting price change is model noise, not information. Monitor calibration stability (see [§ 5](#5-calibration-robustness-the-differentiable-inner-loop)) so the strategy layer never mistakes a recalibration artefact for a move.
+- **For automated market making, VALAX answers "what is fair?" — not "where do I quote?".** It can supply a fair mid, Greeks for inventory management, and fast revaluation across a strike × tenor × side quoting grid (`vmap` over the grid, analytic and Fourier pricers such as Black-Scholes, Black-76, Bachelier, Heston COS and SABR where MC is too slow). The market-making *strategy* — quote skewing, inventory limits, queue position, adverse-selection avoidance — is the firm's moat and lives in the AMM engine, which decides where to quote relative to the fair value.
 
 The through-line: **make the engine the trusted, boring, well-tested valuation-and-risk core, and put all skepticism, edge estimation, and cost modelling in the separate strategy system that consumes it.** That division is what makes the whole thing safe.
 
@@ -211,7 +216,7 @@ The through-line: **make the engine the trusted, boring, well-tested valuation-a
 
 ## 8. Coverage today vs. roadmap
 
-The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#5-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `FO`).
+The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#4-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `FO`).
 
 The pattern mirrors every other application page: **the pricing, Greek, and calibration primitives are shipped and strong; the intraday _service harness_ around them — warm-up, shape-bucketing, resident service — is the build project**, and gradient-based intraday hedging/quoting ([§ 2.2](#22-gradient-based-intraday-decisions-the-pricer-and-the-control-problem-share-one-graph-frontier)) is the categorical frontier.
 
@@ -240,6 +245,6 @@ The pattern mirrors every other application page: **the pricing, Greek, and cali
 - **The deep-hedging pattern behind the § 2.2 decision loop** → [Quant Research § 6](quant-research.md), [Vision](../vision.md).
 - **The risk / hedging pipeline the Greeks feed** → [Risk: End-to-End](../risk-overview.md).
 - **What it takes to make this a production service** → [Productionisation Design](../architecture/production.md).
-- **Where VALAX sits in the surrounding bank / desk stack** → [Where VALAX Fits](../landscape.md).
+- **Where VALAX sits in the surrounding bank / desk stack** → [Positioning & Design Rationale](../positioning/index.md).
 - **Greeks, calibration, and vol-surface mechanics** → [Greeks (Theory § 6)](../theory/greeks.md#6-greeks-and-automatic-differentiation), [Calibration](../guide/calibration.md), [Vol Surfaces](../guide/vol-surfaces.md).
 - **The forward direction — real-time risk, service layer** → [Vision](../vision.md), [Roadmap](../roadmap.md).

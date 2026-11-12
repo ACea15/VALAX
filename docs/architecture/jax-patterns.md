@@ -686,6 +686,6 @@ In-tree references that walk through specific applications:
 - **Multi-curve solver design** — [`architecture/production.md` §11](production.md#11-multi-curve-framework),
   with workstream status in
   [`roadmap.md`](../roadmap.md#multi-curve-framework-what-ships-whats-left)
-- **Why VALAX is JAX-native** — [`design-rationale.md`](../design-rationale.md)
+- **Why VALAX is JAX-native** — [Positioning & Design Rationale § 4](../positioning/index.md#4-the-seven-choices-valax-commits-to-and-what-each-one-buys)
   §3 and §4 connect the architectural commitment to JAX with the specific
   pain points it lets VALAX skip.

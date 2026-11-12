@@ -48,8 +48,10 @@ runs path generation + payoff + discounting, and returns an `MCResult`
 
 VALAX ships a broad set of built-in recipes spanning equity (GBM / Heston /
 local-vol / SLV), rates (LMM and the Hull-White / G2++ / Cheyette short-rate
-models), and multi-asset (`MultiAssetGBMModel`) pricing. See the coverage map
-in §2 and the built-in recipe list in the [API reference](../api/pricing.md#built-in-recipes).
+models), and multi-asset (`MultiAssetGBMModel`) pricing. Which instrument has
+a recipe under which model is the *MC* column of the
+[coverage matrix](../applications/instrument-pricing.md#coverage-matrix); the
+built-in recipe list is in the [API reference](../api/pricing.md#built-in-recipes).
 
 To swap the model, just pass a different one:
 
@@ -79,36 +81,39 @@ for instr, model in registered_recipes():
     print(f"  ({instr}, {model})")
 ```
 
-## 2. Coverage map
+## 2. Recipes by model family
 
-Legend: ✓ = dispatcher recipe exists, 🟡 = planned (payoff exists, recipe
-not yet wired), 🟠 = needs a new path generator, 🔴 = needs major infra.
+**What the MC engine covers** — which instruments have a recipe, under which
+models, and which are planned — is stated once, in the *MC* and *`price()`
+routes* columns of the
+[coverage matrix](../applications/instrument-pricing.md#coverage-matrix)
+(checked against the recipe registry by `tests/test_docs/test_price_routes.py`;
+planned recipes link to their roadmap item). This section documents the
+engine-specific behaviour of the shipped recipes only.
 
-### Equity (single asset)
+### Equity (single and multi-asset)
 
-| Instrument | `BlackScholesModel` | `HestonModel` | `LocalVolModel` | `SLVModel` | `MultiAssetGBMModel` | Notes |
-|-----------|:---:|:---:|:---:|:---:|:---:|---|
-| `EuropeanOption` | ✓ | ✓ | ✓ | ✓ | — | |
-| `AsianOption` | ✓ | ✓ | ✓ | ✓ | — | Arithmetic + geometric averaging |
-| `EquityBarrierOption` | ✓ | ✓ | ✓ | ✓ | — | KI/KO with sigmoid smoothing; LV/SLV is the canonical model when smile shape at the barrier matters |
-| `LookbackOption` | ✓ | ✓ | ✓ | ✓ | — | Floating + fixed strike |
-| `VarianceSwap` | ✓ | ✓ | ✓ | ✓ | — | Realized variance from log-returns |
-| `SpreadOption` | — | — | — | — | ✓ | Validates Margrabe (K=0) and Kirk (K≠0) analytical |
-| `WorstOfBasketOption` | — | — | — | — | ✓ | 2+ asset basket; cross-asset correlation Greeks via `jax.grad` |
-| `AmericanOption` | 🟡 | 🟡 | 🟡 | 🟡 | — | LSM engine exists for rates — needs lifting |
-| `DigitalOption` | 🟡 | 🟡 | 🟡 | 🟡 | — | Payoff is smoothed Heaviside |
-| `Autocallable` / `Cliquet` | 🟠 | 🟠 | 🟠 | 🟠 | 🟠 | Needs multi-observation / forward-start engine — SLV is the natural model once the recipe is wired |
+The single-asset recipes run under `BlackScholesModel`, `HestonModel`,
+`LocalVolModel` and `SLVModel`; the multi-asset ones under
+`MultiAssetGBMModel`.
+
+| Instrument | Recipe notes |
+|-----------|---|
+| `AsianOption` | Arithmetic + geometric averaging |
+| `EquityBarrierOption` | KI/KO with sigmoid smoothing; LV/SLV is the canonical model when smile shape at the barrier matters |
+| `LookbackOption` | Floating + fixed strike |
+| `VarianceSwap` | Realized variance from log-returns |
+| `SpreadOption` | Validates Margrabe (K=0) and Kirk (K≠0) analytical |
+| `WorstOfBasketOption` | 2+ asset basket; cross-asset correlation Greeks via `jax.grad` |
 
 ### Rates (LMM)
 
-| Instrument | `LMMModel` | Notes |
-|-----------|:---:|---|
-| `Caplet` | ✓ | Period = one forward period of the tenor grid |
-| `Cap` | ✓ | Every caplet period on the grid |
-| `Swaption` (European) | ✓ | Swap periods = consecutive grid periods from expiry |
-| `BermudanSwaption` | ✓ | Longstaff-Schwartz, `stderr = 0.0` sentinel; exercise dates on the grid, swap ends at the last tenor date |
-| `CMSSwap` / `CMSCapFloor` | 🟠 | Replication payoff needs to be added |
-| `RangeAccrual` | 🟠 | Full daily-observation MC on LMM |
+| Instrument | Recipe notes |
+|-----------|---|
+| `Caplet` | Period = one forward period of the tenor grid |
+| `Cap` | Every caplet period on the grid |
+| `Swaption` (European) | Swap periods = consecutive grid periods from expiry |
+| `BermudanSwaption` | Longstaff-Schwartz, `stderr = 0.0` sentinel; exercise dates on the grid, swap ends at the last tenor date |
 
 ### LMM through `price()`
 
@@ -199,11 +204,9 @@ calibrator yet (see the [calibration register](../applications/calibration-regis
 
 ### Fixed income (stochastic rates)
 
-| Instrument | MC pricing | Blocker |
-|-----------|:---:|---|
-| `FixedRateBond` / `FloatingRateBond` | ✓ | `HullWhiteModel` |
-| `CallableBond` / `PuttableBond` | ✓ | `HullWhiteModel` (analytic affine continuation value) |
-| `ConvertibleBond` | 🔴 | Equity + rates + credit coupled MC |
+Fixed- and floating-rate bonds have recipes under all four short-rate models
+(Hull-White, G2++, Cheyette 1F / 2F); callable and puttable bonds under
+Hull-White only, with an analytic affine continuation value.
 
 Callable and puttable bonds do **not** need a Longstaff-Schwartz regression:
 Hull-White zero-coupon bonds are affine in the short rate, so the continuation
@@ -216,11 +219,14 @@ trinomial-tree price — see
 ### Multi-factor short-rate (G2++, Cheyette)
 
 Beyond Hull-White, the MC dispatcher also prices under the two-factor **G2++** and
-the quasi-Gaussian **Cheyette** (1F / 2F) short-rate models — fixed/floating bonds,
-caplets/caps, European swaptions, and CMS-spread swaps — via exact-conditional path
-generators (`generate_g2pp_paths` and the Cheyette path generators). See
-[API: Pricing](../api/pricing.md) for the full registered recipe list and the
-[Calibration](calibration.md) guide for fitting these models.
+the quasi-Gaussian **Cheyette** (1F / 2F) short-rate models via exact-conditional
+path generators (`generate_g2pp_paths` and the Cheyette path generators). The
+recipe sets differ per model — e.g. European swaptions under G2++ and Cheyette 1F,
+caplets/caps under Cheyette 1F only, CMS-spread swaps under G2++ and Cheyette 2F —
+so read the per-model routes off the
+[coverage matrix](../applications/instrument-pricing.md#interest-rate-derivatives).
+See [API: Pricing](../api/pricing.md#built-in-recipes) for the registered recipe
+list and the [Calibration](calibration.md) guide for fitting these models.
 
 ### Time-dependent volatility
 
@@ -307,15 +313,11 @@ distinct projection curve rather than silently ignoring it.
 
 ### FX / Inflation / Credit
 
-| Instrument | Status | Blocker |
-|-----------|:---:|---|
-| `FXVanillaOption`, `FXBarrierOption` | 🟡 | Literally reuse `generate_gbm_paths` with drift $r_d - r_f$ |
-| `QuantoOption`, `TARF` | 🟠 | Correlated FX + asset MC |
-| `YearOnYearInflationSwap`, `InflationCapFloor` | 🔴 | Jarrow-Yildirim 3-factor MC |
-| `CDS`, `CDOTranche` | 🔴 | Survival curve + hazard-rate MC, copula simulation |
-
-See the [Roadmap](../roadmap.md) for the execution order of the 🟡/🟠/🔴
-items.
+No MC recipe ships for these asset classes yet. The planned ones are the 🟡
+cells of the matrix's MC column, each linked to the roadmap item that records
+its blocker (FX vanilla / barrier: `generate_gbm_paths` with drift
+\(r_d - r_f\); quanto / TARF: correlated FX + asset paths; inflation:
+Jarrow-Yildirim; credit: hazard-rate and copula simulation).
 
 ## 3. Path generators (low-level)
 
@@ -857,14 +859,15 @@ result = mc_price_dispatch(option, bsm_model, config, key, spot=spot)
 ## 8. Variance reduction (planned)
 
 Neither the dispatcher nor the low-level pipeline currently applies
-variance reduction. The following are roadmap items:
+variance reduction. None of the techniques below is built; they are tracked on
+the [roadmap](../roadmap.md#57-monte-carlo-variance-reduction):
 
-| Technique | Status | Notes |
-|-----------|:------:|-------|
-| Antithetic variates | 🟡 | 2× for smooth payoffs; easy plug-in at the path-generator level |
-| Control variates | 🟡 | Black-Scholes as control for Heston/SABR; 5–50× |
-| Importance sampling | 🟡 | Problem-specific |
-| Stratified / quasi-MC (Sobol, Halton) | 🟡 | `diffrax` does not yet expose quasi-random Brownian increments |
+| Technique | Notes |
+|-----------|-------|
+| Antithetic variates | 2× for smooth payoffs; easy plug-in at the path-generator level |
+| Control variates | Black-Scholes as control for Heston/SABR; 5–50× |
+| Importance sampling | Problem-specific |
+| Stratified / quasi-MC (Sobol, Halton) | `diffrax` does not yet expose quasi-random Brownian increments |
 
 See [theory §5.3](../theory/pricing-methods.md#53-monte-carlo-simulation) for the
 underlying theory.
@@ -889,4 +892,4 @@ underlying theory.
 - [Models & Theory §6.3](../theory/greeks.md#63-pathwise-method-for-mc-greeks) — when pathwise differentiation works and when it doesn't.
 - [Greeks & Automatic Differentiation (Theory § 6)](../theory/greeks.md#6-greeks-and-automatic-differentiation) — how `jax.grad` composes with the MC pipeline.
 - [Scenarios & Shocks](../risk-scenarios.md) — vmapped MC pricing for VaR / ES.
-- [Roadmap](../roadmap.md) — execution order for the 🟡 / 🟠 / 🔴 items in the coverage map.
+- [Coverage matrix](../applications/instrument-pricing.md#coverage-matrix) — which instruments the MC engine prices, under which models, and what is planned (each planned cell links to its [roadmap](../roadmap.md) item).

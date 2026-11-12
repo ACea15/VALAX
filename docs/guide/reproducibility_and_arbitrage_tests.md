@@ -81,9 +81,8 @@ The manifest update is a real diff in the PR.
 
 The synthetic layer enables a class of automated assertions that real
 market data cannot: **the calibrator's residual must lie at the
-observation-noise floor**. Demonstrated end-to-end in
-`examples/08_end_to_end_workflow.py` and locked in as automated tests
-in `tests/test_market/test_calibration_residual.py`.
+observation-noise floor**. Locked in as automated tests in
+`tests/test_market/test_calibration_residual.py`.
 
 ### SABR smile residual
 

@@ -31,6 +31,8 @@ risk API is documented in [API → Greeks](../api/greeks.md#quote-space-hedge-sp
 
 ## Status legend
 
+<!-- coverage-map -->
+
 | Status | Meaning |
 |---|---|
 | ✅ | Implemented and covered by a test |

@@ -1,5 +1,7 @@
 # Treasury & ALM
 
+[← Applications overview](index.md#3-the-audience-map-ranked-by-fit-today) · one of five audience pages
+
 *How VALAX supports bank Treasury — the function that runs the balance sheet as a portfolio, owns interest-rate risk in the **banking book**, and is measured on Net Interest Income (NII) stability across rate cycles.*
 
 This page is the companion to [Regulatory: FRTB & CCAR](regulatory.md). Where that page maps VALAX onto the **trading-book** capital regimes (FRTB, CCAR), this page maps it onto the **banking-book** regimes owned by Treasury: **IRRBB**, **NII simulation**, **LCR / NSFR**, **FTP**, and the bank's own **HQLA / investment portfolio**.
@@ -32,25 +34,25 @@ Here is Treasury's daily production loop in one picture, with each stage annotat
 ┌──────────────────────────────────────────────────────────────────┐
 │  Daily Treasury loop                                             │
 │                                                                  │
-│  1. Refresh curves ────────────────────► valax/curves/           │
-│     (OIS, SOFR/€STR, credit)             bootstrap, DiscountCurve│
+│  1. Refresh curves ────────────────────► bootstrap_curve_graph   │
+│     (OIS, SOFR/€STR, funding)            → MarketState           │
 │                                                                  │
-│  2. Reprice banking book ─────────────► pricing/analytic/bonds  │
-│     (bonds, FRNs, swaps, caps)          instruments/rates        │
+│  2. Reprice banking book ─────────────► price() via group_pv    │
+│     (bonds, FRNs, swaps, caps)                                   │
 │                                                                  │
-│  3. Compute EVE + NII sensitivity ────► compute_ladder           │
-│     (KRD ladder, DV01)                  greeks/autodiff          │
+│  3. Compute EVE + NII sensitivity ────► keyed_ladder             │
+│     (KRD ladder, DV01 per curve)        (curve_ladder, dv01)     │
 │                                                                  │
-│  4. Apply IRRBB 6 scenarios ──────────► steepener, flattener,   │
-│                                          parallel_shift,          │
-│                                          key_rate_bump           │
+│  4. Apply IRRBB 6 scenarios ──────────► keyed_curve_stress      │
+│                                          (parallel / steepener / │
+│                                          flattener), KeyedScenario│
 │                                                                  │
-│  5. ΔEVE / ΔNII per scenario ─────────► hypothetical_pnl_vector │
+│  5. ΔEVE / ΔNII per scenario ─────────► group_scenario_pnl      │
 │     (vmap across scenarios)                                      │
 │                                                                  │
 │  6. Bucket to Basel tenor grid ───────► tenor_bucket_map,        │
-│                                          bucket_sensitivity_     │
-│                                          ladder                  │
+│                                          aggregate on            │
+│                                          curve_ladder            │
 │                                                                  │
 │  7. SOT check vs. Tier 1 ─────────────► arithmetic on ΔEVE       │
 │                                                                  │
@@ -59,8 +61,8 @@ Here is Treasury's daily production loop in one picture, with each stage annotat
 │                                          🟡 behavioural overlays │
 │                                             are the honest gap    │
 │                                                                  │
-│  9. Investment portfolio mark ────────► portfolio_pnl over       │
-│     + duration/KRD                       HQLA instruments        │
+│  9. Investment portfolio mark ────────► group_pv / keyed_ladder  │
+│     + duration/KRD                       over HQLA instruments   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -93,45 +95,47 @@ The scenario magnitudes are prescribed per currency (e.g. USD: parallel ±200 bp
 
 | BCBS 368 requirement | VALAX primitive |
 |---|---|
-| Parallel up / down | `parallel_shift(curve, dr)` and `stress_scenario(..., parallel_rate_shift=dr)` |
-| Steepener | `steepener(n_assets, n_pillars, short_bump, long_bump)` |
-| Flattener | `flattener(...)` |
-| Short-rate shock up / down | `key_rate_bump(curve, pillar_index=0, bump=...)` on front pillars |
+| Parallel up / down | `keyed_curve_stress(layout, "USD.OIS", "parallel", dr, dr)` (or `keyed_stress_scenario(layout, parallel_shift=dr)` for every curve) |
+| Steepener | `keyed_steepener(layout, "USD.OIS", short_bump, long_bump)` |
+| Flattener | `keyed_flattener(layout, "USD.OIS", short_bump, long_bump)` |
+| Short-rate shock up / down | `KeyedScenario(curve_shocks={"USD.OIS": front_end_bumps})` — the BCBS short-rate decay shape as a per-pillar vector |
 | Banking-book instruments (fixed / floating bonds, FRNs, swaps, caps, callable bonds) | [`valax/instruments/bonds.py`](../guide/fixed-income.md), [`valax/instruments/rates.py`](../guide/rates-exotics.md), [callable bonds guide](../guide/callable-bonds.md) |
-| ΔEVE via re-discounting under each scenario | `hypothetical_pnl_vector(pricing_fn, instruments, base_market, irrbb_scenarios)` |
-| Key-rate durations, DV01 ladder | `compute_ladder(...).delta_rate` — full pillar-level KRDs from one autodiff pass |
-| Bucket to Basel tenor grid | `tenor_bucket_map(pillar_times, basel_vertices)` + `bucket_sensitivity_ladder` |
+| ΔEVE via re-discounting under each scenario | `group_scenario_pnl(positions, model, market, irrbb_scenarios)` — full revaluation through `price()` |
+| Key-rate durations, DV01 ladder | `keyed_ladder(...).curve_ladder("USD.OIS")` — pillar-level KRDs per named curve from one autodiff pass; `basis_dv01` for the projection-vs-OIS basis |
+| Bucket to Basel tenor grid | `tenor_bucket_map(pillar_times, basel_vertices)` + `aggregate` on the curve's ladder |
 | PCA level/slope/curvature (industry-standard factor reduction) | `pca_jacobian` + `pushforward_sensitivities` — see [PCA Curve Shocks](../guide/pca-rates.md) |
 | SOT check | `jnp.max(jnp.abs(delta_eve)) / tier1_capital` |
 
-That is not a marketing table. The six BCBS scenarios are literally already named functions in `valax.risk`. A Treasury team can stand up a production-grade IRRBB Standardised Approach calculator using primitives that exist today.
+That is not a marketing table. Four of the six BCBS scenarios are named functions in `valax.risk`, and the two short-rate shocks are one `KeyedScenario` each. A Treasury team can stand up a production-grade IRRBB Standardised Approach calculator using primitives that exist today.
 
 ### 3.3 End-to-end IRRBB code sketch
 
 ```python
 import jax.numpy as jnp
+from valax.market import KeyedScenario, stack_keyed_scenarios
 from valax.risk import (
-    parallel_shift, steepener, flattener, key_rate_bump,
-    stress_scenario, stack_scenarios,
-    hypothetical_pnl_vector, compute_ladder, bucket_sensitivity_ladder,
-    tenor_bucket_map,
+    KeyedFactorLayout, keyed_curve_stress, keyed_steepener, keyed_flattener,
+    group_scenario_pnl, keyed_ladder, tenor_bucket_map, aggregate,
 )
 
-# 1. BCBS 368 USD scenarios (magnitudes for USD)
+OIS = "USD.OIS"
+layout = KeyedFactorLayout.from_market_state(market)
+
+# 1. BCBS 368 USD scenarios (magnitudes for USD), on the named OIS curve
 DR_PARALLEL = 0.02   # ±200 bp
 DR_SHORT    = 0.03   # ±300 bp
 
-irrbb = stack_scenarios([
-    stress_scenario(n_assets, n_pillars, parallel_rate_shift=+DR_PARALLEL),
-    stress_scenario(n_assets, n_pillars, parallel_rate_shift=-DR_PARALLEL),
-    steepener  (n_assets, n_pillars, short_bump=-DR_SHORT, long_bump=+DR_PARALLEL),
-    flattener  (n_assets, n_pillars, short_bump=+DR_SHORT, long_bump=-DR_PARALLEL),
-    stress_scenario(n_assets, n_pillars, rate_shocks=short_shock_up_vector),   # scenario 5
-    stress_scenario(n_assets, n_pillars, rate_shocks=short_shock_down_vector), # scenario 6
+irrbb = stack_keyed_scenarios([
+    keyed_curve_stress(layout, OIS, "parallel", +DR_PARALLEL, +DR_PARALLEL),
+    keyed_curve_stress(layout, OIS, "parallel", -DR_PARALLEL, -DR_PARALLEL),
+    keyed_steepener(layout, OIS, short_bump=-DR_SHORT, long_bump=+DR_PARALLEL),
+    keyed_flattener(layout, OIS, short_bump=+DR_SHORT, long_bump=-DR_PARALLEL),
+    KeyedScenario(curve_shocks={OIS: +short_shock_vector}),   # scenario 5
+    KeyedScenario(curve_shocks={OIS: -short_shock_vector}),   # scenario 6
 ])
 
-# 2. ΔEVE per scenario — full re-revaluation of the banking book
-delta_eve = hypothetical_pnl_vector(banking_book_pricer, positions, base_market, irrbb)
+# 2. ΔEVE per scenario — full revaluation of the banking book through price()
+delta_eve = group_scenario_pnl(positions, model, market, irrbb)
 
 # 3. Worst-case and SOT check
 worst = jnp.min(delta_eve)           # most negative EVE change
@@ -139,18 +143,19 @@ sot_ratio = jnp.abs(worst) / tier1_capital
 sot_pass  = sot_ratio < 0.15         # BCBS 368 threshold
 
 # 4. Ladder for KRD / DV01 attribution — where the sensitivity is concentrated
-ladder = compute_ladder(banking_book_pricer, positions, base_market)
+ladder = keyed_ladder(positions, model, market, layout)
+krd = ladder.curve_ladder(OIS)       # per-pillar KRDs of the OIS curve
 
 # 5. Bucket to Basel 19-tenor IRRBB grid for the ITS / EBA return
 basel_vertices = jnp.array([
     0.25, 0.5, 1, 1.5, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 35
 ])
 tenor_bm = tenor_bucket_map(pillar_times, basel_vertices, weight="linear")
-bucketed = bucket_sensitivity_ladder(ladder, rate_bucket=tenor_bm)
-# bucketed.delta_rate is now the KRD ladder on the Basel tenor grid — ready for the ITS return.
+krd_basel = aggregate(tenor_bm, krd)
+# krd_basel is the KRD ladder on the Basel tenor grid — ready for the ITS return.
 ```
 
-Under the hood, `hypothetical_pnl_vector` uses `jax.vmap` over scenarios and — inside each scenario — over instruments. For a 500 000-position retail banking book with six IRRBB scenarios, that is **3 000 000 repricings compiled into a single JIT call** rather than a Python loop over positions. On a single GPU this runs in seconds; on CPU it is still competitive with vendor ALM engines that need overnight batches.
+Under the hood, `group_scenario_pnl` uses `jax.vmap` over scenarios and — inside each scenario — over instruments. For a 500 000-position retail banking book with six IRRBB scenarios, that is **3 000 000 repricings compiled into a single JIT call** rather than a Python loop over positions. On a single GPU this runs in seconds; on CPU it is still competitive with vendor ALM engines that need overnight batches.
 
 ### 3.4 Why this matters commercially
 
@@ -178,7 +183,7 @@ The second half of IRRBB — and arguably the number Treasury *actually manages*
 - Schedule generation and day-count arithmetic ([`valax/dates/schedule.py`](../guide/tutorial-rates.md), [`valax/dates/daycounts.py`](../api/dates.md)) — all JIT-compatible integer ordinals.
 - Floating-rate cash-flow computation (FRN and floating swap leg pricers).
 - Curve-based forward-rate projection (`DiscountCurve` interpolation → forward rates).
-- Scenario propagation via `apply_scenario` → new `MarketData` → NII delta.
+- Scenario propagation: a `KeyedScenario` applied by `shock` → shocked `MarketState` → NII delta, on any named curve.
 
 **What is not yet turnkey:**
 - A first-class NII projection engine that walks the banking book position-by-position and aggregates monthly. Every piece needed is there; the orchestration layer isn't packaged. This is a natural addition and does not require any architectural change — it is a few hundred lines composing existing primitives.
@@ -195,9 +200,9 @@ The bank's own portfolio of sovereigns, covered bonds, agency MBS, and supranati
 |---|---|
 | Bond present-value (fixed, floating, callable) | [`valax/pricing/analytic/bonds.py`](../guide/fixed-income.md), [callable bonds guide](../guide/callable-bonds.md) |
 | Yield-to-maturity, duration, convexity | `jax.grad` / `jax.hessian` on the pricer |
-| Key-rate durations at Treasury's chosen bucket grid | `compute_ladder` + `bucket_sensitivity_ladder` |
-| Portfolio-level stress (parallel, steepener, credit spread) | `portfolio_pnl` with `jax.vmap` over the portfolio |
-| Multi-scenario ES for HQLA VaR | `expected_shortfall` on the `hypothetical_pnl_vector` |
+| Key-rate durations at Treasury's chosen bucket grid | `keyed_ladder(...).curve_ladder(curve_id)` + `tenor_bucket_map` / `aggregate` |
+| Portfolio-level stress (parallel, steepener, basis) | `keyed_curve_stress` / `keyed_basis_shift` + `group_scenario_pnl` (credit-spread shocks are not yet keyed — [roadmap](../roadmap.md#remaining-work)) |
+| Multi-scenario ES for HQLA VaR | `expected_shortfall` on the `group_scenario_pnl` vector |
 | Callable-bond OAS (option-adjusted spread) | Callable-bond lattice pricer (guide/callable-bonds) |
 
 Treasury typically runs this in Excel + Bloomberg SDK today. Replacing that with a differentiable batch that ties into the same IRRBB engine is a natural upgrade — and it means the *HQLA duration in the ALM report* and the *HQLA duration in the investment report* are provably the same number, because they come from the same code path.
@@ -231,11 +236,10 @@ FTP is Treasury's internal-pricing curve: every trade booked anywhere in the ban
 
 **Mechanically:** it is discount-curve pricing — VALAX's bread and butter. Where the gap sits:
 
-- **Today:** a single `DiscountCurve` can carry an FTP curve. This works for a proof-of-concept and for FTP on the derivatives book.
-- **Tomorrow:** [multi-curve `MarketData`](../guide/why-multicurve.md) (roadmap) will let a Treasury team carry OIS + SOFR + own-credit funding spread + XCCY basis in one object — which is what a real FTP engine needs.
-- **Beyond:** an FTP-specific curve arithmetic layer (base + tenor liquidity premium + behavioural overlay) is a five-line addition once the curve container supports multiple curves.
+- **Today:** the [multi-curve market](../guide/why-multicurve.md) lets a Treasury team carry OIS, SOFR projection, an FTP / funding curve and XCCY curves side by side in one `CurveGraph` inside the `MarketState`, each shockable and reported as its own risk factor.
+- **Not yet built:** an FTP-specific curve arithmetic layer (base + tenor liquidity premium + credit add-on + behavioural overlay) and a credit-adjusted own-funding curve construction. Both compose existing curve primitives; neither is packaged.
 
-**Verdict:** the pricing mechanics are there; multi-curve is the pending piece.
+**Verdict:** the curve container and pricing mechanics are there; the FTP add-on arithmetic is the pending piece.
 
 ---
 
@@ -263,7 +267,7 @@ For a Treasury team evaluating VALAX, the honest framing: **the deterministic AL
 
 ## 9. Coverage today vs. roadmap
 
-The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#5-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `TRE`).
+The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#4-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `TRE`).
 
 **The through-line:** the *pricing and sensitivity* primitives Treasury needs are all there today; the *behavioural and structural* modelling — deposit pass-through, prepayment, non-maturity-deposit life curves, FTP — is not, a genuine boundary of current scope, though architecturally the easiest kind of thing to add on top of `equinox.Module` + `jax.grad`.
 
@@ -271,7 +275,7 @@ The full, cross-audience coverage matrix now lives in one place — **[Applicati
 
 ## 10. Why the JAX foundation matters for Treasury specifically
 
-Treasury has properties that make JAX a genuinely good fit — not just a "modern Python stack" but a specific technical advantage: autodiff KRDs and durations, `vmap` over a 500 000-position book, one `MarketData` pytree, bucketing as a matrix multiply, `optax`-calibrated behavioural models, and deterministic pure functions. Each capability and its `TRE` payoff is enumerated in [Applications § 2](index.md#2-what-makes-valax-distinctive-capability-by-capability) (deeper *why* in [Design Rationale § 3](../design-rationale.md#3-the-seven-choices-valax-commits-to-and-what-each-one-buys)).
+Treasury has properties that make JAX a genuinely good fit — not just a "modern Python stack" but a specific technical advantage: autodiff KRDs and durations, `vmap` over a 500 000-position book, one `MarketState` pytree, bucketing as a matrix multiply, `optax`-calibrated behavioural models, and deterministic pure functions. Each capability and its `TRE` payoff is enumerated in [Applications § 2](index.md#2-what-makes-valax-distinctive-capability-by-capability) (deeper *why* in [Positioning § 4](../positioning/index.md#4-the-seven-choices-valax-commits-to-and-what-each-one-buys)).
 
 The net effect: the same code path that produces a trader's DV01 on a swap at 14:31 produces the firm-wide EVE waterfall under the IRRBB Severely-Adverse scenario overnight, and the CFO's morning ITS return two hours later. One library, one mental model, three regulatory audiences.
 
@@ -300,4 +304,4 @@ The net effect: the same code path that produces a trader's DV01 on a swap at 14
 - **Fixed-income pricing (bonds, FRNs, swaps, caps)** → [Fixed Income](../guide/fixed-income.md), [Rates Exotics](../guide/rates-exotics.md), [Callable / Puttable Bonds](../guide/callable-bonds.md).
 - **Curve construction and multi-curve rationale** → [Yield Curves & Bootstrapping](../guide/curves.md), [Why Multi-Curve?](../guide/why-multicurve.md).
 - **Scenario framework and bucketing** → [Scenarios & Shocks](../risk-scenarios.md), [PCA Curve Shocks](../guide/pca-rates.md).
-- **The forward direction — multi-curve, behavioural models, FTP** → [Vision](../vision.md) and [Roadmap](../roadmap.md).
+- **The forward direction — behavioural models, FTP** → [Vision](../vision.md) and [Roadmap](../roadmap.md).

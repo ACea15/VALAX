@@ -10,25 +10,25 @@ CMS swaps, CMS caps/floors, and range accruals.
 !!! success "All instruments on this page are implemented."
     See `valax/instruments/rates.py` and `valax/pricing/analytic/rates_exotics.py`.
 
-!!! note "Curve consumption — single-curve today, multi-curve on the roadmap"
-    Every analytic rates pricer takes plain `DiscountCurve` argument(s);
-    none currently accepts a `CurveGraph`.  The multi-curve *calibration*
-    engine ships (see the [Multi-Curve Bootstrap guide](curves.md#5-multi-curve-bootstrap)),
-    but *pricing* against a calibrated `CurveGraph` requires either passing
-    the graph's OIS discount curve as `curve` (single-curve approximation) or
-    manually computing the dual-curve PV from the graph (see the worked
-    example in [`curves.md` §5.2](curves.md#52-a-worked-usd-dual-curve-build)).
+!!! note "Curve consumption — kernels take curves, `price()` takes the graph"
+    The analytic rates kernels take plain `DiscountCurve` arguments, and
+    most accept an optional `forward_curve` for dual-curve pricing (OIS
+    discounting, projection off the index curve); without it they fall back
+    to the single-curve identity. The `*_from_graph` wrappers price straight
+    from a calibrated `CurveGraph` by curve id
+    (see the [Multi-Curve Bootstrap guide](curves.md#5-multi-curve-bootstrap)).
 
-    | Pricer | Location | Curve consumption |
+    | Kernel | Location | Curve consumption |
     |---|---|---|
-    | `interest_rate_swap_price` | `valax/pricing/analytic/floating.py` | 1 curve — single-`DiscountCurve` (used for both projection and discounting) |
-    | `ois_swap_price` | `valax/pricing/analytic/floating.py` | 1 curve — telescoping identity assumes projection curve = discount curve |
-    | `caplet_price` / `cap_price` / `floor_price` | `valax/pricing/analytic/caplets.py` | 1 curve |
-    | `european_swaption_price` / `bermudan_swaption_price` | `valax/pricing/analytic/swaptions.py` | 1 curve |
-    | `bond_price` / `callable_bond_price` / `puttable_bond_price` | `valax/pricing/analytic/bonds.py` / `pricing/lattice/hull_white_tree.py` | 1 curve |
-    | `cross_currency_swap_price` | `valax/pricing/analytic/rates_exotics.py` | 2 curves — `domestic_curve` + `foreign_curve` (both `DiscountCurve`; not a `CurveGraph`) |
-    | `zcis_price` / `yyis_price` / `inflation_cap_floor_price_black76` | `valax/pricing/analytic/inflation.py` | 1 curve for nominal discount + 1 `InflationCurve` for CPI projection |
-    | `cms_swap_price` / `cms_cap_price` / `range_accrual_price` | `valax/pricing/analytic/rates_exotics.py` | 1 curve |
+    | `swap_price` / `swap_rate` / `swaption_price_black76` / `swaption_price_bachelier` | `valax/pricing/analytic/swaptions.py` | discount curve + optional `forward_curve` |
+    | `ois_swap_price` / `floating_rate_bond_price` | `valax/pricing/analytic/floating.py` | discount curve + optional `forward_curve` (telescoping identity when omitted) |
+    | `caplet_price_black76` / `cap_price_black76` (and `_bachelier`) | `valax/pricing/analytic/caplets.py` | discount curve + optional `forward_curve` |
+    | `cms_swap_price` / `cms_cap_floor_price_black76` / `range_accrual_price_black76` / `total_return_swap_price` | `valax/pricing/analytic/rates_exotics.py` | discount curve + optional `forward_curve` |
+    | `cross_currency_swap_price` | `valax/pricing/analytic/rates_exotics.py` | 2 curves — `domestic_curve` + `foreign_curve` |
+    | `fixed_rate_bond_price` | `valax/pricing/analytic/bonds.py` | 1 curve |
+    | `callable_bond_price` / `puttable_bond_price` / `bermudan_swaption_tree_price` | `valax/pricing/lattice/hull_white_tree.py` | the Hull-White model's curve |
+    | `zcis_price` / `yyis_price` / `inflation_cap_floor_price_black76` | `valax/pricing/analytic/inflation.py` | 1 nominal discount curve + 1 `InflationCurve` for CPI projection |
+    | `*_from_graph` (swaps, OIS, FRNs, caplets, caps, swaptions, CMS, range accruals, TRS) | `valax/pricing/analytic/graph_pricing.py`, `rates_smile.py` | a `CurveGraph` + curve ids |
 
     Through `valax.price` the curves are resolved from a `MarketState` by
     each trade's static ids instead — `discount_id` / `forward_id`, each

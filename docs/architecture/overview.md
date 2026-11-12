@@ -53,6 +53,19 @@ delta, vega, rho = jax.grad(price_fn, argnums=(1, 2, 3))(option, spot, vol, rate
 
 This works for **all** pricing methods — analytical, Monte Carlo, PDE, and lattice. No method-specific Greek implementations needed.
 
+## Invariants for contributors
+
+The [seven architectural choices](../positioning/index.md#4-the-seven-choices-valax-commits-to-and-what-each-one-buys) only hold if every new module keeps them. These are acceptance criteria, not style guidelines; the detailed rules, with examples, are in [`CONTRIBUTING.md` § 2](https://github.com/ACea15/VALAX/blob/main/CONTRIBUTING.md#2-architectural-rules).
+
+1. **Every pricing function is `jax.grad`-able.** A workaround (`stop_gradient`, a finite-difference fallback) breaks the Greek-consistency property, and the change should not land.
+2. **Every domain type is an `equinox.Module` pytree.** Anything that does not flatten / unflatten under `jax.tree_util` cannot be `vmap`-ed across scenarios and instruments.
+3. **No global state, no caches that survive between calls, no observer pattern.** Determinism is by construction; any leaked state means yesterday's risk run might not replay tomorrow.
+4. **Dates inside traced code are integer ordinals.** `datetime.date` appears at the user-facing boundary only.
+5. **No `scipy` inside JIT-traced code.** Use `optimistix` / `lineax` / `jax.scipy`, or the trader-hot-path / batch-risk equivalence silently breaks.
+6. **New instruments declare their risk-factor consumption** in [Risk Factors § 5](../risk-factors.md#5-instrument-factor-matrix). This keeps the bucketing layer of [Theory § 7.8](../theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations) honest at scale.
+
+The JAX idioms that satisfy these invariants (static trace-time dispatch, the double-where autodiff-safety pattern, JIT cache semantics, autodiff through autodiff) are catalogued in [JAX Patterns](jax-patterns.md). The test-layer counterpart is [Validation Strategy](validation-strategy.md). If an invariant is hard to satisfy for a new module, the module is fighting the architecture: redesign the module rather than weaken the architecture.
+
 ## Package Structure
 
 ```

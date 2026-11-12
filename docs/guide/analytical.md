@@ -1,6 +1,14 @@
 # Analytical Pricing
 
-VALAX provides three closed-form pricing models for European options.
+This page covers the closed-form vanilla engines — Black-Scholes-Merton,
+Black-76, Bachelier, SABR and Garman-Kohlhagen — and how to pick between them.
+**Which instruments have an analytic pricer**, routed through `price()` (✅)
+or called directly (◇), is stated once, in the *Analytic* column of the
+[coverage matrix](../applications/instrument-pricing.md#coverage-matrix); an
+exotic's closed form (digital, Margrabe / Kirk, Jamshidian, CMS, range
+accrual, …) is documented on its instrument guide, and the Heston COS
+semi-analytic pricer in [theory](../theory/stochastic-models.md) and
+[API: Pricing](../api/pricing.md).
 
 ## Black-Scholes-Merton
 

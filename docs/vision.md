@@ -4,7 +4,7 @@ This document captures the long-term ambition for VALAX: the kinds of workflows 
 
 It is **not** a feature list (see [`roadmap.md`](roadmap.md) for time-ordered tasks and tier breakdowns), and it is **not** a structural design (see [`architecture/production.md`](architecture/production.md) for the data model, layering, and phased delivery plan). It is the **why** that the roadmap and the architecture documents serve. It is deliberately untimed: it should still read true after several roadmap tiers have shipped.
 
-For the *architectural* why — what is actually hard about quant systems at scale, why VALAX makes the design choices it does, and what it deliberately leaves out of scope — see [Design Rationale](design-rationale.md).
+For the *architectural* why — what is actually hard about quant systems at scale, why VALAX makes the design choices it does, and what it deliberately leaves out of scope — see [Positioning & Design Rationale](positioning/index.md).
 
 VALAX today is a pricing kernel — option pricers, curve bootstrapping, autodiff Greeks, vmap portfolio risk. The destination described here is a **differentiable valuation, risk, and research engine** usable end-to-end by trading desks, asset managers, and quant researchers.
 
@@ -42,7 +42,7 @@ Each ring is a different kind of customer doing a different kind of work. The ou
 
 ## 1. Operational uses
 
-The first thing VALAX gives a trading or investment shop is the unglamorous-but-essential daily pipeline. Once `MarketState`, `MarketSpec`, the snapshot store, and the multi-curve graph solver are landed, the engine supports:
+The first thing VALAX gives a trading or investment shop is the unglamorous-but-essential daily pipeline. `MarketState` and the multi-curve graph solver have landed; once a declarative market spec and a snapshot store sit on top of them, the engine supports:
 
 ### End-of-day mark-to-market
 - `valax build-state` ingests vendor quotes → calibrated `MarketState`.
@@ -156,8 +156,8 @@ These are the use cases that justify building VALAX in JAX rather than wrapping 
 
 The vision implies a small set of durable principles for prioritization. Specific time-ordered tasks live in [`roadmap.md`](roadmap.md); the principles are:
 
-1. **`MarketState` is the highest-leverage prerequisite.** It is a hard dependency for the service layer (P4), XVA (P3.1), and neural surrogates (P5.1). Roughly 80% of everything downstream blocks on it.
-2. **The multi-curve graph unlocks three of the four strategic use cases.** It is independently shippable and should be progressed in parallel with `MarketState`.
+1. **`MarketState` was the highest-leverage prerequisite, and it has shipped** (`valax/core/market_state.py`). It is the hard dependency of the service layer (P4), XVA (P3.1), and neural surrogates (P5.1), so those are now unblocked on the market side. The remaining migration is retiring the legacy `MarketData` container from the last flat risk paths ([roadmap](roadmap.md#remaining-work)).
+2. **The multi-curve graph unlocks three of the four strategic use cases, and it has shipped** — joint bootstrap, dual-curve pricing and calibration, and per-curve risk.
 3. **Every new pricer must remain `jax.grad`-able and `vmap`-able.** This single discipline keeps the entire frontier (P5) reachable for free. The acceptance test for a new module is: *can I differentiate it, vectorize it, and sample its inputs from a posterior?*
 4. **The XVA prototype is the strategic crown jewel.** Once `MarketState`, the multi-curve graph, and a credit survival curve are in place, a CVA demo on GPU is the single artefact most likely to make a bank seriously evaluate VALAX. Plan its dependencies (netting sets, exposure harness) early so it isn't a re-architecture later.
 5. **Defer P5, but design for it.** Don't build neural surrogates yet, but never compromise the purity of pricing functions. The frontier is paid for by discipline at the operational layer.

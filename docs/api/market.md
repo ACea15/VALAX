@@ -1,8 +1,9 @@
 # Market Data
 
 The `valax.market` namespace carries everything VALAX considers "the
-state of the world": spots, vols, dividends, the discount curve,
-correlations, scenario shocks, and — since the synthetic submodule
+state of the world" beyond the [`MarketState`](core.md#marketstate)
+container itself: scenario shocks, quote sets and provenance, the legacy
+flat `MarketData` container, and — since the synthetic submodule
 landed — the generators, observation layer, and arbitrage-injection
 stress tools that drive the library end-to-end without any external
 data source.
@@ -17,39 +18,47 @@ Stage 6  Risk          ←  Stage 5  Pricing & Greeks  ←  Stage 4  Portfolio
 
 | Stage | Module | What it produces |
 |---|---|---|
-| 1 | `valax.market.synthetic.snapshots`, `curves`, `correlations`, `model_params` | `MarketData`, `DiscountCurve`, correlation matrix, ground-truth `SABRModel` / `HestonModel` / `HullWhiteModel` / `MultiAssetGBMModel`. |
+| 1 | `valax.market.synthetic.snapshots`, `curves`, `correlations`, `model_params` | `MarketData` (legacy), `DiscountCurve`, correlation matrix, ground-truth `SABRModel` / `HestonModel` / `HullWhiteModel` / `MultiAssetGBMModel`. |
 | 2 | `valax.market.synthetic.observations` | Noisy implied-vol smile, price strip, par-rate quotes. |
 | 3 | [`valax.calibration`](calibration.md) | Fitted model parameters. |
 | 4 | `valax.market.synthetic.portfolio` | Stacked `EuropeanOption` / `InterestRateSwap` pytrees. |
 | 5 | [`valax.pricing`](pricing.md), [`valax.greeks`](greeks.md) | Vectorised prices and Greeks. |
-| 6 | `valax.market.synthetic.paths`, `scenarios` | `MarketData` tapes and `ScenarioSet` batches. |
+| 6 | `valax.market.synthetic.paths`, `scenarios` | `MarketData` tapes and `ScenarioSet` batches (legacy flat layout; keyed scenarios on a `MarketState` come from the [keyed generators](risk.md#keyed-generators)). |
 
 A user-facing tour of the same workflow lives in
 [User Guide → Synthetic Market Data](../guide/synthetic_market.md);
-the runnable counterpart is `examples/08_end_to_end_workflow.py`.
+the runnable `MarketState` counterparts are the unified examples 10–13 and 19
+([Examples](../examples.md#unified-calibration-pricing-and-risk)).
 
 ## Core market state
 
-Canonical container of the market state at a single valuation date.
-All four leaves of `MarketData` are differentiable, so `jax.grad`
+The market object VALAX prices against is
+[`valax.core.MarketState`](core.md#marketstate) — a keyed `CurveGraph`
+(OIS discount + projection curves, basis, XCCY), full vol surfaces, spots,
+dividends, plus credit / inflation / FX — and it is what
+[`price()`](core.md#the-unified-signature) takes. This section documents
+the **legacy** flat container it replaced, and its positional scenario
+types. All four leaves of `MarketData` are differentiable, so `jax.grad`
 through a pricing function that consumes a `MarketData` returns
 sensitivities to every spot, vol, dividend, and curve pillar
 simultaneously.
 
-!!! note "`MarketData` is being generalised into `MarketState`"
-    [`valax.core.MarketState`](core.md#marketstate) subsumes this
-    container: a keyed `CurveGraph` instead of one curve, full vol
-    surfaces instead of a scalar per asset, plus credit / inflation / FX.
-    `MarketData` stays for one minor release as a two-way view
-    (`MarketState.from_market_data` / `.to_market_data`).
+!!! warning "Legacy — `MarketData`, `MarketScenario`, `ScenarioSet` are scheduled for removal"
+    They stay for one deprecation cycle as a two-way view
+    (`MarketState.from_market_data` / `.to_market_data`); see the
+    [roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
+    The `MarketState` counterparts are [`KeyedScenario`](#keyed-scenarios-for-marketstate)
+    + [`valax.risk.shock`](risk.md#keyed-shocks-on-a-marketstate) for
+    shocks, the keyed generators, `valax.risk.state_var` for repricing
+    through `price(...)`, and the keyed ladders / waterfall / VaR in
+    `valax.risk.state_ladders` ([API → Risk](risk.md)).
 
-    The repricing loop **has** moved: `valax.risk.state_var` reprices a
-    `MarketState` under a `KeyedScenario` through `price(...)`, and
-    `wrap_equity_pricing_fn` is deprecated alongside this container. What
-    still consumes the legacy view is the rest of `valax.risk.var`
-    (`reprice_under_scenario`, `portfolio_pnl`, `parametric_var`,
-    `pnl_attribution`), the sensitivity ladders, and the scenario
-    generators — all frozen at current behaviour until `MarketData` goes.
+    What still consumes the legacy view is the rest of `valax.risk.var`
+    (`reprice_under_scenario`, `portfolio_pnl`, the flat `parametric_var`,
+    `pnl_attribution`, and the deprecated `wrap_equity_pricing_fn`),
+    the flat `compute_ladder` / `waterfall_pnl_report`, the RTPL / HPL
+    vectors, and the flat scenario generators — frozen at current
+    behaviour until `MarketData` goes.
 
 ::: valax.market.MarketData
 
@@ -305,9 +314,12 @@ exceptions above.
 
 These are intentionally *not* provided by the current synthetic layer:
 
-- **Random vol-surface synthesis attached to `MarketData`.** The
-  `vols` field is scalar-per-asset; full SVI/SABR surface generation
-  requires a schema extension and is on the roadmap.
+- **Random vol-surface synthesis attached to the legacy `MarketData`.**
+  Its `vols` field is scalar-per-asset and the container is scheduled for
+  removal, so it will not gain one. Surface-bearing synthetic markets are
+  `MarketState`s: `EquityWorld.truth_market()` (SABR smile) and
+  `RatesVolWorld.truth_market()` (swaption cube, caplet strip) in the
+  [synthetic quote universes](#synthetic-quote-universes) below.
 - **Discrete-dividend schedules, FX market handles, inflation /
   credit curve generators.** Mechanical to add but out of scope for
   the first iteration.
@@ -418,4 +430,4 @@ SABR surface (the
 - [API → Curves](curves.md) — `DiscountCurve` and bootstrap instruments.
 - [API → Models](models.md) — the model classes that the parameter samplers produce.
 - [API → Calibration](calibration.md) — the consumers of the observation layer.
-- [API → Risk](risk.md) — the consumer of `MarketScenario` / `ScenarioSet`.
+- [API → Risk](risk.md) — the consumer of `KeyedScenario` (and of the legacy `MarketScenario` / `ScenarioSet`).

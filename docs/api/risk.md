@@ -9,8 +9,10 @@ and `parametric_var`'s delta-normal computation.
 For `MarketData`, `MarketScenario`, `ScenarioSet`, `KeyedScenario`,
 `zero_scenario`, and `stack_scenarios`, see [Market Data](market.md).
 This page covers the perturbation and measurement layer built on top —
-both the legacy positional shocks on a `MarketData` and the keyed shocks
-on a `MarketState`.
+both the keyed shocks on a `MarketState` (the current API) and the legacy
+positional shocks on a `MarketData`, which are scheduled for removal after
+one deprecation cycle. Single-instrument market risk is
+[`valax.greeks.market_risk`](greeks.md#valax.greeks.market_risk).
 
 ## Shock application
 
@@ -73,7 +75,8 @@ maps the four flat `MarketScenario` vectors onto a `MarketData`. Because
 curve — `discount_curve` plus the `"_default_"` entry of an attached
 `curve_graph`, which are the same curve seen through two views. Named
 projection / basis curves on the graph are carried through unshocked; use
-the keyed API below for those.
+the keyed API below for those. It is removed together with `MarketData`
+after one deprecation cycle ([roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)).
 
 ::: valax.risk.shocks.apply_scenario
 
@@ -98,6 +101,13 @@ implies for the sensitivity ladders, is in
 ::: valax.risk.state_shocks.shift_surface
 
 ## Scenario generation
+
+!!! note "Legacy flat generators"
+    These draw `ScenarioSet`s over the positional
+    `[spots, vols, rates, dividends]` layout of a `MarketData` and stay for
+    one deprecation cycle. On a `MarketState` use the
+    [keyed generators](#keyed-generators) below, which address every named
+    curve separately. `curve_shape_bumps` is shared by both layouts.
 
 ::: valax.risk.scenarios.parametric_scenarios
 
@@ -237,6 +247,11 @@ Risk-factor ordering in `cov`: `[spots, vols, rates, dividends]`.
 Discount-factor sensitivities are converted to zero-rate sensitivities
 internally.
 
+This is the **legacy** flat-`MarketData` form, still to be retired; the
+`MarketState` counterpart, with a per-curve covariance and an additive
+Euler decomposition, is
+[`keyed_parametric_var` / `keyed_component_var`](#per-curve-delta-normal-var).
+
 ::: valax.risk.var.parametric_var
 
 ## Spread risk: OAS & Z-spread
@@ -311,9 +326,18 @@ adjustment, not an exact OAS bridge.
 Decompose scenario P&L into risk-factor contributions using a
 second-order Taylor expansion with autodiff sensitivities.
 
+Still on the flat `MarketData` / `MarketScenario` path; its port is
+pending. For a per-curve attribution on a `MarketState` use
+[`keyed_waterfall_pnl`](#per-block-waterfall).
+
 ::: valax.risk.var.pnl_attribution
 
 ## P&L vectors
+
+The RTPL / HPL pair still consumes the flat `MarketData` view (a
+`SensitivityLadder` and a `ScenarioSet`); re-targeting it onto the keyed
+ladder is open work on the
+[roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 ### Risk-theoretical P&L (RTPL)
 
@@ -338,6 +362,11 @@ workflows.
 ::: valax.risk.pnl_vectors.explained_unexplained_vector
 
 ## Sensitivity ladders
+
+The flat, positional ladder over a `MarketData` (legacy, kept for one
+deprecation cycle and still the input of the RTPL vector). On a
+`MarketState` use the [keyed ladders](#keyed-ladders-on-a-marketstate)
+below.
 
 ::: valax.risk.ladders.SensitivityLadder
 
@@ -473,8 +502,10 @@ a smooth piecewise-linear re-binning.
 `RatesFactorModel` is the typed end-to-end wrapper over `pca_jacobian`
 for yield-curve risk: it carries `pillar_times`, `jacobian`,
 `eigenvalues`, and `fraction_explained`, and exposes `shock_curve`
-and `scenario` methods that plug straight into `apply_scenario` /
-`pnl_attribution`. See the
+and `scenario` methods. `scenario` returns a legacy `MarketScenario` for
+`apply_scenario` / `pnl_attribution`; on a `MarketState`, put
+`jacobian @ scores` into a `KeyedScenario(curve_shocks={curve_id: ...})`
+and apply it with [`shock`](#keyed-shocks-on-a-marketstate). See the
 [PCA Curve Shocks guide](../guide/pca-rates.md) for the end-to-end
 pattern.
 

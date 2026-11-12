@@ -163,6 +163,8 @@ scenario-shocked version of it.
 
 ## 5. Scope in VALAX today
 
+<!-- coverage-map -->
+
 | Engine / model | Discount curve | Projection curve |
 |---|---|---|
 | Analytic rates pricers | ✅ | ✅ |

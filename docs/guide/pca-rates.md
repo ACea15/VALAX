@@ -1,8 +1,8 @@
 # PCA Curve Shocks for Rates Risk
 
-The classic Litterman–Scheinkman result is that the first three principal components of historical yield-curve returns explain ≥95% of pillar variance and admit a clean interpretation: **level**, **slope**, and **curvature**. VALAX exposes that workflow as `valax.risk.factors.RatesFactorModel`, which sits on top of the generic [`pca_jacobian`](../api/risk.md) primitive and plugs into the standard [`apply_scenario`](../api/risk.md) / [`pnl_attribution`](../api/risk.md) machinery.
+The classic Litterman–Scheinkman result is that the first three principal components of historical yield-curve returns explain ≥95% of pillar variance and admit a clean interpretation: **level**, **slope**, and **curvature**. VALAX exposes that workflow as `valax.risk.factors.RatesFactorModel`, which sits on top of the generic [`pca_jacobian`](../api/risk.md) primitive. Its loadings feed a [`KeyedScenario`](../api/market.md#keyed-scenarios-for-marketstate) applied to a `MarketState` by [`shock`](../api/risk.md#keyed-shocks-on-a-marketstate) and repriced through `price()` — the current risk path — and its `scenario` method still produces a positional `MarketScenario` for the legacy [`apply_scenario`](../api/risk.md#full-scenario-application) / [`pnl_attribution`](../api/risk.md#pl-attribution) machinery on `MarketData`, which is scheduled for removal.
 
-For the underlying math see [Models & Theory § 7.8](../theory/index.md). For the runnable end-to-end example see [`examples/09_pca_rates_pnl.py`](https://github.com/ACea15/VALAX/blob/main/examples/09_pca_rates_pnl.py).
+For the underlying math see [Models & Theory § 7.8](../theory/index.md). For the runnable end-to-end example — PCA fitted to a curve history, then PC and basis moves applied as `KeyedScenario`s to a dual-curve book on `MarketState` — see [`examples/19_unified_book_workflow.py`](../examples.md#a-rates-book-end-to-end).
 
 ---
 
@@ -19,10 +19,11 @@ returns: Float[Array, "n_obs n_pillars"]
         ▼
 RatesFactorModel(pillar_times, jacobian, eigenvalues, fraction_explained)
         │
-        │  model.shock_curve(curve, pc_scores)      ← single-curve path
-        │  model.scenario(pc_scores, n_assets=...)  ← full MarketScenario path
+        │  model.shock_curve(curve, pc_scores)      ← one-curve kernel path
+        │  KeyedScenario(curve_shocks={id: J @ s})  ← MarketState path (shock → price)
+        │  model.scenario(pc_scores, n_assets=...)  ← legacy MarketScenario path
         ▼
-shocked curve  →  pricing_fn / pnl_attribution
+shocked curve / MarketState  →  price() / group_scenario_pnl
 ```
 
 Three layers, one Jacobian, no duplicated math.
@@ -41,7 +42,7 @@ returns = zero_rate_returns_from_snapshots(curves, query_dates)
 
 Why absolute dates rather than tenors? Real yield-curve PCA is run on a fixed pillar grid that does not roll forward with the snapshots — the rolling time-to-maturity drift is part of what the PCs absorb. If you need a true constant-maturity series, resample each snapshot onto a shifted grid before calling `zero_rate_returns_from_snapshots`.
 
-The result is in the same units as `MarketScenario.rate_shocks` — additive continuously-compounded zero-rate changes per pillar.
+The result is in the same units as `KeyedScenario.curve_shocks` (and the legacy `MarketScenario.rate_shocks`) — additive continuously-compounded zero-rate changes per pillar.
 
 ---
 
@@ -80,7 +81,7 @@ On a well-behaved yield curve every entry should be ≥ 0.95; ≥ 0.99 at every 
 
 ## 4. Shock a curve, price the trade
 
-The single-curve path is `model.shock_curve(curve, pc_scores)`:
+The one-curve kernel path is `model.shock_curve(curve, pc_scores)`, on a bare `DiscountCurve`:
 
 ```python
 import jax.numpy as jnp
@@ -91,7 +92,20 @@ shocked = model.shock_curve(base_curve, scores)
 pnl = bond_ladder_pv(shocked) - bond_ladder_pv(base_curve)
 ```
 
-For the full risk pipeline (multi-asset `MarketData`, vol shocks, scenario sets, P&L attribution), use the `scenario` path:
+On a `MarketState` — the market `price()` takes — put the loadings into a `KeyedScenario` addressed to the curve they were fitted on. The Jacobian's rows must line up with that curve's pillars (example 19 prepends a zero row for a reference pillar that never moves). On a dual-curve market, name both curves, or add a basis move on the projection curve only:
+
+```python
+from valax.core import price
+from valax.market import KeyedScenario
+from valax.risk import shock
+
+dz = model.jacobian @ scores                        # one bump per curve pillar
+moved = shock(market, KeyedScenario(curve_shocks={"USD.SOFR.OIS": dz,
+                                                  "USD.SOFR.3M": dz}))
+pnl = price(swap, None, moved).price - price(swap, None, market).price
+```
+
+**Legacy path.** `model.scenario(...)` returns a positional `MarketScenario` for the flat `MarketData` pipeline (`apply_scenario`, `pnl_attribution`). It can only move the default curve and goes with `MarketData` after one deprecation cycle:
 
 ```python
 from valax.risk.shocks import apply_scenario
@@ -102,7 +116,7 @@ shocked_market = apply_scenario(base_market, scen)
 attribution = pnl_attribution(pricing_fn, instruments, base_market, scen)
 ```
 
-Both paths produce identical rate moves on the discount curve — the test suite asserts that bit-for-bit.
+`shock_curve` and the `scenario` path produce identical rate moves on the discount curve — the test suite asserts that bit-for-bit.
 
 ### One-shot autodiff
 
@@ -124,19 +138,22 @@ This is the natural risk-management object for a 3-factor view of the desk: one 
 
 ## 5. Building scenario sets
 
-For VaR / stress testing, draw a batch of PC scores from a multivariate normal with diagonal covariance equal to `model.eigenvalues`, then stack the resulting scenarios:
+For VaR / stress testing, draw a batch of PC scores from a multivariate normal with diagonal covariance equal to `model.eigenvalues`. On a `MarketState`, one `KeyedScenario` whose leaves carry a leading scenario axis is the whole set, and `group_scenario_pnl` reprices a group under it through `price()`:
 
 ```python
 import jax
-from valax.market.scenario import stack_scenarios
+from valax.market import KeyedScenario
+from valax.risk import group_scenario_pnl, value_at_risk
 
 key = jax.random.PRNGKey(0)
 scores = jax.random.normal(key, (1000, model.n_components)) \
        * jnp.sqrt(model.eigenvalues)
-scenarios = stack_scenarios([
-    model.scenario(s, n_assets=n_assets) for s in scores
-])
+scenarios = KeyedScenario(curve_shocks={"USD.SOFR.OIS": scores @ model.jacobian.T})
+pnl = group_scenario_pnl(swaps, None, market, scenarios)   # (1000,)
+var_99 = value_at_risk(pnl, 0.99)
 ```
+
+`examples/19_unified_book_workflow.py` runs exactly this on a dual-curve book. The legacy equivalent stacks `model.scenario(s, n_assets=n_assets)` with `valax.market.stack_scenarios` into a `ScenarioSet` for the flat `MarketData` pipeline.
 
 The diagonal covariance is exact in PC coordinates — that's the whole point of using PCA factors as the working coordinate system for rates risk.
 

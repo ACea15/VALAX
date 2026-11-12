@@ -26,6 +26,8 @@ about applying them at book and business scale.
 
 ## The scaling ladder
 
+<!-- coverage-map -->
+
 | Rung | What it means | Status |
 |---|---|---|
 | **1. Instrument** | `price(instrument, *market_args)` — one pure function returning a scalar | ✅ the whole library |

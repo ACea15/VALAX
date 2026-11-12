@@ -1,5 +1,7 @@
 # Quant Research
 
+[← Applications overview](index.md#3-the-audience-map-ranked-by-fit-today) · one of five audience pages
+
 *How VALAX serves front-office quants, structuring desks, model R&D teams, and academic quant-finance researchers — where "differentiable everything" stops being a talking point and starts being an unfair advantage in iteration speed.*
 
 **Quant research may be VALAX's strongest *technical* fit of any audience.** Where [Market Risk & Model Validation](market-risk.md) is the strongest **commercial** case (regulator-mandated need, no incumbent lock-in), quant research is the strongest **technical** one: it is the audience where *every* JAX-native choice — autodiff, JIT, `vmap`, `equinox`, composability with the ML stack — compounds into a research-productivity moat that vendor C++ analytics libraries structurally cannot match.
@@ -8,7 +10,7 @@
 
 ## 1. The summary — differentiable pricing as a categorical research advantage
 
-This section is the whole argument on one screen; the rest of the page is the worked detail. For quant research the JAX-native architecture is not a "nice implementation choice" — it is the primary source of research-productivity leverage. The distinctive capabilities and their `QR` payoff are enumerated in [Applications § 2](index.md#2-what-makes-valax-distinctive-capability-by-capability) (with the deeper *why* in [Design Rationale § 3](../design-rationale.md#3-the-seven-choices-valax-commits-to-and-what-each-one-buys)); the point for research is that they **compound**.
+This section is the whole argument on one screen; the rest of the page is the worked detail. For quant research the JAX-native architecture is not a "nice implementation choice" — it is the primary source of research-productivity leverage. The distinctive capabilities and their `QR` payoff are enumerated in [Applications § 2](index.md#2-what-makes-valax-distinctive-capability-by-capability) (with the deeper *why* in [Positioning § 4](../positioning/index.md#4-the-seven-choices-valax-commits-to-and-what-each-one-buys)); the point for research is that they **compound**.
 
 The compounding effect: **every model you have already implemented becomes a differentiable primitive for the next one.** A team of five researchers on VALAX outpaces a team of twenty on a C++ analytics library — not because JAX is magic, but because the tax of maintaining bump-and-reprice / serialisation-boundary / class-hierarchy infrastructure disappears entirely.
 
@@ -87,7 +89,7 @@ No hand-written LM, no numerical Jacobian — `optimistix` gets the exact Jacobi
 The loop from "I read an interesting paper this morning" to "I have a calibrated, GPU-accelerated implementation with Greeks" is measured in **hours, not months**:
 
 1. **Write the SDE as a `diffrax` term** (~50 lines): drift, diffusion, correlation.
-2. **Wrap the MC pricer as a pure function** (~30 lines): `V(instrument, params, market) → price`, `@eqx.filter_jit`.
+2. **Wrap the MC pricer as a pure function** (~30 lines): a kernel `kernel(instrument, params, market) → price` under `@eqx.filter_jit`, optionally registered as a `price()` route so it reads a `MarketState` like every other model ([route checklist](../guide/tutorial-unified-pricing.md)).
 3. **Calibrate with `optimistix` / `optax`** (~20 lines) — autodiff Jacobian.
 4. **All Greeks from `jax.grad`; `vmap` for parameter sweeps** — no extra code.
 5. **QuantLib comparison** for validation — pattern in `tests/test_quantlib_comparison/`.
@@ -220,7 +222,7 @@ The same stack powers cutting-edge scientific ML research: pull in `flax` for la
 
 Peer-reviewed research and internal model-governance both live on reproducibility, which VALAX makes a *property*, not a wish:
 
-- **Pure functions.** `V(instrument, market) → price` with no mutable state → bit-identical outputs across machines and years.
+- **Pure functions.** `price(instrument, model, market)` with no mutable state → bit-identical outputs across machines and years.
 - **Integer-ordinal dates.** No `datetime` timezone / DST ambiguity.
 - **Explicit PRNG keys.** Every stochastic op takes a `jax.random.PRNGKey` — no hidden global RNG. Seed once, replay forever.
 - **Pinned dependency versions.** A git tag is a full reproducibility contract.
@@ -232,7 +234,7 @@ For academics, submissions ship with a working git tag rather than "code availab
 
 ## 10. Coverage today vs. roadmap
 
-The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#5-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `QR`).
+The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#4-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `QR`).
 
 The pattern: **the infrastructure is complete; the canonical worked examples — neural-surrogate, deep-hedging, and neural-SDE calibration notebooks — are the roadmap.** For a research team this is close to ideal: you're not building tooling, you're doing research.
 

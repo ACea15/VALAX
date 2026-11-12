@@ -127,6 +127,17 @@ Three things are worth internalising now:
     Heston `v0` is a model parameter, today's SPX level is market, the number
     of MC paths is config.
 
+!!! note "`price()` routes to the kernels; it does not replace them"
+    Every route ends in a public kernel (`black_scholes_price`,
+    `fixed_rate_bond_price`, `pde_price`, a path generator plus a payoff), and
+    those kernels remain a supported API. Call them directly when you are
+    composing something `price()` does not express: a custom payoff on
+    generated paths, a quantity it does not return (a yield, a duration, a
+    factor model), or a `jax.grad` through your own pipeline. The single-curve
+    case above is numerically identical either way. Examples 01–06 are written
+    on the kernels, and examples 10 onward on `price()`, dropping down where that is
+    clearer ([Two layers, both supported](../examples.md#two-layers-both-supported)).
+
 ## 2. One trade, four engines
 
 Only `method` and `config` change below — the trade and the market are
@@ -436,8 +447,13 @@ swaption cubes and `ConstantVol` all coexist in the same container
 !!! tip "Coming from `MarketData`?"
     `MarketState.from_market_data(md, asset_ids=…)` and
     `state.to_market_data()` are a lossless two-way view for everything
-    `MarketData` can express, so the risk/VaR framework keeps working while
-    you migrate ([API → Market Data](../api/market.md)).
+    `MarketData` can express, so the legacy flat risk path (`apply_scenario`,
+    `compute_ladder`, `pnl_attribution`, the RTPL / HPL vectors) keeps working
+    while you migrate. `MarketData` is legacy and scheduled for removal: new
+    code shocks a `MarketState` with a `KeyedScenario` (`valax.risk.shock`)
+    and measures it with the keyed ladders / VaR or
+    [`market_risk`](#every-entry-the-trade-touches-market_risk)
+    ([API → Risk](../api/risk.md), [API → Market Data](../api/market.md)).
 
 ## 7. Models that reference the market
 
@@ -920,6 +936,16 @@ Two more that are quieter but worth knowing:
   what, per instrument.
 - [Tutorial — Rates End-to-End](tutorial-rates.md) — the build/calibrate half
   of the pipeline in full.
+- [Examples](../examples.md#unified-calibration-pricing-and-risk) — runnable,
+  self-checking end-to-end scripts on this contract (10–22): a rates book
+  from quotes to `market_risk` and keyed scenarios
+  ([19](../examples.md#a-rates-book-end-to-end)), FX / inflation /
+  cross-currency trades on one market
+  ([20](../examples.md#fx-inflation-and-cross-currency-on-one-market)), one
+  swaption through every short-rate model and engine
+  ([21](../examples.md#one-swaption-every-engine)), and multi-asset and
+  path-dependent exotics across equity models
+  ([22](../examples.md#multi-asset-and-path-dependent-exotics)).
 - [Scaling Up](../scaling/batching.md) — `vmap`, batching and JIT once the
   single-trade call is familiar.
 

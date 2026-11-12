@@ -8,6 +8,16 @@ The basic `pnl_attribution` function (see [VaR & P&L](risk-var.md#pl-attribution
 
 For the mathematical foundations, see [Models & Theory § 7.4](theory/risk-measures.md#74-sensitivity-ladders).
 
+!!! note "Two ladders: keyed (current) and flat (legacy)"
+    This section documents `compute_ladder` / `SensitivityLadder` /
+    `waterfall_pnl` / `waterfall_pnl_report`, which run on the legacy flat
+    `MarketData` path with an opaque `pricing_fn`. On a `MarketState`,
+    priced through `price(instrument, model, market)`, use
+    [`keyed_ladder` → `KeyedLadder`](#keyed-ladders-on-a-marketstate) and
+    `keyed_waterfall_pnl` / `keyed_waterfall_report` below. The flat ladder
+    is still what `risk_theoretical_pnl_vector` and
+    `bucket_sensitivity_ladder` consume; their keyed port is pending.
+
 ### Computing a Ladder
 
 A `SensitivityLadder` holds bucketed first- and second-order sensitivities for every risk factor in the portfolio:

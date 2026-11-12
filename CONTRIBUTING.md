@@ -426,6 +426,11 @@ what VALAX can price and **must never be left inconsistent with the code**:
 
 Status legend (both files): ✅ implemented & tested · 🟡 instrument pytree
 defined but pricer not yet implemented · n-a (no vol input; curve discounting).
+The matrix's solver columns (`Analytic | MC | PDE | Lattice`) use ✅ routed
+through `price()` · ◇ kernel only · 🟡 planned (linked to its roadmap item) ·
+— none, and are checked against the code by
+`tests/test_docs/test_price_routes.py`. Every other coverage map is indexed on
+`docs/coverage.md`; `python scripts/coverage_report.py` lists the gaps.
 
 **Single-source-of-truth ownership model** — document each instrument,
 derivation, or selling point exactly once and cross-link; never copy a formula,
@@ -437,8 +442,10 @@ example, or status table between pages:
   own each instrument's payoff maths and how-to recipe — on exactly one
   asset-class page.
 - **Solver guides** (`docs/guide/{analytical,monte-carlo,pde,lattice}.md`) own
-  engine mechanics and that engine's model-coverage matrix — link to the
-  instrument guide instead of re-deriving payoffs.
+  engine mechanics and per-recipe engine details (scheme, dimension,
+  cross-check oracle) with **no status** — which instruments an engine covers
+  is the coverage matrix's solver column; link to it, and to the instrument
+  guide instead of re-deriving payoffs.
 - **Theory** (`docs/theory/`) owns the maths; **API** (`docs/api/`) is
   mkdocstrings autodoc of public symbols.
 
@@ -448,9 +455,10 @@ example, or status table between pages:
 |----------------|---------------|
 | New theory / formula | `docs/theory/` (one page per chapter) |
 | New instrument | `docs/applications/instrument-pricing.md` (coverage matrix + definition), `docs/guide/<asset-class>.md`, and `docs/api/instruments.md` |
-| New pricing function | `docs/guide/<method>.md` and `docs/api/pricing.md` |
+| New pricing function | the solver column of its row in `docs/applications/instrument-pricing.md` (✅ routed / ◇ kernel only), `docs/guide/<method>.md` and `docs/api/pricing.md` |
+| New coverage table (any dimension) | a `<!-- coverage-map -->` marker on its page and a row on `docs/coverage.md` |
 | New model | `docs/guide/<area>.md` and `docs/api/models.md` |
-| New runnable demo | `examples/` and `docs/examples.md` |
+| New runnable demo | `examples/` and `docs/examples.md`; a unified-layer (`price()`) demo is also self-checking, honours `VALAX_EXAMPLES_FAST`, and is listed in `tests/test_examples/test_unified_examples.py` |
 | Roadmap status change | `docs/roadmap.md` — flip `[ ]`→`[x]` and name the implementing symbol (🟡 if the pytree exists but the pricer doesn't) |
 | Release-worthy feature | `CHANGELOG.md` under `[Unreleased]` |
 | New MC (instrument, model) recipe | `valax/pricing/mc/recipes.py` + `@register` + test under `tests/test_mc/test_dispatch.py` + coverage-map row in `docs/guide/monte-carlo.md` |
@@ -459,6 +467,15 @@ example, or status table between pages:
 written up on exactly one asset-class guide; every other page links to it. A
 change that defines an instrument pytree but no pricer is 🟡 (not ✅) in both
 the coverage matrix and the roadmap — mark ✅ only when a tested pricer exists.
+
+**Two layers, both documented.** The pricing kernels and `price()` are both
+public API: `price()` routes to the kernels and does not supersede them. Keep
+kernel-layer examples and guide snippets (examples 01–06, `comparisons/`,
+`pitfalls/`) on the kernels. Don't port them to `price()`, and don't mark a
+kernel deprecated because a route wraps it. Retire an example only when an
+API it depends on is scheduled for removal on the roadmap. In the same change,
+repoint every inbound link and add a row to the *Retired examples* table in
+`docs/examples.md`.
 
 ### 5.2 Build docs locally before opening a PR
 

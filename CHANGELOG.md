@@ -12,6 +12,42 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — docs: one instrument × solver coverage matrix, checked against the code; coverage hub
+
+**Changed** the coverage matrix (`docs/applications/instrument-pricing.md`):
+the free-text *Method(s)* column is replaced by four solver columns —
+*Analytic*, *MC*, *PDE*, *Lattice* — with cells ✅ routed through `price()`,
+◇ kernel only (direct call), 🟡 planned (linked to its roadmap item), ✅ +🟡
+routed with more models planned, or —. The planned solver routes that only the
+solver guides listed (MC American / digital / FX / CMS, PDE Heston-American /
+SLV / spread, …) are now cells of the matrix. `tests/test_docs/test_price_routes.py`
+checks every solver cell against the registry, the `KERNEL_ONLY` kernels and
+the roadmap, and each row's status against its cells; the parser is shared
+with the new gap report `scripts/coverage_report.py`.
+
+**Removed** the duplicate status tables: the per-solver matrices of
+`guide/{monte-carlo,pde,lattice}.md` (now status-free recipe-detail tables
+linking to the matrix), the short-rate engine matrix of `api/pricing.md`, and
+the roadmap's own instrument matrix (its blockers moved into the tier
+checklists, with new open items for FX swap, chooser, cliquet, MC American /
+digital / FX / CMS / inflation, and a new §5.7 MC variance reduction).
+
+**Added** `docs/coverage.md`, the hub of every coverage map (instrument ×
+solver, roadmap, calibration pipeline and register, chain levels, AAD audit,
+risk factors, risk pipeline, capabilities, multi-curve scope, production,
+scaling) with its owning page and checker; owning pages carry a
+`<!-- coverage-map -->` marker, and `tests/test_docs/test_coverage_hub.py`
+keeps the hub complete and the engine pages free of status marks.
+
+**Fixed** stale claims found on the way: the MC guide's G2++ / Cheyette caplet
+and cap recipes (only Cheyette 1F has them); `api/pricing.md` calling the
+Hull-White tree "not yet through `price()`"; the roadmap's "no convexity
+adjustment" for CMS and "Hagan replication is a follow-up" (both ship); the
+calibration guide's `bermudan_swaption_price` 🟡, survival-curve 🟡, products
+listed as priceable that are not (compound, chooser, autocallable, cliquet,
+quanto, forward-start), and module names that no longer exist; the analytical
+guide's "three closed-form models".
+
 ### Changed — Phase 4 (D18) — curve-free LMM; the four LMM routes through `price()`
 
 **`LMMModel` is curve-free.** Fields are now `tenor_dates`, `vol_structure`,

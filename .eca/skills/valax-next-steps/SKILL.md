@@ -11,9 +11,11 @@ Turn the current state of VALAX into a prioritized list of *what to build next*.
 
 Per AGENTS.md, status is defined by two canonical files, corroborated by the code so you never propose something already done:
 
-1. `docs/roadmap.md` — Current-State tables, the Instrument Coverage Matrix, the Priority 1–5 snapshot with its **Recommended Execution Order** and **Assessment**, and the Tier 1–6 `[x]`/`[ ]` checklists (each implemented item names a `valax.*` symbol).
-2. `docs/applications/instrument-pricing.md` — coverage matrix (instrument x method x model input x calibration x status). Legend: ✅ implemented & tested · 🟡 pytree defined but pricer not implemented · n-a.
-3. **Code check (to avoid stale proposals):** confirm a sample of ✅ claims by reading `valax/` exports + the mirrored `tests/`; treat 🟡 (defined, no pricer), 📋 (planned), and empty matrix cells as candidate work.
+1. `docs/roadmap.md` — Current-State tables, the Priority 1–5 snapshot with its **Recommended Execution Order** and **Assessment**, and the Tier 1–6 `[x]`/`[ ]` checklists (each implemented item names a `valax.*` symbol; each open item records its blocker).
+2. `docs/applications/instrument-pricing.md` — the coverage matrix: instrument × solver columns (`Analytic | MC | PDE | Lattice`) × `price()` routes per model × model input × calibration × status. Status legend: ✅ implemented & tested · 🟡 pytree defined but pricer not implemented · n-a. Solver cells: ✅ routed · ◇ kernel only (direct call, not in `price()`) · 🟡 planned (links to its roadmap section) · ✅ +🟡 routed, more models planned · — none. It is checked against the code by `tests/test_docs/test_price_routes.py`, so it is trustworthy when that test is green.
+3. **Gap listing:** `python scripts/coverage_report.py` (`--planned`, `--markdown`) prints the 🟡 and — cells per solver with their roadmap sections — the starting frontier.
+4. **Other coverage maps** (calibration pipeline and register, risk factors, risk pipeline, capabilities, audit conformance, …) are indexed on `docs/coverage.md`.
+5. **Code check (to avoid stale proposals):** confirm a sample of ✅ claims by reading `valax/` exports + the mirrored `tests/`; treat 🟡 (defined, no pricer / planned solver), ◇ (kernel not yet routed through `price()`), 📋 (planned), and — cells where a solver is expected as candidate work.
 
 ## What counts as a "next step"
 
@@ -29,7 +31,7 @@ Candidate work items, gathered from the source of truth:
 
 1. **Dependency readiness** — prefer unblocked work. Honor roadmap-stated blockers (e.g. `MarketState` / multi-curve `MarketData` blocks a large fraction of downstream items); never propose a dependent before its prerequisite.
 2. **Stated priority** — P1 > P2 > ... and the roadmap's own **Recommended Execution Order** is a strong prior.
-3. **Leverage / impact** — items that unlock many others or close a whole audience gap (cross-reference `docs/applications/index.md` section 5 and `docs/risk-factors.md`).
+3. **Leverage / impact** — items that unlock many others or close a whole audience gap (cross-reference `docs/applications/index.md` section 4 and `docs/risk-factors.md`, both indexed on `docs/coverage.md`).
 4. **Effort / risk** — call out quick wins (a 🟡 pricer, a missing API export) separately from multi-quarter efforts.
 
 ## Procedure

@@ -199,8 +199,8 @@ print(f"portfolio PV: {float(jnp.sum(prices)):.4f}")
 
 See [User Guide → Synthetic Market Data](guide/synthetic_market.md) for
 the full six-stage workflow (calibration on noisy quotes, market tapes,
-risk scenarios, arbitrage stress tests) and [`examples/08_end_to_end_workflow.py`](examples.md#end-to-end-workflow)
-for the runnable counterpart.
+risk scenarios, arbitrage stress tests) and [`examples/19_unified_book_workflow.py`](examples.md#a-rates-book-end-to-end)
+for a runnable quotes → curves → book risk → scenarios workflow on `MarketState`.
 
 ## Running Tests
 

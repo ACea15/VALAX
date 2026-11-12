@@ -22,15 +22,22 @@ Stage 6  Risk          ←  Stage 5  Pricing & Greeks  ←  Stage 4  Portfolio
 
 | Stage | Module | Produces |
 |------|--------|----------|
-| 1 | `snapshots.py`, `curves.py`, `correlations.py`, `model_params.py` | `MarketData`, `DiscountCurve`, correlation matrix, ground-truth `HestonModel` / `SABRModel` / `HullWhiteModel` / `MultiAssetGBMModel`. |
+| 1 | `snapshots.py`, `curves.py`, `correlations.py`, `model_params.py` | `MarketData` (legacy flat container), `DiscountCurve`, correlation matrix, ground-truth `HestonModel` / `SABRModel` / `HullWhiteModel` / `MultiAssetGBMModel`. |
 | 2 | `observations.py` | Noisy implied-vol smile, price strip, par-rate quotes. |
 | 3 | `valax.calibration` | Fitted models. |
 | 4 | `portfolio.py` | Stacked `EuropeanOption` / `InterestRateSwap` pytrees. |
 | 5 | `valax.portfolio.batch` | Vectorised prices + Greeks. |
-| 6 | `scenarios.py`, `paths.py` | `ScenarioSet`, `MarketData` tapes. |
+| 6 | `scenarios.py`, `paths.py` | `ScenarioSet`, `MarketData` tapes (legacy flat layout). |
 
-A worked example walking all six stages lives in
-`examples/08_end_to_end_workflow.py`.
+The unified workflow on `MarketState` (synthetic quotes, calibration chains,
+`price()` and book risk) is walked end to end by examples 10–13 and 19
+([Examples](../examples.md#unified-calibration-pricing-and-risk)). The retired
+example 08 walked these six stages on `MarketData`, which — together with
+`MarketScenario` / `ScenarioSet` — is legacy and scheduled for removal; the
+Stage 1 / 6 generators that return them stay until then. On a `MarketState`,
+Stage 1 is the [quote universes](#synthetic-quote-universes) below (each world's
+`truth_market()`) and Stage 6 is the keyed generators
+([API → Risk](../api/risk.md#keyed-generators)).
 
 !!! tip "Prefer a narrative tutorial?"
     The [Rates End-to-End Tutorial](tutorial-rates.md) walks the same six
@@ -218,8 +225,8 @@ from valax.market import (
   `MarketData.vols` is a scalar per asset. SABR smile term structures are
   synthesised on the `MarketState` path instead
   ([quote universes](#synthetic-quote-universes)).
-- It does not synthesise FX, credit, inflation or rates-vol (swaption, cap)
-  quotes yet.
+- It does not synthesise FX, credit or inflation quotes yet (rates-vol
+  quotes ship via `rates_vol_snapshot`, above).
 - It does not implement detection of injected arbitrages — those
   exception types are *reserved* (see
   `valax.core.diagnostics`), and the corresponding tests are

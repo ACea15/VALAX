@@ -45,20 +45,22 @@ The market instruments on the left are the **liquid hedging universe** — the t
 
 ### Calibration matrix
 
-The table below summarises the full pipeline VALAX supports today (✅) or plans to support (🟡). Click any entry for the in-depth guide.
+<!-- coverage-map -->
+
+The table below summarises the full pipeline VALAX supports today (✅) or plans to support (🟡). Click any entry for the in-depth guide. Which products price off each artefact, and by which solver, is the [coverage matrix](../applications/instrument-pricing.md#coverage-matrix); what each calibration assumes and where it is known to fall short is the [Calibration Assumptions Register](../applications/calibration-register.md).
 
 | Market | Calibration inputs (liquid) | Calibration routine | Calibrated artefact | Exotics priced against it |
 |--------|-----------------------------|---------------------|---------------------|---------------------------|
 | **Rates — discount** | OIS deposits, OIS par swaps, FX forwards / FX swaps (cross-currency discount) | [`bootstrap_sequential` / `bootstrap_simultaneous`](curves.md#3-sequential-bootstrap) | `DiscountCurve` (OIS / €STR / SOFR) | All cashflow discounting; bonds; every swap PV |
 | **Rates — projection** | Money-market deposits, FRAs, IMM futures (with convexity adj.), IBOR par swaps, tenor-basis swaps | [`bootstrap_curve_graph`](curves.md#5-multi-curve-bootstrap) ✅ | `CurveGraph` (one `DiscountCurve` per tenor, keyed by identifier) | IRS, FRN, OIS swap, CMS, range accrual, Bermudan swaption ✅ |
-| **Cross-currency** | FX spot, FX forward points, cross-currency basis swaps (constant-notional and MTM variants) | [`bootstrap_curve_graph`](curves.md#5-multi-curve-bootstrap) ✅ | `CurveGraph` (dom + for OIS + tenor curves, all keyed by identifier) | Cross-currency swaps, quanto adjustments ✅ |
+| **Cross-currency** | FX spot, FX forward points, cross-currency basis swaps (constant-notional and MTM variants) | [`bootstrap_curve_graph`](curves.md#5-multi-curve-bootstrap) ✅ | `CurveGraph` (dom + for OIS + tenor curves, all keyed by identifier) | Cross-currency swaps, FX forwards ✅; quanto options (planned) |
 | **Inflation** | Zero-coupon inflation swaps (ZCIS), year-on-year inflation swaps (YYIS) | [`from_zc_rates`](curves.md#7-inflation-curves) | `InflationCurve` (forward CPI) | ZCIS, YYIS, inflation caps/floors ✅ |
-| **Equity smile (per slice)** | Listed vanilla calls/puts on a single expiry (broker smile / OPRA chain) | [`calibrate_sabr`](#3-sabr-smile-calibration), [`calibrate_svi_slice`](vol-surfaces.md#svi-surface) | `SABRModel` or `SVIParams` for one expiry | European, American, digital, barrier, compound, chooser, Asian, lookback options |
-| **Equity surface** | Vanilla calls/puts across an (expiry × strike) grid | [`calibrate_sabr_surface`](vol-surfaces.md#sabr-surface), [`calibrate_svi_surface`](vol-surfaces.md#svi-surface), [`GridVolSurface`](vol-surfaces.md#grid-surface) | `SABRVolSurface`, `SVIVolSurface`, `GridVolSurface` | Autocallables, worst-of, cliquet, variance swap, all path-dependent exotics |
-| **Equity stochastic vol** | Listed vanilla call prices (mid) across expiries and strikes | [`calibrate_heston`](#4-heston-stochastic-vol-calibration) | `HestonModel` ($v_0, \kappa, \theta, \xi, \rho$) | Forward-starting options, cliquets, variance swaps, VIX-style products (MC) |
-| **Rates volatility** | ATM swaption straddles, swaption cube ($K \times T_\text{exp} \times T_\text{tail}$), caps/floors | SABR cube on the curve forwards (`calibrate_swaption_cube_from_curves`, chain: `swaption_cube_node`) ✅; cap strip → optionlet SABR (`strip_optionlet_surface`, chain: `caplet_strip_node` → `optionlet_sabr_node`) ✅; [`calibrate_hull_white`](#6-dual-curve-rates-calibration-ois-discounting) (Jamshidian) and `calibrate_g2pp` ✅, single- **or** dual-curve; Hull-White per trade off the cube ([`swaption_basket_node`](calibration-to-risk.md#rates-per-trade-model-calibration)) ✅ | SABR swaption cube; `OptionletVolSurface`; `HullWhiteModel` $(a, \sigma)$; `G2PPModel` | Callable / puttable bonds ✅, Bermudan swaptions ✅, CMS spread options, range accruals |
-| **FX volatility** | ATM straddles, 25Δ and 10Δ risk reversals + butterflies (broker strangles) | [`calibrate_sabr`](#3-sabr-smile-calibration) on the strike grid implied by the broker convention | FX `SABRVolSurface` / `SVIVolSurface` | FX vanilla, FX barrier, quanto, TARF (planned) |
-| **Credit** | Par CDS spreads at standard IMM tenors (6M, 1Y, 3Y, 5Y, 7Y, 10Y) | Survival-curve bootstrap 🟡 | `SurvivalCurve` (piece-wise constant hazard) | Off-market CDS, index tranches (CDO), CVA |
+| **Equity smile (per slice)** | Listed vanilla calls/puts on a single expiry (broker smile / OPRA chain) | [`calibrate_sabr`](#3-sabr-smile-calibration), [`calibrate_svi_slice`](vol-surfaces.md#svi-surface) | `SABRModel` or `SVIParams` for one expiry | European, American, digital, barrier, Asian, lookback options ✅; compound, chooser (planned) |
+| **Equity surface** | Vanilla calls/puts across an (expiry × strike) grid | [`calibrate_sabr_surface`](vol-surfaces.md#sabr-surface), [`calibrate_svi_surface`](vol-surfaces.md#svi-surface), [`GridVolSurface`](vol-surfaces.md#grid-surface) | `SABRVolSurface`, `SVIVolSurface`, `GridVolSurface` | Worst-of, variance swap and the path-dependent MC exotics ✅; autocallables, cliquets (planned) |
+| **Equity stochastic vol** | Listed vanilla call prices (mid) across expiries and strikes | [`calibrate_heston`](#4-heston-stochastic-vol-calibration) | `HestonModel` ($v_0, \kappa, \theta, \xi, \rho$) | European (COS / PDE / MC); barrier, Asian, lookback, variance swap (MC) ✅; forward-starting options, cliquets, VIX-style products (planned) |
+| **Rates volatility** | ATM swaption straddles, swaption cube ($K \times T_\text{exp} \times T_\text{tail}$), caps/floors | SABR cube on the curve forwards (`calibrate_swaption_cube_from_curves`, chain: `swaption_cube_node`) ✅; cap strip → optionlet SABR (`strip_optionlet_surface`, chain: `caplet_strip_node` → `optionlet_sabr_node`) ✅; [`calibrate_hull_white`](#6-dual-curve-rates-calibration-ois-discounting) (Jamshidian) and `calibrate_g2pp` ✅, single- **or** dual-curve; Hull-White per trade off the cube ([`swaption_basket_node`](calibration-to-risk.md#rates-per-trade-model-calibration)) ✅ | SABR swaption cube; `OptionletVolSurface`; `HullWhiteModel` $(a, \sigma)$; `G2PPModel` | Callable / puttable bonds ✅, Bermudan swaptions ✅, swaptions / caps off the cube or optionlet surface ✅, CMS swaps / caps / floors and range accruals (analytic kernels on the cube / optionlet surface) ✅ |
+| **FX volatility** | ATM straddles, 25Δ and 10Δ risk reversals + butterflies (broker strangles) | [`calibrate_sabr`](#3-sabr-smile-calibration) on the strike grid implied by the broker convention | FX `SABRVolSurface` / `SVIVolSurface` | FX vanilla ✅; FX barrier, quanto, TARF (planned) |
+| **Credit** | Par CDS spreads at standard IMM tenors (6M, 1Y, 3Y, 5Y, 7Y, 10Y) | `from_cds_spreads` (closed-form credit triangle) ✅; repricing hazard bootstrap 🟡 | `SurvivalCurve` (piece-wise constant hazard) | Off-market CDS, index tranches (CDO), CVA (planned) |
 
 The *Calibration inputs* column is what a desk actually pulls from Bloomberg / Refinitiv / broker runs every morning. The *Calibrated artefact* column is the JAX pytree VALAX returns. The *Exotics* column lists what you can then price with that pytree as an input — consistently with the original hedging instruments by construction.
 
@@ -139,9 +141,9 @@ See [Analytical Pricing § FX Options](analytical.md#fx-options-garman-kohlhagen
 
 **Calibration output.** A SABR swaption cube (`calibrate_swaption_cube_from_curves`, or `swaption_cube_node` in a chain) and a calibrated `HullWhiteModel` via `calibrate_hull_white` — or, per trade off the calibrated cube, via `swaption_basket_node` (see [From Quotes to Risk](calibration-to-risk.md#rates-per-trade-model-calibration)). The Jamshidian decomposition turns each swaption into a portfolio of options on individual ZCBs, each priced by Black-76 on an integrated short-rate variance — fast enough to drive a least-squares fit of $(a, \sigma)$; see [API: Calibration](../api/calibration.md).
 
-**What you can price with it.** `CallableBond`, `PuttableBond` ✅; `BermudanSwaption` (Hull-White PDE through `price`, or LSM on LMM paths) ✅; CMS caps/floors, range accruals, callable structured notes 🟡.
+**What you can price with it.** `CallableBond`, `PuttableBond` ✅; `BermudanSwaption` (Hull-White PDE or tree through `price`, or LSM on LMM paths) ✅; European swaptions (Jamshidian, tree, PDE) and caps / caplets (PDE) ✅. CMS caps / floors and range accruals price off the SABR cube / optionlet surface by their analytic kernels, not off Hull-White; callable structured notes are not modelled.
 
-### 2.5 Credit (planned)
+### 2.5 Credit (survival curve only; pricers planned)
 
 | Market instrument | What it constrains | Calibration target |
 |-------------------|--------------------|--------------------|
@@ -150,9 +152,9 @@ See [Analytical Pricing § FX Options](analytical.md#fx-options-garman-kohlhagen
 | Tranche base correlations (CDX 0–3, 3–7, …) | Gaussian-copula correlation skew | Base-correlation curve |
 | Bond–CDS basis | Funding-adjusted hazard | Cross-check / spread basis |
 
-**Calibration output.** A bootstrapped `SurvivalCurve`, recovery rate $R$ (typically 40 % for senior unsecured), and base-correlation curves for tranches. See [Credit Derivatives](credit.md).
+**Calibration output.** A `SurvivalCurve` from `from_cds_spreads` — the closed-form credit-triangle approximation \(h = s / (1 - R)\), not a repricing bootstrap (see the [register](../applications/calibration-register.md)) — recovery rate $R$ (typically 40 % for senior unsecured), and base-correlation curves for tranches. See [Credit Derivatives](credit.md).
 
-**What you can price with it.** Off-market `CDS`, `CDOTranche`, and the credit leg of CVA / wrong-way risk calculations.
+**What you will price with it.** Off-market `CDS`, `CDOTranche`, and the credit leg of CVA / wrong-way risk calculations — all planned ([roadmap §3.4](../roadmap.md#34-credit-derivatives)).
 
 ### 2.6 Inflation
 
@@ -375,13 +377,13 @@ The whole point of calibration is that the outputs become the **inputs to the pr
 | Calibrated artefact | Consumed by | Example exotics priced |
 |---------------------|-------------|------------------------|
 | `DiscountCurve` (OIS) | Every cashflow PV in the library | All bonds, swaps, options' discounting |
-| `CurveGraph` (OIS + one `DiscountCurve` per tenor per currency) | `valax.pricing.analytic.rates`, `valax.pricing.mc.lmm` *(consumption via a single `DiscountCurve` argument today; see [`curves.md` §8](curves.md#8-what-is-not-yet-implemented) for the pricing-side gap)* | IRS, OIS swap, Bermudan swaption (LSM on LMM), CMS, range accrual |
+| `CurveGraph` (OIS + one `DiscountCurve` per tenor per currency) | `price()` on a `MarketState` (each trade's `discount_id` / `forward_id`), the `*_from_graph` pricers of `valax.pricing.analytic.graph_pricing` | IRS, OIS / tenor-basis / cross-currency swaps, FRN, swaptions, caps, CMS, range accrual, short-rate and LMM routes |
 | `InflationCurve` | `valax.pricing.analytic.inflation` | ZCIS, YYIS, inflation caps/floors |
-| `SABRVolSurface` / `SVIVolSurface` / `GridVolSurface` | All Black-Scholes / Black-76 pricers, `valax.pricing.mc`, `valax.pricing.pde`, `valax.pricing.lattice` | European, American, digital, barrier, Asian, lookback, autocallable, worst-of, cliquet, variance swap |
+| `SABRVolSurface` / `SVIVolSurface` / `GridVolSurface` | All Black-Scholes / Black-76 pricers, `valax.pricing.mc`, `valax.pricing.pde`, `valax.pricing.lattice` | European, American, digital, barrier, Asian, lookback, worst-of, variance swap |
 | `SABRModel` (single slice) | `sabr_implied_vol`, `calibrate_sabr_surface` (as initial guess) | One-expiry vanilla repricing, smile-consistent digital replication, CMS convexity adjustment |
-| `HestonModel` | Heston semi-analytic pricer, `valax.pricing.mc.heston` | Forward-start options, cliquets, variance swaps, VIX-style products |
-| `HullWhiteModel` + trinomial tree | `callable_bond_price`, `puttable_bond_price`, `bermudan_swaption_price` 🟡 | Callable / puttable bonds, Bermudan swaptions, callable structured notes |
-| `SurvivalCurve` 🟡 | `valax.instruments.credit` pricers | Off-market CDS, CDOTranche, CVA |
+| `HestonModel` | `heston_cos_price`, the Heston 2-D ADI PDE and MC recipes | European; barrier, Asian, lookback, variance swap (MC) |
+| `HullWhiteModel` | `price(..., method="pde" / "lattice" / "mc")`; tree kernels `callable_bond_price`, `puttable_bond_price`, `swaption_tree_price`, `bermudan_swaption_tree_price` | Callable / puttable bonds, European and Bermudan swaptions, caps |
+| `SurvivalCurve` | credit pricers (planned, [roadmap §3.4](../roadmap.md#34-credit-derivatives)) | Off-market CDS, CDOTranche, CVA (planned) |
 
 **Differentiability all the way through.** Because every calibrated artefact is a JAX pytree with the calibrated parameters as dynamic leaves, `jax.grad` of an exotic price w.r.t. the *original market quotes* flows in one reverse-mode pass:
 
@@ -398,7 +400,7 @@ This gives you, for free:
 - **SABR-parameter vega** per expiry on a SABR cube.
 - **Hull-White $(a, \sigma)$ sensitivity** of a callable bond.
 
-See [Greeks & Automatic Differentiation](../theory/greeks.md#6-greeks-and-automatic-differentiation) and the [end-to-end example](../examples.md) (`examples/08_end_to_end_workflow.py`) for a full walk-through from synthetic market quotes to calibrated SABR fit to portfolio-level Greeks.
+See [Greeks & Automatic Differentiation](../theory/greeks.md#6-greeks-and-automatic-differentiation) and the [unified examples](../examples.md#unified-calibration-pricing-and-risk) (10–19) for full walk-throughs from synthetic market quotes to calibrated curves, smiles and models to book-level risk.
 
 ## 6. Dual-Curve Rates Calibration (OIS Discounting)
 

@@ -40,13 +40,14 @@ For example:
 | `MOD.HESTON.AAPL.KAPPA` | Heston mean-reversion for AAPL |
 | `CORR.EQ.AAPL.MSFT` | AAPL–MSFT spot correlation |
 
-The identifier is what links a factor across **scenarios** (rows of a `ScenarioSet`), **covariance matrices** (rows / columns of $\Sigma$), **ladders** (entries of `SensitivityLadder.*`), and **PLA reports** (per-factor RTPL contributions).
+The identifier is what links a factor across **scenarios** (coordinates of a stacked `KeyedScenario`), **covariance matrices** (rows / columns of $\Sigma$), **ladders** (entries of `KeyedLadder.to_dict()`), and **PLA reports** (per-factor RTPL contributions — still positional, see below).
 
 !!! note "Current code"
     Two layouts coexist. The **legacy** one is flat and *positional*
     (`[spots, vols, rates, dividends]`) inside `MarketData` /
     `MarketScenario`; it has one undivided `rates` block and therefore
-    cannot name a curve.
+    cannot name a curve. It is kept for one deprecation cycle, and the
+    FRTB PLA vectors (`risk_theoretical_pnl_vector`) still run on it.
 
     The **current** one is identifier-keyed:
     [`KeyedFactorLayout`](api/risk.md#keyed-per-curve-factor-layout) holds
@@ -69,7 +70,7 @@ The identifier is what links a factor across **scenarios** (rows of a `ScenarioS
 | **Multiplicative / log** | $x_{\text{new}} = x_{\text{old}} \cdot (1 + r)$ | Spot prices, FX rates, equity indices (where daily returns are the natural primitive). |
 | **Multiplicative** on shape, additive on level | $x_{\text{new}} = x_{\text{old}}(1 + r)$ for spot, additive on related vol/curve | Mixed-mode parametric MC where spot returns are log-normal but curves shift in absolute bp. |
 
-VALAX defaults to additive shocks; multiplicative spot shocks are opted in via `MarketScenario(multiplicative=True)`.
+VALAX defaults to additive shocks; multiplicative spot shocks are opted in via `KeyedScenario(multiplicative=True)` (or `MarketScenario(multiplicative=True)` on the legacy flat path).
 
 ### 1.4 Factor categories
 
@@ -128,24 +129,24 @@ Legend: ✅ implemented, 🚧 partially implemented (factor structure exists but
 
 | Factor ID | Description | Where it lives | Shock primitive | Sensitivity | Instruments | Pricing engines |
 |---|---|---|---|---|---|---|
-| `EQ.SPOT.<asset>` ✅ | Equity / index spot per asset. | `MarketData.spots[a]` | `MarketScenario.spot_shocks` (add. or mult.) | `delta_spot`, `gamma_spot`, `vanna` | All equity options, equity barriers, Asian, lookback, autocallable, basket, spread, variance swap, TRS leg | `pricing/analytic/black_scholes.py`, `pricing/mc/*`, `pricing/pde/*`, `pricing/lattice/binomial.py` |
-| `EQ.VOL.<asset>` ✅ | Single scalar implied vol per asset. *Not* a smile — a single per-asset ATM-like vol. | `MarketData.vols[a]` | `MarketScenario.vol_shocks` (additive) | `delta_vol` (vega), `volga`, `vanna` | Same as above | Same as above |
-| `EQ.DIV.<asset>` ✅ | Continuous dividend yield per asset. | `MarketData.dividends[a]` | `MarketScenario.dividend_shocks` | `delta_div` | Equity options, autocallables, TRS | `pricing/analytic/black_scholes.py`, `pricing/mc/*` |
-| `EQ.CORR.<a>.<b>` 🚧 | Pairwise correlation between equity log-returns. Used by multi-asset MC. | `MultiAssetGBMModel.correlation` (a model parameter, not in `MarketData`) | Autodiff only (`jax.grad` w.r.t. correlation entry) | `corr_<a,b>` (via grad) | Spread options, worst-of basket, multi-asset MC | `pricing/mc/multi_asset_paths.py`, `pricing/analytic/spread.py` |
+| `EQ.SPOT.<asset>` ✅ | Equity / index spot per asset. | `MarketState.spots[asset_id]` (legacy: `MarketData.spots[a]`) | `KeyedScenario.spot_shocks` (add. or mult.; legacy `MarketScenario.spot_shocks`) | `delta_spot`, `gamma_spot`, `vanna` | All equity options, equity barriers, Asian, lookback, autocallable, basket, spread, variance swap, TRS leg | `pricing/analytic/black_scholes.py`, `pricing/mc/*`, `pricing/pde/*`, `pricing/lattice/binomial.py` |
+| `EQ.VOL.<asset>` ✅ | One vol number per surface / asset: on a `MarketState` the **parallel shift** of a whole surface (any surface type), on the legacy path a single per-asset ATM-like scalar. *Not* a node-level smile factor (see [§3.5](#35-volatility-surfaces)). | `MarketState.surfaces[surface_id]` (legacy: `MarketData.vols[a]`) | `KeyedScenario.vol_shocks` via `shift_surface` (legacy `MarketScenario.vol_shocks`, additive) | `delta_vol` (vega), `volga`, `vanna` | Same as above | Same as above |
+| `EQ.DIV.<asset>` ✅ | Continuous dividend yield per asset. | `MarketState.dividends[asset_id]` (legacy: `MarketData.dividends[a]`) | `KeyedScenario.dividend_shocks` (legacy `MarketScenario.dividend_shocks`) | `delta_div` | Equity options, autocallables, TRS | `pricing/analytic/black_scholes.py`, `pricing/mc/*` |
+| `EQ.CORR.<a>.<b>` 🚧 | Pairwise correlation between equity log-returns. Used by multi-asset MC. | `MultiAssetGBMModel.correlation` (a model parameter, not in `MarketState`) | Autodiff only (`jax.grad` w.r.t. correlation entry) | `corr_<a,b>` (via grad) | Spread options, worst-of basket, multi-asset MC | `pricing/mc/multi_asset_paths.py`, `pricing/analytic/spread.py` |
 
 ### 2.2 Interest Rates — Single Curve
 
 | Factor ID | Description | Where it lives | Shock primitive | Sensitivity | Instruments | Pricing engines |
 |---|---|---|---|---|---|---|
-| `IR.ZERO.<ccy>.<pillar>` ✅ | Continuously-compounded zero rate at each curve pillar. The default `MarketData.discount_curve` is interpreted as the all-purpose single curve. | `DiscountCurve.discount_factors` (one per pillar, log-DF storage) | `bump_curve_zero_rates`, `parallel_shift`, `key_rate_bump`, `MarketScenario.rate_shocks`, `steepener`, `flattener`, `butterfly` | `delta_rate` (per pillar = DV01 ladder / KRD), `gamma_rate`, `cross_spot_rate`, `cross_vol_rate` | Bonds (ZC, fixed, FRN, callable, puttable), swaps, swaptions, caplets/caps, equity-option discounting, every other instrument | `pricing/analytic/bonds.py`, `pricing/analytic/swaptions.py`, `pricing/analytic/caplets.py`, `pricing/analytic/floating.py`, all other engines via `MarketData.discount_curve` |
+| `IR.ZERO.<ccy>.<pillar>` ✅ | Continuously-compounded zero rate at each curve pillar of a single-curve market — the `"_default_"` curve of a `MarketState` (e.g. `MarketState.flat(...)`), equivalently the legacy `MarketData.discount_curve`. For several named curves see [§3.2](#32-interest-rates-multi-curve). | `DiscountCurve.discount_factors` (one per pillar, log-DF storage) | `bump_curve_zero_rates`, `parallel_shift`, `key_rate_bump`; `KeyedScenario.curve_shocks["_default_"]`, `keyed_stress_scenario`, `keyed_steepener` / `keyed_flattener` / `keyed_butterfly`; legacy `MarketScenario.rate_shocks`, `steepener`, `flattener`, `butterfly` | `delta_rate` (per pillar = DV01 ladder / KRD), `gamma_rate`, `cross_spot_rate`, `cross_vol_rate` | Bonds (ZC, fixed, FRN, callable, puttable), swaps, swaptions, caplets/caps, equity-option discounting, every other instrument | `pricing/analytic/bonds.py`, `pricing/analytic/swaptions.py`, `pricing/analytic/caplets.py`, `pricing/analytic/floating.py`, all other engines via the curve `price()` resolves from the `MarketState` |
 
 ### 2.3 Volatility (scalar form)
 
-The system stores one scalar vol per equity asset in `MarketData.vols`. Full vol surfaces exist in `valax/surfaces/` (`GridVolSurface`, `SABRVolSurface`, `SVIVolSurface`) but are **not yet routed through the risk engine** — see [§3 Planned Factors](#3-planned-factors).
+A `MarketState` holds full vol surfaces from `valax/surfaces/` (`GridVolSurface`, `SABRVolSurface`, `SVIVolSurface`, `ConstantVol`, …) keyed by surface id, and the keyed risk layer moves each one by a single **parallel shift** (`shift_surface`), so the vol factor is one number per surface — the [design choice](risk-scenarios.md#vol-shocks-parallel-shift-not-node-shock) that keeps it defined for every surface type. The legacy `MarketData.vols` stores one scalar per equity asset. Node-level (strike × expiry) and surface-parameter factors are **not yet** risk factors — see [§3.5](#35-volatility-surfaces).
 
 ### 2.4 Sensitivity-side coverage
 
-Every factor in this section is automatically picked up by `compute_ladder()` and `pnl_attribution()`, because they reverse-mode-differentiate through `MarketData`. The risk engine produces:
+Every factor in this section is automatically picked up by `keyed_ladder()` on a `MarketState` — one `KeyedLadder` block per named curve, surface and asset, read back by factor id ([Sensitivity Ladders § Keyed ladders](risk-ladders.md#keyed-ladders-on-a-marketstate)). The legacy flat path, `compute_ladder()` and `pnl_attribution()` over `MarketData`, produces the positional fields:
 
 - `ladder.delta_spot` ∈ ℝ^`n_assets`
 - `ladder.delta_vol` ∈ ℝ^`n_assets`
@@ -165,7 +166,7 @@ These factors have **either an instrument or a curve type in the codebase that n
 
 | Factor ID | Description | What is needed | Pricing engines that will consume it |
 |---|---|---|---|
-| `CRED.HAZARD.<name>.<pillar>` ✅ *(curve & shocks now in place; pricing engine TBD)* | Per-issuer hazard rate at each pillar. Survival probabilities $S(t)=\exp(-\int_0^t h)$. | `SurvivalCurve` ✅ in `valax/curves/survival.py`. `bump_hazard_rates`, `key_rate_hazard_bump`, `parallel_credit_spread_shift` ✅ in `valax/risk/shocks.py`. **Still needed:** CDS pricer that ingests a `SurvivalCurve`. | (planned) `pricing/analytic/cds.py` for `CDS`, `pricing/lattice/*` for `ConvertibleBond` with credit |
+| `CRED.HAZARD.<name>.<pillar>` ✅ *(curve & shocks now in place; pricing engine TBD)* | Per-issuer hazard rate at each pillar. Survival probabilities $S(t)=\exp(-\int_0^t h)$. | `SurvivalCurve` ✅ in `valax/curves/survival.py`. `bump_hazard_rates`, `key_rate_hazard_bump`, `parallel_credit_spread_shift` ✅ in `valax/risk/shocks.py`. **Still needed:** CDS pricer that ingests a `SurvivalCurve`, and keyed shocks for `MarketState.credit_curves` (the primitives above are not yet wired into `KeyedScenario` / `shock`). | (planned) `pricing/analytic/cds.py` for `CDS`, `pricing/lattice/*` for `ConvertibleBond` with credit |
 | `CRED.SPREAD.<name>.<pillar>` ✅ *(via `parallel_credit_spread_shift`)* | Par CDS spread per pillar; converted to hazard via $h\approx s/(1-R)$. | Implemented via the credit-triangle conversion in shocks; bootstrap-from-spreads available via `SurvivalCurve.from_cds_spreads`. | Same as above |
 | `CRED.RECOVERY.<name>` 📋 | Per-name recovery rate (typically 40% for senior unsecured). Affects loss-given-default in CDS and convertibles. | Recovery as a scalar leaf on `CreditEntity` (TBD) or a static parameter on each `CDS`. | CDS, CDO |
 | `CRED.BASE_CORR.<bucket>` 📋 | Base correlation per CDO tranche bucket. | Gaussian copula simulator and base-correlation lookup table. | `CDOTranche` |
@@ -184,7 +185,10 @@ The delta-bucketing engine for multi-curve builds is
 a `(n_pillars_total, n_quotes)` sensitivity matrix through
 `optimistix.ImplicitAdjoint` at the cost of one linear solve per
 quote — this is what a production KRD / basis DV01 / xccy DV01
-pipeline stands on.  `apply_scenario` shocks the single
+pipeline stands on.  The `CurveGraph` is what a `MarketState` carries
+in `MarketState.curves`, so every curve on it is a market input to
+`price(instrument, model, market)`.  On the legacy flat path,
+`apply_scenario` shocks only the single
 `MarketData.discount_curve` (plus the `"_default_"` entry of an
 attached graph, which is the same curve); the shock primitives below
 close the gap for the `MultiCurveSet` view, and the `CurveGraph`-aware
@@ -203,7 +207,7 @@ generators, the covariance matrix and the ladders alike
 
 | Factor ID | Description | What is needed | Pricing engines that will consume it |
 |---|---|---|---|
-| `IR.OIS.<ccy>.<pillar>` ✅ *(via `bump_discount_curve` on `MultiCurveSet`, or `bump_graph_curve` on `CurveGraph`)* | OIS / collateral discount-curve zero rate. | `bump_discount_curve` ✅ and `bump_graph_curve` ✅ in `valax/risk/shocks.py`; `MarketData.curve_graph` ✅ carries an optional `CurveGraph`; `KeyedScenario.curve_shocks` + `valax.risk.shock` ✅ address any graph curve from a scenario; `KeyedFactorLayout` ✅ gives each curve its own block in a scenario *set*, a covariance matrix (`block_covariance`) and a ladder (`KeyedLadder`), so a projection curve carries its own VaR (`keyed_component_var`) and P&L rung (`keyed_waterfall_pnl`). | All analytic rates pricers (dual-curve via the optional `forward_curve` argument; see [`guide/curves.md` §8](guide/curves.md#8-what-is-not-yet-implemented)). |
+| `IR.OIS.<ccy>.<pillar>` ✅ *(via `bump_discount_curve` on `MultiCurveSet`, or `bump_graph_curve` on `CurveGraph`)* | OIS / collateral discount-curve zero rate. | `bump_discount_curve` ✅ and `bump_graph_curve` ✅ in `valax/risk/shocks.py`; `MarketState.curves` ✅ holds the `CurveGraph` (the legacy `MarketData.curve_graph` carries one optionally); `KeyedScenario.curve_shocks` + `valax.risk.shock` ✅ address any graph curve from a scenario; `KeyedFactorLayout` ✅ gives each curve its own block in a scenario *set*, a covariance matrix (`block_covariance`) and a ladder (`KeyedLadder`), so a projection curve carries its own VaR (`keyed_component_var`) and P&L rung (`keyed_waterfall_pnl`). | All analytic rates pricers (dual-curve via the optional `forward_curve` argument; see [`guide/curves.md` §8](guide/curves.md#8-what-is-not-yet-implemented)). |
 | `IR.FWD.<ccy>.<tenor>.<pillar>` ✅ *(via `bump_forward_curve` or `bump_graph_curve`)* | Tenor-specific forward curve (e.g. 3M SOFR forwards). | `bump_forward_curve(mcs, tenor, rate_bumps)` and `parallel_basis_shift` ✅ on `MultiCurveSet`; `bump_graph_curve(graph, curve_id, rate_bumps)` / `parallel_graph_shift` / `key_rate_graph_bump` ✅ on `CurveGraph`. | `pricing/analytic/floating.py` (FRN, OIS swap), `pricing/analytic/swaptions.py`, `pricing/analytic/caplets.py` — all with optional `forward_curve` |
 | `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` ✅ | Forward-curve basis (e.g. 3M vs 6M, SOFR vs OIS): the spread $b$ in $r^{\text{proj}} = r^{\text{disc}} + b$. | `keyed_basis_shift(layout, projection_id, bump, over=discount_id)` ✅ takes a **basis** as input rather than a raw zero-rate bump. `as_basis_layout` ✅ makes it a *coordinate*, not just a scenario: it reparameterises the projection curve's block into a spread and names it with this identifier (`basis_factor_prefix`), so the basis gets its own variance in `block_covariance`, its own rung in `keyed_waterfall_pnl`, its own `KeyedLadder.basis_dv01`, and its own `keyed_component_var` contribution — independently of discounting, which is how the market trades it. Gate: `tests/test_risk/test_state_ladders.py::TestBasisDV01`, `tests/test_risk/test_keyed_scenarios.py::TestBasisLayout`. With `quote_jacobian` the delta w.r.t. a `TenorBasisSwap.spread` is additionally available through the calibrated `CurveGraph`. | Basis swaps, dual-curve XCCY |
 | `IR.XCCY.<ccy>.<pillar>` 🚧 | Cross-currency basis between two currencies' funding curves. | The same machinery as `IR.BASIS` now applies — `as_basis_layout` is currency-agnostic and `basis_factor_prefix` falls back to both full curve ids when the currencies differ — but the *pricer* is the gap: `cross_currency_swap_price` is single-curve-per-currency (each leg projects off its own discount curve). `price()` now resolves the second-currency curve (`CrossCurrencySwap.foreign_discount_id`) and the FX spot, so both curves' DV01 and the FX delta come out of one gradient, but no basis between a currency's projection and discount curve enters the price yet. `quote_jacobian` on a four-curve `CurveGraph` closed by a `CrossCurrencyBasisSwap` produces the xccy DV01 in one solve. | `CrossCurrencySwap` (pricer exists; per-leg curve selection TBD) |
@@ -213,8 +217,8 @@ generators, the covariance matrix and the ladders alike
 
 | Factor ID | Description | What is needed | Pricing engines |
 |---|---|---|---|
-| `FX.SPOT.<pair>` 🚧 | FX spot (domestic per foreign). Currently piggybacks on `MarketData.spots` but the semantics are different (no dividend, has a foreign curve). | Dedicated `fx_spots: dict[pair, Float]` leaf on an extended `MarketData`, and a foreign discount curve per currency. | `pricing/analytic/fx.py`, `pricing/analytic/black76.py`, all FX options & forwards |
-| `IR.OIS.<foreign_ccy>` 📋 | Foreign / second-currency discount curve. Acts as the "dividend yield" in Garman-Kohlhagen. | Per-currency `DiscountCurve` registry inside `MarketData`. | All FX options (Garman-Kohlhagen), XCCY swaps |
+| `FX.SPOT.<pair>` 🚧 | FX spot (domestic per foreign). On a `MarketState` it is its own pair-keyed leaf, `MarketState.fx_spots`, read by `price()` for `FXForward`, `FXVanillaOption` and `CrossCurrencySwap`, and its single-trade delta comes out of `valax.greeks.market_risk`. (The legacy `MarketData` has no FX field and piggybacks on `spots`.) | Keyed scenario shocks: `KeyedScenario` / `shock` do not address `fx_spots` yet, and `KeyedFactorLayout` has no FX block. | `pricing/analytic/fx.py`, `pricing/analytic/black76.py`, all FX options & forwards |
+| `IR.OIS.<foreign_ccy>` 🚧 | Foreign / second-currency discount curve. Acts as the "dividend yield" in Garman-Kohlhagen. | The per-currency registry is the `CurveGraph` on `MarketState` (e.g. the EUR/USD four-curve `bootstrap_curve_graph` build), and FX trades name it via `foreign_discount_id`, so it is shocked and laddered like any named curve. What is missing is the FX side of the pair — see `FX.SPOT` above. | All FX options (Garman-Kohlhagen), XCCY swaps |
 | `FX.VOL.<pair>.<delta>.<expiry>` 📋 | FX vol surface (delta-strike convention). | A `FXVolSurface` type with delta-strike + expiry pillars, plus shocks. | `FXVanillaOption`, `FXBarrierOption`, `QuantoOption` |
 | `FX.SMILE.<pair>.<param>` 📋 | Parametric FX-smile factors (risk reversal, butterfly, strangle) per delta/expiry. | Smile parametrisation (Vanna-Volga / SABR-FX) layered on top of the vol surface. | Same as above |
 
@@ -222,18 +226,18 @@ generators, the covariance matrix and the ladders alike
 
 | Factor ID | Description | What is needed | Pricing engines |
 |---|---|---|---|
-| `INF.CPI.<index>.<pillar>` 🚧 | Forward CPI level. `InflationCurve` exists in `valax/curves/inflation.py` but is not in `MarketData` or the risk scenarios. | Either add `inflation_curve: InflationCurve` to `MarketData`, or hold a curve registry. Add `bump_cpi_levels`, `parallel_breakeven_shift`. | `pricing/analytic/inflation.py` for ZC/YoY inflation swaps and inflation caps/floors |
+| `INF.CPI.<index>.<pillar>` 🚧 | Forward CPI level. `InflationCurve` (`valax/curves/inflation.py`) lives in the identifier-keyed `MarketState.inflation_curves`, is read by `price()` for the inflation swaps and caps/floors, and its single-trade sensitivities come out of `valax.greeks.market_risk`; it is not yet in the keyed risk scenarios. | Keyed shocks (`KeyedScenario` / `shock` do not address `inflation_curves` yet) and a `KeyedFactorLayout` block. Add `bump_cpi_levels`, `parallel_breakeven_shift`. | `pricing/analytic/inflation.py` for ZC/YoY inflation swaps and inflation caps/floors |
 | `INF.BREAKEVEN.<index>.<pillar>` 🚧 | Zero-coupon breakeven inflation rate per pillar (the "inflation DV01" axis). | Shock primitive `parallel_breakeven_shift` and `key_rate_breakeven_bump`. | Same as above |
 | `INF.SEASONALITY.<index>` 📋 | Monthly seasonality adjustments for CPI. | Seasonality vector + bumping primitive. | YoY swaps that span sub-annual periods |
 
 ### 3.5 Volatility Surfaces
 
-The existing `MarketData.vols` is a scalar per asset. Real equity / FX / rates desks shock a full smile / term structure.
+A `MarketState` already carries full surfaces (`MarketState.surfaces`), but the keyed risk layer moves each by one parallel shift (§2.3), and the legacy `MarketData.vols` is a scalar per asset. Real equity / FX / rates desks shock a full smile / term structure.
 
 | Factor ID | Description | What is needed | Pricing engines |
 |---|---|---|---|
-| `EQ.VOL.<asset>.<strike>.<expiry>` 📋 | Implied vol at every node of a `GridVolSurface`. | Add `vol_surfaces: dict[asset, GridVolSurface]` to `MarketData`. Shock primitive: per-node bump and parametric (ATM-level / skew / convexity / term-structure). | Equity options priced from a surface; future Dupire local-vol PDE; smile-aware MC. |
-| `EQ.SABR.<asset>.<expiry>.{ALPHA,RHO,NU,BETA}` 📋 | SABR slice parameters per expiry. | Add `SABRVolSurface` to `MarketData`, with `valax/risk/sabr_shocks.py` to bump each parameter and reconstruct vol. | `pricing/analytic/sabr.py`, MC paths in `pricing/mc/sabr_paths.py`. |
+| `EQ.VOL.<asset>.<strike>.<expiry>` 📋 | Implied vol at every node of a `GridVolSurface`. | The surface is already in `MarketState.surfaces`. Needed: a node-level keyed shock (per-node bump and parametric ATM-level / skew / convexity / term-structure) and a node-level, surface-keyed vega ladder — open on the [roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation). | Equity options priced from a surface; future Dupire local-vol PDE; smile-aware MC. |
+| `EQ.SABR.<asset>.<expiry>.{ALPHA,RHO,NU,BETA}` 📋 | SABR slice parameters per expiry. | A `SABRVolSurface` already sits in `MarketState.surfaces`; needed is a parameter-level shock (bump each parameter and reconstruct vol) wired into the keyed layout. | `pricing/analytic/sabr.py`, MC paths in `pricing/mc/sabr_paths.py`. |
 | `EQ.SVI.<asset>.<expiry>.{A,B,RHO,M,SIGMA}` 📋 | SVI raw parameters per slice. | Same pattern as SABR. | Equity options on SVI-fitted surfaces. |
 | `RATES.SWAPTION_VOL.<ccy>.<expiry>.<tenor>` 📋 | Black / Bachelier vol cube on the swaption grid. | `SwaptionVolCube` type + cube-bumping primitives. | `pricing/analytic/swaptions.py`. |
 
@@ -252,7 +256,7 @@ These are second-tier factors: they are **inputs to the stochastic model** rathe
 | Factor ID | Description | What is needed | Pricing engines |
 |---|---|---|---|
 | `CORR.EQ.<a>.<b>` 🚧 | Equity–equity correlation. Already differentiable inside `MultiAssetGBMModel.correlation`. | Expose as a named, registry-managed risk factor with PSD-preserving shocks. | Multi-asset MC, spread / basket options. |
-| `CORR.EQ_FX.<asset>.<pair>` 📋 | Equity–FX correlation (used for quanto adjustment). | Cross-asset correlation matrix in `MarketData`. | `QuantoOption`. |
+| `CORR.EQ_FX.<asset>.<pair>` 📋 | Equity–FX correlation (used for quanto adjustment). | Cross-asset correlation matrix as a named factor (on the model or the `MarketState`). | `QuantoOption`. |
 | `CORR.IR.<ccy_a>.<ccy_b>` 📋 | IR–IR cross-currency correlation. | Multi-curve correlation block. | XCCY structured products, hybrid notes. |
 
 ---
@@ -263,13 +267,13 @@ This is the dependency-ordered build-out plan that turns 🚧 / 📋 entries int
 
 1. **Survival curve + credit shocks** *(this iteration: completed for the curve and shock primitives)*
     - Unlocks: CDS pricer, OAS for callable bonds, convertible-bond credit dimension.
-2. **Multi-curve `MarketData`** — *(shipped, bar the quote-space leg)* `MarketData.curve_graph` ✅ holds an optional `CurveGraph` (dict of `DiscountCurve` keyed by identifier, supports any number of currencies × tenors + basis + xccy), and the `CurveGraph`-aware `bump_*` primitives ✅ mirror the `MultiCurveSet` ones.  Scenario-level addressing shipped with `KeyedScenario` + `valax.risk.shock` on a `MarketState` ✅, and the VaR path no longer drops the graph ✅.  Keyed scenario *generators* and the per-curve covariance layout shipped with `KeyedFactorLayout` + `block_covariance` + `keyed_parametric_scenarios` ✅, and the keyed ladders / per-curve VaR decomposition with `KeyedLadder` + `keyed_component_var` ✅, so a projection curve and a basis each carry their own P&L and VaR.  **Remaining:** integration with `quote_jacobian` for quote-space delta bucketing, and the legacy flat `valax/risk/var.py` engine (kept for one deprecation cycle).
+2. **Multi-curve market** — *(shipped, bar the quote-space leg)* `MarketState.curves` ✅ holds the jointly bootstrapped `CurveGraph` (`bootstrap_curve_graph`; dict of `DiscountCurve` keyed by identifier, supports any number of currencies × tenors + basis + xccy) that `price()` and the dual-curve pricers read, the legacy `MarketData.curve_graph` ✅ carries one optionally, and the `CurveGraph`-aware `bump_*` primitives ✅ mirror the `MultiCurveSet` ones.  Scenario-level addressing shipped with `KeyedScenario` + `valax.risk.shock` on a `MarketState` ✅, and the VaR path no longer drops the graph ✅.  Keyed scenario *generators* and the per-curve covariance layout shipped with `KeyedFactorLayout` + `block_covariance` + `keyed_parametric_scenarios` ✅, and the keyed ladders / per-curve VaR decomposition with `KeyedLadder` + `keyed_component_var` ✅, so a projection curve and a basis each carry their own P&L and VaR.  **Remaining:** integration with `quote_jacobian` for quote-space delta bucketing, porting the FRTB PLA vector pair onto the keyed ladder, and retiring the legacy flat `valax/risk/var.py` engine (kept for one deprecation cycle).
     - Unlocks: real OIS-vs-SOFR basis risk, dual-curve KRDs, dual-curve PLA decomposition (separate `delta_ois` and `delta_sofr` ladders), full cross-currency delta chains, closed-form basis DV01 and xccy DV01 via the implicit-adjoint quote-Jacobian.
-3. **Per-currency curve registry + FX risk factors** — distinguish `EQ.SPOT.<asset>` (currently overloaded) from `FX.SPOT.<pair>`, and add a foreign discount curve per currency.
+3. **FX risk factors** — *(container shipped)* the per-currency curve registry is the `CurveGraph`, and `MarketState.fx_spots` ✅ already separates `FX.SPOT.<pair>` from `EQ.SPOT.<asset>` for pricing and single-trade risk. **Remaining:** keyed shocks and a `KeyedFactorLayout` block for `fx_spots`, and FX vol.
     - Unlocks: full Garman-Kohlhagen risk, XCCY swap KRDs in both currencies, multi-currency PLA.
-4. **Vol-surface risk factors** — replace scalar `MarketData.vols` with a per-asset `VolSurface` (grid, SABR, or SVI), and add `compute_vega_ladder()` that buckets vega by strike × expiry.
+4. **Vol-surface risk factors** — *(partially shipped)* `MarketState.surfaces` ✅ holds a surface (grid, SABR, SVI, …) per id, and the keyed layer gives each one a parallel-shift vega (`KeyedLadder.vega`) ✅. **Remaining:** a node-level, surface-keyed vega ladder that buckets vega by strike × expiry.
     - Unlocks: realistic vol PLA, smile-aware stress scenarios, FRTB vega capital requirements.
-5. **Inflation factor wiring** — add `inflation_curves` to `MarketData`, expose `INF.CPI` and `INF.BREAKEVEN` ladders.
+5. **Inflation factor wiring** — `MarketState.inflation_curves` ✅ exists and is priced from; **remaining:** keyed shocks and a layout block for it, and `INF.CPI` / `INF.BREAKEVEN` ladders.
     - Unlocks: inflation desk PLA, inflation-linked bond IE01.
 6. **Model-parameter ladder** — generic infrastructure that lets any pytree model (Heston, HW, LMM, SVI) auto-register its parameters as named risk factors.
     - Unlocks: model-drift attribution, "Greeks-of-Greeks" diagnostics.
@@ -282,7 +286,9 @@ Each tier deliberately keeps the autodiff invariant intact: every new factor is 
 
 ## 5. Instrument → Factor Matrix
 
-Quick reverse lookup: which factors does each instrument load on? `*` indicates a factor that is consumed but not yet exposed as an independent risk factor in the current `MarketData`.
+<!-- coverage-map -->
+
+Quick reverse lookup: which factors does each instrument load on? `*` indicates a factor that is consumed but not yet exposed as an independent risk factor in the keyed risk layer (`KeyedFactorLayout` on a `MarketState`).
 
 | Instrument | Spot | Vol | Rate (single) | Rate (OIS) | Rate (Fwd) | Basis | Credit | FX | Inflation | Vol surface | Model params |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
@@ -324,16 +330,17 @@ See the [Risk API page](api/risk.md) for full signatures; the table below maps f
 
 | Category | Bump (per-pillar) | Parallel shift | Key-rate / pointwise | Notes |
 |---|---|---|---|---|
-| Equity spot | `MarketScenario.spot_shocks` | — | — | Set `multiplicative=True` for returns. |
-| Equity vol (scalar) | `MarketScenario.vol_shocks` | — | — | One scalar per asset. |
-| Dividend yield | `MarketScenario.dividend_shocks` | — | — | Additive. |
-| IR (single curve) | `bump_curve_zero_rates` | `parallel_shift` | `key_rate_bump` | Applied via `MarketScenario.rate_shocks` inside `apply_scenario`. |
+| Equity spot | `KeyedScenario.spot_shocks` | — | — | Set `multiplicative=True` for returns. Legacy flat path: `MarketScenario.spot_shocks`. |
+| Equity vol (per surface) | `KeyedScenario.vol_shocks` | `shift_surface` | — | One parallel shift per surface. Legacy flat path: `MarketScenario.vol_shocks`, one scalar per asset. |
+| Dividend yield | `KeyedScenario.dividend_shocks` | — | — | Additive. Legacy flat path: `MarketScenario.dividend_shocks`. |
+| IR (named curve on a `CurveGraph`) | `bump_graph_curve` | `parallel_graph_shift` | `key_rate_graph_bump` | Applied via `KeyedScenario.curve_shocks[curve_id]` inside `shock`; generators in [Scenarios § Keyed generators](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout). |
+| IR (single curve) | `bump_curve_zero_rates` | `parallel_shift` | `key_rate_bump` | On a bare `DiscountCurve`. Legacy flat path: applied via `MarketScenario.rate_shocks` inside `apply_scenario`. |
 | IR (multi-curve forward) | `bump_forward_curve` | `parallel_basis_shift` | (use `bump_forward_curve` with one nonzero pillar) | Targets a specific tenor key in a `MultiCurveSet`. |
 | IR (multi-curve discount) | `bump_discount_curve` | (pass uniform array) | (single nonzero pillar) | Leaves all forward curves untouched. |
-| Credit hazard | `bump_hazard_rates` | `parallel_credit_spread_shift` | `key_rate_hazard_bump` | Spread→hazard via $\Delta h=\Delta s/(1-R)$. |
+| Credit hazard | `bump_hazard_rates` | `parallel_credit_spread_shift` | `key_rate_hazard_bump` | Spread→hazard via $\Delta h=\Delta s/(1-R)$. On a bare `SurvivalCurve`; not yet reachable from `KeyedScenario`. |
 | Inflation CPI | 📋 `bump_cpi_levels` | 📋 `parallel_breakeven_shift` | 📋 `key_rate_breakeven_bump` | Planned; see roadmap §4 item 5. |
 | FX spot / vol | 📋 | 📋 | 📋 | Planned; see roadmap §4 item 3. |
-| Vol surface | 📋 | 📋 | 📋 | Planned; see roadmap §4 item 4. |
+| Vol surface (node-level) | 📋 | ✅ `shift_surface` (parallel) | 📋 | Node bumps planned; see roadmap §4 item 4. |
 
 For end-to-end use of these primitives in a P&L explain or backtest, see the [VaR & P&L](risk-var.md) and [Backtesting & FRTB PLA](risk-backtesting.md) guides.
 

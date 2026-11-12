@@ -335,6 +335,8 @@ assumptions and measured limitations are in the
 
 ## Part II — How VALAX implements the chain
 
+<!-- coverage-map -->
+
 | Piece | VALAX symbol | Status |
 | --- | --- | --- |
 | Level $R(\theta; q, \mathcal{M}, p)$ | `valax.calibration.level.CalibrationLevel`, `LevelInputs` | ✅ |

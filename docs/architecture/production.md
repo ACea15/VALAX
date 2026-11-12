@@ -214,8 +214,20 @@ Notes:
 
 ### 3.3 `MarketState` — the canonical pytree
 
-Replaces the current narrow `MarketData`. This is the single object
-every pricing function above L2 takes as its market argument:
+Replaces the narrow legacy `MarketData`. This is the single object
+every pricing function above L2 takes as its market argument.
+
+!!! note "Implementation status"
+    Shipped as [`valax.core.MarketState`](../api/core.md#marketstate)
+    (`valax/core/market_state.py`), the market argument of
+    `price(instrument, model, market)`. The shipped shape differs from the
+    sketch below: discount and projection curves live in **one**
+    identifier-keyed `CurveGraph` (`curves`), alongside `surfaces`,
+    `spots`, `dividends`, `fixings`, `credit_curves`, `inflation_curves`
+    and `fx_spots`; `asof` / `snapshot_id` are not fields (provenance is
+    kept alongside the market in `SnapshotProvenance`). `MarketData` stays
+    only as a two-way legacy view (`from_market_data` / `to_market_data`)
+    for one deprecation cycle. The sketch is kept as the original design.
 
 ```python
 # valax/market/state.py  (new — supersedes valax/market/data.py)
@@ -606,11 +618,14 @@ valax run-risk \
     --output    s3://valax-prod/risk/
 ```
 
-The scenarios spec drives `ScenarioSet` generation (parametric /
-historical / stress) — wiring through to the existing
-`valax.risk.scenarios` module. The driver applies each scenario via
-`apply_scenario` to produce a vmapped `MarketState` batch and prices
-the portfolio under each.
+The scenarios spec drives keyed scenario generation (parametric /
+historical / stress) — the `keyed_*` generators over a
+`KeyedFactorLayout` in `valax.risk.scenarios`. The driver applies the
+batched `KeyedScenario` to the `MarketState` with `valax.risk.shock`
+and reprices each group through `price()` (`group_scenario_pnl` in
+`valax.risk.state_var`). *(Originally drafted against the flat
+`ScenarioSet` + `apply_scenario` path, which operates on the legacy
+`MarketData` and is scheduled for removal.)*
 
 ### 7.4 Common shape
 
@@ -753,9 +768,10 @@ valax/
 │   └── (diagnostics)              ← shipped as valax.calibration.CalibrationResult
 │
 ├── market/
-│   ├── data.py                    # ← deprecated, becomes thin alias of state.py
-│   ├── state.py                   ← NEW: MarketState
-│   └── scenario.py                # existing
+│   ├── data.py                    # legacy MarketData — scheduled for removal
+│   ├── state.py                   ← shipped instead as valax/core/market_state.py
+│   ├── keyed_scenario.py          # shipped: KeyedScenario (MarketState shocks)
+│   └── scenario.py                # legacy MarketScenario / ScenarioSet
 │
 ├── portfolio/
 │   ├── batch.py                   # existing
@@ -776,9 +792,12 @@ valax/
     └── risk.py                    # `valax run-risk`
 ```
 
-No existing module's public API changes. `valax/market/data.py` keeps
-exporting `MarketData` as a deprecated alias for a narrow subset of
-`MarketState` to give downstream code a quiet migration path.
+No existing module's public API changes. *(As shipped:)*
+`valax/market/data.py` keeps exporting `MarketData` as a separate legacy
+class, reachable from a `MarketState` through the two-way view
+`MarketState.from_market_data` / `to_market_data`, and it is removed
+after one deprecation cycle (see the
+[roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)).
 
 ---
 
@@ -792,6 +811,8 @@ defines the data model, the solver topology, the new bootstrap
 instruments, and the calibration diagnostics.
 
 ### 11.1 Status today
+
+<!-- coverage-map -->
 
 !!! note "This table is the pre-MC-Curves-1 baseline"
     It records the state that motivated the §11 design and is kept as
@@ -1256,8 +1277,9 @@ Using `hypothesis` (already a dev dependency):
 
 - For any valid `MarketSpec`, the build either succeeds or returns a
   `BuildReport` with at least one error — never silent NaN.
-- `apply_scenario(state, zero_scenario(...))` is idempotent and
-  identity on prices.
+- `shock(state, zero_keyed_scenario())` is idempotent and identity on
+  prices (drafted as `apply_scenario(state, zero_scenario(...))`, the
+  legacy `MarketData` form).
 - `SnapshotStore.read(write(state)) == state` for all generated
   states.
 
@@ -1290,7 +1312,9 @@ parallelisable against the scaffolding).
 - Introduce `valax/io/quotes.py` with `QuoteSet`, `Quote`.
 - Migrate all existing pricing functions and tests to accept
   `MarketState` (via lookup by ID) while keeping `MarketData` as a
-  deprecated thin wrapper.
+  deprecated thin wrapper. *(Status: `MarketState` shipped in
+  `valax/core/market_state.py` and is what `price()` takes; `MarketData`
+  remains as a legacy two-way view scheduled for removal.)*
 - No persistence yet, no workflow yet.
 - **Deliverable:** every existing test passes against `MarketState`.
 
@@ -1430,7 +1454,10 @@ starts.
 
 1. **`MarketData` deprecation strategy.** Hard rename in 0.2.0 vs.
    long-lived alias? Recommend: alias for one minor release, hard
-   rename in the next.
+   rename in the next. *(Resolved: `MarketState` shipped as a new class
+   in `valax.core`; `MarketData`, `MarketScenario` / `ScenarioSet` and
+   `apply_scenario` stay as legacy for one deprecation cycle, then are
+   removed — [roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).)*
 2. **Identifier alphabet — do we standardise on ISO codes
    (`USD.SOFR.OIS`) or vendor identifiers (`SOFRRATE Index`)?**
    Recommend: ISO-like internal names with vendor-specific aliases

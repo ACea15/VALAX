@@ -1,25 +1,45 @@
-"""The coverage matrix's ``price()`` routes column matches the registry.
+"""The coverage matrix matches the code.
 
-``docs/applications/instrument-pricing.md`` states, per instrument and model,
-which methods ``price()`` reaches and which one ``method="auto"`` picks. This
-test parses that column and compares it, in both directions, with what the
-library registers (``registered_pricers()``) and with the auto policy — so a
-new route, a removed one or a changed ``auto`` fails here until the matrix
-says so.
+``docs/applications/instrument-pricing.md`` is the single instrument × solver
+coverage map. This test checks, in both directions:
 
-Cell syntax: ``Label: **auto**, other, ...`` per model, models separated by
-``<br>``; ``—`` = not routed (priced by a direct call); ``†`` = registered but
-not yet priceable through ``price()`` (:data:`KNOWN_UNPRICEABLE`);
-parenthesised text is commentary.
+* the ``price()`` routes column — per instrument and model, which methods
+  ``price()`` reaches and which one ``method="auto"`` picks — against what the
+  library registers (``registered_pricers()``) and the auto policy;
+* the four solver columns (*Analytic*, *MC*, *PDE*, *Lattice*): ✅ iff a
+  method of that solver is registered for the instrument, ◇ iff a kernel is
+  named in :data:`KERNEL_ONLY` (and imports), 🟡 links to a roadmap section
+  with an open ``- [ ]`` item;
+* each row's *Status* against its solver cells.
+
+So a new route, a removed one, a changed ``auto``, a new kernel or a shipped
+roadmap item fails here until the matrix says so.
+
+Routes-cell syntax: ``Label: **auto**, other, ...`` per model, models
+separated by ``<br>``; ``—`` = not routed (priced by a direct call); ``†`` =
+registered but not yet priceable through ``price()``
+(:data:`KNOWN_UNPRICEABLE`); parenthesised text is commentary. The solver-cell
+grammar is in ``coverage_matrix.py``.
 """
 
 from __future__ import annotations
 
+import functools
+import importlib
 import re
-from pathlib import Path
 
 import pytest
 
+from coverage_matrix import (
+    KERNEL,
+    METHOD_OF,
+    NONE,
+    PLANNED,
+    ROUTED,
+    SOLVERS,
+    roadmap_sections,
+    rows as matrix_rows,
+)
 from valax.core import pricing as P
 from valax.instruments.bonds import (
     CallableBond,
@@ -68,12 +88,6 @@ from valax.models import (
     MultiAssetGBMModel,
     SLVModel,
 )
-
-MATRIX = (
-    Path(__file__).resolve().parents[2]
-    / "docs" / "applications" / "instrument-pricing.md"
-)
-COLUMN = "`price()` routes"
 
 #: Model labels of the column (the legend above the matrix).
 LABELS: dict[str, type] = {
@@ -130,11 +144,32 @@ ROWS: dict[str, type] = {
 #: four LMM routes with the LMM adapter of D18.
 KNOWN_UNPRICEABLE: set[tuple[type, type, str]] = set()
 
+#: ``(row anchor, solver column) -> kernels`` behind every ◇ cell: tested
+#: pricers called directly, not (yet) routed through ``price()``.
+KERNEL_ONLY: dict[tuple[str, str], tuple[str, ...]] = {
+    ("variance-swap", "Analytic"): (
+        "valax.pricing.analytic.variance_swap.variance_swap_price",),
+    ("spread-option", "Analytic"): (
+        "valax.pricing.analytic.spread.margrabe_price",
+        "valax.pricing.analytic.spread.kirk_price"),
+    ("cms-swap", "Analytic"): (
+        "valax.pricing.analytic.rates_exotics.cms_swap_price",),
+    ("cms-cap-floor", "Analytic"): (
+        "valax.pricing.analytic.rates_exotics.cms_cap_floor_price_black76",),
+    ("range-accrual", "Analytic"): (
+        "valax.pricing.analytic.rates_exotics.range_accrual_price_black76",),
+    ("total-return-swap", "Analytic"): (
+        "valax.pricing.analytic.rates_exotics.total_return_swap_price",),
+    ("zero-coupon-bond", "Analytic"): (
+        "valax.pricing.analytic.bonds.zero_coupon_bond_price",),
+}
+
 
 def _library(cls: type) -> bool:
     return cls is type(None) or cls.__module__.startswith("valax.")
 
 
+@functools.cache
 def _registry() -> dict[tuple[type, type], tuple[str, ...]]:
     """``(instrument, model) -> available methods`` of the library itself."""
     P._ensure_backends()
@@ -145,27 +180,11 @@ def _registry() -> dict[tuple[type, type], tuple[str, ...]]:
             if _library(i) and _library(m)}
 
 
-def _matrix_rows() -> list[tuple[str, str]]:
-    """``(anchor, routes cell)`` of every row of every coverage-matrix table."""
-    text = MATRIX.read_text()
-    section = text.split("## Coverage matrix", 1)[1].split("\n---\n", 1)[0]
-    rows, col = [], None
-    for line in section.splitlines():
-        if not line.startswith("|"):
-            col = None
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if cells[0] == "Instrument":
-            assert COLUMN in cells, f"matrix table without a {COLUMN} column: {line}"
-            col, width = cells.index(COLUMN), len(cells)
-            continue
-        if set(cells[0]) <= {"-"} or col is None:
-            continue
-        assert len(cells) == width, f"row has {len(cells)} cells, header {width}: {line}"
-        anchor = re.search(r"\]\(#([^)]+)\)", cells[0])
-        assert anchor, f"row without an anchor link: {line}"
-        rows.append((anchor.group(1), cells[col]))
-    return rows
+def _registered_methods(cls: type | None) -> set[str]:
+    """Every ``price()`` method registered for ``cls``, over all models."""
+    if cls is None:
+        return set()
+    return {m for (i, _), ms in _registry().items() if i is cls for m in ms}
 
 
 def _parse(cell: str) -> dict[type, tuple[str, tuple[str, ...], set[str]]]:
@@ -193,11 +212,16 @@ def _parse(cell: str) -> dict[type, tuple[str, tuple[str, ...], set[str]]]:
 
 
 @pytest.fixture(scope="module")
-def documented():
-    rows = _matrix_rows()
-    anchors = [a for a, _ in rows]
+def rows():
+    rows = matrix_rows()
+    anchors = [r.anchor for r in rows]
     assert len(anchors) == len(set(anchors)), "duplicate matrix rows"
-    return {a: _parse(cell) for a, cell in rows}
+    return rows
+
+
+@pytest.fixture(scope="module")
+def documented(rows):
+    return {r.anchor: _parse(r.routes) for r in rows}
 
 
 def test_unrouted_rows_say_so(documented):
@@ -233,6 +257,67 @@ def test_unpriceable_routes_are_marked(documented):
         for m in dagger
     }
     assert marked == KNOWN_UNPRICEABLE
+
+
+def test_every_registered_method_has_a_solver_column():
+    methods = {m for ms in _registry().values() for m in ms}
+    assert methods <= set(METHOD_OF.values()), methods - set(METHOD_OF.values())
+
+
+def test_routed_cells_match_the_registry(rows):
+    """✅ in a solver column iff that solver is registered for the instrument."""
+    for row in rows:
+        registered = _registered_methods(ROWS.get(row.anchor))
+        for solver, cell in row.solvers.items():
+            routed = METHOD_OF[solver] in registered
+            assert (cell.kind == ROUTED) == routed, (
+                f"{row.anchor} / {solver}: cell is {cell.kind}, "
+                f"registered methods {sorted(registered)}")
+
+
+def test_kernel_cells_match_kernel_only(rows):
+    """◇ iff the (row, solver) names a kernel in :data:`KERNEL_ONLY`."""
+    marked = {(r.anchor, s) for r in rows
+              for s, c in r.solvers.items() if c.kind == KERNEL}
+    assert marked == set(KERNEL_ONLY), (
+        f"◇ without a KERNEL_ONLY entry: {marked - set(KERNEL_ONLY)}; "
+        f"KERNEL_ONLY entry not marked ◇: {set(KERNEL_ONLY) - marked}")
+
+
+@pytest.mark.parametrize("path", sorted(
+    p for paths in KERNEL_ONLY.values() for p in paths))
+def test_kernel_only_symbols_import(path):
+    module, _, name = path.rpartition(".")
+    assert callable(getattr(importlib.import_module(module), name))
+
+
+def test_planned_cells_point_at_open_roadmap_items(rows):
+    """Every 🟡 links to a roadmap section that still has an open ``- [ ]``."""
+    sections = roadmap_sections()
+    for row in rows:
+        for solver, cell in row.solvers.items():
+            if cell.roadmap_anchor is None:
+                continue
+            where = f"{row.anchor} / {solver} -> #{cell.roadmap_anchor}"
+            assert cell.roadmap_anchor in sections, f"no such roadmap section: {where}"
+            assert re.search(r"^\s*- \[ \]", sections[cell.roadmap_anchor], re.M), (
+                f"roadmap section has no open item: {where}")
+
+
+def test_status_agrees_with_solver_cells(rows):
+    """✅ status iff something prices it; 🟡 status names the planned solver."""
+    for row in rows:
+        kinds = {c.kind for c in row.solvers.values()}
+        priced = bool(kinds & {ROUTED, KERNEL})
+        assert row.status in {"✅", "🟡"}, f"{row.anchor}: status {row.status!r}"
+        assert (row.status == "✅") == priced, (row.anchor, row.status, kinds)
+        if row.status == "🟡":
+            assert PLANNED in kinds, f"{row.anchor}: 🟡 with no planned solver"
+        assert kinds <= {ROUTED, KERNEL, PLANNED, NONE}
+
+
+def test_solver_columns_are_the_four_families():
+    assert SOLVERS == tuple(METHOD_OF)
 
 
 def test_public_listing_agrees():

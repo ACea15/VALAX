@@ -5,7 +5,7 @@ description: Cross-check VALAX's coverage/progress documentation against the act
 
 # valax-coverage-sync
 
-Make the coverage/progress documentation match the code. Establish ground truth from `valax/` + `tests/`, update the two canonical maps, propagate to the derived lists, and verify the build. For a read-only audit that only *suggests* changes, use `valax-coverage-review`.
+Make the coverage/progress documentation match the code. Establish ground truth from `valax/` + `tests/`, update the two canonical maps, propagate to the derived lists, and verify the build. For a read-only proposal of what to build next from the same maps, use `valax-next-steps`.
 
 ## Ground truth = code + tests (never memory)
 
@@ -20,9 +20,10 @@ Status is derived only from what the code actually provides:
 
 Edit in this order so no new contradictions are created:
 
-1. `docs/applications/instrument-pricing.md` — the coverage matrix (legend ✅/🟡/n-a).
-2. `docs/roadmap.md` — flip `[ ]`→`[x]` (or add the line) naming the symbol; update Current-State tables and the Instrument Coverage Matrix.
-3. Propagate to derived lists so they agree: `docs/applications/index.md` (section 5), `docs/risk-factors.md`, `docs/risk-overview.md`, `docs/guide/{pde,lattice,monte-carlo,calibration}.md`, `docs/api/pricing.md`, `docs/architecture/production.md`.
+1. `docs/applications/instrument-pricing.md` — the coverage matrix: status legend ✅/🟡/n-a, plus the four solver columns (`Analytic | MC | PDE | Lattice`; cells ✅ routed · ◇ kernel only · `[🟡](../roadmap.md#section)` planned · `✅ [+🟡](…)` routed with more models planned · —). A ◇ needs a `KERNEL_ONLY` entry in `tests/test_docs/test_price_routes.py`; a 🟡 needs an open `- [ ]` item in the linked roadmap section. That test is the mechanical check — run it first; it pinpoints most drift.
+2. `docs/roadmap.md` — flip `[ ]`→`[x]` (or add the line) naming the symbol; update the Current-State tables; record the blocker on every open item a 🟡 cell points to. (The roadmap no longer carries its own instrument matrix — it links to the coverage matrix.)
+3. Propagate to the other coverage maps — all listed on `docs/coverage.md` (pages carry a `<!-- coverage-map -->` marker; `tests/test_docs/test_coverage_hub.py` keeps the list complete): `docs/guide/calibration.md`, `docs/applications/calibration-register.md`, `docs/theory/calibration-chains.md`, `docs/architecture/aad-audit-conformance.md`, `docs/risk-factors.md`, `docs/risk-overview.md`, `docs/applications/index.md` (section 4), `docs/theory/multi-curve-short-rate.md`, `docs/architecture/production.md`, `docs/scaling/index.md`.
+4. Solver guides (`docs/guide/{analytical,monte-carlo,pde,lattice}.md`) and `docs/api/pricing.md` hold **no status** — only engine details (scheme, dimension, oracle, recipe notes) and a link to the matrix; `test_coverage_hub.py` fails on status marks in their tables. Fix stale engine prose there, never add a status table.
 
 ## Procedure
 
@@ -31,7 +32,7 @@ Edit in this order so no new contradictions are created:
 3. **Diff against the docs:** for every doc status entry, compare claimed vs actual; build a change set.
 4. **Apply edits**, canonical files first (order above), each ✅ citing its symbol. Respect the AGENTS.md "definition of done": when you mark something implemented, also ensure/flag the owning guide, API export, and theory page — add the row/link where trivial, otherwise list it as follow-up.
 5. **Never fabricate.** If code presence is ambiguous, leave the status unchanged and add it to the follow-up list rather than guessing.
-6. **Verify:** run `pytest` (or a targeted subset if the change is scoped) and `mkdocs build --strict`; both must be green.
+6. **Verify:** run `pytest tests/test_docs` (matrix ↔ registry/kernels/roadmap, hub completeness, calibration register), then `pytest` (or a targeted subset if the change is scoped), `mkdocs build --strict` and `python scripts/check_doc_anchors.py`; all must be green.
 7. **Report** what changed (file:line, old→new, citing symbol/test) and what still needs human authoring (theory derivations, new guide sections).
 
 ## Rules

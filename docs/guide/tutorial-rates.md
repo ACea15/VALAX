@@ -105,8 +105,9 @@ for years in (1.0, 5.0, 10.0, 30.0):
   forward rates, so even a perfect bootstrap will show step-shaped forwards.
   The curve values **at** the pillars are exact; only between pillars do we
   see interpolation artefacts.
-- **Single-curve world.** We are not yet distinguishing OIS discounting from
-  3M / 6M projection. Post-2008 a real desk runs a `MultiCurveSet` — see the
+- **Single-curve world.** This tutorial does not distinguish OIS discounting from
+  3M / 6M projection. Post-2008 a real desk runs a jointly bootstrapped
+  `CurveGraph` inside a `MarketState` — see the
   [Curves guide §5](curves.md#5-multi-curve-bootstrap). The principles below
   generalise unchanged; only the instrument list grows.
 - **No bid-offer, no holiday calendar, ACT/365 throughout.** Real
@@ -551,7 +552,7 @@ system this would cost you *N* bootstrap re-runs plus *N* re-pricings.
 | Hull-White $(a, \sigma)$ from swaptions (Jamshidian) | [Calibration](calibration.md) |
 | Pricing exotics — callable bonds, CMS, range accruals | [Callable Bonds](callable-bonds.md), [Interest Rate Exotics](rates-exotics.md) |
 | Reproducibility contract, arbitrage stress tests | [Reproducibility & Arbitrage Tests](reproducibility_and_arbitrage_tests.md) |
-| The full six-stage synthetic pipeline | [Synthetic Market Data](synthetic_market.md), `examples/08_end_to_end_workflow.py` |
+| Quotes → curves → book risk → PCA scenarios | [Synthetic Market Data](synthetic_market.md), [`examples/19_unified_book_workflow.py`](../examples.md#a-rates-book-end-to-end) |
 
 The same six-stage skeleton — **truth → noisy quotes → calibration →
 validation → pricing → autodiff risk** — applies unchanged to the equity,

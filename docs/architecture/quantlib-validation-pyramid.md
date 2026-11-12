@@ -484,7 +484,7 @@ Heston had `2κθ − ξ² ≪ 0`, e.g. seed=20260101: `κ=0.0000, θ=0.0292,
 - The infrastructure this plan consumes —
   [User Guide → Synthetic Market Data](../guide/synthetic_market.md).
 - The non-tautological testing philosophy that produced this plan —
-  [Design Rationale § 7](../design-rationale.md#7-synthetic-first-testing-and-non-tautological-validation).
+  [Validation Strategy](validation-strategy.md).
 - The roadmap home —
   [Roadmap → QuantLib Validation Pyramid](../roadmap.md#quantlib-validation-pyramid).
 - The compliance matrix this plan extends —

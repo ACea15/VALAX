@@ -12,7 +12,7 @@ It is deliberately a different register from the other forward-looking docs:
 - It is **not** [`vision.md`](vision.md) — the vision is the untimed
   *destination*, the kind of thing VALAX is becoming. Ideas here are concrete
   technical explorations that may or may not serve that destination.
-- It is **not** [`design-rationale.md`](design-rationale.md) or the
+- It is **not** [Positioning & Design Rationale](positioning/index.md) or the
   [architecture](architecture/overview.md) specs — those justify decisions we
   have already made.
 

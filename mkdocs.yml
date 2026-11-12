@@ -57,24 +57,29 @@ plugins:
 watch:
   - valax
 
+# Intentionally outside the sidebar, each with a back-link to its parent:
+# the audience pages are reached from applications/index.md § 3, and
+# positioning/peers.md from positioning/index.md.
+not_in_nav: |
+  /applications/market-risk.md
+  /applications/quant-research.md
+  /applications/trading-desk.md
+  /applications/regulatory.md
+  /applications/treasury.md
+  /positioning/peers.md
+
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
-  - Direction & Applications:
-      - Where VALAX Fits: landscape.md
-      - Design Rationale: design-rationale.md
+  - Strategy & Direction:  
+      - Positioning & Design Rationale: positioning/index.md
       - Vision: vision.md
       - Applications Overview: applications/index.md
-      - Market Risk & Model Validation: applications/market-risk.md
-      - Quant Research: applications/quant-research.md
-      - Front-Office Trading: applications/trading-desk.md
-      - "Regulatory: FRTB & CCAR": applications/regulatory.md
-      - Treasury & ALM: applications/treasury.md
-  - Roadmap & Research:
       - Roadmap: roadmap.md
+      - Coverage Maps: coverage.md
       - Research Ideas: research-ideas.md
   - Solvers and Instruments:
-      - Overview: applications/instrument-pricing.md
+      - Instrument Coverage Matrix: applications/instrument-pricing.md
       - Calibration Assumptions Register: applications/calibration-register.md
       - Instruments:
           - Fixed Income: guide/fixed-income.md
@@ -113,6 +118,7 @@ nav:
       - PDE Solvers Design: architecture/pde-design.md
       - Numerical Pitfalls: architecture/numerical-pitfalls.md
       - Validation:
+          - Validation Strategy: architecture/validation-strategy.md
           - Pricing Examples: examples.md
           - Multi-Curve / AAD Audit Conformance: architecture/aad-audit-conformance.md
           - QuantLib Validation Pyramid: architecture/quantlib-validation-pyramid.md

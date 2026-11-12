@@ -12,7 +12,7 @@ $$
 
 For example, 99% 10-day VaR = $10M means there is a 1% chance of losing more than $10M over 10 days.
 
-**Parametric (delta-normal) VaR** (implemented in `valax/risk/var.py`, `parametric_var`):
+**Parametric (delta-normal) VaR** (implemented on a `MarketState` in `valax/risk/state_ladders.py`, `keyed_parametric_var`, with the additive per-curve Euler split `keyed_component_var`; the legacy flat-`MarketData` version is `parametric_var` in `valax/risk/var.py`):
 
 Assume P&L is linear in risk factors and risk factors are jointly normal:
 
@@ -24,9 +24,9 @@ where $\boldsymbol{\delta}$ is the vector of portfolio sensitivities (from autod
 
 **Assumptions:** Linearity (no gamma), normality (no fat tails), static portfolio. These are strong assumptions that break for options portfolios (significant gamma) and in stressed markets (fat tails).
 
-**Full-revaluation VaR** (implemented in `valax/risk/var.py`, `value_at_risk`):
+**Full-revaluation VaR** (implemented in `valax/risk/var.py`, `value_at_risk`, on a P&L array):
 
-Reprice the portfolio under each scenario (historical or simulated), sort the P&L distribution, and read off the quantile. No linearity or normality assumption. VALAX uses `jax.vmap` to reprice across all scenarios in parallel.
+Reprice the portfolio under each scenario (historical or simulated), sort the P&L distribution, and read off the quantile. No linearity or normality assumption. VALAX uses `jax.vmap` to reprice across all scenarios in parallel — through `price(...)` on a `MarketState` with `group_scenario_pnl` (`valax/risk/state_var.py`), or on the legacy flat path with `portfolio_pnl`.
 
 **VaR is not coherent:** VaR violates the **subadditivity** axiom: $\text{VaR}(A + B)$ can exceed $\text{VaR}(A) + \text{VaR}(B)$. This means diversification can appear to *increase* risk under VaR, which is economically nonsensical. This is why regulators (Basel III.1) are shifting to Expected Shortfall.
 
@@ -51,7 +51,7 @@ Equivalently, it is the average of all losses in the worst $(1-\alpha)$ tail.
 
 ### 7.3 P&L Attribution
 
-**Second-order Taylor expansion** (implemented in `valax/risk/var.py`, `pnl_attribution`):
+**Second-order Taylor expansion** (implemented on a `MarketState` in `valax/risk/state_ladders.py`, `keyed_waterfall_report`, one rung per named curve / surface / asset; the legacy flat-`MarketData` scalar version is `pnl_attribution` in `valax/risk/var.py`):
 
 $$
 \Delta V \approx \sum_i \frac{\partial V}{\partial x_i}\Delta x_i + \frac{1}{2}\sum_{i,j}\frac{\partial^2 V}{\partial x_i \partial x_j}\Delta x_i \Delta x_j
@@ -117,7 +117,7 @@ In VALAX:
 
 This is a structural advantage that compounds with portfolio size. The ladder that takes a traditional system thousands of bump-and-reprice calls falls out of two autodiff passes.
 
-**VALAX implementation:** `valax/risk/ladders.py` provides `SensitivityLadder` (bucketed pytree of all sensitivities), `compute_ladder()` (Jacobian + Hessian computation), `waterfall_pnl()` (arithmetic decomposition from a precomputed ladder), and `waterfall_pnl_report()` (full decomposition including repricing for the unexplained). The ladder can be computed once and reused across many scenarios — the waterfall arithmetic is instantaneous.
+**VALAX implementation:** `valax/risk/ladders.py` provides `SensitivityLadder` (bucketed pytree of all sensitivities), `compute_ladder()` (Jacobian + Hessian computation), `waterfall_pnl()` (arithmetic decomposition from a precomputed ladder), and `waterfall_pnl_report()` (full decomposition including repricing for the unexplained) on the legacy flat `MarketData` layout, with one undivided rate block. The `MarketState` counterpart in `valax/risk/state_ladders.py` — `keyed_ladder()` → `KeyedLadder`, `keyed_waterfall_pnl()`, `keyed_waterfall_report()` — differentiates through `price(...)` w.r.t. the shock magnitudes of a `KeyedFactorLayout`, so every named curve (and a basis) carries its own ladder block and rung. Either way the ladder can be computed once and reused across many scenarios — the waterfall arithmetic is instantaneous.
 
 ### 7.5 P&L Vectors: Hypothetical, Risk-Theoretical, Actual
 
@@ -151,7 +151,7 @@ $$
 \pi_i^{\text{HPL}} = V\!\left(M_0 \oplus s_i\right) - V(M_0)
 $$
 
-where $M_0 \oplus s_i$ is the shocked market and $V(\cdot)$ is the full pricing function. **VALAX implementation:** `portfolio_pnl()` and the alias `hypothetical_pnl_vector()` in `valax/risk/pnl_vectors.py` compute this in one `jax.vmap` pass over the scenario axis.
+where $M_0 \oplus s_i$ is the shocked market and $V(\cdot)$ is the full pricing function. **VALAX implementation:** `group_scenario_pnl()` in `valax/risk/state_var.py` computes this through `price(...)` on a `MarketState` under keyed scenarios; on the legacy flat `MarketData` path, `portfolio_pnl()` and the alias `hypothetical_pnl_vector()` in `valax/risk/pnl_vectors.py` do the same. Each is one `jax.vmap` pass over the scenario axis.
 
 #### Building RTPL vectors from a sensitivity ladder
 
@@ -169,7 +169,7 @@ $$
 \text{Vector fill:}\quad \mathcal{O}(N\cdot F^2)
 $$
 
-compared with $\mathcal{O}(N \cdot C_{\text{pricing}})$ for HPL — typically two to three orders of magnitude cheaper for option-heavy portfolios where $C_{\text{pricing}}$ is dominated by special-function evaluations. **VALAX implementation:** `risk_theoretical_pnl_vector()` in `valax/risk/pnl_vectors.py`.
+compared with $\mathcal{O}(N \cdot C_{\text{pricing}})$ for HPL — typically two to three orders of magnitude cheaper for option-heavy portfolios where $C_{\text{pricing}}$ is dominated by special-function evaluations. **VALAX implementation:** `risk_theoretical_pnl_vector()` in `valax/risk/pnl_vectors.py`, which still consumes the flat `SensitivityLadder`; porting the RTPL/HPL pair onto `KeyedLadder` is open on the [roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 #### From P&L vector to risk metrics
 
@@ -309,7 +309,7 @@ VALAX's autodiff ladder addresses (2) and (3) directly: a full second-order ladd
 
 ### 7.8 Risk Bucketing: Linear and Jacobian Transformations
 
-So far the risk engine lives in **raw factor space**: one sensitivity per `MarketData` leaf (one DV01 per pillar, one vega per asset, one credit delta per hazard pillar). For reporting, capital, and hedging, the same sensitivities have to be expressed in different coordinate systems:
+So far the risk engine lives in **raw factor space**: one sensitivity per market coordinate (one DV01 per pillar of each named curve, one vega per surface or asset, one credit delta per hazard pillar — the coordinates of a `KeyedFactorLayout` on a `MarketState`, or the leaves of the legacy flat `MarketData`). For reporting, capital, and hedging, the same sensitivities have to be expressed in different coordinate systems:
 
 | Purpose | Target space | Why |
 |---|---|---|

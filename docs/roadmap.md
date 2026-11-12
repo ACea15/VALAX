@@ -20,74 +20,26 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | **Dates** | Act/360, Act/365, **Act/Act (ISDA, exact)**, 30/360, **Bus/252**; ordinal-based date arithmetic; schedule generation with day-of-month preservation, end-of-month rolls and short/long front/back **stubs**, returning `(accrual_start, accrual_end, payment_dates)`; **accrued interest and clean/dirty prices**; **business-day calendars and adjustment** for TARGET, SOFR/SIFMA, NYSE, London, Tokyo and Brazil, with union/intersection for cross-currency ([Tier 1.3](#13-business-calendars-and-holiday-schedules)). Adjustment is opt-in — the default convention remains `"unadjusted"` |
 | **Calibration** | SABR, Heston, **Hull-White, G2++, Cheyette (1F/2F)**, and **SLV leverage** calibration with LM / BFGS / Optax solvers; parameter constraint transforms. Curve bootstrap (sequential, simultaneous, joint `CurveGraph`) with implicit-diff quote Jacobian; survival curves from CDS spreads via the closed-form credit-triangle approximation (*not* a repricing bootstrap — see [3.4](#34-credit-derivatives)); SABR / SVI vol surfaces, **swaption cube, optionlet surface** |
 | **Portfolio** | `batch_price()` and `batch_greeks()` via vmap |
-| **Market Data** | `MarketData` container, `MarketScenario` / `ScenarioSet` for risk factor shocks; full synthetic-data subpackage (`valax.market.synthetic`) covering Stages 1–6 of the workflow — `SyntheticMarketConfig`, `SeedRegistry`, NSS / flat curve samplers, random PSD correlation matrices, ground-truth model parameters, noisy observation layer, option / swap portfolio samplers, correlated-GBM market tapes, scenario sets, and deliberate arbitrage injectors |
+| **Market Data** | `MarketState` — the market object behind `price()`: a `CurveGraph` (OIS discount + projection curves, basis, XCCY), surfaces, spots and dividends, with `MarketState.flat(...)` for a constant single-curve market; `KeyedScenario` + `valax.risk.shock` for identifier-keyed risk-factor shocks. Legacy (scheduled for removal, see [Remaining work](#remaining-work)): the flat `MarketData` container and the positional `MarketScenario` / `ScenarioSet` + `apply_scenario`, reachable via `MarketState.to_market_data()`. Full synthetic-data subpackage (`valax.market.synthetic`) covering Stages 1–6 of the workflow — `SyntheticMarketConfig`, `SeedRegistry`, NSS / flat curve samplers, random PSD correlation matrices, ground-truth model parameters, noisy observation layer, option / swap portfolio samplers, correlated-GBM market tapes, scenario sets, and deliberate arbitrage injectors |
 | **Testing infrastructure** | Versioned golden-dataset harness (`tests/golden/`, `assert_matches_golden`, `REGEN_GOLDEN=1` regeneration); shared `SeedRegistry` fixture; pytest markers `arbitrage` / `golden` / `detects`; non-tautological closed-loop tests (pricer × implied-vol roundtrip, analytic vs MC within 3·stderr, autodiff vs finite-difference Greeks, NSS curve self-consistency, SABR calibration at the observation-noise floor, bootstrap roundtrip on off-pillar dates); reserved arbitrage exception types in `valax.core.diagnostics`; `@pytest.mark.xfail` backlog of missing safety checks |
-| **Risk** | Curve shocks (parallel, steepener, butterfly, key-rate), parametric/historical/stress scenarios, VaR, ES, sensitivity ladders with waterfall P&L |
-| **MC infrastructure** | Unified `mc_price_dispatch(instrument, model, ...)` with `(instrument, model)` → recipe registry. Recipes span equity (GBM / Heston / local vol / SLV), multi-asset equity (correlated GBM), and rates (LMM plus the Hull-White / G2++ / Cheyette short-rate models). `register()` decorator for contributor extensions. See [Monte Carlo guide](guide/monte-carlo.md#2-coverage-map). |
+| **Risk** | Curve shocks (parallel, steepener, butterfly, key-rate), parametric/historical/stress scenarios, VaR, ES, sensitivity ladders with waterfall P&L — keyed on a `MarketState` (`keyed_*` generators, `group_*` repricing through `price()`, `keyed_ladder`, `keyed_waterfall_pnl`, `keyed_parametric_var` / `keyed_component_var`; single-instrument risk via `valax.greeks.market_risk`), with the flat `MarketData` counterparts kept as legacy ([§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)) |
+| **MC infrastructure** | Unified `mc_price_dispatch(instrument, model, ...)` with `(instrument, model)` → recipe registry. Recipes span equity (GBM / Heston / local vol / SLV), multi-asset equity (correlated GBM), and rates (LMM plus the Hull-White / G2++ / Cheyette short-rate models). `register()` decorator for contributor extensions. Coverage per instrument: the *MC* column of the [coverage matrix](applications/instrument-pricing.md#coverage-matrix); engine mechanics: [Monte Carlo guide](guide/monte-carlo.md#2-recipes-by-model-family). |
 | **Multi-asset MC** | `MultiAssetGBMModel` with per-asset vols/dividends + correlation matrix. `generate_correlated_gbm_paths` (exact log-Euler via Cholesky). Spread-option MC (validates Margrabe + Kirk analytical) and worst-of basket MC with correlation Greeks via `jax.grad`. |
 
 ### Instrument Coverage Matrix
 
-A snapshot of every instrument class relevant to production bank systems, with implementation status and blocking dependencies.
+<!-- coverage-map -->
 
-#### ✅ Implemented
-
-| Instrument | Asset class | Module | Pricing available |
-|------------|-------------|--------|-------------------|
-| `EuropeanOption` | Equity | `instruments/options.py` | BSM, Black-76, Bachelier, SABR, MC (GBM/Heston), PDE, Lattice |
-| `ZeroCouponBond` | Fixed income | `instruments/bonds.py` | Curve discounting |
-| `FixedRateBond` | Fixed income | `instruments/bonds.py` | Curve discounting, YTM, duration, convexity, KRDs |
-| `FloatingRateBond` / FRN | Fixed income | `instruments/bonds.py` | Forward projection + single-curve discounting, seasoned fixings |
-| `Caplet` | Rates | `instruments/rates.py` | Black-76, Bachelier |
-| `Cap` (and Floor) | Rates | `instruments/rates.py` | Black-76, Bachelier (strip pricing) |
-| `InterestRateSwap` | Rates | `instruments/rates.py` | Analytic (replication), curve discounting |
-| `Swaption` | Rates | `instruments/rates.py` | Black-76, Bachelier |
-| `OISSwap` / `SOFRSwap` | Rates | `instruments/rates.py` | Telescoping float-leg identity + fixed-leg annuity (single-curve) |
-| `BermudanSwaption` | Rates | `instruments/rates.py` | Hull-White PDE (exact exercise projection); Longstaff-Schwartz MC on LMM paths |
-| `FXForward` | FX | `instruments/fx.py` | Covered interest rate parity |
-| `FXVanillaOption` | FX | `instruments/fx.py` | Garman-Kohlhagen, implied vol, 3 delta conventions |
-| `AmericanOption` | Equity | `instruments/options.py` | Binomial tree (CRR), European/American exercise |
-| `EquityBarrierOption` | Equity exotics | `instruments/options.py` | MC with sigmoid smoothing, knock-in/knock-out parity |
-| `AsianOption` | Equity exotics | `instruments/options.py` | MC arithmetic and geometric averaging |
-| `LookbackOption` | Equity exotics | `instruments/options.py` | MC floating-strike and fixed-strike variants |
-| `VarianceSwap` | Volatility | `instruments/options.py` | Analytic (BSM), MC realized variance, seasoned pricing |
-| `CrossCurrencySwap` | Rates / FX | `instruments/rates.py` | Two-curve telescoping + spot conversion, par basis solver |
-| `TotalReturnSwap` | Equity / prime brokerage | `instruments/rates.py` | Self-financing reduction to spread annuity, optional unrealized return |
-| `CMSSwap` | Rates | `instruments/rates.py` | Forward par swap rate (no convexity adjustment) |
-| `CMSCapFloor` | Rates | `instruments/rates.py` | Black-76 on forward CMS rate (no convexity adjustment) |
-| `RangeAccrual` | Rates / structured | `instruments/rates.py` | Black-76 digital-replication (snapshot probability) |
-| `CallableBond` | Fixed income | `instruments/bonds.py` | Hull-White trinomial tree with backward induction, issuer-optimal call exercise |
-| `PuttableBond` | Fixed income | `instruments/bonds.py` | Hull-White trinomial tree with backward induction, holder-optimal put exercise |
-| `ZeroCouponInflationSwap` | Inflation | `instruments/inflation.py` | Forward CPI projection + nominal discounting, breakeven solver |
-| `YearOnYearInflationSwap` | Inflation | `instruments/inflation.py` | YoY forward CPI ratio + nominal discounting (no convexity adjustment) |
-| `InflationCapFloor` | Inflation | `instruments/inflation.py` | Black-76 on YoY forward inflation rate |
-| `SpreadOption` | Multi-asset | `instruments/options.py` | Margrabe (K=0), Kirk (K≠0), Monte Carlo via `MultiAssetGBMModel` |
-| `WorstOfBasketOption` | Multi-asset | `instruments/options.py` | Monte Carlo via `MultiAssetGBMModel` (correlation Greeks via `jax.grad`); analytical form does not exist |
-| `DigitalOption` | Equity exotics | `instruments/options.py` | Analytic (cash-or-nothing $\Phi(d_2)$), PDE (Crank-Nicolson + Rannacher damping) |
-| `CMSSpreadSwap` | Rates | `instruments/rates.py` | Two-factor MC + PDE (G2++, two-factor Cheyette) — decorrelation steepener/flattener |
-
-#### 🟠 Missing — Medium Priority (specific desks)
-
-All instrument pytrees below are already defined; only their pricers are pending.
-
-| Instrument | Asset class | Complexity | Blocked by | Notes |
-|------------|-------------|------------|------------|-------|
-| `CDS` | Credit | Medium | CDS pricing engine, then a true repricing hazard bootstrap (only the closed-form credit-triangle approximation ships) | Prerequisite for XVA (CVA). Huge market |
-| `QuantoOption` | FX / equity cross | Medium | Quanto drift adjustment (multi-asset MC already ships) | FX-equity correlation adjustment |
-| `FXBarrierOption` | FX | Medium | Reiner-Rubinstein analytic (or MC) barrier pricer | FOR/DOM conventions already defined |
-
-#### 🟡 Missing — Lower Priority (structured / exotic)
-
-| Instrument | Asset class | Complexity | Blocked by | Notes |
-|------------|-------------|------------|------------|-------|
-| `Autocallable` / Phoenix | Structured products | High | Multi-observation structured-payoff recipe (SLV + multi-asset paths already ship) | Multi-hundred-billion dollar market. Path-dependent |
-| `CDOTranche` | Credit correlation | High | Copula simulation (survival curve already ships) | Gaussian copula, base correlation |
-| `ConvertibleBond` | Equity-credit hybrid | High | 1-D PDE with credit (Tsiveriotis-Fernandes) | Equity + credit + optionality |
-| `TARF` | FX structured | High | MC with early termination | Target accrual range forward |
-| `Cliquet` / Ratchet | Equity structured | Medium | Forward-starting structured-payoff recipe (LV / SLV already ship) | Popular in structured notes |
-| `MBS` | Securitized | Very high | Prepayment models, OAS (no pytree yet) | Very US-market-specific |
-| `CompoundOption` | Exotic | Low | Geske decomposition (BSM extension) | Option on an option. Rare in practice |
-| `ChooserOption` | Exotic | Low | BSM decomposition | Choose call/put at a future date |
+The instrument × solver coverage — what is priced, by which solver family
+(analytic, Monte Carlo, PDE, lattice), under which models, and what is
+planned — is stated in one place: the
+[coverage matrix](applications/instrument-pricing.md#coverage-matrix),
+checked against the code by `tests/test_docs/test_price_routes.py`. Every
+planned (🟡) cell there links to the open `- [ ]` item in the tier checklists
+below that tracks it, together with its blocker; `python
+scripts/coverage_report.py` lists them by solver and asset class. The other
+coverage maps (calibration, risk factors, capabilities) are indexed on
+[Coverage Maps](coverage.md).
 
 ---
 
@@ -149,10 +101,11 @@ the short-rate overlay in
 **The boundary is sharp.** The `CurveGraph` flows cleanly through
 **build → `MarketState` → `resolve` → analytic / MC / PDE rates pricers**, and
 now through **short-rate calibration**. It stops at **surfaces and
-portfolio**; **risk** is partway across — scenarios are keyed and the
-repricing loop now goes through `price(...)` on a `MarketState`, but the
-*measurement* layer (ladders, scenario generators, `parametric_var`'s
-covariance) still consumes the flat `MarketData` view. **Surfaces** are
+portfolio**; **risk** is most of the way across — scenarios, scenario
+generators, the repricing loop (`price(...)` on a `MarketState`), ladders,
+waterfall and delta-normal VaR are all keyed, but the FRTB PLA vector pair,
+`pnl_attribution` and the flat `parametric_var` still consume the legacy
+flat `MarketData` view, and portfolio aggregation is not built. **Surfaces** are
 partway across too: the rates vol objects (swaption cube, optionlet surface)
 are curve-aware and carry quote-space vega, while the equity surfaces remain
 curve-free:
@@ -173,17 +126,21 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
             greeks 🟡 ── risk 🟡 ── calibration 🟡 ── surfaces 🟡 ── portfolio ❌
                         (keyed scenarios ✅,   (HW/G2++ ✅,   (rates cubes +
                          repricing loop ✅,     Cheyette       optionlets ✅,
-                         ladders + generators   refuses)       equity surfaces
-                         + covariance flat)                    still curve-free)
+                         generators, ladders,   refuses)       equity surfaces
+                         VaR ✅; PLA flat)                     still curve-free)
 ```
 
 So a book can be **priced** multi-curve today and its short-rate models
 **calibrated** multi-curve; it can be **shocked** per curve
 (`valax.risk.shock` on a `MarketState`) and **repriced** per curve
 (`valax.risk.state_var` through `price(...)`), so a basis widening now
-reaches a P&L number. What is still driven by unkeyed `MarketScenario`
-vectors is the measurement layer above that loop — sensitivity ladders,
-the scenario generators, and `parametric_var`'s positional covariance.
+reaches a P&L number. Keyed generators (`keyed_parametric_scenarios`, …)
+draw those moves from a per-curve `KeyedFactorLayout`, and `keyed_ladder` /
+`keyed_waterfall_pnl` / `keyed_parametric_var` measure them per curve. What
+is still driven by unkeyed `MarketScenario` vectors on the legacy
+`MarketData` path is the rest of the measurement layer — `compute_ladder`,
+the RTPL/HPL vectors, `pnl_attribution` and the flat `parametric_var` (see
+[Remaining work § 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)).
 On the **surfaces** side the rates objects are across: a swaption cube or
 optionlet surface is calibrated off the curves and reports vega in *quote*
 space, so a curve move reaches the volatility layer. The equity surfaces and
@@ -1008,6 +965,7 @@ New stochastic models that unlock entire product categories.
 - [x] **Multi-curve pricing in the MC and PDE short-rate solvers** (ontology P5.1) — `valax.pricing.multicurve` (`with_discount_curve`, `tenor_basis`, `swap_leg_basis`, `apply_swap_basis`): OIS discounting by re-fitting the exact-fit model to the trade's discount curve, plus a frozen deterministic tenor basis for projection. Wired into every Hull-White and G2++ recipe in `valax/pricing/pde/{hull_white,g2pp}.py` and `valax/pricing/mc/recipes.py`, and reached automatically from an instrument's `discount_id` / `forward_id` through `valax.core.price`. Single-curve prices are unchanged bit-for-bit. See [Multi-Curve Short Rates](theory/multi-curve-short-rate.md)
 - [x] **Time-dependent (piecewise-constant) volatility** for Hull-White, G2++ and Cheyette 1F/2F (Phase 4) — every model's volatility is an array of buckets with traced breakpoints `volatility_times` (a scalar is one bucket, bit-identical to before against a golden file, `tests/test_models/test_phase4_golden.py`); shared primitives in `valax.models.short_rate` (`decayed_integral`, `piecewise_integral`, `bucket_index`, `volatility_bucket_fields`); Hull-White `hw_state_variance` / `hw_mean_variance_rate`; G2++ and Cheyette 2F parametrised as a first-factor vol and a ratio (`volatility_x` + `volatility_ratio`, `volatility_1` + `volatility_ratio`; `volatility_y` / `volatility_2` are read-only properties). Every engine reads σ(t): Jamshidian / Brigo-Mercurio closed forms, the PDE (exact step averages; `g2pp_operator_rows`, `cheyette_exact_operator_rows`, `cheyette_operator_rows_2d`), Monte Carlo (exact step variance / covariance) and a general Hull-White trinomial tree (`build_general_hull_white_tree`, `hw_tree_width`) with European and Bermudan swaption tree pricers (`swaption_tree_price`, `bermudan_swaption_tree_price`). Validated against quadrature (1e-12), QuantLib `Gsr` (Hull-White, within 5e-6 of `Gaussian1dSwaptionEngine`), PDE ↔ closed form ↔ tree ↔ MC triangulations, and the β = 0 reductions of Cheyette to Hull-White / G2++. Maths: [Time-Dependent Volatility](theory/time-dependent-volatility.md); the co-terminal bootstrap it enables: [§5.6](#unified-calibration-pricing-and-risk)
 - [ ] **Global piecewise σ(t) calibration on a user grid** — the standalone calibrators (`calibrate_hull_white`, `calibrate_g2pp`, `calibrate_cheyette*`) still fit one constant bucket; a σ(t) fitted on a user-chosen grid to a whole basket (a square strip where the basket is triangular, regularised least squares otherwise — a smoothness penalty against the sawtooth an exact bootstrap makes of quote noise) is the model a portfolio / XVA simulation needs, where one model must serve many trades
+- [ ] **Hull-White PDE sensitivity on the t = 0 pillar**: through `market_risk` the PDE route reports ≈ −price on the reference-date pillar (whose discount factor is 1 by construction) and a small offsetting term on the next pillar, while the analytic and tree routes report 0 there. Parallel DV01 and t > 0 pillar deltas agree across engines (`examples/21`), but raw DF deltas bucketed per pillar differ by engine on that pillar until the PDE reads the curve without the t = 0 normalisation
 - [ ] **Stochastic tenor basis** — a genuine multi-curve HJM / Mercurio extension with its own driver per tenor curve; needed for basis *vega* (basis swaptions, tenor-spread options), which the deterministic overlay prices at zero
 
 **Why:** Short-rate models are the backbone of rates desks for Bermudan swaptions, callable bonds, and path-dependent IR exotics. LMM alone is not enough.
@@ -1147,9 +1105,11 @@ OAS, effective duration and effective convexity ship in `valax/risk/oas.py`.
 - [x] **FX forward** pricing with domestic/foreign discount curves
 - [x] **FX vanilla options** — Garman-Kohlhagen (modified Black-Scholes)
 - [x] **FX smile conventions** — delta-based quoting (spot delta, forward delta, premium-adjusted delta), `strike_to_delta` and `delta_to_strike` conversion
-- [ ] **FX barrier options** — continuous and discrete monitoring (instrument defined, analytical pricing TBD)
-- [ ] **Quanto options** — correlation between FX and underlying
-- [ ] **TARFs (Target Accrual Range Forwards)** — path-dependent FX exotics via MC
+- [ ] **FX barrier options** — continuous and discrete monitoring; Reiner-Rubinstein analytic and/or MC barrier pricer (`FXBarrierOption` pytree and FOR/DOM conventions defined)
+- [ ] **Quanto options** — correlation between FX and underlying; blocked by the quanto drift adjustment (analytic, and as an MC recipe — correlated multi-asset paths already ship); `QuantoOption` pytree defined
+- [ ] **TARFs (Target Accrual Range Forwards)** — path-dependent FX exotics via MC with early termination; `TARF` pytree defined
+- [ ] **FX swap** pricing — near + far leg pair on the domestic / foreign curves and keyed FX spot (`FXSwap` pytree defined; today it is only a curve-bootstrap quote type)
+- [ ] **FX Monte Carlo recipes** — `FXVanillaOption` / `FXBarrierOption` on `generate_gbm_paths` with drift \(r_d - r_f\) (no FX MC recipe ships)
 
 **Why:** FX is one of the largest derivatives markets. FX options have unique smile conventions (delta-space, not strike-space).
 
@@ -1160,10 +1120,10 @@ OAS, effective duration and effective convexity ship in `valax/risk/oas.py`.
 ### 3.4 Credit Derivatives
 
 - [x] **Survival curve** construction from CDS spreads — `valax.curves.survival` (`from_cds_spreads`, `SurvivalCurve`)
-- [ ] **CDS pricing** — protection and premium leg valuation (instrument pytree defined; pricer pending)
+- [ ] **CDS pricing** — protection and premium leg valuation (instrument pytree defined; pricer pending). Prerequisite for XVA (CVA) and for a true repricing hazard bootstrap
 - [x] **Piecewise-constant hazard curves** — `from_hazard_rates` builds a `SurvivalCurve` from a hazard term structure
 - [ ] **Hazard rate bootstrapping** from CDS term structure — *not* implemented. `from_cds_spreads` applies the closed-form credit-triangle approximation `h = s / (1 - R)` (`valax/curves/survival.py`); it performs no root-find and does not reprice the CDS premium/protection legs, so it is not a bootstrap. A true bootstrap would route CDS quotes through `BootstrapInstrument` / `bootstrap_curve_graph` like the rates quotes
-- [ ] **CDO tranche** pricing (Gaussian copula, base correlation) (instrument pytree defined; pricer pending)
+- [ ] **CDO tranche** pricing (Gaussian copula, base correlation) — blocked by copula simulation (the survival curve already ships); instrument pytree defined, pricer pending
 
 **Why:** Credit derivatives are essential for bank trading books and CVA computation.
 
@@ -1174,8 +1134,12 @@ OAS, effective duration and effective convexity ship in `valax/risk/oas.py`.
 - [x] **Zero-coupon inflation swap** pricing — `zcis_price`, breakeven solver
 - [x] **Year-on-year inflation swap** pricing — `yyis_price` (no convexity adjustment yet)
 - [x] **Inflation cap/floor** — Black-76 on forward YoY inflation rate
+- [ ] **Inflation cap/floor vol time to the fixing at period end**: `inflation_cap_floor_price_black76` (and its `price()` adapter) measures the Black-76 time `T` to the period *start*, while the YoY rate is fixed by CPI(Tᵢ) at the period *end*. A spot-starting cap's first caplet therefore gets no time value (T floored to 1e-10). Found by `examples/20`, which uses a forward-start cap to avoid it
+- [ ] **CPI before the first pillar**: `forward_cpi` extrapolates flat *backwards* and `from_zc_rates` adds no reference-date pillar, so CPI(today) reads CPI(first pillar) rather than the base CPI, and a spot-start YoY swap or cap gets a zero first coupon. Anchor the curve at `(reference_date, base_cpi)`. `examples/20` adds the pillar by hand and asserts the bad behaviour
+- [ ] **`index_lag` honoured**: the field is declared on all three inflation instruments but no kernel reads it
 - [ ] **Seasonality adjustment** for monthly CPI
 - [ ] **YoY convexity adjustment** (Jarrow-Yildirim)
+- [ ] **Jarrow-Yildirim three-factor Monte Carlo** — the first inflation MC recipes (`YearOnYearInflationSwap`, `InflationCapFloor`); no inflation MC ships
 
 **Why:** Inflation markets have grown significantly. Real-money investors use inflation swaps for liability hedging.
 
@@ -1183,13 +1147,19 @@ OAS, effective duration and effective convexity ship in `valax/risk/oas.py`.
 
 ### 3.6 Equity Exotics
 
-- [ ] **Autocallable / phoenix notes** — path-dependent early redemption (SLV ships; structured-payoff recipe pending)
+- [ ] **Autocallable / phoenix notes** — path-dependent early redemption; blocked by a multi-observation structured-payoff MC recipe (SLV and multi-asset paths already ship)
+- [ ] **Cliquet / ratchet** — forward-starting structured-payoff MC recipe (LV / SLV already ship); `Cliquet` pytree defined
+- [ ] **Chooser options** — BSM decomposition (choose call / put at a future date); `ChooserOption` pytree defined
+- [ ] **American options by Monte Carlo** — lift the Longstaff-Schwartz engine of the LMM Bermudan (`bermudan_swaption_lsm`) to `AmericanOption` under BS / Heston / LV / SLV
+- [ ] **Digital options by Monte Carlo** — wire `DigitalOption` recipes (smoothed-Heaviside payoff) for BS / Heston / LV / SLV
 - [x] **Worst-of basket options** — multi-asset MC via `MultiAssetGBMModel`
 - [x] **Lookback options** — MC floating and fixed strike
 - [ ] **Touch / no-touch / one-touch** — digital barriers (cash-or-nothing `DigitalOption` ships; one-touch barriers pending)
 - [x] **Range accruals** — Black-76 digital replication (rates `RangeAccrual`)
 - [ ] **Compound options** — option on an option (Geske; pytree defined, pricer pending)
 - [x] **Variance / volatility swaps** — analytic static replication + MC realized variance
+- [ ] **Variance-swap MC annualisation from the time grid**: the MC recipes annualise realised variance with a fixed `annual_factor = 252` that `price()` cannot pass, so the fair strike is right only when `n_steps = 252·T` (at 126 steps over 1Y it is 2σ²). Annualise with `n_obs / T` instead. Demonstrated by `examples/22`
+- [ ] **Per-asset vols for `BlackScholesModel` through `price()`**: the model has no `surface_id`, so `vol=None` reads only the `_default_` surface, and the error message wrongly says the market has no surface for the underlying even when `<ID>.VOL` exists. A multi-asset market must pass the BS vol explicitly, so the surface is not a declared entry and its vega is only a model greek (`examples/22`)
 - [x] **Spread & digital options** — Margrabe / Kirk + MC (spread); analytic + PDE (digital)
 
 **Why:** Structured products desks sell these daily. Autocallables alone are a multi-hundred-billion dollar market.
@@ -1198,10 +1168,11 @@ OAS, effective duration and effective convexity ship in `valax/risk/oas.py`.
 
 ### 3.7 CMS and Spread Options
 
-- [x] **CMS rate convexity adjustment** — `cms_convexity_adjustment` (analytic); Hagan static replication is a follow-up
+- [x] **CMS rate convexity adjustment** — `cms_convexity_adjustment`, Hagan (2003): closed-form quadratic approximation and static replication over the swaption smile (`valax/pricing/analytic/cms_convexity.py`)
 - [x] **CMS cap/floor** pricing — `cms_cap_floor_price_black76`
 - [x] **CMS spread options** — `CMSSpreadSwap` priced under two-factor G2++ / Cheyette (MC + PDE)
 - [ ] **Range accrual on CMS** — structured coupon products
+- [ ] **CMS and range-accrual Monte Carlo on LMM** — CMS swap / CMS cap-floor replication payoffs and full daily-observation range accrual on LMM paths (today these price only by their analytic kernels, outside `price()`)
 
 **Why:** CMS products are actively traded in rates markets. The convexity adjustment is non-trivial and a classic quant problem.
 
@@ -1209,7 +1180,7 @@ OAS, effective duration and effective convexity ship in `valax/risk/oas.py`.
 
 ### 3.8 Mortgage-Backed Securities and Convertible Bonds
 
-- [ ] **MBS** — prepayment models (PSA, CPR), OAS, effective duration
+- [ ] **MBS** — prepayment models (PSA, CPR), OAS, effective duration (very high complexity, US-market-specific; no pytree yet)
 - [ ] **Convertible bonds** — equity-credit hybrid, 1-D PDE with credit (Tsiveriotis-Fernandes); `ConvertibleBond` pytree defined, pricer pending
 
 **Why:** Large markets but specialized. Lower priority unless targeting specific desks.
@@ -1246,9 +1217,9 @@ Portfolio-level risk management and valuation adjustments.
 
 **Why:** Regulatory requirement and core risk management practice.
 
-**Approach:** Scenarios as pytree diffs applied to `MarketData`. Batch repricing via `vmap`. P&L attribution via Taylor expansion using autodiff Greeks. Reverse stress testing via `optimistix.minimize`.
+**Approach:** Scenarios as identifier-keyed pytree diffs (`KeyedScenario`) applied to a `MarketState` by `valax.risk.shock`; batch repricing via `vmap` through `price()`. P&L attribution via Taylor expansion using autodiff Greeks. Reverse stress testing via `optimistix.minimize`.
 
-**Status:** Scenario framework implemented in two representations — the positional `MarketScenario` / `ScenarioSet` pytrees with `apply_scenario` over a `MarketData`, and the identifier-keyed `KeyedScenario` with `shock` over a `MarketState` (`valax/risk/state_shocks.py`) for per-curve, per-surface moves — plus named stress builders (steepener, flattener, butterfly). P&L attribution via `pnl_attribution()` with second-order Taylor expansion. Keyed *generators*, historical crisis replay, and reverse stress testing are next.
+**Status:** Scenario framework implemented on the identifier-keyed `KeyedScenario` with `shock` over a `MarketState` (`valax/risk/state_shocks.py`) for per-curve, per-surface moves, plus keyed generators over a per-curve `KeyedFactorLayout` (`keyed_parametric_scenarios`, `keyed_historical_scenarios`, `keyed_stress_scenario`, `keyed_curve_stress`, `keyed_steepener` / `keyed_flattener` / `keyed_butterfly`, `keyed_basis_shift` in `valax/risk/scenarios.py`) and keyed waterfall attribution (`keyed_waterfall_pnl`). The positional `MarketScenario` / `ScenarioSet` + `apply_scenario` over a `MarketData` remain as the **legacy** path for one deprecation cycle; P&L attribution via `pnl_attribution()` (second-order Taylor) is still on that flat path. Historical crisis replay and reverse stress testing are next.
 
 ### 4.3 XVA Suite
 
@@ -1300,8 +1271,8 @@ Machine learning integration and computational scaling. For the *why* these matt
 ### 5.4 Multi-Dimensional PDE Solvers
 
 - [x] **ADI (Alternating Direction Implicit)** for 2D PDEs — **European Heston `(ln S, v)` delivered** (Douglas / Craig–Sneyd / Hundsdorfer–Verwer)
-- [ ] **American / exotic under 2-D ADI** (early-exercise projection, barriers on the 2-D grid)
-- [ ] **Local-stochastic vol (SLV) and two-asset** 2-D recipes
+- [ ] **American / exotic under 2-D ADI** (early-exercise projection, barriers on the 2-D grid) — first target `AmericanOption` under `HestonModel`, cross-checked against MC / QuantLib FD
+- [ ] **Local-stochastic vol (SLV) and two-asset** 2-D recipes — European `SLVModel` on `(S, v)`; `SpreadOption` on `(S₁, S₂)` cross-checked against Margrabe / Kirk
 - [ ] **Sparse grid** methods for higher dimensions
 - [ ] **Neural PDE solvers** (PINNs) for high-dimensional problems
 
@@ -1387,6 +1358,14 @@ whose "Improve" rows point at the open items below.
 - [x] **End-to-end examples** — `examples/10`–`13` (market tiers, multi-curve book risk, equity smile + Heston + Monte Carlo exotic risk, vmapped quote scenarios with P&L explain), self-checking and run by `tests/test_examples/`
 - [x] **Example 14 — rates per-trade model** — `examples/14_unified_rates_per_trade_model.py`: noisy curves + cube → per-trade Hull-White σ(t) by the co-terminal bootstrap (batched with `eqx.filter_vmap`; basket repriced to ≤ 1e-13, against 2.8% for a constant-σ least-squares fit shown alongside) → Bermudans through `price` (PDE) → quote risk by `λ_m` vs autodiff, with the vega profile across each basket, one entry per exercise date; self-checking (total cube vega equals the summed basket profile)
 - [x] **Examples 15–18 — rates vol chain, diagnostics, SLV, per-trade G2++ / Cheyette** — `examples/15_unified_rates_caps_optionlet_chain.py` (curves → `caplet_strip_node` → `optionlet_sabr_node` → caps / floors through `price` → quote risk vs autodiff and full-recalibration FD), `16_unified_calibration_diagnostics.py` (bad quotes named by `check()` / `failed_labels()`, healthy nodes isolated, `condition_alert`, `check_engine` refusing a frozen-y Cheyette fit), `17_unified_slv_fixed_point.py` (leverage fixed point swept over `n_iterations`, LV / Heston / SLV barrier, risk by AD through the unrolled passes vs FD), `18_unified_rates_per_trade_g2pp_cheyette.py` (per-trade G2++ and Cheyette σ(t) by the co-terminal bootstrap with a, b, ρ, η/σ and κ, β held as fixed inputs; exact vs engine-consistent G2++ bootstrap; model risk vs Hull-White with every model repricing the co-terminals exactly); all self-checking and run by `tests/test_examples/`
+- [x] **Example 19 — a rates book end to end** — `examples/19_unified_book_workflow.py`: synthetic OIS + 3M quotes → joint bootstrap → swaps, fixed-rate bonds and an FRN through `price()` (policy shown per trade) → `market_risk` per trade (Σ = whole-book gradient; bucketed zero-rate DV01s checked against a ±1 bp `shock`) → the bond kernels (`fixed_rate_bond_price` equals the routed price; YTM / duration / convexity explain a 25 bp move) → `fit_rates_pca` on a synthetic curve history → PC and basis `KeyedScenario`s revalued under `vmap` with P&L explain, PC-score sensitivities by `jax.grad`, VaR / ES; self-checking and run by `tests/test_examples/`
+- [x] **Examples 20–22: FX / inflation / cross-currency, the rates engine ladder, multi-asset and path-dependent exotics**:
+  - `examples/20_unified_fx_inflation_xccy.py`: FX forward and option, cross-currency, 3M-vs-6M multi-leg, ZCIS, YoY and cap / floor on one multi-currency market. Checked by covered interest parity, put–call parity, the leg sum and cap − floor = YoY; `market_risk` exactly zero outside declared entries and decoys.
+  - `21_unified_rates_engine_ladder.py`: one European and one Bermudan swaption under Hull-White / G2++ / Cheyette 1F / 2F / LMM by every registered engine. Within-model agreement to measured tolerances against the closed forms, Bermudan ≥ European, the `auto` policy and its errors, curve deltas agreeing across engines.
+  - `22_unified_multi_asset_exotics.py`: spread and worst-of under `MultiAssetGBMModel` vs Margrabe / Kirk; a barrier / Asian / lookback / variance-swap ladder under BS / Heston / LV / SLV with exact anchors; spot risk; a dual digital composed on the path kernel.
+
+  All self-checking and run by `tests/test_examples/` (21 and 22 are `slow`). The route limitations they surfaced are open items in [§2.1](#21-short-rate-models), [§3.5](#35-inflation-derivatives) and [§3.6](#36-equity-exotics).
+- [x] **Retire the `MarketData`-era examples** — `examples/07_synthetic_market.py`, `08_end_to_end_workflow.py`, `09_pca_rates_pnl.py` and `comparisons/08_risk_greeks_var.py` are removed: they were built on `MarketData` / `MarketScenario` / the legacy `valax/risk/var.py`, which are scheduled for removal. Successors: examples 10–13 and 19 (mapping in `docs/examples.md` § Retired examples); the calibration-residual loop of 08 stays tested in `tests/test_market/test_calibration_residual.py`. The kernel-layer examples 01–06, `comparisons/` and `pitfalls/` are kept on purpose: the kernels are public API alongside `price()`, not legacy
 - [ ] **Richer synthetic noise** — bid/ask pairs as fit weights, correlated noise across a strip, stale / missing quotes
 - [x] **Migrate the per-model calibrators** — every calibrator returns `CalibrationResult` and takes `settings: SolverSettings` (`EXACT_SETTINGS`, `FIT_SETTINGS`; `BASKET_SETTINGS` = BFGS to 1e-12 for Hull-White / G2++, whose closed forms nest a root-find with a non-finite implicit derivative far from the solution; `CHEYETTE_SETTINGS` = BFGS to 1e-10). `calibrate_sabr` / `calibrate_heston` / `calibrate_svi_slice` are `solve_level` wrappers; `calibrate_hull_white` / `calibrate_g2pp` / `calibrate_cheyette*` wrap `basket_fit_level` (curve-free models); the SABR / SVI surface, optionlet surface and swaption cube loops are batched levels (`sabr_batch_level`, `solve_batched_level`, `swaption_cube_level`); `strip_caplet_vols` is solved bucket by bucket but packaged as one lower-triangular root level (`caplet_strip_level`, strike columns batched by `strip_columns_level`); `strip_optionlet_surface` returns the SABR level with the strip as a child; `calibrate_slv*` are fixed-point levels. No string solver selection remains, there is one return type, and the six unchecked `throw=False` solves (Hull-White ×2, G2++ ×2, Cheyette `_run_solver` ×2) plus those in `strip_caplet_vols` / `swaption_implied_normal_vol` and the diagnostics discarded by the surface loops and curve wrappers now report traceable convergence. Migration evidence (old vs new): SABR LM bit-identical, SABR BFGS ≤ 1e-9 in parameters, Heston (COS) bit-identical, Hull-White ≤ 1e-14 relative in price, G2++ ≤ 7e-15, Cheyette frozen-`y` ≤ 1.2e-12 relative in price, caplet strip ≤ 3e-16 in vols, batched surfaces equal to per-slice fits to 1e-12
 - [x] **Curve bootstrap as a calibration level** — `bootstrap_curve_graph` returns the same root level as `curve_graph_node` (labels name each instrument); `CurveBuildDiagnostics` is retired (fitted quotes via `fitted_curve_quotes`, conditioning via `result.condition_number()`), and `quote_jacobian` raises `CalibrationError` on an unconverged build
@@ -1406,7 +1385,7 @@ whose "Improve" rows point at the open items below.
 - [x] **LMM curve de-embedding** (Phase 4, [D18](architecture/calibration-pricing-risk.md#3-decisions)) — `LMMModel(tenor_dates, vol_structure, corr_structure, initial_curve=None, curve_id=None)`: the initial forwards, accruals, tenor times, `P(0, T_0)` and factor loadings are properties of the bound curve (the loadings now follow `corr_structure`, so correlation gradients reach the paths); `curve_requirements(LMMModel)` binds the pinned id, else the trade's discount curve; `price()` refuses a pre-bound model; `build_lmm_model(curve, …)` returns the bound model for kernel calls, bit-identical paths and prices (`tests/test_models/test_lmm.py`)
 - [ ] **Constrained (KKT) and FX smile levels** — arbitrage-free SVI, the FX delta system
 - [x] **Explicit pricing policy and default configs** (Phase 4, workstream 2a, [D15](architecture/calibration-pricing-risk.md#3-decisions)) — `valax.core.policy` states the `auto` method of every registered pair (`AUTO_METHODS`; the global analytic → lattice → pde → mc fallback is removed, so `auto` raises for a pair without a policy) and a default config for each numerical method (`set_default_config`, `default_config`, `effective_config`; PDE grids, the Cheyette calibrator's frozen-y grids, `MCConfig(100_000, 100)`, `TreeConfig()`), so `price(..., config=None)` works for every method. `PricingResult.config` and calibration provenance record the config actually used. The frozen map reproduces every former `auto` choice (`tests/test_core/test_pricing_policy.py`, pinned to the Phase 4 golden file)
-- [x] **Rates routes added to `price`** (Phase 4, workstream 2a) — `ImpliedVolModel(surface_id)` prices `Caplet` / `Cap` / `Swaption` off a market vol source (cube, optionlet surface, flat `ConstantVol` normal or lognormal) by the `rates_smile` kernels, bit-identical (`tests/test_models/test_implied_vol.py`); `swaption_basket_node` prices its targets through it and example 15 uses it. The Hull-White tree (`callable_bond_price`, `puttable_bond_price`, `swaption_tree_price`, `bermudan_swaption_tree_price`) is routed under `method="lattice"` with `TreeConfig` (general tree, half-width `⌈width_factor · n_steps⌉`, factor 2, so it runs on a traced model; `auto` unchanged) (`tests/test_lattice/test_hull_white_tree_routes.py`). The coverage matrix's `price()` routes column is checked against the registry both ways (`tests/test_docs/test_price_routes.py`)
+- [x] **Rates routes added to `price`** (Phase 4, workstream 2a) — `ImpliedVolModel(surface_id)` prices `Caplet` / `Cap` / `Swaption` off a market vol source (cube, optionlet surface, flat `ConstantVol` normal or lognormal) by the `rates_smile` kernels, bit-identical (`tests/test_models/test_implied_vol.py`); `swaption_basket_node` prices its targets through it and example 15 uses it. The Hull-White tree (`callable_bond_price`, `puttable_bond_price`, `swaption_tree_price`, `bermudan_swaption_tree_price`) is routed under `method="lattice"` with `TreeConfig` (general tree, half-width `⌈width_factor · n_steps⌉`, factor 2, so it runs on a traced model; `auto` unchanged) (`tests/test_lattice/test_hull_white_tree_routes.py`). The coverage matrix's `price()` routes column — and, since the coverage unification, its four solver columns (Analytic / MC / PDE / Lattice: routed, kernel-only, planned) and each row's status — are checked against the registry both ways (`tests/test_docs/test_price_routes.py`)
 - [x] **Multi-asset routes priceable through `price`** (Phase 4, D16) — `SpreadOption` / `WorstOfBasketOption` name their assets in `underlying_ids`; `price()` resolves the spots in that order and hands them to the MC recipes as `spots`, bit-identical to a direct `mc_price_dispatch` (`tests/test_mc/test_multi_asset_route.py`)
 - [x] **LMM routes priceable through `price`** (Phase 4, D18) — `Caplet`, `Cap`, `Swaption`, `BermudanSwaption` × `LMMModel` (`mc`): the recipes in `valax/pricing/mc/recipes.py` map the trade's periods onto `tenor_dates` from the dates (`valax.pricing.mc.lmm_period_indices`; off-grid dates raise when concrete, NaN when traced; the trade's day count must be the curve's) and spread `MCConfig.n_steps` over the grid segments (`n_steps_per_period` is an override); each route equals the recipe with explicit indices bit for bit, curve risk equals the bound-model delta to 1e-12, caplets match Black-76 within 2 pooled stderr, a one-exercise Bermudan equals the European (`tests/test_mc/test_lmm_routes.py`); all four pass the route contract. Routing them fixed the European swaption payoff (forwards at expiry, not at their own fixings: +20% before; now within 0.6 stderr of Black at Rebonato's swap vol, `tests/test_mc/test_lmm.py`)
 - [ ] **LMM grid from the trade** — dates must sit on the model's tenor grid, a caplet fixing lag is not modelled, and the trade's day count must equal the curve's; separate fixing / accrual conventions per period would lift all three
@@ -1417,6 +1396,16 @@ whose "Improve" rows point at the open items below.
 - [x] **FX forward and FX vanilla through `price`** (Phase 4 close-out, first trades onboarded by the checklist) — `FXForward × None` and `FXVanillaOption × ImpliedVolModel` (`analytic`); new static selectors `discount_id` (domestic) / `foreign_discount_id`, FX spot keyed by the pair, rates `project_rate` of each curve to expiry, vol `sample_vol` at (strike, expiry); bit-identical to `fx_forward_price` / `garman_kohlhagen_price` (`tests/test_core/test_fx_routes.py`)
 - [ ] **Derivative convergence of numerical engines** — PDE / lattice / MC Greeks against exact oracles with documented per-engine tolerances
 - [ ] **Position / portfolio layer** — quantity and trade id, grouping by structure and shape, manual schedule padding, book-level quote risk through one sweep
+
+### 5.7 Monte Carlo Variance Reduction
+
+Neither `mc_price_dispatch` nor the low-level path pipeline applies variance
+reduction today (engine notes: [Monte Carlo § 8](guide/monte-carlo.md#8-variance-reduction-planned)).
+
+- [ ] **Antithetic variates** — plug-in at the path-generator level; ~2× for smooth payoffs
+- [ ] **Control variates** — e.g. Black-Scholes as the control for Heston / SABR
+- [ ] **Importance sampling** — problem-specific (deep out-of-the-money, barriers)
+- [ ] **Stratified / quasi-MC (Sobol, Halton)** — blocked: `diffrax` does not yet expose quasi-random Brownian increments
 
 ---
 

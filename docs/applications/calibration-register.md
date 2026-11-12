@@ -1,5 +1,7 @@
 # Calibration Methodology & Assumptions Register
 
+<!-- coverage-map -->
+
 Every calibration in VALAX makes choices: what it fits and what it holds
 fixed, which instruments it fits to, in which space it measures the misfit,
 which engine prices the targets, and what it silently assumes about the
