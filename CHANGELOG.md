@@ -48,6 +48,38 @@ listed as priceable that are not (compound, chooser, autocallable, cliquet,
 quanto, forward-start), and module names that no longer exist; the analytical
 guide's "three closed-form models".
 
+### Changed — examples: unified end-to-end examples 19–22; `MarketData`-era demos retired
+
+**Added** `examples/20_unified_fx_inflation_xccy.py` (FX, cross-currency,
+multi-leg and inflation trades on one multi-currency market, checked by parity
+identities, with declared-entry risk), `21_unified_rates_engine_ladder.py`
+(one European and one Bermudan swaption under every short-rate / LMM model and
+engine) and `22_unified_multi_asset_exotics.py` (spread / worst-of, and a
+barrier / Asian / lookback / variance-swap ladder across BS, Heston, LV and SLV,
+plus a kernel-built dual digital). 21 and 22 are `slow` in
+`tests/test_examples/`. The route limitations they surfaced are recorded as
+open roadmap items: inflation caplet vol time, CPI before the first pillar,
+unused `index_lag`, variance-swap annualisation, per-asset BS vols, and the
+t = 0 pillar sensitivity of the Hull-White PDE.
+
+**Added** `examples/19_unified_book_workflow.py`: quotes → OIS + 3M bootstrap →
+swaps, bonds and an FRN through `price()` → per-trade `market_risk` (bucketed
+DV01s, ±1 bp `shock` check) → bond YTM / duration / convexity from the kernels
+→ `fit_rates_pca` → PC and basis `KeyedScenario`s under `vmap` with P&L
+explain, PC-score sensitivities and VaR / ES. Self-checking; run by
+`tests/test_examples/`.
+
+**Removed** `examples/07_synthetic_market.py`, `08_end_to_end_workflow.py`,
+`09_pca_rates_pnl.py` and `comparisons/08_risk_greeks_var.py`. They were built
+on `MarketData`, `MarketScenario` and the legacy `valax/risk/var.py`, which are
+scheduled for removal. Successors are mapped in `docs/examples.md` § Retired
+examples, and the calibration-residual loop of 08 stays tested in
+`tests/test_market/test_calibration_residual.py`.
+
+**Kept on purpose:** examples 01–06, `comparisons/` and `pitfalls/` call the
+kernels directly. The kernel layer is public API alongside `price()`, not
+legacy; `AGENTS.md`, `CONTRIBUTING.md` and `docs/examples.md` now say so.
+
 ### Changed — Phase 4 (D18) — curve-free LMM; the four LMM routes through `price()`
 
 **`LMMModel` is curve-free.** Fields are now `tenor_dates`, `vol_structure`,

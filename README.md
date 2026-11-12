@@ -129,23 +129,33 @@ Runnable scripts in `examples/` demonstrate the full library with synthetic mark
 | `04_rates_derivatives.py` | Caplet/floor pricing, cap strips, swaps, swaptions, rate Greeks |
 | `05_monte_carlo.py` | GBM/Heston/SABR paths, convergence, Asian + barrier exotics |
 | `06_pde_and_lattice.py` | Crank-Nicolson PDE, binomial trees, American options, method comparison |
-| `07_synthetic_market.py` | Synthetic market snapshot/correlation generators, portfolio sampling, batched pricing |
-| `08_end_to_end_workflow.py` | Full six-stage workflow: synthetic world → noisy observations → calibration → portfolio → pricing/Greeks → arbitrage stress test |
-| `09_pca_rates_pnl.py` | Synthetic yield-curve history, PCA rates factor model, level/slope/curvature shocks, bond-ladder P&L |
 | `10_unified_market_tiers.py` | One option on three markets — flat Black-Scholes, bootstrapped curve + SABR smile, + calibrated Heston — through the same quotes → calibrate → price → quote-risk workflow |
 | `11_unified_multicurve_rates.py` | Synthetic OIS + 3M quotes → joint bootstrap → swap book → book quote risk in one adjoint sweep (vs autodiff and FD), single-curve limit |
 | `12_unified_equity_smile_and_model.py` | Noisy equity quotes → curve, SABR smiles, Heston → European / barrier / Asian prices → Monte Carlo quote risk with fixed-input sensitivities |
 | `13_unified_quote_scenarios.py` | Correlated quote scenarios → `vmap` recalibration + repricing compiled once → P&L explain vs first-order quote risk → VaR / ES |
+| `14_unified_rates_per_trade_model.py` | Curves → swaption cube → per-trade Hull–White σ(t) co-terminal bootstrap → Bermudan through `price()` (PDE) → quote risk and vega profile |
+| `15_unified_rates_caps_optionlet_chain.py` | Cap strip → optionlet SABR as chain nodes → caps / floors through `price()` → quote risk |
+| `16_unified_calibration_diagnostics.py` | Bad quotes named by `check()` / `failed_labels()`, conditioning alerts, engine provenance |
+| `17_unified_slv_fixed_point.py` | SLV leverage as a fixed-point level, LV / Heston / SLV barrier, risk by AD |
+| `18_unified_rates_per_trade_g2pp_cheyette.py` | Per-trade G2++ and Cheyette σ(t), exact vs engine-consistent calibration, model risk vs Hull–White |
+| `19_unified_book_workflow.py` | Rates book end to end: quotes → curves → `price()` → `market_risk` → bond kernels → PCA + basis `KeyedScenario`s, P&L explain, VaR / ES |
+| `20_unified_fx_inflation_xccy.py` | FX forward / option, cross-currency and basis swaps, ZCIS / YoY / caps on one multi-currency market; parity checks; risk exactly zero outside declared entries |
+| `21_unified_rates_engine_ladder.py` | One European and one Bermudan swaption under Hull–White, G2++, Cheyette 1F/2F and LMM by every engine; engine agreement, the `auto` policy, curve risk across engines |
+| `22_unified_multi_asset_exotics.py` | Spread / worst-of under multi-asset GBM; barrier / Asian / lookback / variance swap under BS, Heston, LV, SLV; spot risk; a kernel-built dual digital |
 
-Examples 10–13 exercise the unified calibration framework end to end on
-synthetic *quotes* generated from a known true market
+**Two layers, both supported.** Examples 01–06 call the pricing kernels
+directly. That layer is public API, not legacy, and it is the one to compose
+when `price()` does not express what you need. Examples 10–22 use the unified
+`price(instrument, model, market)` contract on a keyed `MarketState`. They run
+end to end on synthetic *quotes* generated from a known true market
 (`valax.market.rates_snapshot` / `equity_snapshot`) and assert their own
 claims; `tests/test_examples/` runs them in fast mode
-(`VALAX_EXAMPLES_FAST=1`).
+(`VALAX_EXAMPLES_FAST=1`). Examples 07–09 were retired with the `MarketData`
+deprecation (see the *Retired examples* table in `docs/examples.md`).
 
 `examples/comparisons/` additionally contains side-by-side comparison scripts
 (e.g. against QuantLib) covering options, fixed income, SABR, caps/swaptions,
-Monte Carlo, PDE/lattice, Heston smiles, risk/VaR, local-vol PDE, and
+Monte Carlo, PDE/lattice, Heston smiles, local-vol PDE, and
 Hull-White, G2++ and Cheyette across MC, tree, PDE and analytic engines.
 
 ```bash

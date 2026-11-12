@@ -26,6 +26,10 @@ UNIFIED = (
     pytest.param("16_unified_calibration_diagnostics.py", marks=_slow),
     pytest.param("17_unified_slv_fixed_point.py", marks=_slow),
     pytest.param("18_unified_rates_per_trade_g2pp_cheyette.py", marks=_slow),
+    "19_unified_book_workflow.py",
+    "20_unified_fx_inflation_xccy.py",
+    pytest.param("21_unified_rates_engine_ladder.py", marks=_slow),
+    pytest.param("22_unified_multi_asset_exotics.py", marks=_slow),
 )
 
 

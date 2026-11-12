@@ -31,9 +31,10 @@ Relationship to the legacy view
 -------------------------------
 
 ``MarketScenario`` stays the legacy view for one deprecation cycle: the
-whole ``valax/risk/var.py`` VaR framework, the scenario generators in
-``valax/risk/scenarios.py`` and ``examples/09_pca_rates_pnl.py`` consume
-it unchanged.  :func:`keyed_from_market_scenario` lifts one into a
+whole ``valax/risk/var.py`` VaR framework and the scenario generators in
+``valax/risk/scenarios.py`` consume it unchanged.
+``examples/19_unified_book_workflow.py`` shows the keyed path end to end
+(PCA and basis scenarios on a dual-curve book).  :func:`keyed_from_market_scenario` lifts one into a
 ``KeyedScenario`` so the two representations can be cross-checked against
 each other (and so a legacy generator can feed the keyed path).
 """

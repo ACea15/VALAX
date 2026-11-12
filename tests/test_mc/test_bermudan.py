@@ -6,8 +6,6 @@ Validates the backward induction algorithm against known properties:
 - Price is finite and positive for ITM swaptions
 - JIT compatibility
 - Payer and receiver both produce positive prices
-
-Companion example: examples/comparisons/08_bermudan_swaption.py (planned)
 """
 
 import jax
