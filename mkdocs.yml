@@ -29,6 +29,9 @@ markdown_extensions:
   - toc:
       permalink: true
 
+extra_css:
+  - stylesheets/extra.css
+
 extra_javascript:
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
@@ -58,9 +61,22 @@ watch:
   - valax
 
 # Intentionally outside the sidebar, each with a back-link to its parent:
-# the audience pages are reached from applications/index.md § 3, and
-# positioning/peers.md from positioning/index.md.
+# the audience pages are reached from applications/index.md § 3,
+# positioning/peers.md from positioning/index.md, the asset-class guides from
+# guide/asset-classes.md and the numerical-method guides from
+# guide/numerical-methods.md.
 not_in_nav: |
+  /guide/fixed-income.md
+  /guide/callable-bonds.md
+  /guide/rates-exotics.md
+  /guide/fx.md
+  /guide/inflation.md
+  /guide/equity-exotics.md
+  /guide/credit.md
+  /guide/analytical.md
+  /guide/monte-carlo.md
+  /guide/pde.md
+  /guide/lattice.md
   /applications/market-risk.md
   /applications/quant-research.md
   /applications/trading-desk.md
@@ -81,19 +97,8 @@ nav:
   - Solvers and Instruments:
       - Instrument Coverage Matrix: applications/instrument-pricing.md
       - Calibration Assumptions Register: applications/calibration-register.md
-      - Instruments:
-          - Fixed Income: guide/fixed-income.md
-          - Callable/Puttable/FRN/Convertible Bonds: guide/callable-bonds.md
-          - Interest Rate Exotics: guide/rates-exotics.md
-          - FX Derivatives: guide/fx.md
-          - Inflation Derivatives: guide/inflation.md
-          - Equity Exotics: guide/equity-exotics.md
-          - Credit Derivatives: guide/credit.md
-      - Solvers:
-          - Analytical Pricing: guide/analytical.md
-          - Monte Carlo: guide/monte-carlo.md
-          - PDE Solvers: guide/pde.md
-          - Binomial Trees: guide/lattice.md
+      - Asset Classes: guide/asset-classes.md
+      - Numerical Methods: guide/numerical-methods.md
       - Synthetic Market Data: guide/synthetic_market.md
   - Conventions:
       - Dates, Schedules & Accrual: guide/dates-and-conventions.md

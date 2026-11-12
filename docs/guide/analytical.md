@@ -1,5 +1,7 @@
 # Analytical Pricing
 
+[← Numerical Methods](numerical-methods.md)
+
 This page covers the closed-form vanilla engines — Black-Scholes-Merton,
 Black-76, Bachelier, SABR and Garman-Kohlhagen — and how to pick between them.
 **Which instruments have an analytic pricer**, routed through `price()` (✅)

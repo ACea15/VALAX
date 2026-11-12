@@ -1,5 +1,7 @@
 # Interest Rate Exotics
 
+[← Asset Classes](asset-classes.md)
+
 Interest rate derivatives are the largest derivatives market by notional. VALAX's
 core IR instruments (caps, floors, swaptions, vanilla IRS) are documented in the
 [Fixed Income](fixed-income.md) guide and the [Analytical Pricing](analytical.md)

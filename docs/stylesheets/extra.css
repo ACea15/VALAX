@@ -1,0 +1,16 @@
+/* Use more of the screen: Material caps the page grid at 61rem by default,
+   which forces wide tables (e.g. the coverage matrix) to scroll sideways. */
+.md-grid {
+  max-width: 96rem; /* use `none` for full viewport width */
+}
+
+/* Let tables use the full content column instead of shrink-wrapping. */
+.md-typeset__table {
+  display: block;
+  width: 100%;
+}
+
+.md-typeset table:not([class]) {
+  display: table;
+  width: 100%;
+}

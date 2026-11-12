@@ -1,5 +1,7 @@
 # Lattice Methods
 
+[← Numerical Methods](numerical-methods.md)
+
 VALAX provides two recombining-lattice pricing engines: a Cox-Ross-Rubinstein
 (CRR) binomial tree for equity vanillas, and a Hull-White trinomial tree for
 short-rate bonds with embedded optionality and for European / Bermudan

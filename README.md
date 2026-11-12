@@ -186,7 +186,7 @@ pytest tests/test_pricing/test_black_scholes.py -v
 mkdocs build --strict
 
 # Serve docs locally
-mkdocs serve
+mkdocs serve --livereload
 ```
 
 ## License

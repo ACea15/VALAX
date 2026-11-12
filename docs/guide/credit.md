@@ -1,5 +1,7 @@
 # Credit Derivatives
 
+[← Asset Classes](asset-classes.md)
+
 !!! warning "Partially implemented — instrument pricers on the roadmap"
     The **survival / hazard-rate curve** bootstrapped from CDS spreads is implemented
     (`valax.curves.survival` — `from_cds_spreads`, `from_hazard_rates`,

@@ -1,5 +1,7 @@
 # Monte Carlo Pricing
 
+[← Numerical Methods](numerical-methods.md)
+
 VALAX provides a three-layer Monte Carlo stack:
 
 1. **Path generators** — low-level SDE simulators, built on

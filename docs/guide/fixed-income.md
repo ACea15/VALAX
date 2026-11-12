@@ -1,5 +1,7 @@
 # Fixed Income
 
+[← Asset Classes](asset-classes.md)
+
 VALAX provides a full fixed income stack: date utilities, discount curves, bond instruments, and pricing with autodiff risk measures (duration, convexity, key-rate durations).
 
 ## Date Utilities

@@ -1,5 +1,7 @@
 # PDE Solvers
 
+[← Numerical Methods](numerical-methods.md)
+
 VALAX prices derivatives by solving the pricing PDE with finite differences —
 Crank–Nicolson in 1-D and Alternating-Direction Implicit (ADI) schemes in 2-D —
 with the tridiagonal systems solved via [lineax](https://docs.kidger.site/lineax/).
