@@ -1,7 +1,5 @@
 # Inflation Derivatives
 
-[← Asset Classes](asset-classes.md)
-
 Inflation derivatives are linked to a **Consumer Price Index (CPI)** such as
 US CPI-U, Euro HICP, or UK RPI. The key conventions are:
 

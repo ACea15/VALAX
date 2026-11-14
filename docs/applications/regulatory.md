@@ -1,7 +1,5 @@
 # Regulatory Applications: FRTB & CCAR
 
-[← Applications overview](index.md#3-the-audience-map-ranked-by-fit-today) · one of five audience pages
-
 *How VALAX supports bank market-risk capital programmes — the Basel III.1 **Fundamental Review of the Trading Book (FRTB)** migration and the Federal Reserve's annual **Comprehensive Capital Analysis and Review (CCAR / DFAST)** stress tests.*
 
 This page is the **outward-facing** view of the risk stack described in [Risk: End-to-End](../risk-overview.md), the Risk how-to pages (starting with [Scenarios & Shocks](../risk-scenarios.md)), and [Models & Theory § 7](../theory/risk-measures.md#7-risk-measures). Read those first for the mathematical foundations and the code walkthrough; read *this* to see how they map onto a real bank regulatory programme.

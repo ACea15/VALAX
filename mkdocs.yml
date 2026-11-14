@@ -6,14 +6,18 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  logo: assets/logo.svg        # italic V pierced by a bullet ("vala")
+  # PNG, not SVG: Safari ignores SVG favicons. Regenerate from the SVG source with
+  #   rsvg-convert -w 64 -h 64 docs/assets/favicon.svg -o docs/assets/favicon.png
+  favicon: assets/favicon.png  # same mark on a navy tile
   palette:
     - scheme: slate
-      primary: deep purple
+      primary: custom  # navy, defined in docs/stylesheets/extra.css
       accent: amber
   features:
     - content.code.copy
     - navigation.sections
-    - navigation.expand
+    - navigation.indexes  # a section's index.md is its clickable parent page
     - toc.follow
 
 markdown_extensions:
@@ -60,45 +64,45 @@ plugins:
 watch:
   - valax
 
-# Intentionally outside the sidebar, each with a back-link to its parent:
-# the audience pages are reached from applications/index.md § 3,
-# positioning/peers.md from positioning/index.md, the asset-class guides from
-# guide/asset-classes.md and the numerical-method guides from
-# guide/numerical-methods.md.
-not_in_nav: |
-  /guide/fixed-income.md
-  /guide/callable-bonds.md
-  /guide/rates-exotics.md
-  /guide/fx.md
-  /guide/inflation.md
-  /guide/equity-exotics.md
-  /guide/credit.md
-  /guide/analytical.md
-  /guide/monte-carlo.md
-  /guide/pde.md
-  /guide/lattice.md
-  /applications/market-risk.md
-  /applications/quant-research.md
-  /applications/trading-desk.md
-  /applications/regulatory.md
-  /applications/treasury.md
-  /positioning/peers.md
-
+# Nested sections stay collapsed until clicked (no navigation.expand). A section
+# whose first entry is an index.md shows only that parent page; its children
+# appear when it is opened (navigation.indexes).
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
-  - Strategy & Direction:  
-      - Positioning & Design Rationale: positioning/index.md
+  - Strategy & Direction:
+      - Positioning & Design Rationale:
+          - positioning/index.md
+          - Peer Tools & Market Segments: positioning/peers.md
       - Vision: vision.md
-      - Applications Overview: applications/index.md
+      - Applications Overview:
+          - applications/index.md
+          - Market Risk & Model Validation: applications/market-risk.md
+          - Quant Research: applications/quant-research.md
+          - Front-Office Trading: applications/trading-desk.md
+          - "Regulatory: FRTB & CCAR": applications/regulatory.md
+          - Treasury & ALM: applications/treasury.md
       - Roadmap: roadmap.md
       - Coverage Maps: coverage.md
       - Research Ideas: research-ideas.md
   - Solvers and Instruments:
       - Instrument Coverage Matrix: applications/instrument-pricing.md
       - Calibration Assumptions Register: applications/calibration-register.md
-      - Asset Classes: guide/asset-classes.md
-      - Numerical Methods: guide/numerical-methods.md
+      - Asset Classes:
+          - guide/asset-classes/index.md
+          - Fixed Income: guide/fixed-income.md
+          - Callable/Puttable/FRN/Convertible Bonds: guide/callable-bonds.md
+          - Interest Rate Exotics: guide/rates-exotics.md
+          - FX Derivatives: guide/fx.md
+          - Inflation Derivatives: guide/inflation.md
+          - Equity Exotics: guide/equity-exotics.md
+          - Credit Derivatives: guide/credit.md
+      - Numerical Methods:
+          - guide/numerical-methods/index.md
+          - Analytical Pricing: guide/analytical.md
+          - Monte Carlo: guide/monte-carlo.md
+          - PDE Solvers: guide/pde.md
+          - Binomial Trees: guide/lattice.md
       - Synthetic Market Data: guide/synthetic_market.md
   - Conventions:
       - Dates, Schedules & Accrual: guide/dates-and-conventions.md
@@ -140,16 +144,18 @@ nav:
       - Risk Measures: theory/risk-measures.md
       - Calibration Theory: theory/calibration.md
       - "Calibration Chains: Quotes to Risk": theory/calibration-chains.md
-      - Interest-Rate Derivatives: theory/rate-derivatives.md
-      - References: theory/references.md
       - Rates:
-          - "Hull-White MC: Exact Conditional Simulation": theory/hull-white-mc.md
-          - "Hull-White Swaptions: Jamshidian Decomposition": theory/hull-white-swaptions.md
-          - "Hull-White Finite Differences: Bermudans and Callables": theory/hull-white-pde.md
-          - "Time-Dependent Volatility: HW, G2++, Cheyette and the General Tree": theory/time-dependent-volatility.md
-          - "G2++: Two-Factor Gaussian and Decorrelation": theory/g2pp.md
-          - "Cheyette: Quasi-Gaussian Skew": theory/cheyette.md
-          - "Multi-Curve Short Rates: the Deterministic Tenor Basis": theory/multi-curve-short-rate.md
+          - theory/rates/index.md
+          - Derivatives:
+              - Interest-Rate Derivatives: theory/rate-derivatives.md
+              - "Hull-White MC: Exact Conditional Simulation": theory/hull-white-mc.md
+              - "Hull-White Swaptions: Jamshidian Decomposition": theory/hull-white-swaptions.md
+              - "Hull-White Finite Differences: Bermudans and Callables": theory/hull-white-pde.md
+              - "Time-Dependent Volatility: HW, G2++, Cheyette and the General Tree": theory/time-dependent-volatility.md
+              - "G2++: Two-Factor Gaussian and Decorrelation": theory/g2pp.md
+              - "Cheyette: Quasi-Gaussian Skew": theory/cheyette.md
+              - "Multi-Curve Short Rates: the Deterministic Tenor Basis": theory/multi-curve-short-rate.md
+      - References: theory/references.md
   - Risk:
       - Overview: risk-overview.md
       - Risk Factors: risk-factors.md

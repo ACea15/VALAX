@@ -268,6 +268,7 @@ Underlying: forward and swap rates off a multi-curve framework
 numeraire that makes the relevant rate a martingale
 ([Theory §9.1](../theory/rate-derivatives.md#91-change-of-numeraire-and-the-forward-measure)).
 Usage: [Rates exotics guide](../guide/rates-exotics.md). Fields: [API](../api/instruments.md).
+Theory map: [Rates: Products and Models](../theory/rates/index.md).
 
 ### Caplet / floorlet
 A single-period call/put on a simply-compounded forward rate $F_i$: pays $\tau_i\,(F_i(T_{i-1})-K)^+$ at $T_i$ (caplet). Priced by Black-76 or Bachelier under the $T_i$-forward measure; a per-expiry smile is supplied by an `OptionletVolSurface`. See [Theory §9.2](../theory/rate-derivatives.md#92-caps-floors-and-the-caplet-formula) and [§2.2](../theory/stochastic-models.md#22-black-76-futures-forwards)/[§2.3](../theory/stochastic-models.md#23-bachelier-normal-model).

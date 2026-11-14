@@ -1,3 +1,18 @@
+/* Navy header/tabs (mkdocs.yml sets `primary: custom`). */
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: #1b3a6b;
+  --md-primary-fg-color--light: #2a4f8a;
+  --md-primary-fg-color--dark: #122a4f;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+}
+
+/* On the dark (slate) scheme, links default to the primary colour, which
+   would make navy links unreadable — use a light blue instead. */
+[data-md-color-scheme="slate"][data-md-color-primary="custom"] {
+  --md-typeset-a-color: #7fb0ff;
+}
+
 /* Use more of the screen: Material caps the page grid at 61rem by default,
    which forces wide tables (e.g. the coverage matrix) to scroll sideways. */
 .md-grid {

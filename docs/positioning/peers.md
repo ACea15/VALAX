@@ -1,7 +1,5 @@
 # Peer Tools & Market Segments
 
-[← Positioning & Design Rationale](index.md) · competitive positioning
-
 *How VALAX compares with the other systems that fill the pricing-and-risk "third ring" — QuantLib, vendor platforms, bank internal libraries, prop and buy-side stacks — and where, across those market segments, an open, differentiable, GPU-vectorised engine is most likely to be useful.*
 
 ---

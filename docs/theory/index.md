@@ -75,4 +75,4 @@ own page under `theory/`.
   - [9.6 Model Choice for Rate Derivatives](rate-derivatives.md#96-model-choice-for-rate-derivatives)
 - [References](references.md#references)
 
-Rates deep-dives (own pages): [Hull-White Monte Carlo](hull-white-mc.md) · [Hull-White Swaptions (Jamshidian)](hull-white-swaptions.md) · [Hull-White Finite Differences](hull-white-pde.md) · [Time-Dependent Volatility (HW, G2++, Cheyette; general HW tree)](time-dependent-volatility.md) · [Multi-Curve Short Rates: the Deterministic Tenor Basis](multi-curve-short-rate.md).
+**Rates** have their own section, [Rates: Products and Models](rates/index.md): an overview of interest-rate products (curve-only, vanilla optionality, model-dependent) and, under *Derivatives*, chapter 9 followed by the model deep-dives — [Hull-White Monte Carlo](hull-white-mc.md) · [Hull-White Swaptions (Jamshidian)](hull-white-swaptions.md) · [Hull-White Finite Differences](hull-white-pde.md) · [Time-Dependent Volatility (HW, G2++, Cheyette; general HW tree)](time-dependent-volatility.md) · [G2++](g2pp.md) · [Cheyette](cheyette.md) · [Multi-Curve Short Rates: the Deterministic Tenor Basis](multi-curve-short-rate.md).

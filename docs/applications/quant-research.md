@@ -1,7 +1,5 @@
 # Quant Research
 
-[← Applications overview](index.md#3-the-audience-map-ranked-by-fit-today) · one of five audience pages
-
 *How VALAX serves front-office quants, structuring desks, model R&D teams, and academic quant-finance researchers — where "differentiable everything" stops being a talking point and starts being an unfair advantage in iteration speed.*
 
 **Quant research may be VALAX's strongest *technical* fit of any audience.** Where [Market Risk & Model Validation](market-risk.md) is the strongest **commercial** case (regulator-mandated need, no incumbent lock-in), quant research is the strongest **technical** one: it is the audience where *every* JAX-native choice — autodiff, JIT, `vmap`, `equinox`, composability with the ML stack — compounds into a research-productivity moat that vendor C++ analytics libraries structurally cannot match.

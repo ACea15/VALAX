@@ -1,7 +1,5 @@
 # Treasury & ALM
 
-[← Applications overview](index.md#3-the-audience-map-ranked-by-fit-today) · one of five audience pages
-
 *How VALAX supports bank Treasury — the function that runs the balance sheet as a portfolio, owns interest-rate risk in the **banking book**, and is measured on Net Interest Income (NII) stability across rate cycles.*
 
 This page is the companion to [Regulatory: FRTB & CCAR](regulatory.md). Where that page maps VALAX onto the **trading-book** capital regimes (FRTB, CCAR), this page maps it onto the **banking-book** regimes owned by Treasury: **IRRBB**, **NII simulation**, **LCR / NSFR**, **FTP**, and the bank's own **HQLA / investment portfolio**.

@@ -1,4 +1,4 @@
-[← Models & Theory index](index.md)
+[← Models & Theory index](index.md) · [Rates overview](rates/index.md)
 
 # 9. Interest-Rate Derivatives
 
@@ -102,9 +102,9 @@ A **Bermudan swaption** may be exercised into the underlying swap on any of a se
 
 - **Longstaff-Schwartz (LSM)** on simulated LMM paths: regress the continuation value on curve state variables at each exercise date, then exercise when immediate value exceeds the regressed continuation. Implemented in `valax/pricing/mc/bermudan.py` on the LMM of Section [2.6](stochastic-models.md#26-libor-market-model-lmm-bgm).
 - **Backward induction on the Hull-White trinomial tree** (Section [2.8](stochastic-models.md#28-hull-white-one-factor-short-rate-model)): the single short-rate state makes the exercise decision a per-node $\max(\text{continuation}, \text{exercise})$ — the same machinery already used for callable bonds.
-- **Short-rate PDE** (roadmap PR-3): the exercise projection seam of the finite-difference solver (Section [5.2](pricing-methods.md#52-pde-finite-differences)) carries over directly. Not yet built.
+- **Short-rate PDE**: the exercise projection seam of the finite-difference solver (Section [5.2](pricing-methods.md#52-pde-finite-differences)) applies the exercise decision pointwise on the value function. See [Hull-White Finite Differences](hull-white-pde.md); the same projection serves [G2++](g2pp.md) (2-D) and [Cheyette](cheyette.md).
 
-The three routes should agree; building them so they cross-validate is the recommended sequencing (see the roadmap).
+The routes cross-validate one another; which models and engines each Bermudan is routed through is stated in the [coverage matrix](../applications/instrument-pricing.md#interest-rate-derivatives).
 
 ### 9.5 CMS and Convexity Adjustments
 
@@ -126,7 +126,10 @@ The market-standard evaluation is **Hagan static replication**: express the CMS 
 | European swaption *level* (fast calibration) | **Hull-White** via Jamshidian | Decompose into a portfolio of ZCB options | [2.8](stochastic-models.md#28-hull-white-one-factor-short-rate-model) |
 | Full forward-curve dynamics, Bermudans | **LMM / BGM** | Models each forward directly; PCA-reduced factors | [2.6](stochastic-models.md#26-libor-market-model-lmm-bgm) |
 | Swaption/cap **smile** | **SABR** per expiry | Fits the strike dimension the one-factor models cannot | [2.5](stochastic-models.md#25-sabr) |
+| Imperfect correlation between tenors (CMS spreads, Bermudans) | **G2++** | Two Gaussian factors; Brigo-Mercurio swaption closed form | [G2++](g2pp.md) |
+| Rate **skew** in an exact-fit, low-dimensional model | **Cheyette** (1F / 2F) | State-dependent volatility; ZCB stays affine | [Cheyette](cheyette.md) |
+| A term structure of volatility (co-terminal calibration) | **Piecewise-constant σ(t)** on HW / G2++ / Cheyette | One bucket per exercise date reprices each co-terminal European | [Time-Dependent Volatility](time-dependent-volatility.md) |
 
-The recurring limitation of one-factor short-rate models is that a **single volatility parameter cannot fit the swaption grid** — Jamshidian calibration matches a *level*, not a smile. G2++/HW-2F and the market models trade tractability for that flexibility.
+The recurring limitation of one-factor Gaussian short-rate models is that a **single volatility parameter cannot fit the swaption grid** — Jamshidian calibration matches a *level*, not a smile. G2++/HW-2F, Cheyette and the market models trade tractability for that flexibility.
 
 **Calibration status.** The short-rate calibrators have shipped: `calibrate_hull_white` (Jamshidian swaption surface), `calibrate_g2pp`, and `calibrate_cheyette` / `calibrate_cheyette_2f`, alongside the swaption cube and cap/floor optionlet surface objects the smile calibrators feed on. The generic SABR calibrator of Section [8](calibration.md#8-calibration-theory) applies directly to a swaption smile. The one model still without a calibrator is **LMM** — caplet/swaption volatility stripping remains open, tracked at [Roadmap Tier 2.6](../roadmap.md#26-libor-market-model-lmm-bgm).

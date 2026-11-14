@@ -1,7 +1,5 @@
 # Market Risk & Model Validation
 
-[← Applications overview](index.md#3-the-audience-map-ranked-by-fit-today) · one of five audience pages
-
 *How VALAX serves the two middle-office functions that share the same tooling — **Market Risk Management (MRM)** on the trading book, and **Model Validation** as the SR 11-7 / TRIM independent challenger to the front office.*
 
 These are the [audiences](index.md) VALAX is best positioned to serve *today*. Where [Regulatory: FRTB & CCAR](regulatory.md) covers the compliance outputs and [Treasury & ALM](treasury.md) covers the banking book, this page covers the **daily production loop of the middle office** — sensitivity ladders, limits, VaR/ES, backtests, P&L explain, and the challenger benchmarking Model Validation is required to run. Both functions need an *analytics platform they own*, distinct from the front-office pricers they oversee, and VALAX is architected for that role: pure functions, deterministic replay, autodiff Greeks, `vmap` over books, and a QuantLib comparison suite already in the tree.

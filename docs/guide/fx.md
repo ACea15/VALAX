@@ -1,7 +1,5 @@
 # FX Derivatives
 
-[← Asset Classes](asset-classes.md)
-
 The FX market is the largest financial market by volume, with over \$7.5 trillion
 daily turnover. VALAX's base FX instruments (forwards and vanilla options) are
 implemented and documented in [Analytical Pricing § FX Options](analytical.md#fx-options-garman-kohlhagen).

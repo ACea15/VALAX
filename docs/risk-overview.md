@@ -72,19 +72,19 @@ Every number in §2 is produced by the same chain of transformations. From left 
            ├──────────────► bucket via A or J ──► bucketed Δ, γ ──► limits / capital
            │                (valax/risk/bucketing.py)
            ▼
-  ┌────────────────┐                                  ┌────────────────┐
-  │ Scenarios      │ ── shock ───────────► many ──►  │   P&L vector  │
+  ┌────────────────┐                                  ┌───────────────┐
+  │ Scenarios      │ ── shock ───────────► many ──►   │   P&L vector  │
   │ (historical /  │                       reprices   │  (n_scenarios)│
-  │  parametric /  │   or                              └───────┬───────┘
-  │  stress)       │ ── waterfall rungs ──►  RTPL ──►          │
-  └────────────────┘  (cheap arithmetic)                       │
-           │                                                    ▼
-           │                                          ┌────────────────┐
+  │  parametric /  │   or                             └───────┬───────┘
+  │  stress)       │ ── waterfall rungs ──►  RTPL ──►         │
+  └────────────────┘  (cheap arithmetic)                      │
+           │                                                  ▼
+           │                                          ┌───────────────┐
            │                                          │   VaR  / ES   │  ←—— sample stats
            │                                          │   on PnL vec  │       (theory §7.1-7.2)
            │                                          └───────┬───────┘
-           │                                                    │
-           ▼                                                    ▼
+           │                                                  │
+           ▼                                                  ▼
    Backtest:   var_breaches → kupiec_pof → traffic light
    PLA:        rtpl vs hpl → spearman + ks → FRTB zone
    Capital:    bucketed Δ at FRTB vertices → SBA formula (planned)

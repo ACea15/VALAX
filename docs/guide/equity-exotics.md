@@ -1,7 +1,5 @@
 # Equity Exotics
 
-[← Asset Classes](asset-classes.md)
-
 VALAX supports a comprehensive set of exotic equity options beyond the standard
 vanillas, barriers, Asians, and lookbacks documented in the core
 [Analytical Pricing](analytical.md) and [Monte Carlo](monte-carlo.md) guides.

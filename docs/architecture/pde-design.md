@@ -1,195 +1,221 @@
 # PDE Solvers — Design
 
-!!! note "Status: design specification (prose-first)"
-    This document is the design specification for VALAX's **multivariate** PDE
-    pricing subsystem. It is written **before** the implementation so the
-    architecture can be reviewed against readable prose and math rather than
-    diffs. Public signatures shown here are **illustrative** — they describe the
-    intended API and are not yet importable. As each layer lands, its symbols
-    gain Google-style docstrings and are switched on in
-    [`api/pricing.md`](../api/pricing.md) so `mkdocs build --strict` stays green.
+!!! note "Status: as-built architecture"
+    This page describes how the `valax/pricing/pde/` package is **factored and
+    why**: its layers, the seams between them, and the numerical decisions
+    behind them. It began as a pre-implementation specification; it now
+    documents the code as shipped, and records where the build departed from
+    the original spec ([§10](#10-delivery-phases)).
 
-    The theory behind the equations is in [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences);
-    the user-facing walkthrough is in the [PDE guide](../guide/pde.md).
+    It deliberately does **not** state which instruments the engine covers:
+    that is the *PDE* column of the
+    [coverage matrix](../applications/instrument-pricing.md#coverage-matrix)
+    (checked against the registry), and `registered_recipes()` lists the
+    registered pairs at runtime. Usage is in the [PDE guide](../guide/pde.md);
+    the maths in [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences),
+    [Hull-White Finite Differences](../theory/hull-white-pde.md),
+    [G2++ §8](../theory/g2pp.md#8-pde-2-d-finite-differences) and
+    [Cheyette §8](../theory/cheyette.md#8-pde-finite-differences); public
+    symbols on [`api/pricing.md`](../api/pricing.md).
 
-## 1. Motivation
+## 1. Purpose
 
-VALAX today ships a single PDE solver: a 1-D Crank–Nicolson scheme for a
-European option under Black–Scholes, living in one file
-(`valax/pricing/pde/solvers.py`). Everything — grid construction, coefficient
-assembly, boundary conditions, the tridiagonal solve, and the price read-off —
-is inlined in one `pde_price` function. It covers exactly one model
-(`BlackScholesModel`) and one instrument (`EuropeanOption`), with no early
-exercise.
+The PDE engine is one of VALAX's four numerical routes (analytic, Monte Carlo,
+PDE, lattice). It earns its place where the others are weakest:
 
-Meanwhile the rest of the library already carries the *models* (Heston, local
-vol, SLV, Hull–White, multi-asset GBM) and the *instruments* (American,
-barrier, digital, spread, worst-of, callable/puttable bonds, Bermudan
-swaptions) that a real PDE engine would price. Those instruments are currently
-reachable only via Monte Carlo, analytic approximations, or lattices. A proper
-finite-difference subsystem "lights up" that existing surface area:
+- **Early exercise.** American and Bermudan exercise are free-boundary
+  problems that a backward grid solves natively, with deterministic
+  (noise-free) prices and Greeks — a callable bond or Bermudan swaption needs
+  no regression, unlike Longstaff–Schwartz.
+- **Barriers and digitals.** Discontinuous payoffs and absorbing boundaries
+  are handled exactly on the mesh, where MC and CRR trees converge slowly and
+  erratically near the barrier/strike.
+- **Independent cross-checks.** Heston against COS, Hull-White against the
+  trinomial tree and Jamshidian, G2++ against the Brigo–Mercurio quadrature,
+  Cheyette against its own exact-`y` oracle: a price that agrees across
+  engines is a price worth trusting.
 
-- **Early exercise done right.** American/Bermudan exercise is a natural
-  free-boundary problem on a PDE grid. Today it rides on the binomial tree
-  (`BinomialConfig.american`) keyed on `EuropeanOption`; the `AmericanOption`
-  type has no pricer at all.
-- **Barriers and digitals.** These are notoriously inaccurate under MC and CRR
-  near the barrier/strike. A PDE with an absorbing boundary and Rannacher
-  start-up is the right tool. `DigitalOption` currently has **no** pricer
-  anywhere in VALAX.
-- **Stochastic-volatility grids.** Heston and (local-)stochastic vol admit
-  2-D backward PDEs that complement the COS and MC pricers and cross-check
-  them.
-
-This document specifies a layered, multi-file `valax/pricing/pde/` package that
-supports 1-D and 2-D (and, where it makes sense, n-D) problems, early exercise,
-multiple models, and a dispatcher — mirroring how the `mc/` package is
-factored.
+The package started as a single 1-D Crank–Nicolson function for a European
+under Black–Scholes. It is now a layered subsystem: reusable numerics (grids,
+operators, steppers, boundaries, payoff smoothing) underneath per-model recipe
+modules registered on a dispatcher, reachable both directly and through
+`valax.price(..., method="pde")`.
 
 ## 2. Design goals and non-goals
 
 **Goals.**
 
-1. **Multivariate.** First-class 1-D *and* 2-D solvers, with the 2-D layer
-   general enough for Heston `(S, v)`, local-stochastic vol, and two-asset
-   `(S₁, S₂)` problems.
+1. **Multivariate.** First-class 1-D *and* 2-D solvers. The 2-D layer is
+   general enough for Heston `(ln S, v)`, two-factor short rates (G2++,
+   Cheyette 2F) and the exact-`y` one-factor Cheyette `(x, y)`.
 2. **Composable numerics.** Grids, linear algebra, time-stepping, spatial
-   operators, boundary conditions, terminal conditions, and early-exercise
-   projection are **separate, reusable modules** — not inlined per pricer.
+   operators, boundary conditions, terminal conditions, payoff smoothing and
+   early exercise are **separate, reusable modules**, not inlined per pricer.
 3. **Autodiff-clean.** The whole solve is differentiable end-to-end so Greeks
    come from `jax.grad`/`jax.jacobian`, never finite differences (per
-   `AGENTS.md`). This constrains our choice of early-exercise method (§7).
+   `AGENTS.md`). This constrains the early-exercise method (§7), the read-off
+   (§4.2) and the payoff sampling (§8).
 4. **Convention-consistent.** Configs are `eqx.Module`s with `static=True`
-   grid sizes/flags; entry points are pure functions `price(instrument,
-   model, ...)`; dispatch mirrors `mc/dispatch.py`.
-5. **Backward-compatible.** The existing `pde_price(option, spot, vol, rate,
-   dividend, config)` keeps its exact signature and behaviour, re-expressed as
-   a thin wrapper over the new core.
+   grid sizes/flags; recipes are pure functions of `(instrument, model,
+   config, **market_args)`; dispatch mirrors `mc/dispatch.py`; schedules are
+   handled with **traced** indices so every recipe is `filter_jit`-able.
+5. **Backward-compatible.** `pde_price(option, spot, vol, rate, dividend,
+   config)` keeps its original signature and behaviour, re-expressed as a thin
+   façade over the layered core (§4.13).
 
-**Non-goals (for this design).**
+**Non-goals.**
 
-- No general n-D (d > 3) solver — the curse of dimensionality makes MC the
-  right tool there. We scope to d ≤ 2 concretely, with the operator layer left
-  open to a third axis where a specific product demands it.
-- No adaptive/AMR meshing. Grids are structured (optionally non-uniform via a
-  fixed analytic stretch), not adaptively refined.
+- No general n-D (d > 2) solver — the curse of dimensionality makes MC the
+  right tool there. The two-factor exact-`y` Cheyette PDE (5-D) is
+  deliberately not built; see
+  [research ideas](../research-ideas.md) for the multi-dimensional discussion.
+- No adaptive/AMR meshing. Grids are structured — uniform, or non-uniform via
+  a fixed analytic `sinh` stretch — never adaptively refined.
 - No sparse/algebraic multigrid. Multi-D implicit solves are done by
-  **operator splitting (ADI)** into per-axis tridiagonal solves (§6), reusing
-  the machinery we already have.
+  **operator splitting (ADI)** into per-axis tridiagonal solves (§6).
 
-## 3. Where this sits in the tree
+## 3. Package layout
 
 ```
 valax/pricing/pde/
-├── __init__.py        # public exports + recipe import side-effect
-├── config.py          # PDEConfig (1-D, back-compat), PDEConfig2D, scheme/exercise enums
-├── grids.py           # Grid1D / Grid2D builders (uniform + stretched), price read-off
-├── linalg.py          # reusable tridiagonal (Thomas / lineax) solve + matvec
-├── schemes.py         # theta-scheme time-stepping + Rannacher start-up (1-D)
-├── operators.py       # spatial operator assembly from drift/diffusion coefficients
-├── adi.py             # 2-D ADI schemes (Douglas / Craig–Sneyd / Hundsdorfer–Verwer)
-├── boundary.py        # Dirichlet / Neumann / linearity BCs (1-D endpoints, 2-D edges)
-├── terminal.py        # terminal (payoff) conditions evaluated on the mesh
-├── exercise.py        # early-exercise projection (penalty method, explicit projection)
-├── coefficients.py    # model → PDE operator coefficients (BS, Heston, LV, SLV, HW, multi-asset)
-├── dispatch.py        # (instrument_cls, model_cls) registry + pde_price_dispatch
-├── recipes.py         # per-(instrument, model) registered pricers
-└── solvers.py         # high-level drivers + back-compat pde_price wrapper
+├── __init__.py         # public exports; imports the recipe modules for their side effects
+├── config.py           # Scheme / Exercise enums, PDEConfig (1-D), PDEConfig2D
+├── grids.py            # Grid1D / Grid2D builders, boundary_coords, cubic read-offs
+├── linalg.py           # tridiagonal solve (lineax) + matvec
+├── operators.py        # Operator1D: non-uniform 3-point stencil from drift/diffusion/discount
+├── operators2d.py      # Operator2D: ADI split A0 (mixed) + A1 + A2
+├── boundary.py         # Dirichlet callables, linearity folds, Heston variance-axis rows
+├── schemes.py          # 1-D theta-scheme + Rannacher; solver_fn / event_fn seams
+├── schemes2d.py        # 2-D ADI: Douglas / Craig–Sneyd / Hundsdorfer–Verwer
+├── terminal.py         # equity terminal payoffs on the log-spot mesh
+├── payoff_smoothing.py # C¹ cell-averaged positive part + smoothed exercise projections
+├── exercise.py         # American penalty solver; plain explicit projection
+├── coefficients.py     # model → operator: BS, local vol, Heston, Hull-White, G2++
+├── rates_payoffs.py    # model-agnostic short-rate payoffs (swap tails, coupons, caplets, CMS, exercise)
+├── dispatch.py         # (instrument_cls, model_cls) registry, PDEResult, pde_price_dispatch
+├── recipes.py          # equity recipes (BS, local vol, Heston)
+├── hull_white.py       # Hull-White 1-D recipes
+├── g2pp.py             # G2++ 2-D recipes
+├── cheyette.py         # Cheyette 1F/2F frozen-y recipes, operators, exact-y oracle
+└── solvers.py          # back-compat pde_price façade
 ```
 
-The layering is strict: a module only depends on modules **above** it in this
-list (with `coefficients.py`/`recipes.py`/`dispatch.py`/`solvers.py` as the
-"assembly" layer that ties the numerics to VALAX models and instruments).
+The dependency graph is layered: numerics never import recipes, and the
+recipe modules depend only on the numerics (plus `dispatch.register`):
 
 ```
-config → grids → linalg → schemes → operators → adi → boundary → terminal → exercise
-                                                                                  │
-                                          coefficients ────────────────┐         │
-                                                                       ▼         ▼
-                                                          dispatch ← recipes ← solvers
+config ─┐
+grids ──┼─► operators ─► operators2d ─► boundary ─► schemes / schemes2d
+linalg ─┘                                               │
+                     terminal · payoff_smoothing · exercise
+                                     │
+            coefficients ────────────┼──────── rates_payoffs
+                                     ▼
+       recipes · hull_white · g2pp · cheyette ──register──► dispatch
+                                     │
+                                  solvers (pde_price façade)
 ```
 
-## 4. Layer-by-layer specification
+Two pragmatic exceptions to strict layering: `cheyette.py` reuses
+`g2pp._phi_step_discounts`, and builds its own operators (rather than in
+`coefficients.py`) because they depend on Cheyette-specific state helpers.
 
-The tone below mirrors `mc/`: small pure functions, `eqx.Module` configs with
-static grid fields, and JIT applied by the *caller* (no `@jax.jit` baked into
-pricing functions — consistent with the rest of `valax/pricing/`).
+## 4. Layer by layer
+
+Small pure functions, `eqx.Module` configs with static grid fields, and JIT
+applied by the *caller* (no `@jax.jit` baked into pricing functions —
+consistent with the rest of `valax/pricing/`).
 
 ### 4.1 `config.py` — configuration
 
-A single place for grid sizes, scheme selection, and exercise style. Grid
-counts and enums are `static=True` so they specialise the compiled graph.
-
 ```python
-class Scheme(enum.Enum):        # time-stepping scheme
-    IMPLICIT = "implicit"       # backward Euler (θ=1)
-    CRANK_NICOLSON = "cn"       # θ=1/2
-    DOUGLAS = "douglas"         # 2-D ADI, θ per axis
-    CRAIG_SNEYD = "craig_sneyd" # 2-D ADI, 2nd-order cross-term
-    HV = "hv"                   # 2-D ADI, Hundsdorfer–Verwer
+class Scheme(enum.Enum):
+    IMPLICIT = "implicit"        # backward Euler (θ = 1), 1-D
+    CRANK_NICOLSON = "cn"        # θ = 1/2, 1-D
+    DOUGLAS = "douglas"          # 2-D ADI
+    CRAIG_SNEYD = "craig_sneyd"  # 2-D ADI, 2nd order in the mixed term
+    HV = "hv"                    # 2-D ADI, Hundsdorfer–Verwer
+    def is_adi(self) -> bool: ...
 
 class Exercise(enum.Enum):
-    EUROPEAN = "european"
-    AMERICAN = "american"       # continuous free boundary (penalty)
-    BERMUDAN = "bermudan"       # discrete exercise dates (explicit projection)
+    EUROPEAN = "european"; AMERICAN = "american"; BERMUDAN = "bermudan"
 
-class PDEConfig(eqx.Module):                       # 1-D — unchanged public shape
-    n_spot: int = eqx.field(static=True, default=200)
-    n_time: int = eqx.field(static=True, default=200)
-    spot_range: float = eqx.field(static=True, default=4.0)
-    scheme: Scheme = eqx.field(static=True, default=Scheme.CRANK_NICOLSON)
-    rannacher_steps: int = eqx.field(static=True, default=0)   # 0 = off
+class PDEConfig(eqx.Module):     # all fields static
+    n_spot: int = 200            # interior nodes (log-spot, or the short-rate state)
+    n_time: int = 200
+    spot_range: float = 4.0      # half-width in std devs
+    scheme: Scheme = Scheme.CRANK_NICOLSON
+    exercise: Exercise = Exercise.EUROPEAN
+    rannacher_steps: int = 0
+    penalty_rho: float = 1.0e6   # American penalty coefficient
+    penalty_iters: int = 5       # fixed penalty iterations per step
+    smooth_payoff: bool = True   # cell-averaged kinks (short-rate recipes)
 
-class PDEConfig2D(eqx.Module):
-    n_x: int = eqx.field(static=True, default=128)     # first axis (e.g. log-spot)
-    n_y: int = eqx.field(static=True, default=64)      # second axis (e.g. variance)
-    n_time: int = eqx.field(static=True, default=200)
-    x_range: float = eqx.field(static=True, default=4.0)
-    y_max: float = eqx.field(static=True, default=1.0) # e.g. max variance
-    scheme: Scheme = eqx.field(static=True, default=Scheme.CRAIG_SNEYD)
-    theta: float = eqx.field(static=True, default=0.5)
-    rannacher_steps: int = eqx.field(static=True, default=2)
+class PDEConfig2D(eqx.Module):   # all fields static
+    n_x: int = 128; n_y: int = 64; n_time: int = 200
+    x_range: float = 4.0         # half-width in std devs (both G2++ / Cheyette-2F axes)
+    y_max: float = 1.0           # Heston v_max; exact-y Cheyette: multiple of ȳ
+    y_scale: float = 0.1         # sinh concentration of the Heston variance axis
+    scheme: Scheme = Scheme.CRAIG_SNEYD
+    exercise: Exercise = Exercise.EUROPEAN
+    theta: float = 0.5
+    rannacher_steps: int = 2
+    smooth_payoff: bool = True
 ```
 
-Design note: `PDEConfig` keeps its three original fields *first and defaulted
-identically*, so all existing call sites and tests are untouched; `scheme` and
-`rannacher_steps` are additive with backward-compatible defaults.
+`PDEConfig` keeps its three original fields first and defaulted identically,
+so pre-existing call sites are untouched. Fields are reused across recipe
+families rather than duplicated: the short-rate 1-D recipes size their
+centred-state mesh with `n_spot` / `spot_range`.
+
+Two caveats worth knowing:
+
+- **`exercise` is not consulted by any recipe.** Exercise style follows the
+  *instrument type* — `AmericanOption` always takes the penalty path,
+  `CallableBond` / `PuttableBond` / `BermudanSwaption` always project at their
+  exercise dates. The field is carried for API stability only.
+- **Recipes floor `rannacher_steps`.** Digital, barrier and every short-rate
+  recipe use at least 2 fully-implicit start-up steps regardless of the config
+  (`_MIN_RANNACHER = 2` in the short-rate modules).
+
+Through `price(..., method="pde")` the config may be `None`: the default per
+pair comes from `valax.core.policy` (see the
+[PDE guide § 5.1](../guide/pde.md#51-the-dispatcher)).
 
 ### 4.2 `grids.py` — meshes
 
-Grid construction (currently inlined in `pde_price`) becomes reusable builders
-returning lightweight `eqx.Module` meshes. Uniform spacing in `x = ln S` is the
-default (equal resolution in moneyness); an optional analytic **sinh-stretch**
-concentrates nodes near a focal point (strike or barrier) for sharper Greeks
-without extra nodes. `centred_state_grid` covers the short-rate case: a mesh for
-a mean-reverting state that starts at the origin, sized in standard deviations
-of that state at the horizon.
+Meshes are `eqx.Module`s holding **interior** nodes only; the exterior
+(boundary) coordinates are one edge spacing beyond the first/last node
+(`boundary_coords`), shared by the operator stencils and the Dirichlet
+boundaries so both agree on the boundary placement.
 
 ```python
 class Grid1D(eqx.Module):
-    nodes: Float[Array, " n"]          # spatial coordinates (e.g. log-spot)
+    nodes: Float[Array, " n"]
     n: int = eqx.field(static=True)
 
-class Grid2D(eqx.Module):
-    x_nodes: Float[Array, " nx"]
-    y_nodes: Float[Array, " ny"]
-    nx: int = eqx.field(static=True)
-    ny: int = eqx.field(static=True)
+class Grid2D(eqx.Module):          # tensor product of two Grid1D axes
+    x: Grid1D
+    y: Grid1D                      # .n_x, .n_y, .shape properties
 
-def uniform_log_spot_grid(spot, vol, expiry, *, n, half_width) -> Grid1D: ...
-def stretched_grid(center, lo, hi, *, n, concentration) -> Grid1D: ...
-def read_off_1d(grid, values, query) -> Float[Array, ""]:      # Catmull-Rom cubic
-    ...
-def read_off_2d(grid, values, x_query, y_query) -> Float[Array, ""]:
-    ...   # reuses valax.surfaces._interp.bilinear_2d
+def uniform_log_spot_grid(spot, vol, expiry, *, n, half_width) -> Grid1D
+def uniform_linear_grid(lo, hi, *, n) -> Grid1D            # barrier domains, exact-y axis
+def centred_state_grid(std_dev, *, n, half_width) -> Grid1D # short-rate factors, centred at 0
+def sinh_concentrated_grid(lo, hi, center, *, n, scale) -> Grid1D  # Tavella–Randall stretch
+def log_spot_variance_grid(spot, expiry, v0, v_max, *, n_x, n_y,
+                           x_half_width, v_scale, vol_ref=None) -> Grid2D  # Heston
+def read_off_1d(grid, values, query) -> Float[Array, ""]
+def read_off_2d(grid, values, query_x, query_y) -> Float[Array, ""]
 ```
 
-We deliberately **reuse `valax/surfaces/_interp.py::bilinear_2d`** for the 2-D
-read-off — it is already autodiff-clean with flat extrapolation.
+The equity meshes are centred on the spot; the short-rate meshes are centred
+on the origin of a zero-mean state, so their read-off point is fixed
+(§5). The Heston variance axis is `sinh`-concentrated around `v0`, where the
+value function has the most curvature.
 
 #### Read-off, grid detachment, and second-order Greeks (gamma)
 
-The 1-D read-off does **not** use `jnp.interp`. A subtle interaction between
+Neither read-off uses `jnp.interp`. A subtle interaction between
 piecewise-linear interpolation and the *spot-centred* grid silently collapses
 gamma to `~0`, so two coupled choices are required to get correct second-order
 spot Greeks through the ordinary autodiff Greek engine.
@@ -222,11 +248,18 @@ cell apart; a finite-difference bump only recovers gamma once `h ≳ dx`.
    barrier) apply the same detachment at the recipe level in `_barrier_bs` —
    grid bounds on `ln(stop_gradient(spot))`, read-off query left live. Barrier
    gamma then matches a QuantLib FD reference and obeys in/out gamma parity
-   `Γ(KO) + Γ(KI) = Γ(vanilla)`.
-2. **A curvature-carrying read-off.** `read_off_1d` uses a **Catmull-Rom cubic**
-   (C¹, 4-point Hermite on the uniform grid, flat extrapolation preserved), so
-   `V_g'' ≠ 0`. A linear read-off — *even detached* — still fails, yielding the
-   spurious `Γ = −V_g'/S² = −Δ/S`.
+   `Γ(KO) + Γ(KI) = Γ(vanilla)`. The local-vol recipe also detaches its
+   grid-width reference vol, and Heston detaches `v0` / `theta` for mesh
+   placement while keeping them live in the operator and read-off.
+2. **A curvature-carrying read-off.** `read_off_1d` is a 4-point **cubic
+   Hermite** (a non-uniform Catmull-Rom: C¹, tangents from the second-order
+   three-point derivative, so it reproduces quadratics exactly; flat
+   extrapolation preserved), so `V_g'' ≠ 0`. A linear read-off — *even
+   detached* — still fails, yielding the spurious `Γ = −V_g'/S² = −Δ/S`.
+   `read_off_2d` applies the same kernel tensor-wise (separable bicubic), which
+   is why it is used instead of `surfaces._interp.bilinear_2d`: bilinear has
+   no within-cell curvature and would collapse Heston gamma and the mixed
+   `∂²/∂x∂v` Greek.
 
 With both in place the query slides across a static value field and autodiff
 recovers, through the **unified** `greeks()` engine (no PDE-specific Greek
@@ -238,11 +271,11 @@ $$
 
 Measured against Black–Scholes at ATM (`n_spot=400`): delta error `~7e-5`, gamma
 error `~1e-5` (vs `≡0` before), and price accuracy *improves* (the cubic read-off
-is closer to analytic than the linear one). Note the cubic's second derivative
-and an on-grid central second difference are the *same stencil* on a uniform
-grid — reading `V''` off the value field directly is an equivalent route; we
-prefer the read-off form because it keeps every Greek on the single autodiff
-path. Regression coverage: `tests/test_pde/test_grids.py`,
+is closer to analytic than the linear one). The cubic's second derivative and
+an on-grid central second difference are the *same stencil* on a uniform grid —
+reading `V''` off the value field directly is an equivalent route; we prefer
+the read-off form because it keeps every Greek on the single autodiff path.
+Regression coverage: `tests/test_pde/test_grids.py`,
 `tests/test_pde/test_crank_nicolson.py::TestPDESecondOrderGreeks`,
 `tests/test_pde/test_barrier_pde.py::TestBarrierGamma`, the QuantLib
 cross-checks `test_pde_pr1_ql.py::{test_european_gamma_matches_quantlib,
@@ -251,43 +284,66 @@ profile in `test_gamma_benchmark.py`.
 
 ### 4.3 `linalg.py` — the tridiagonal workhorse
 
-Today the tridiagonal LHS assembly and the RHS matvec are inlined. ADI needs
-per-axis tridiagonal solves *many* times per step, so this is extracted once:
-
 ```python
-def tridiagonal_solve(lower, diag, upper, rhs) -> Float[Array, " n"]:
-    """Solve a tridiagonal system via lineax.Tridiagonal()."""
-    op = lx.TridiagonalLinearOperator(diag, lower, upper)
-    return lx.linear_solve(op, rhs, solver=lx.Tridiagonal()).value
-
-def tridiagonal_matvec(lower, diag, upper, v) -> Float[Array, " n"]:
-    """Multiply a tridiagonal operator by a vector (the RHS build)."""
-    ...
+def tridiagonal_solve(lower, diag, upper, rhs) -> Float[Array, " n"]   # lineax.Tridiagonal
+def tridiagonal_matvec(lower, diag, upper, v) -> Float[Array, " n"]
 ```
 
-This is the **only** place that touches `lineax` (it currently appears in
-exactly one file across the whole codebase), keeping the dependency surface
-tiny and the solve testable in isolation.
+Bands follow the solver convention (`lower`/`upper` of length `n − 1`). This is
+the only module in `valax/pricing/` that touches `lineax`; every implicit
+stage of every scheme — 1-D steps, the American penalty iterations, and the
+`vmap`-batched per-axis ADI solves — goes through it.
 
-### 4.4 `schemes.py` — 1-D time-stepping
+### 4.4 `operators.py` / `operators2d.py` — spatial operators
 
-A θ-scheme stepper generalising the current CN loop, plus **Rannacher
-start-up**: run `rannacher_steps` fully-implicit (θ=1) sub-steps first to damp
-oscillations from non-smooth terminal data, then switch to CN. The backward
-loop is a `jax.lax.scan` (as today).
+`build_operator_1d(grid, drift, diffusion, discount)` assembles
+$\mathcal{L}V = \tfrac12\sigma^2 V_{xx} + \mu V_x - rV$ with the
+**non-uniform** three-point central stencil (exact for quadratics; reduces to
+the classic uniform form). Each coefficient may be a scalar or a per-node
+array — the per-node *discount* is what short-rate models need, since there
+the discount rate is the state itself. `Operator1D` stores the bands **per
+row** (length `n` each) so the edge rows' couplings to the exterior nodes are
+available to the boundary layer; the interior solve uses `lower[1:]` /
+`upper[:-1]`.
+
+`Operator2D` is the three-way ADI split $L = A_0 + A_1 + A_2$ (in't Hout &
+Foulon 2010):
 
 ```python
-def theta_step(operator, boundary, v, tau_new, tau_old, dt, theta) -> Float[Array, " n"]: ...
-def solve_backward_1d(operator, boundary, terminal, grid, *, n_time, dt,
-                      scheme, rannacher_steps, project=None) -> Float[Array, " n"]:
-    """Backward time-march terminal→0 via lax.scan; `project` hook = early exercise."""
+class Operator2D(eqx.Module):
+    a1_lower, a1_diag, a1_upper   # (n_x, n_y): tridiagonal along axis 0
+    a2_lower, a2_diag, a2_upper   # (n_x, n_y): tridiagonal along axis 1
+    c0                            # (n_x, n_y): mixed coefficient, A0 V = c0 · D_x(D_y V)
+    sx_*, sv_*                    # per-axis first-derivative weights for A0
+    # apply_a0 / apply_a1 / apply_a2 / apply
+
+def build_operator_2d(grid, ...) -> Operator2D
 ```
 
-The optional `project` callable is the seam for early exercise (§7) — it is
-`None` for European, and a value-projection closure otherwise. As shipped there
-are two seams: `solver_fn` (replaces the per-step tridiagonal solve — the
-American penalty method) and `event_fn` (post-processes the field after each
-step — discrete coupons and Bermudan/callable/puttable exercise projection).
+The discount is split evenly between `A1` and `A2` (each implicit per-axis
+solve stays well posed); `A0` is applied **only explicitly** and never
+inverted, so it is stored as a coefficient plus separable stencil weights.
+
+### 4.5 `schemes.py` — 1-D time-stepping
+
+```python
+def solve_backward_1d(operator, boundary, terminal, *, expiry, n_time, theta,
+                      rannacher_steps=0, solver_fn=None, event_fn=None) -> Float[Array, " n"]
+def theta_for_scheme(scheme) -> float   # IMPLICIT → 1.0, CN → 0.5; raises on an ADI scheme
+```
+
+A θ-scheme march from the terminal condition to `t = 0` in a single
+`jax.lax.scan`, with **Rannacher start-up** (the first `rannacher_steps` steps
+fully implicit). Three extension points cover every recipe:
+
+- **Stacked operators.** `operator` may carry bands of shape `(n,)` (constant
+  in time) or `(n_time, n)` (row `m` used at backward step `m`, nearest expiry
+  first). Local vol (`lv_operator_stack`), Hull-White (`hw_operator_stack`)
+  and frozen-`y` Cheyette 1F (`cheyette_operator_stack`) use the stacked form.
+- **`solver_fn`** replaces the per-step tridiagonal solve — the American
+  penalty method plugs in here.
+- **`event_fn(level, values)`** post-processes the field after each step —
+  coupon injection and Bermudan / callable / puttable exercise projection.
 
 > **Time-index convention — get this wrong and every time-dependent boundary is
 > silently mispriced.** The scan marches `m = 0 … n_time-1` starting from the
@@ -298,264 +354,244 @@ step — discrete coupons and Bermudan/callable/puttable exercise projection).
 > The stepper originally mirrored the boundary `tau`; see entry 2 of
 > [Numerical Pitfalls](numerical-pitfalls.md) for why that survived 1298
 > QuantLib comparisons, and `TestBoundaryTimeDirection` /
-> `TestEventSeam` for the guards that now pin both conventions.
+> `TestEventSeam` (`tests/test_pde/test_schemes.py`) for the guards that now
+> pin both conventions.
 
-### 4.5 `operators.py` — spatial operators
-
-Builds the discrete spatial operator $\mathcal{L}$ from **drift** and
-**diffusion** coefficient fields sampled on the grid. In 1-D this yields the
-`(lower, diag, upper)` tridiagonal bands (generalising today's constant
-`alpha/beta/gamma`); coefficients may be space- **and** time-dependent (needed
-for local vol). In 2-D it yields the per-axis tridiagonal parts **plus a
-cross-derivative stencil** for the mixed term $\partial_{xy}$.
+### 4.6 `schemes2d.py` — 2-D ADI
 
 ```python
-class Operator1D(eqx.Module):
-    lower: Float[Array, " n"]; diag: Float[Array, " n"]; upper: Float[Array, " n"]
-
-class Operator2D(eqx.Module):
-    x_bands: Operator1D           # A_x (acts along x for each fixed y)
-    y_bands: Operator1D           # A_y (acts along y for each fixed x)
-    cross: Float[Array, "nx ny"]  # A_0 mixed-derivative stencil weights
-
-def build_operator_1d(grid, drift, diffusion, discount) -> Operator1D: ...
-def build_operator_2d(grid, drift_x, drift_y, diff_xx, diff_yy, diff_xy, discount) -> Operator2D: ...
+def solve_backward_2d(operator, boundary, terminal, *, expiry, n_time, scheme,
+                      theta, rannacher_steps, event_fn=None) -> Float[Array, "n_x n_y"]
 ```
 
-The mixed-derivative stencil uses a standard four-point centred difference; it
-is treated **explicitly** in the ADI schemes (§6), which is why we need
-Craig–Sneyd/HV corrections to recover second order.
+Douglas, Craig–Sneyd and Hundsdorfer–Verwer (§6) over the `Operator2D` split.
+Each implicit stage inverts one direction only, as a batch of independent
+tridiagonal solves (`tridiagonal_solve` under `jax.vmap`); the mixed term is
+explicit. Rannacher steps run plain Douglas with θ = 1. With `A0 = A2 = 0` every
+scheme collapses exactly to the 1-D θ-method — a structural test the suite
+relies on.
 
-### 4.6 `adi.py` — 2-D solvers
+The seams mirror the 1-D stepper, with one difference in form:
 
-Alternating-Direction Implicit operator splitting. Each time step decomposes
-into a sequence of **1-D tridiagonal solves per axis** (via `linalg.py`) with
-the cross term applied explicitly. Three schemes, increasing in accuracy/cost:
-
-- **Douglas** — first predictor + one implicit correction per axis; robust,
-  first-order in the cross term.
-- **Craig–Sneyd** — adds a second explicit stage that restores **second-order**
-  accuracy in the presence of the mixed derivative.
-- **Hundsdorfer–Verwer** — a two-parameter scheme with better damping for
-  strongly correlated / convection-dominated problems (e.g. large `|ρ|` Heston).
-
-```python
-def adi_step(op2d, boundary, v, dt, *, scheme, theta) -> Float[Array, "nx ny"]: ...
-def solve_backward_2d(op2d, boundary, terminal, grid, *, n_time, dt,
-                      scheme, theta, rannacher_steps, project=None) -> Float[Array, "nx ny"]: ...
-```
-
-The `project` hook mirrors the 1-D case, so American exercise on a 2-D grid
-(e.g. American under Heston) reuses the same seam.
+- **Time-dependent operators** are passed as a *function* of the backward step
+  index, `operator(m) -> Operator2D`, assembled inside the loop rather than
+  stored as `n_time` copies of the 2-D bands. Piecewise-constant σ(t) uses this
+  (`g2pp_operator_rows`, `cheyette_operator_rows_2d`,
+  `cheyette_exact_operator_rows`).
+- **`event_fn`** has the same forward-level convention as in 1-D; the
+  short-rate recipes use it for the deterministic per-step discount, coupon
+  injection and Bermudan projection.
 
 ### 4.7 `boundary.py` — boundary conditions
 
-An abstraction over the two 1-D endpoints and the four 2-D edges (plus
-corners). Three BC families cover our instruments:
+Two mechanisms, chosen by whether the problem has far-field data.
 
-- **Dirichlet** — fixed value (barrier level; deep-ITM/OTM asymptotics).
-- **Neumann** — fixed first derivative (linearity of value in $S$ at the far
-  field).
-- **Linearity / "PDE-at-boundary"** — impose $\partial_{xx}V = 0$ at the far
-  edge (the common robust choice for the variance axis in Heston).
+**Dirichlet data (equity).** `Boundary1D(lower_fn, upper_fn)` and
+`Boundary2D(x_lower_fn, x_upper_fn)` hold callables `tau -> value`. They are
+**plain Python objects, not pytrees**: they are closed over by the `scan` body
+and produce traced values from the traced `tau`. Factories:
+`bs_european_boundary` (deep-ITM/OTM asymptotics), `american_boundary`
+(intrinsic), `digital_boundary`, `knockout_boundary` (wraps another boundary,
+zeroing the barrier edge), `heston_boundary` (the 1-D asymptotics reused per
+variance slice), and the inert `zero_boundary`. The boundary value enters as
+an affine ghost term weighted `(1-θ)`/`θ` across the step.
 
-*As shipped*, the linearity condition is not a `Boundary` object but an
-**operator transform**: `apply_linearity_bc_1d` folds a linearly-extrapolated
-exterior ghost back into the first and last rows, zeroing the edge bands so no
-boundary data is consumed at all (pair it with the inert `zero_boundary`). The
-2-D variance axis uses the same idea via `apply_heston_variance_bc`.
+**Operator folds (no far-field formula).** Short-rate claims have no
+closed-form far-field value — a callable's deep-ITM/OTM value depends on the
+whole remaining exercise schedule — so the edge condition is a *shape*, baked
+into the operator rows and paired with `zero_boundary`:
 
-This is what short-rate problems need, because they have **no closed-form
-far-field value to pin**: a callable bond's deep-ITM/OTM value depends on the
-entire remaining exercise schedule. Two properties bound what it buys — it is
-*exact on affine fields* (the extrapolated ghost is then the true value), but
-the convection term at the edges degrades to a one-sided difference and is
-therefore first-order there. Harmless once the domain is wide enough that the
-edges carry negligible probability, which is the same requirement the Dirichlet
-factories impose — and worth *verifying* by sweeping the width rather than
-assuming (entry 2 of [Numerical Pitfalls](numerical-pitfalls.md)).
+- `apply_linearity_bc_1d` / `apply_linearity_bc_2d` impose $V_{xx} = 0$ (and
+  $V_{yy} = 0$ in 2-D, per axis independently) by folding a
+  linearly-extrapolated ghost into the edge rows. Exact on affine fields; the
+  edge convection degrades to one-sided (first order), harmless once the
+  domain is wide enough that the edges carry negligible probability — worth
+  *verifying* by sweeping the width rather than assuming (entry 2 of
+  [Numerical Pitfalls](numerical-pitfalls.md)). The exact-`y` Cheyette folds
+  only the `x` axis (its `y` axis is hyperbolic).
+- `apply_heston_variance_bc` rewrites the first/last rows of `A2`:
+    - **`v = 0` (degenerate).** The variance diffusion `½ξ²v` vanishes and the
+      drift `κ(θ-v) → κθ > 0` points *into* the domain, so the row is a
+      **drift-only, one-sided upwind** difference with no sub-zero ghost —
+      well posed whether or not the Feller condition `2κθ ≥ ξ²` holds.
+    - **`v = v_max`.** Linearity `V_vv = 0` via ghost extrapolation.
 
-```python
-class Dirichlet(eqx.Module): value_fn: Callable   # tau -> value
-class Neumann(eqx.Module):   slope_fn: Callable
-class Linearity(eqx.Module): pass
+**Mixed term at the boundary.** `A0` is zero on all four edges in every 2-D
+operator: a one-sided cross stencil there injects spurious flux (entry 1 of
+[Numerical Pitfalls](numerical-pitfalls.md)). Being explicit-only, it needs no
+boundary data of its own.
 
-class Boundary1D(eqx.Module): lower: ...; upper: ...
-class Boundary2D(eqx.Module): x_lower: ...; x_upper: ...; y_lower: ...; y_upper: ...
-```
+### 4.8 `terminal.py` and `payoff_smoothing.py` — payoffs on the mesh
 
-This generalises today's inline `boundary_lower`/`boundary_upper` closures.
+`terminal.py` holds the equity terminal conditions on the log-spot mesh:
+`vanilla_terminal`, `intrinsic_payoff` (the American obstacle) and
+`digital_terminal`. Heston broadcasts the vanilla payoff across the variance
+axis inside its recipe; barriers use the vanilla payoff plus an absorbing
+boundary (§4.7), the correct treatment for continuous monitoring. Short-rate
+payoffs live in `rates_payoffs.py` (§4.11).
 
-**As delivered (Heston, PR-2).** The axes are handled asymmetrically, because
-only the log-spot axis carries natural Dirichlet data:
-
-- **Log-spot (`x`) axis — Dirichlet.** `Boundary2D` holds two callables
-  `x_lower_fn(tau)` / `x_upper_fn(tau)` (the deep-ITM/OTM Black–Scholes
-  asymptotics, reused from the 1-D `bs_european_boundary`), applied per variance
-  slice as an affine ghost term weighted `(1-θ)`/`θ` across the step. This is why,
-  with `A0 = A2 = 0`, the 2-D stepper collapses **exactly** to the 1-D
-  θ-method.
-- **Variance (`v`) axis — baked into the operator.** The variance edges are *not*
-  Dirichlet, so `apply_heston_variance_bc` rewrites the first and last rows of
-  the tridiagonal `A2` directly:
-    - **`v = 0` (degenerate).** As `v → 0` the variance diffusion `½ξ²v` vanishes
-      and the drift `κ(θ-v) → κθ > 0` points *into* the domain. The row becomes a
-      **drift-only, one-sided upwind** (forward) difference with no coupling to a
-      sub-zero ghost — well posed whether or not the Feller condition
-      `2κθ ≥ ξ²` holds (it never differentiates across `v = 0`).
-    - **`v = v_max`.** A linearity condition `V_vv = 0` via linear ghost
-      extrapolation folded into the stencil.
-- **Mixed term at the boundary.** The cross-derivative operator `A0` is set to
-  **zero on all four edges** (a one-sided cross stencil there injects spurious
-  flux — see [Numerical Pitfalls](numerical-pitfalls.md)). It is applied
-  explicitly only, so it needs no boundary data of its own.
-
-### 4.8 `terminal.py` — payoff on the mesh
-
-Terminal (payoff) conditions evaluated on the grid, per instrument. Unlike the
-MC payoff functions (which return per-path cashflows), these return
-**grid-shaped** arrays: shape `(n,)` in 1-D, `(nx, ny)` in 2-D.
-
-```python
-def vanilla_terminal(grid, strike, is_call) -> Float[Array, " n"]: ...
-def digital_terminal(grid, strike, payout, is_call) -> Float[Array, " n"]: ...   # Rannacher-smoothed
-def heston_terminal(grid, strike, is_call) -> Float[Array, "nx ny"]: ...          # payoff independent of v
-def spread_terminal(grid, strike, is_call) -> Float[Array, "nx ny"]: ...
-```
-
-Barriers are handled as an **absorbing Dirichlet boundary** at the barrier
-level (set in `boundary.py`) rather than only through the terminal condition —
-the correct treatment for continuously-monitored knock-outs.
+`payoff_smoothing.py` replaces a pointwise `max(f, 0)` by a C¹ function of `f`
+and its half-variation over the node's cell (Pooley–Vetzal–Forsyth 2003):
+`smooth_positive_part` (exact cell average, 1-D), `bias_neutral_positive_part`
+(zero integrated bias, 2-D), `cell_half_variation`, the rank-dispatching
+`positive_part`, and the exercise projections `project_max` / `project_min`.
+The short-rate recipes route every kinked payoff and projection through these
+when `config.smooth_payoff` is set; the equity and Heston recipes ignore the
+flag. Rationale in §8.
 
 ### 4.9 `exercise.py` — early exercise
 
-See §7 for the method rationale. Two projection strategies:
-
 ```python
-def penalty_project(v, payoff, *, rho, iters) -> Float[Array, " n"]:
-    """Smooth American projection: add rho*max(payoff - v, 0) forcing term."""
-
-def explicit_project(v, exercise_value, is_min) -> Float[Array, " n"]:
-    """Bermudan/callable: v <- max/min(v, exercise_value) at snapped event steps."""
+def penalty_solver(payoff, rho, iters) -> TridiagonalSolver   # plugs into solver_fn
+def explicit_project(values, exercise_value, *, is_min) -> Float[Array, " n"]
 ```
 
-Both are `jax.grad`-friendly. `explicit_project` reuses the date→step snapping
-idiom from `hull_white_tree.py` (`round(times / dt)`), so discrete exercise
-dates map to specific `lax.scan` steps.
+`penalty_solver` returns a drop-in replacement for `tridiagonal_solve` that
+iterates $(A + \rho\,\mathrm{diag}(m^k))V^{k+1} = b + \rho\, m^k \odot g$ a
+**fixed** `iters` times (a `lax.scan`), so the graph is static and
+differentiable. `explicit_project` is the plain pointwise `min`/`max`; the
+production short-rate recipes use the smoothed `project_min` / `project_max`
+of §4.8 instead (identical to it when `smooth_payoff=False`).
 
-*As shipped*, discrete (Bermudan/callable/puttable) exercise is applied through
-the `event_fn` seam on `solve_backward_1d` rather than a separate `project`
-argument; the snapping is done with **traced** indices (`.at[levels].set(...)`),
-so schedules need not be concrete and the pricers stay `filter_jit`-able —
-unlike the trinomial tree, whose half-width is an array shape. Note that
-snapping is used for *exercise* dates only: cashflow dates get an exact
-analytic correction instead (§5).
+Discrete exercise lands through `event_fn` with **traced** level indices
+(`snap_to_levels`, `.at[levels].set(...)`), so schedules need not be concrete
+and the pricers stay `filter_jit`-able — unlike the trinomial tree, whose
+half-width is an array shape. Snapping is used for *exercise* dates only;
+cashflow dates get an exact analytic correction instead (§5).
 
-### 4.10 `coefficients.py` — model → operator coefficients
+### 4.10 `coefficients.py` — model → operator
 
-The adapter layer mapping each VALAX model onto the drift/diffusion fields the
-operator builder expects. It reuses the models' existing coefficient helpers
-wherever possible.
+| Model | Axes | Builder | Notes |
+|---|---|---|---|
+| `BlackScholesModel` | `ln S` | `bs_operator` | constant drift `r−q−½σ²`, diffusion `σ²`, discount `r` |
+| `LocalVolModel` | `ln S` | `lv_operator_stack` | per-node, per-step Dupire `σ²_loc(x, t)` — a stacked operator |
+| `HestonModel` | `(ln S, v)` | `heston_operator_2d` | `½v ∂ₓₓ`, `½ξ²v ∂ᵥᵥ`, mixed `ρξv ∂ₓᵥ` |
+| `HullWhiteModel` | centred `x` | `hw_operator_stack` | drift `−a x`, discount `x + ᾱ_k` with `α` *integrated* per step |
+| `G2PPModel` | centred `(x, y)` | `g2pp_operator_2d`, `g2pp_operator_rows` | state-only discount `x + y`; `φ(t)` factored out (§5); rows for σ(t) |
 
-| Model | Axes | Coefficients (source) |
+The Cheyette operators live in `cheyette.py` (they need the model's
+Gaussian-limit mean and `ȳ(t)`): `cheyette_operator_stack` (1F frozen-`y`,
+state-dependent diffusion `½σ²(1 + β(x̃ + m))²`), `cheyette_operator_2d` /
+`cheyette_operator_rows_2d` (2F frozen-`y`), and `cheyette_exact_operator_2d` /
+`cheyette_exact_operator_rows` (1F exact-`y`, with first-order **upwinded**
+advection on the hyperbolic `y` axis).
+
+SLV and two-asset operators are not built; see
+[roadmap §5.4](../roadmap.md#54-multi-dimensional-pde-solvers).
+
+### 4.11 `rates_payoffs.py` — shared short-rate payoffs
+
+Hull-White, G2++ and Cheyette price the same family of rates payoffs, and the
+payoff arithmetic is identical across them once the model can value
+zero-coupon bonds at its grid nodes. Recipes therefore hand this module two
+closures over `(model, grid)`:
+
+- `bond_portfolio(t, payment_times, cashflows) -> node values` — $\sum_i c_i P(t, T_i)$;
+- `discount_factor(t, payment_time) -> node values` — a single $P(t, T)$;
+
+and it supplies, for 1-D or 2-D node arrays alike: `snap_to_levels`,
+`swap_tail_values`, `coupon_values_by_level` (timing-exact coupon injection),
+`caplet_fixing_values` / `caplet_values_by_level` (a caplet as a put on the
+accrual-end bond, injected at its fixing level), `cms_spread_values_by_level`,
+`exercise_obstacle_by_level`, and the terminal-plus-event builders
+`exercisable_terminal_and_event` (callable/puttable) and
+`bermudan_terminal_and_event`. Everything model-specific — affine
+coefficients, the exact-fit shift, frozen- vs exact-`y` — stays inside the
+closures.
+
+### 4.12 `dispatch.py` and the recipe modules
+
+A mirror of `mc/dispatch.py`: a module-level registry keyed on
+`(type(instrument), type(model))`, a `register` decorator (raises on a
+duplicate unless `overwrite=True`), `registered_recipes()`, and
+`pde_price_dispatch(instrument, model, config, **market_args) -> PDEResult`,
+which raises a `ValueError` listing the registered pairs on a miss.
+`PDEResult` is an `eqx.Module` with a scalar `price` (and `__float__`).
+
+Recipes are spread over four modules, all imported for their side effects by
+`pde/__init__.py`:
+
+| Module | Model family | Engine |
 |---|---|---|
-| `BlackScholesModel` | `x = ln S` | drift `r−q−½σ²`, diffusion `½σ²`, discount `r` (from `GBMDrift`/`GBMDiffusion`) |
-| `HestonModel` | `(ln S, v)` | from `HestonDrift`/`HestonDiffusion`: `½v ∂ₓₓ`, `½ξ²v ∂ᵥᵥ`, `ρξv ∂ₓᵥ` |
-| `LocalVolModel` | `x = ln S` | per-node `σ_loc = dupire_local_vol(surface, k, t)` at each `(x, t)` |
-| `SLVModel` | `(ln S, v)` | Heston block × leverage `L(k,t)·√v` via `LeverageGrid.__call__` |
-| `HullWhiteModel` | `x = r − α(t)` | drift `−a x`, diffusion `½σ²`, discount `x + α(t)` — the discount coefficient *is* the state, so the operator is a per-step **stack** (`hw_operator_stack`) |
-| `MultiAssetGBMModel` | `(ln S₁, ln S₂)` | covariance `Σ_ij = ρ_ij σ_i σ_j` (cross term = `ρσ₁σ₂`) |
+| `recipes.py` | Black–Scholes, local vol, Heston | 1-D CN (+ penalty / Rannacher / absorbing BC); 2-D ADI for Heston |
+| `hull_white.py` | Hull-White | 1-D, centred state, linearity BC |
+| `g2pp.py` | G2++ | 2-D ADI, linearity BC on both axes |
+| `cheyette.py` | Cheyette 1F / 2F (frozen-`y`) | 1-D / 2-D, reusing the Hull-White / G2++ substrate |
 
-Local vol is the interesting case: coefficients are **time- and
-space-dependent**, evaluated at each grid node per time step via
-`jax.vmap(dupire_local_vol)`. This is why `operators.py` accepts callable
-coefficients, not just constant bands.
+The short-rate modules were split out of `recipes.py` because they need their
+own grid, boundary and discrete-event machinery. Each module docstring
+records the oracle used to validate each recipe.
 
-### 4.11 `dispatch.py` + `recipes.py` — instrument×model routing
+**Off-registry entry point.** `cheyette_exact_price(instrument, model,
+config)` prices a one-factor `FixedRateBond`, `Swaption` or `Caplet` with the
+exact-`y` 2-D PDE. It is not registered because it would share the
+`(instrument, CheyetteModel)` key with the frozen-`y` recipe while taking a
+`PDEConfig2D`; the Cheyette calibrator selects it with `engine="exact"`.
 
-A direct mirror of `mc/dispatch.py`: a module-level dict registry keyed on
-`(type(instrument), type(model))`, a `register` decorator, and a
-`pde_price_dispatch` entry point that raises a helpful `ValueError` listing
-available recipes on a miss. `recipes.py` is imported for its side effects
-(populating the registry), exactly like `mc/recipes.py`.
+**Market arguments and `price()`.** Equity recipes take `spot`. Short-rate
+recipes may additionally name `discount_curve` and `forward_curve` (and, for
+multi-index trades, `curves` / `spots`). `valax.core.pricing.price` bridges
+the registry directly — no adapter per recipe — and supplies those arguments
+**only to a recipe that names them explicitly** in its signature: a
+`**market_args` catch-all does not count, so an un-migrated recipe can never
+silently drop a projection curve, and `price()` refuses a trade touching
+curves its recipe cannot take. Hull-White and G2++ honour both curves
+(re-fit the exact-fit model to the discount curve; frozen tenor basis for
+projection — [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md));
+Cheyette is single-curve. Both default to `None`, leaving single-curve prices
+bit-for-bit unchanged.
 
-*As shipped*, `recipes.py` holds the equity recipes and
-**`hull_white.py`** the interest-rate ones (`FixedRateBond`, `CallableBond`,
-`PuttableBond`, `Swaption`, `BermudanSwaption`), split out because the
-short-rate side needs its own grid, boundary and discrete-event machinery.
-Both are imported for side effects by `pde/__init__.py`.
-
-```python
-_REGISTRY: dict[tuple[type, type], Callable[..., PDEResult]] = {}
-
-def register(instrument_cls, model_cls, *, overwrite=False): ...
-def pde_price_dispatch(instrument, model, config, **market_args) -> PDEResult: ...
-
-class PDEResult(eqx.Module):
-    price: Float[Array, ""]
-    def __float__(self) -> float: return float(self.price)
-```
-
-Illustrative recipe registrations for the first delivery:
+### 4.13 `solvers.py` — the back-compat façade
 
 ```python
-@register(AmericanOption, BlackScholesModel)
-def _american_bs(*, instrument, model, config, spot): ...
-
-@register(DigitalOption, BlackScholesModel)
-def _digital_bs(*, instrument, model, config, spot): ...
-
-@register(EquityBarrierOption, BlackScholesModel)
-def _barrier_bs(*, instrument, model, config, spot): ...
-
-@register(EuropeanOption, HestonModel)
-def _european_heston(*, instrument, model, config, spot): ...   # 2-D ADI
+def pde_price(option, spot, vol, rate, dividend, config=PDEConfig()) -> Float[Array, ""]
 ```
 
-### 4.12 `solvers.py` — drivers + back-compat
-
-High-level 1-D/2-D drivers that assemble grid → operator → boundary → terminal
-→ time-march, plus the **unchanged** public `pde_price`:
-
-```python
-def pde_price(option, spot, vol, rate, dividend, config=PDEConfig()) -> Float[Array, ""]:
-    """Back-compat façade: builds a BlackScholesModel + EuropeanOption path
-    through the new 1-D driver. Identical signature and results to today."""
-```
+Builds a `BlackScholesModel` and runs grid → `bs_operator` →
+`bs_european_boundary` → `vanilla_terminal` → `solve_backward_1d` →
+`read_off_1d`. Same signature as the original monolithic solver; it is a
+public kernel in its own right, not legacy.
 
 ## 5. Coordinate and discretisation conventions
 
-- **Equity spot axis:** log-spot `x = ln S` (uniform grid = uniform in
-  moneyness; kills the `S²` coefficient). Matches today's solver and Heston's
-  `log S` state.
-- **Variance axis (Heston/SLV):** `v` directly on `[0, y_max]`, with a
-  linearity BC at `v = y_max` and the natural (degenerate) behaviour at
-  `v = 0` handled by the Feller-aware upwinding of the convection term.
-- **Short-rate axis (Hull–White):** *as shipped*, the **centred state** `x` of
-  `r(t) = x(t) + alpha(t)`, not `r` directly (`centred_state_grid`). The drift
-  and diffusion are then time-independent, the state starts exactly at the
+- **Equity spot axis:** log-spot `x = ln S` (uniform in moneyness; removes the
+  `S²` coefficient). Grid placement detached from autodiff (§4.2).
+- **Variance axis (Heston):** `v` directly on `[0, y_max]`, `sinh`-concentrated
+  at `v0`, with the boundary rows of §4.7.
+- **Short-rate axes:** the **centred** state of `r(t) = x(t) + α(t)`
+  (Hull-White), `r = x + y + φ(t)` (G2++), or the centred Cheyette factor
+  `x̃ = x − m(t)` (frozen-`y`), on `centred_state_grid` sized from the
+  state's terminal standard deviation. Drift and diffusion are then
+  time-independent (Hull-White, G2++ with constant σ), the state starts at the
   origin — so the read-off point is fixed and needs no `stop_gradient`
-  scaffolding — and the whole dependence on the initial curve collapses into the
-  scalar `alpha`. The discount term is `(x + alpha(t))·V`, i.e. the discount
-  coefficient varies in **both space and time**, which is why the operator is a
-  per-step stack rather than a single set of bands.
+  scaffolding — and the curve dependence collapses into the deterministic
+  shift.
+- **Deterministic discount shifts.** Hull-White and Cheyette 1F put `α(t)`
+  into a per-step operator stack. G2++ and the 2-D Cheyette recipes instead
+  **factor out** the spatially-uniform `φ(t)`: with `V = D(t) W`, `W` solves a
+  PDE with the state-only discount, and `exp(−∫φ)` re-enters as a per-step
+  scalar applied through `event_fn`.
 - **Time:** backward from the terminal condition, `dt = T / n_time`, via
-  `jax.lax.scan`. See the time-index convention box in §4.4.
+  `jax.lax.scan`. See the time-index convention box in §4.5.
 - **Curve-derived quantities are *integrated* across a step, not sampled at its
   midpoint.** A log-linear discount curve has a piecewise-constant instantaneous
   forward that jumps at every pillar, so midpoint sampling is only first-order
   on the steps that straddle one — enough to stall an otherwise second-order
-  scheme (entry 3 of [Numerical Pitfalls](numerical-pitfalls.md)).
+  scheme (entry 3 of [Numerical Pitfalls](numerical-pitfalls.md)). The same
+  discipline applies to piecewise-constant σ(t): each step uses exact step
+  averages of the variance rates.
 - **Contractual dates are not snapped to time levels** where an exact correction
   exists. Snapping displaces a cashflow by up to `dt/2`, an `O(dt)` error that
-  dominates a second-order scheme; the Hull–White recipes instead scale each
-  coupon by the analytic bond price from its snapped level to its true payment
-  date (entry 4 of [Numerical Pitfalls](numerical-pitfalls.md)). Exercise dates
-  *are* snapped — a decision has to happen at a level — but that error is second
-  order.
-- **Read-off:** cubic Hermite in 1-D (`read_off_1d`); separable bicubic in 2-D
-  (`read_off_2d`) — both differentiable, and both carrying genuine within-cell
-  curvature so second-order Greeks survive.
+  dominates a second-order scheme; the short-rate recipes instead scale each
+  coupon by the model's analytic bond price from its snapped level to its true
+  payment date (entry 4 of [Numerical Pitfalls](numerical-pitfalls.md)).
+  Exercise dates *are* snapped — a decision has to happen at a level — but that
+  error is second order.
+- **Exercise ordering.** Exercise is decided on the *ex-coupon* continuation
+  value and the coupon added afterwards (call/put prices are quoted ex-coupon),
+  matching the tree; callable/puttable exercise compares a *clean* call price
+  against a clean continuation value.
+- **Read-off:** cubic Hermite in 1-D; separable bicubic in 2-D (§4.2).
 
 ## 6. Multi-dimensional scheme: why ADI
 
@@ -566,112 +602,162 @@ solves.
 | Option | Pros | Cons | Verdict |
 |---|---|---|---|
 | **ADI (Douglas / Craig–Sneyd / HV)** | Each step = a few **1-D tridiagonal solves per axis** → reuses `linalg.py`; unconditionally stable; the industry standard for Heston/basket FD | Cross term treated explicitly → needs CS/HV to recover 2nd order | **Chosen** |
-| Full 2-D implicit (block/sparse) | Cross term implicit; conceptually uniform | No sparse/block operator exists in VALAX; large systems; harder to keep autodiff-clean | Rejected |
+| Full 2-D implicit (block/sparse) | Cross term implicit; conceptually uniform | No sparse/block operator in VALAX; large systems; harder to keep autodiff-clean | Rejected |
 | Explicit (FTCS) | Trivial, no solves | CFL-restricted `Δt`; unstable/slow for realistic grids | Rejected |
 
-ADI factors cleanly into the tridiagonal building blocks we already have, and
-Craig–Sneyd/HV correctly handle the $\partial_{xy}$ mixed term arising from
-spot–vol correlation $\rho$. Douglas is the robust default for weakly
-correlated problems; Craig–Sneyd is the accuracy default; HV is available for
-strongly correlated / convection-dominated regimes.
+ADI factors cleanly into the tridiagonal building blocks, and Craig–Sneyd/HV
+correctly handle the mixed term — Heston's spot–vol correlation `ρξv ∂ₓᵥ` and
+G2++'s factor correlation `ρση ∂ₓᵧ` alike. Douglas is robust for weakly
+correlated problems; Craig–Sneyd is the accuracy default (`PDEConfig2D`); HV is
+available for strongly correlated / convection-dominated regimes. The exact-`y`
+Cheyette oracle uses Douglas (no mixed term; upwinded `y`).
 
 ## 7. Early exercise: method rationale
 
-| Method | Autodiff | Smoothness | Fit |
+| Method | Autodiff | Smoothness | Used for |
 |---|---|---|---|
 | **Penalty method** | Clean (fixed iteration of smooth ops) | Smooth Greeks | **American (continuous)** |
-| **Explicit projection** | Clean (`max`/`min` at event steps) | Kinked but fine | **Bermudan / callable / puttable (discrete dates)** |
+| **Projection at event levels** | Clean (`min`/`max`, smoothed by default) | C¹ with `smooth_payoff` | **Bermudan / callable / puttable** |
 | PSOR | Awkward (data-dependent iteration count) | Non-smooth | Rejected |
 
-- **Penalty method** for continuous American exercise: add a forcing term
-  $\rho\,\max(g - V, 0)$ that pushes the solution above the payoff, solved with
-  a small fixed number of iterations per step. Fixed iteration count + smooth
-  operations ⇒ clean `jax.grad` (important because `AGENTS.md` mandates autodiff
-  Greeks, not FD).
-- **Explicit projection** for discrete-date exercise (Bermudan swaptions,
-  callable/puttable bonds): apply `V ← max/min(V_continuation, exercise_value)`
-  **only** at snapped event steps — matching the existing lattice pattern in
-  `hull_white_tree.py`.
+- **Penalty method** for continuous American exercise: a forcing term
+  $\rho\,\max(g - V, 0)$ pushes the solution above the payoff, solved with a
+  fixed number of iterations per step. Fixed iteration count + smooth
+  operations ⇒ clean `jax.grad`.
+- **Projection** for discrete-date exercise: `V ← max/min(V_cont, exercise)`
+  only at snapped exercise levels — the lattice pattern of
+  `hull_white_tree.py`. Because the projection is itself a kink, the
+  short-rate recipes cell-average it (§8).
 - **PSOR is rejected**: its data-dependent iteration count and non-smooth
   updates are hard to make cleanly differentiable in JAX.
 
-## 8. Non-smooth payoffs: Rannacher start-up
+American exercise is 1-D only; projection works on both the 1-D and 2-D
+steppers. American / exotic payoffs on the 2-D grid are planned
+([roadmap §5.4](../roadmap.md#54-multi-dimensional-pde-solvers)).
 
-Crank–Nicolson oscillates on discontinuous terminal data (digitals) and kinks
-(vanillas at the strike), polluting gamma/vega. The fix is **Rannacher
-start-up**: replace the first `rannacher_steps` CN steps (typically 2) with
-fully-implicit (backward-Euler) steps, which damp high-frequency modes, then
-resume CN. This is essential for `DigitalOption` (whose terminal condition is a
-step) and for barriers, and cheap insurance for vanillas. It is exposed as a
-config knob (`rannacher_steps`), defaulted **on** for the 2-D config and for
-digital/barrier recipes.
+## 8. Non-smooth payoffs: Rannacher start-up and cell averaging
+
+Two complementary remedies, one in time and one in space.
+
+**Rannacher start-up (time).** Crank–Nicolson and Craig–Sneyd oscillate on
+discontinuous terminal data (digitals) and kinks (vanillas at the strike,
+swaption terminals, projections), polluting gamma/vega. Replacing the first
+`rannacher_steps` steps with fully-implicit steps damps the high-frequency
+modes. Defaulted on for the 2-D config, and floored at 2 by the digital,
+barrier and short-rate recipes.
+
+**Cell averaging (space).** Rannacher does nothing about where the kink sits
+relative to the *nodes*. Sampled pointwise, the discrete price is only
+piecewise smooth in the model inputs — it kinks each time a node crosses the
+exercise boundary — so finite-difference risk depends on the step and 1-D
+convergence is erratic. `payoff_smoothing` makes the price C¹ at an `O(h²)`
+bias: the exact cell average on 1-D grids, and a bias-neutral kernel on 2-D
+grids, where the cell average's one-signed bias measured larger than the
+error it removed. The switch is `smooth_payoff` (default on; `False` restores
+pointwise sampling bit-for-bit, and is part of the config that calibration
+provenance records). The kernels, the measured evidence and the 2-D
+decision are in
+[Hull-White Finite Differences § 4](../theory/hull-white-pde.md#kinks-cell-averaged-payoff-and-exercise)
+and the [PDE guide § 5.5](../guide/pde.md#55-non-smooth-payoffs-rannacher-start-up-and-cell-averaging).
 
 ## 9. Validation strategy
 
-Testing mirrors the source layout (`valax/pricing/pde/X.py` ↔
-`tests/test_pde/test_X.py`) and follows the tiered tolerance convention from
-`AGENTS.md` and the existing PDE tests:
+Tests mirror the source layout (`valax/pricing/pde/X.py` ↔
+`tests/test_pde/test_X.py`, plus per-model and per-feature files such as
+`test_heston_pde.py`, `test_g2pp.py`, `test_cheyette.py`,
+`test_*_piecewise.py`, `test_short_rate_caps.py`, `test_cms_spread_pde.py`,
+`test_multicurve.py`, `test_payoff_smoothing.py`), following the tiered
+tolerances of `AGENTS.md`:
 
-- **Cross-checks against existing pricers.** European↔analytic BS (rel
-  `< 5e-3` on a fine grid); American↔binomial (`american=True`);
-  spread↔Margrabe/Kirk; callable/puttable↔Hull–White tree; digital↔tight
-  call-spread proxy; Heston↔COS; otherwise MC within `2·stderr`.
-- **QuantLib comparisons** under `tests/test_quantlib_comparison/`, driving
-  both engines from the shared `effective_market` in `_ql_adapters.py`
-  (extended with Heston/basket adapters as needed): VALAX FD vs
-  `FdBlackScholesVanillaEngine` / `FdHestonVanillaEngine` (rel `< 1e-2`);
-  American premium vs `BinomialVanillaEngine` CRR (abs `< 0.05`).
-- **Convergence-ordering test** (`fine < coarse`) as the PDE-specific accuracy
-  idiom, rather than pinning an absolute error.
-- **`@eqx.filter_jit` smoke test** for every new pricing function (the mandated
-  test that is currently missing from `test_crank_nicolson.py` — we do not copy
-  that gap).
-- **Autodiff Greeks** taken with `jax.grad` *through* the solver, sanity-checked
-  vs FD at `rtol ≈ 1e-4`.
-- **Golden values** only for canonical configs lacking an analytic/QL reference,
-  registered via `assert_matches_golden` with tolerances loosened toward the PDE
-  floor.
+- **Cross-checks against other engines.** European ↔ analytic BS;
+  American ↔ binomial; digital ↔ analytic; barrier ↔ structural invariants
+  (in/out parity, including gamma parity) and QuantLib FD gamma — VALAX has
+  no closed-form barrier pricer yet; local vol ↔ Dupire MC; Heston ↔ COS (`rel < 1e-3`) and Andersen-QE MC; Hull-White ↔ analytic
+  bond, Jamshidian, the trinomial tree; G2++ ↔ the Brigo–Mercurio quadrature;
+  Cheyette ↔ its β = 0 reduction to Hull-White / G2++ and the frozen-`y` ↔
+  exact-`y` bias measurement; Bermudans ↔ co-terminal European bounds.
+- **QuantLib comparisons** under `tests/test_quantlib_comparison/`:
+  `test_pde_pr1_ql.py`, `test_pde_lattice_ql.py`, `test_local_vol_pde_ql.py`,
+  `test_heston_pde_ql.py`, `test_hull_white_pde_ql.py`, `test_g2pp_pde_ql.py`,
+  `test_cheyette_pde_ql.py` (via the β = 0 reduction; QuantLib has no Cheyette
+  engine).
+- **Measured convergence order** and **domain-width independence**, not just
+  an absolute error at the default grid — the lesson of entries 2–4 of
+  [Numerical Pitfalls](numerical-pitfalls.md)
+  (e.g. `TestPDEDomainWidthIndependence`, `TestBoundaryTimeDirection`).
+- **Structural tests:** Heston with frozen variance reproduces
+  Black–Scholes under every ADI scheme (`test_schemes2d.py`); with smoothed
+  payoffs, full-revaluation FD risk is step-independent and equals `jax.grad`,
+  and the Hull-White European swaption error falls by 4 per refinement
+  (`test_payoff_smoothing.py`).
+- **`@eqx.filter_jit` smoke tests** for the recipes, and the route contract
+  (`tests/test_core/test_route_contract.py`) for every `price(..., method="pde")`
+  pair.
+- **Autodiff Greeks** through the solver, sanity-checked against FD.
 
 ## 10. Delivery phases
 
-The layers build strictly bottom-up, so the work sequences into reviewable
-slices:
+The layers were built bottom-up in reviewable slices. This section is the
+history; current coverage is the coverage matrix's *PDE* column, open work is
+[roadmap §5.4](../roadmap.md#54-multi-dimensional-pde-solvers).
 
 1. **PR-1 (1-D foundation).** `config`, `grids`, `linalg`, `schemes`,
-   `operators` (1-D), `boundary`, `terminal`, `exercise`, `coefficients` (BS
-   only), `dispatch`, `recipes` (American/Digital/Barrier under BS), and the
-   `solvers.py` refactor. High value, no ADI. Cross-checks: binomial, analytic,
-   call-spread proxy.
-2. **PR-2 (2-D / stochastic vol).** *European Heston delivered.* `operators2d`
-   (the `A0 + A1 + A2` split with the cross-term), `schemes2d` (Douglas /
-   Craig–Sneyd / Hundsdorfer–Verwer), `heston_operator_2d`, the variance-axis
-   boundary surgery, and the `(EuropeanOption, HestonModel)` recipe. Validated
-   against COS (`rel < 1e-3`), Andersen-QE MC, and QuantLib
-   `AnalyticHestonEngine` / `FdHestonVanillaEngine`. Two intentional divergences
-   from the spec above, both driven by autodiff correctness:
+   `operators`, `boundary`, `terminal`, `exercise`, `coefficients` (BS),
+   `dispatch`, `recipes` (European / American / digital / barrier under BS),
+   and the `solvers.py` refactor. Local vol followed as a stacked-operator
+   recipe.
+2. **PR-2 (2-D / stochastic vol).** European Heston: `operators2d`,
+   `schemes2d` (Douglas / Craig–Sneyd / HV), `heston_operator_2d`, the
+   variance-axis boundary rows. Validated against COS, Andersen-QE MC and
+   QuantLib `AnalyticHestonEngine` / `FdHestonVanillaEngine`. The mixed-term
+   boundary bug found here is entry 1 of
+   [Numerical Pitfalls](numerical-pitfalls.md).
+3. **PR-3 (rates).** The Hull-White short-rate PDE (`hull_white.py`): bonds,
+   callable/puttable bonds, European and Bermudan swaptions, then caplets and
+   caps. Three discretisation bugs surfaced and were fixed — time-reversed
+   boundary sampling in *both* steppers, midpoint-sampled `α`, and cashflow
+   snapping (entries 2–4 of [Numerical Pitfalls](numerical-pitfalls.md)).
+4. **Two-factor and skewed short rates.** G2++ (`g2pp.py`) on the 2-D ADI
+   substrate, including CMS-spread swaps and callable/puttable bonds; Cheyette
+   1F/2F frozen-`y` and the 1F exact-`y` oracle (`cheyette.py`); the shared
+   payoff layer `rates_payoffs.py` factored out of the three.
+5. **Cross-cutting upgrades.** Multi-curve discounting/projection for the
+   Hull-White and G2++ recipes; piecewise-constant σ(t) for all three
+   short-rate models (stacked rows in 1-D, per-step operator functions in 2-D);
+   cell-averaged payoffs and projections (`payoff_smoothing.py`).
 
-   - The 2-D stepper landed as **`schemes2d.py`** (not a standalone `adi.py`).
-   - The 2-D read-off is a **separable bicubic Hermite** (`read_off_2d`), *not*
-     `bilinear_2d`: bilinear interpolation has no within-cell curvature, so
-     `jax.grad(jax.grad(...))` would collapse gamma (and the mixed cross-Greek)
-     to ~0 — the same reason the 1-D read-off uses a cubic. Grid *placement*
-     stays `stop_gradient`-detached; the live read-off queries (`ln S`, `v0`)
-     carry delta/gamma and v0-vega.
+**Where the build departed from the original spec**, in each case for
+autodiff correctness or simplicity:
 
-   Still open under PR-2: American/exotic on the 2-D grid, and SLV / two-asset
-   recipes.
-3. **PR-3 (rates).** Hull–White short-rate PDE for callable/puttable bonds and
-   Bermudan swaptions. Cross-checks: Hull–White tree, LSM.
+- The 2-D stepper is **`schemes2d.py`** + **`operators2d.py`**, not a
+  standalone `adi.py`.
+- The 2-D read-off is a **separable bicubic Hermite**, not `bilinear_2d`
+  (§4.2).
+- Boundaries are **callables plus operator folds**, not
+  `Dirichlet` / `Neumann` / `Linearity` classes; no Neumann condition was
+  needed.
+- Discrete exercise and coupons use the **`event_fn`** seam and American
+  exercise the **`solver_fn`** seam, rather than a single `project` hook.
+- The exercise style follows the **instrument type**; `config.exercise` is not
+  consulted (§4.1).
+- Short-rate payoffs live in **`rates_payoffs.py`** and the Cheyette operators
+  in **`cheyette.py`**, not in `terminal.py` / `coefficients.py`.
+- The `SLVModel` and `MultiAssetGBMModel` coefficient adapters, and the
+  `spread_terminal` / 2-D American paths, were not built — they are the open
+  items of roadmap §5.4.
 
-Each PR adds Google-style docstrings and switches on its
-[`api/pricing.md`](../api/pricing.md) entries, keeping `mkdocs build --strict`
-green throughout.
+## 11. Relationship to other docs
 
-## 11. Relationship to existing docs
-
-- **Theory:** the PDE math (operators, ADI, penalty method, Rannacher, per-model
-  PDEs) lives in [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences).
-- **User guide:** usage, the model×instrument matrix, config knobs, and
-  Greeks-through-solver are in the [PDE guide](../guide/pde.md).
-- **API reference:** [`api/pricing.md`](../api/pricing.md) — populated
-  incrementally as symbols land.
+- **Coverage (what is priced by PDE):**
+  [coverage matrix](../applications/instrument-pricing.md#coverage-matrix),
+  *PDE* column.
+- **Usage, configs, recipe-level engine details:** [PDE guide](../guide/pde.md).
+- **Maths:** [theory §5.2](../theory/pricing-methods.md#52-pde-finite-differences)
+  (operators, ADI, penalty, Rannacher),
+  [Hull-White Finite Differences](../theory/hull-white-pde.md),
+  [G2++ §8](../theory/g2pp.md#8-pde-2-d-finite-differences),
+  [Cheyette §8](../theory/cheyette.md#8-pde-finite-differences),
+  [Time-Dependent Volatility](../theory/time-dependent-volatility.md),
+  [Multi-Curve Short Rates](../theory/multi-curve-short-rate.md).
+- **Bugs found building it:** [Numerical Pitfalls](numerical-pitfalls.md).
+- **API reference:** [`api/pricing.md`](../api/pricing.md#pde).

@@ -117,7 +117,7 @@ The finite domain requires boundary conditions on the truncated edges. VALAX use
 
 **When to use:** low-dimensional problems (one underlying, or one spot plus one variance factor) where you want the full solution surface, and especially early-exercise, barrier, and digital features where a backward grid with an absorbing boundary and Rannacher start-up beats MC and CRR. Faster than MC for $d \le 2$; the curse of dimensionality makes it impractical for $d > 3$, where Monte Carlo takes over.
 
-**VALAX implementation:** the shipping solver is `valax/pricing/pde/solvers.py` (`pde_price`) — 1-D CN, `jax.lax.scan` backward loop, `lineax` tridiagonal solve, Black-Scholes asymptotic boundaries. The multivariate subsystem (2-D ADI, penalty/projection early exercise, model×instrument dispatch) is specified in the [PDE design doc](../architecture/pde-design.md) and delivered in phases; see the [PDE guide](../guide/pde.md) for the target coverage matrix.
+**VALAX implementation:** `valax/pricing/pde/` — 1-D θ-schemes (CN / implicit, Rannacher start-up) and 2-D ADI (Douglas / Craig–Sneyd / Hundsdorfer–Verwer), each a `jax.lax.scan` backward loop over `lineax` tridiagonal solves, with penalty (American) and projection (Bermudan / callable) early exercise and an `(instrument, model)` recipe dispatcher reachable through `price(..., method="pde")`; `pde_price` remains the 1-D Black–Scholes European kernel. The architecture is in the [PDE design doc](../architecture/pde-design.md), usage in the [PDE guide](../guide/pde.md), and which instruments it prices in the PDE column of the [coverage matrix](../applications/instrument-pricing.md#coverage-matrix).
 
 ### 5.3 Monte Carlo Simulation
 

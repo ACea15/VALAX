@@ -1,7 +1,5 @@
 # Front-Office Trading — the Differentiable Pricing Core
 
-[← Applications overview](index.md#3-the-audience-map-ranked-by-fit-today) · one of five audience pages
-
 *How VALAX serves a front-office desk running an **in-house trading platform**: not as the strategy and not as the execution gateway, but as the differentiable **pricing-and-risk core** that values a universe of products consistently and — the part that is actually novel — exposes exact **gradients that cross into the decision layer**, at intraday cadence, on CPU or GPU.*
 
 Before the pitch, the honest framing of *what is and isn't novel here*, because it changes what the page is even about:
