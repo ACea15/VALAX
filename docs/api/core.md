@@ -242,7 +242,7 @@ pv_kernel = hw_swaption_price(swaption, bound)
 - [API → Market Data](market.md) — `KeyedScenario`, quote sets, the
   synthetic-market generators, and the legacy `MarketData` container
   (scheduled for removal).
-- [API → Risk](risk.md) — keyed shocks, generators, repricing and ladders
+- [API → Risk](risk.md) — keyed shocks, generators, repricing and sensitivities
   on a `MarketState`.
 - [API → Curves](curves.md) — `CurveGraph` and the joint bootstrap that
   builds it.

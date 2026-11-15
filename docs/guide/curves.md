@@ -977,7 +977,7 @@ pricing inflation swaps and caps/floors against a built curve, see
       `KeyedScenario` via `valax.risk.shock` (built on
       `valax.risk.shocks.bump_graph_curve` / `parallel_graph_shift` /
       `key_rate_graph_bump`, which also work on a bare graph), and measure
-      with `valax.greeks.market_risk` or the keyed ladders
+      with `valax.greeks.market_risk` or the keyed sensitivities
       ([API → Risk](../api/risk.md#keyed-shocks-on-a-marketstate)). The
       legacy `MarketData.curve_graph` field only carries a graph and is
       removed with `MarketData`.

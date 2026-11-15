@@ -446,9 +446,9 @@ def pnl_attribution(
 
     Warns:
         UserWarning: If ``base.curve_graph`` holds curves other than the
-            ``"_default_"`` sentinel — the ``delta_rate`` rung covers the
+            ``"_default_"`` sentinel — the ``delta_rate`` term covers the
             sentinel curve only, so moves of a named curve would land in
-            ``unexplained`` rather than in a rung of their own.
+            ``unexplained`` rather than in a term of their own.
     """
     _warn_frozen_graph_curves(base, "pnl_attribution")
 

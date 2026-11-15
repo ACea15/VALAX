@@ -146,7 +146,7 @@ If you need a constant, make it a module-level constant assigned exactly once.
 
 ### 2.2 Every data structure is an `equinox.Module`
 
-All structured data — instruments, curves, models, market data, risk ladders —
+All structured data — instruments, curves, models, market data, risk sensitivities —
 must subclass `equinox.Module`. This makes them frozen dataclasses that are
 automatically registered as JAX pytrees.
 

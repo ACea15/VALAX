@@ -19,7 +19,7 @@ function. Two consequences:
   so there is no single `pricing_fn` to `vmap`.
 
 Everything built today assumes past this problem: `batch_price`,
-[`compute_ladder`](../risk-ladders.md), and the VaR engine each take **one**
+[`compute_flat_sensitivities`](../risk-sensitivities.md), and the VaR engine each take **one**
 `pricing_fn` and **one** homogeneous instrument batch. Composing a mixed book is
 currently left to the caller.
 
@@ -75,7 +75,7 @@ container and the group-and-aggregate engine above are not yet implemented.
   `vmap`-over-instruments.
 - The `(instrument, model)` recipe registries (`mc_price_dispatch`,
   `pde_price_dispatch`).
-- The aggregation algebra — `SensitivityLadder`, `BucketMap`, and the PCA factor
+- The aggregation algebra — `FlatSensitivities`, `BucketMap`, and the PCA factor
   model — which already combines sensitivities in factor space once each group has
   produced its Greeks (see [Greeks & Hedging](greeks-and-hedging.md)).
 

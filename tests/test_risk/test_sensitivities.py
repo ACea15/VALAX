@@ -1,4 +1,4 @@
-"""Tests for sensitivity ladders and waterfall P&L decomposition."""
+"""Tests for flat bucketed sensitivities and waterfall P&L decomposition."""
 
 import jax
 import jax.numpy as jnp
@@ -10,10 +10,10 @@ from valax.instruments.options import EuropeanOption
 from valax.market.data import MarketData
 from valax.market.scenario import MarketScenario
 from valax.pricing.analytic.black_scholes import black_scholes_price
-from valax.risk.ladders import (
-    SensitivityLadder,
+from valax.risk.sensitivities import (
+    FlatSensitivities,
     WaterfallPnL,
-    compute_ladder,
+    compute_flat_sensitivities,
     waterfall_pnl,
     waterfall_pnl_report,
 )
@@ -86,102 +86,102 @@ def large_scenario():
     )
 
 
-# ── Test: Ladder shape and structure ─────────────────────────────────
+# ── Test: Sensitivities shape and structure ─────────────────────────────────
 
 
-class TestComputeLadder:
+class TestComputeFlatSensitivities:
     def test_shapes(self, simple_portfolio):
-        """All ladder fields should have correct shapes."""
+        """All sensitivity fields should have correct shapes."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
 
         n_assets = 2
         n_pillars = 3
 
         # First order
-        assert ladder.delta_spot.shape == (n_assets,)
-        assert ladder.delta_vol.shape == (n_assets,)
-        assert ladder.delta_rate.shape == (n_pillars,)
-        assert ladder.delta_div.shape == (n_assets,)
+        assert sens.delta_spot.shape == (n_assets,)
+        assert sens.delta_vol.shape == (n_assets,)
+        assert sens.delta_rate.shape == (n_pillars,)
+        assert sens.delta_div.shape == (n_assets,)
 
         # Second order diagonals
-        assert ladder.gamma_spot.shape == (n_assets,)
-        assert ladder.gamma_rate.shape == (n_pillars,)
-        assert ladder.volga.shape == (n_assets,)
-        assert ladder.vanna.shape == (n_assets,)
+        assert sens.gamma_spot.shape == (n_assets,)
+        assert sens.gamma_rate.shape == (n_pillars,)
+        assert sens.volga.shape == (n_assets,)
+        assert sens.vanna.shape == (n_assets,)
 
         # Cross blocks
-        assert ladder.cross_spot_rate.shape == (n_assets, n_pillars)
-        assert ladder.cross_vol_rate.shape == (n_assets, n_pillars)
+        assert sens.cross_spot_rate.shape == (n_assets, n_pillars)
+        assert sens.cross_vol_rate.shape == (n_assets, n_pillars)
 
     def test_delta_spot_positive_for_calls(self, simple_portfolio):
         """Call option deltas should be positive."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        assert jnp.all(ladder.delta_spot > 0)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        assert jnp.all(sens.delta_spot > 0)
 
     def test_gamma_spot_positive_for_calls(self, simple_portfolio):
         """Call option gammas should be positive."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        assert jnp.all(ladder.gamma_spot > 0)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        assert jnp.all(sens.gamma_spot > 0)
 
     def test_vega_positive_for_long_options(self, simple_portfolio):
         """Long option vegas should be positive."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        assert jnp.all(ladder.delta_vol > 0)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        assert jnp.all(sens.delta_vol > 0)
 
     def test_volga_positive_for_options(self, simple_portfolio):
         """Long option volgas should be positive (vega convexity)."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        assert jnp.all(ladder.volga > 0)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        assert jnp.all(sens.volga > 0)
 
 
-# ── Test: Ladder first order matches existing pnl_attribution ────────
+# ── Test: Sensitivities first order matches existing pnl_attribution ────────
 
 
-class TestLadderConsistency:
+class TestSensitivitiesConsistency:
     def test_first_order_matches_pnl_attribution(
         self, simple_portfolio, small_scenario,
     ):
-        """Ladder delta terms should match pnl_attribution delta terms."""
+        """Sensitivities delta terms should match pnl_attribution delta terms."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
 
         # Existing pnl_attribution
         attrib = pnl_attribution(
             _bs_market_fn, instruments, base, small_scenario,
         )
 
-        # Ladder first-order P&L
+        # Sensitivities first-order P&L
         d_spots = small_scenario.spot_shocks
         d_vols = small_scenario.vol_shocks
         d_rates = small_scenario.rate_shocks
 
-        ladder_delta_spot = jnp.sum(ladder.delta_spot * d_spots)
-        ladder_delta_vol = jnp.sum(ladder.delta_vol * d_vols)
-        ladder_delta_rate = jnp.sum(ladder.delta_rate * d_rates)
+        sens_delta_spot = jnp.sum(sens.delta_spot * d_spots)
+        sens_delta_vol = jnp.sum(sens.delta_vol * d_vols)
+        sens_delta_rate = jnp.sum(sens.delta_rate * d_rates)
 
-        assert jnp.isclose(ladder_delta_spot, attrib["delta_spot"], rtol=1e-4)
-        assert jnp.isclose(ladder_delta_vol, attrib["delta_vol"], rtol=1e-4)
-        assert jnp.isclose(ladder_delta_rate, attrib["delta_rate"], rtol=1e-4)
+        assert jnp.isclose(sens_delta_spot, attrib["delta_spot"], rtol=1e-4)
+        assert jnp.isclose(sens_delta_vol, attrib["delta_vol"], rtol=1e-4)
+        assert jnp.isclose(sens_delta_rate, attrib["delta_rate"], rtol=1e-4)
 
     def test_spot_gamma_matches_pnl_attribution(
         self, simple_portfolio, small_scenario,
     ):
-        """Ladder gamma_spot P&L should match pnl_attribution gamma_spot."""
+        """Sensitivities gamma_spot P&L should match pnl_attribution gamma_spot."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
         attrib = pnl_attribution(
             _bs_market_fn, instruments, base, small_scenario,
         )
 
         d_spots = small_scenario.spot_shocks
-        ladder_gamma = 0.5 * jnp.sum(ladder.gamma_spot * d_spots**2)
+        sens_gamma = 0.5 * jnp.sum(sens.gamma_spot * d_spots**2)
 
-        assert jnp.isclose(ladder_gamma, attrib["gamma_spot"], rtol=1e-3)
+        assert jnp.isclose(sens_gamma, attrib["gamma_spot"], rtol=1e-3)
 
 
 # ── Test: Waterfall P&L ──────────────────────────────────────────────
@@ -191,7 +191,7 @@ class TestWaterfallPnL:
     def test_zero_scenario_zero_pnl(self, simple_portfolio):
         """Zero scenario should produce zero waterfall P&L."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
 
         zero = MarketScenario(
             spot_shocks=jnp.zeros(2),
@@ -199,19 +199,19 @@ class TestWaterfallPnL:
             rate_shocks=jnp.zeros(3),
             dividend_shocks=jnp.zeros(2),
         )
-        wf = waterfall_pnl(ladder, zero, base)
+        wf = waterfall_pnl(sens, zero, base)
 
         assert jnp.isclose(wf.delta_spot, 0.0, atol=1e-10)
         assert jnp.isclose(wf.delta_vol, 0.0, atol=1e-10)
         assert jnp.isclose(wf.predicted, 0.0, atol=1e-10)
 
-    def test_rungs_sum_to_predicted(self, simple_portfolio, small_scenario):
-        """Sum of all rungs should equal predicted."""
+    def test_terms_sum_to_predicted(self, simple_portfolio, small_scenario):
+        """Sum of all terms should equal predicted."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        wf = waterfall_pnl(ladder, small_scenario, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        wf = waterfall_pnl(sens, small_scenario, base)
 
-        rung_sum = (
+        term_sum = (
             wf.delta_spot
             + wf.delta_vol
             + wf.delta_rate
@@ -223,15 +223,15 @@ class TestWaterfallPnL:
             + wf.cross_spot_rate_pnl
             + wf.cross_vol_rate_pnl
         )
-        assert jnp.isclose(rung_sum, wf.predicted, atol=1e-10)
+        assert jnp.isclose(term_sum, wf.predicted, atol=1e-10)
 
     def test_first_plus_second_equals_predicted(
         self, simple_portfolio, small_scenario,
     ):
         """total_first_order + total_second_order should equal predicted."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        wf = waterfall_pnl(ladder, small_scenario, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        wf = waterfall_pnl(sens, small_scenario, base)
 
         assert jnp.isclose(
             wf.total_first_order + wf.total_second_order,
@@ -300,20 +300,20 @@ class TestWaterfallReport:
         assert rel_error < 0.01
 
 
-# ── Test: Precomputed ladder reuse ───────────────────────────────────
+# ── Test: Precomputed sensitivities reuse ───────────────────────────────────
 
 
-class TestLadderReuse:
+class TestSensitivitiesReuse:
     def test_precomputed_matches_on_the_fly(
         self, simple_portfolio, small_scenario,
     ):
-        """waterfall_pnl_report with precomputed ladder should match
+        """waterfall_pnl_report with precomputed sensitivities should match
         on-the-fly computation."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
 
         wf_precomputed = waterfall_pnl_report(
-            _bs_market_fn, instruments, base, small_scenario, ladder=ladder,
+            _bs_market_fn, instruments, base, small_scenario, sensitivities=sens,
         )
         wf_fresh = waterfall_pnl_report(
             _bs_market_fn, instruments, base, small_scenario,

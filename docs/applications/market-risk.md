@@ -2,7 +2,7 @@
 
 *How VALAX serves the two middle-office functions that share the same tooling — **Market Risk Management (MRM)** on the trading book, and **Model Validation** as the SR 11-7 / TRIM independent challenger to the front office.*
 
-These are the [audiences](index.md) VALAX is best positioned to serve *today*. Where [Regulatory: FRTB & CCAR](regulatory.md) covers the compliance outputs and [Treasury & ALM](treasury.md) covers the banking book, this page covers the **daily production loop of the middle office** — sensitivity ladders, limits, VaR/ES, backtests, P&L explain, and the challenger benchmarking Model Validation is required to run. Both functions need an *analytics platform they own*, distinct from the front-office pricers they oversee, and VALAX is architected for that role: pure functions, deterministic replay, autodiff Greeks, `vmap` over books, and a QuantLib comparison suite already in the tree.
+These are the [audiences](index.md) VALAX is best positioned to serve *today*. Where [Regulatory: FRTB & CCAR](regulatory.md) covers the compliance outputs and [Treasury & ALM](treasury.md) covers the banking book, this page covers the **daily production loop of the middle office** — bucketed sensitivities, limits, VaR/ES, backtests, P&L explain, and the challenger benchmarking Model Validation is required to run. Both functions need an *analytics platform they own*, distinct from the front-office pricers they oversee, and VALAX is architected for that role: pure functions, deterministic replay, autodiff Greeks, `vmap` over books, and a QuantLib comparison suite already in the tree.
 
 ---
 
@@ -11,7 +11,7 @@ These are the [audiences](index.md) VALAX is best positioned to serve *today*. W
 These are the buyers and output-consumers — the people who fund the stack and read its numbers. The hands-on **users** are a different population (risk quants and developers); see [§ 2.1](#21-market-risk-management-mrm).
 
 **To the Head of MRM:**
-*A production-ready middle-office analytics stack: autodiff ladders, vmapped VaR/ES, waterfall P&L explain, Basel backtesting toolkit, and FRTB PLA — all in the same code path. Your morning-after P&L dialogue with the desk is one call, and the number reconciles by construction with the FRTB submission your CFO sends the regulator.*
+*A production-ready middle-office analytics stack: autodiff bucketed sensitivities, vmapped VaR/ES, waterfall P&L explain, Basel backtesting toolkit, and FRTB PLA — all in the same code path. Your morning-after P&L dialogue with the desk is one call, and the number reconciles by construction with the FRTB submission your CFO sends the regulator.*
 
 **To the Head of Model Validation:**
 *An independent-by-construction challenger implementation, in Python + JAX rather than C++, with a QuantLib comparison suite already in the tree covering options, fixed income, Heston, SABR, caps, swaptions, MC, PDE, lattice, SLV, and Greeks. Your annual validation cycle starts from a shipped evidence pack.*
@@ -34,7 +34,7 @@ For Model Validation this is decisive: a challenger in Python + JAX + XLA is *ge
 
 ### 1.2 Exact autodiff everywhere — a different cost model, not a feature
 
-The incumbent computes Greeks by bump-and-reprice; VALAX computes them by autodiff — not "the same numbers, faster" but a structurally cheaper *and* exact cost model. The generic capability and its `MRM` payoff — the whole factor ladder in one reverse pass, a bump-free RTPL that removes a common cause of FRTB PLA failure, no bump-width disputes in validation, and one ladder every audience slices — is set out in [Applications § 2.1](index.md#21-exact-autodiff-risk-no-bump-and-reprice) and [§ 2.3](index.md#23-one-market-state-object-one-code-path).
+The incumbent computes Greeks by bump-and-reprice; VALAX computes them by autodiff — not "the same numbers, faster" but a structurally cheaper *and* exact cost model. The generic capability and its `MRM` payoff — every factor sensitivity in one reverse pass, a bump-free RTPL that removes a common cause of FRTB PLA failure, no bump-width disputes in validation, and one set of sensitivities every audience slices — is set out in [Applications § 2.1](index.md#21-exact-autodiff-risk-no-bump-and-reprice) and [§ 2.3](index.md#23-one-market-state-object-one-code-path).
 
 None of this is about running the same computation faster. It is a structurally different — cheaper, exact — way of producing the risk numbers the regulator asks for.
 
@@ -69,7 +69,7 @@ Middle-office function reporting to the CRO. Owns:
 
 | Responsibility | Cadence |
 |---|---|
-| End-of-day sensitivity computation across the trading book (DV01, delta, vega, gamma, ladders) | EOD |
+| End-of-day sensitivity computation across the trading book (DV01, delta, vega, gamma, bucketed per factor) | EOD |
 | Full-revaluation VaR / ES and parametric VaR | EOD |
 | Limit monitoring — per-desk DV01, vega, gamma, VaR limits | Intraday + EOD |
 | Named stress scenarios (parallel, steepener, crash, credit widening) and named-stress limits | EOD + weekly |
@@ -116,16 +116,17 @@ MRM's daily production loop and Model Validation's challenger pricing consume th
 │  2. Reprice book at today's close ────► price() via group_pv     │
 │     (HPL versus prior close)                                     │
 │                                                                  │
-│  3. Compute full sensitivity ladder ──► keyed_ladder             │
+│  3. Compute bucketed sensitivities ───► keyed_sensitivities      │
 │     (Δ, γ, vanna, volga, DV01 per        (market_risk per trade) │
 │      curve and basis, cross-gamma)                               │
 │                                                                  │
 │  4. Waterfall P&L explain ────────────► keyed_waterfall_report   │
-│     (one rung per curve / surface /                              │
+│     (one term per curve / surface /                              │
 │      asset vs. actual repricing)                                 │
 │                                                                  │
-│  5. Bucketed limits view ─────────────► KeyedLadder.curve_ladder │
-│     (desk / sector / tenor)              block_totals, BucketMap │
+│  5. Bucketed limits view ─────────────► KeyedSensitivities.      │
+│     (desk / sector / tenor)              key_rate_dv01,          │
+│                                          block_totals, BucketMap │
 │                                                                  │
 │  6. Full-reval VaR / ES ──────────────► keyed_historical_        │
 │     (10 000 historical or MC scenarios)   scenarios,             │
@@ -147,12 +148,13 @@ MRM's daily production loop and Model Validation's challenger pricing consume th
 │                                          (HPL/RTPL vectors still │
 │                                           on the flat path)      │
 │                                                                  │
-│  10. Limits monitor + breach queue ───► arithmetic on ladder     │
+│  10. Limits monitor + breach queue ───► arithmetic on the        │
+│                                          sensitivities           │
 │      (send breaches to trader / CRO)     + bucket outputs        │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Every stage has a one-line VALAX primitive today. This is not aspirational — the guide walkthroughs in [Scenarios & Shocks](../risk-scenarios.md) and `examples/19_unified_book_workflow.py` exercise this loop end-to-end on synthetic books. The core object is the `KeyedLadder` (one `jax.grad` + `jax.hessian` pass through `price()`, one block per named curve, surface and asset): the trader's Greeks, the desk's DV01 per curve, the basis DV01, the CRO's cross-gamma and the per-curve VaR contributions are all slices of it — **the ladder is the noun; every dashboard is a verb.** One exception remains: the FRTB PLA vectors and SBA bucketing (`bucket_sensitivity_ladder`) still read the legacy flat `SensitivityLadder` until their keyed port lands ([roadmap](../roadmap.md#remaining-work)).
+Every stage has a one-line VALAX primitive today. This is not aspirational — the guide walkthroughs in [Scenarios & Shocks](../risk-scenarios.md) and `examples/19_unified_book_workflow.py` exercise this loop end-to-end on synthetic books. The core object is the `KeyedSensitivities` (one `jax.grad` + `jax.hessian` pass through `price()`, one block per named curve, surface and asset): the trader's Greeks, the desk's DV01 per curve, the basis DV01, the CRO's cross-gamma and the per-curve VaR contributions are all slices of it — **the sensitivities are the noun; every dashboard is a verb.** One exception remains: the FRTB PLA vectors and SBA bucketing (`bucket_sensitivities`) still read the legacy flat `FlatSensitivities` until their keyed port lands ([roadmap](../roadmap.md#remaining-work)).
 
 ---
 
@@ -180,7 +182,7 @@ var_99 = value_at_risk(pnl_vec, confidence=0.99)
 es_975 = expected_shortfall(pnl_vec, confidence=0.975)
 ```
 
-Under the hood, `jax.vmap` handles both axes — 10 000 scenarios × 5 000 instruments = 50 000 000 repricings compiled into one JIT call. On a single GPU this is minutes; on CPU it's competitive with the vendor risk engines it displaces. For a faster cross-check, `keyed_parametric_var(ladder, cov)` gives the delta-normal answer from the keyed ladder and a per-curve `block_covariance` — and `keyed_component_var` splits it by curve, basis and surface — and the *gap* between full-reval and parametric is itself a useful diagnostic on portfolio convexity.
+Under the hood, `jax.vmap` handles both axes — 10 000 scenarios × 5 000 instruments = 50 000 000 repricings compiled into one JIT call. On a single GPU this is minutes; on CPU it's competitive with the vendor risk engines it displaces. For a faster cross-check, `keyed_parametric_var(sens, cov)` gives the delta-normal answer from the keyed sensitivities and a per-curve `block_covariance` — and `keyed_component_var` splits it by curve, basis and surface — and the *gap* between full-reval and parametric is itself a useful diagnostic on portfolio convexity.
 
 ---
 
@@ -206,11 +208,11 @@ The zone (green / yellow / red) drives the capital multiplier directly. For desk
 
 ## 6. P&L explain — the trader-vs-MRM dialogue
 
-The most politically charged conversation on any trading floor happens at 09:00 the morning after a big move: the trader claims the loss was "market", MRM claims it was "the position", the CRO wants a number. VALAX's `keyed_waterfall_report` answers with one rung per named market object and a residual:
+The most politically charged conversation on any trading floor happens at 09:00 the morning after a big move: the trader claims the loss was "market", MRM claims it was "the position", the CRO wants a number. VALAX's `keyed_waterfall_report` answers with one term per named market object and a residual:
 
 ```python
 from valax.market import KeyedScenario
-from valax.risk import keyed_ladder, keyed_waterfall_report
+from valax.risk import keyed_sensitivities, keyed_waterfall_report
 
 # Yesterday's actual moves, addressed by identifier
 overnight = KeyedScenario(
@@ -222,8 +224,8 @@ overnight = KeyedScenario(
     },
 )
 
-ladder = keyed_ladder(positions, model, yesterday_market, second_order=True)
-wf = keyed_waterfall_report(positions, model, yesterday_market, overnight, ladder=ladder)
+sens = keyed_sensitivities(positions, model, yesterday_market, second_order=True)
+wf = keyed_waterfall_report(positions, model, yesterday_market, overnight, sensitivities=sens)
 
 # The answer the CRO wants: first-order P&L per curve / surface / asset,
 # then the second-order terms, the actual repricing and the residual
@@ -233,7 +235,7 @@ print(f"second order:{wf.total_second_order:+.0f} "
       f"actual:{wf.actual:+.0f} unexplained:{wf.unexplained:+.0f}")
 ```
 
-Every rung has a name a trader recognises; the `unexplained` residual is the honest measure of "how well the risk engine understands this book". A systematically large or biased unexplained is the single most actionable model-improvement signal MRM produces.
+Every term has a name a trader recognises; the `unexplained` residual is the honest measure of "how well the risk engine understands this book". A systematically large or biased unexplained is the single most actionable model-improvement signal MRM produces.
 
 ---
 
@@ -241,7 +243,7 @@ Every rung has a name a trader recognises; the `unexplained` residual is the hon
 
 The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#4-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `MRM`).
 
-In brief: the daily MRM production loop and the Model Validation challenger pack are **both fully achievable today** with shipped components. The multi-curve market has shipped; **porting the PLA vectors onto the keyed ladder** and **SBA aggregation** are the roadmap items that would close the last gaps for a bank-wide deployment, and the differentiable **risk-measure / reverse-stress** capabilities of [§ 1.3](#13-differentiable-risk-measures-and-reverse-stress-testing-the-frontier) are the categorical frontier.
+In brief: the daily MRM production loop and the Model Validation challenger pack are **both fully achievable today** with shipped components. The multi-curve market has shipped; **porting the PLA vectors onto the keyed sensitivities** and **SBA aggregation** are the roadmap items that would close the last gaps for a bank-wide deployment, and the differentiable **risk-measure / reverse-stress** capabilities of [§ 1.3](#13-differentiable-risk-measures-and-reverse-stress-testing-the-frontier) are the categorical frontier.
 
 ---
 

@@ -160,7 +160,7 @@ nav:
       - Overview: risk-overview.md
       - Risk Factors: risk-factors.md
       - Scenarios & Shocks: risk-scenarios.md
-      - Sensitivity Ladders: risk-ladders.md
+      - Bucketed Sensitivities: risk-sensitivities.md
       - "VaR & P&L": risk-var.md
       - Risk Bucketing: risk-bucketing.md
       - Backtesting & FRTB PLA: risk-backtesting.md

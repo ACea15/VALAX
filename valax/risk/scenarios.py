@@ -37,7 +37,7 @@ needs to agree on:
 
 * a **scenario** (which shocks are applied),
 * a **covariance matrix** (rows/columns of :math:`\\Sigma`), and
-* a **ladder** (:mod:`valax.risk.state_ladders`, whose sensitivities are
+* a set of **sensitivities** (:mod:`valax.risk.state_sensitivities`,
   indexed by the same blocks),
 
 and :meth:`KeyedFactorLayout.factor_ids` names every coordinate with the
@@ -407,8 +407,8 @@ class KeyedFactorLayout(eqx.Module):
     dividends]`` layout.  Each :class:`FactorBlock` owns a contiguous slice
     of the factor vector, and **every curve on the graph gets its own
     block** — which is what lets a covariance matrix hold a separate block
-    per curve, a scenario move one curve without touching another, and a
-    ladder report a projection curve's risk in its own right.
+    per curve, a scenario move one curve without touching another, and the
+    sensitivities report a projection curve's risk in its own right.
 
     Attributes:
         blocks: The blocks, in coordinate order.  Static.
@@ -540,7 +540,7 @@ class KeyedFactorLayout(eqx.Module):
         """Hierarchical identifier of every coordinate, in order.
 
         The names that line a scenario up with a covariance matrix and a
-        ladder.  See :doc:`/risk-factors` § 1.2 for the convention.
+        set of sensitivities.  See :doc:`/risk-factors` § 1.2 for the convention.
 
         Returns:
             One identifier per coordinate, length :attr:`n_factors`.
@@ -734,8 +734,8 @@ class KeyedFactorLayout(eqx.Module):
 
         Unlike :func:`valax.market.keyed_scenario.zero_keyed_scenario`,
         which is empty, this carries an explicit zero for every block —
-        the base point a ladder differentiates at
-        (:func:`valax.risk.state_ladders.keyed_ladder`) and the structural
+        the base point sensitivities are taken at
+        (:func:`valax.risk.state_sensitivities.keyed_sensitivities`) and the structural
         template :func:`valax.market.keyed_scenario.stack_keyed_scenarios`
         requires.
 
@@ -808,7 +808,7 @@ def as_basis_layout(
       drags the projection curve with it, which is the empirically right
       behaviour and is impossible to express in the absolute layout
       without a near-unit correlation);
-    * the corresponding ladder entries are a **basis DV01**, named
+    * the corresponding sensitivity entries are a **basis DV01**, named
       ``IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>``.
 
     Args:
@@ -1273,8 +1273,8 @@ def keyed_basis_shift(
     absolute move on ``projection_id`` (and validates that ``over`` is a
     real curve, so the intent is recorded); in a basis layout from
     :func:`as_basis_layout` it sets the basis coordinates directly, which
-    is also what makes the move appear on the basis rung of a
-    :class:`~valax.risk.state_ladders.KeyedLadder`.
+    is also what makes the move appear on the basis term of a
+    :class:`~valax.risk.state_sensitivities.KeyedSensitivities`.
 
     Args:
         layout: The coordinate system.

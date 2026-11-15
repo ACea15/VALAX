@@ -2,21 +2,21 @@
 
 "Reliable at scale" means three things at once: the book's sensitivities are
 **exact** (no bump-and-reprice noise), **consistent** (every trade differentiated
-against the *same* market object), and **cheap** (the whole ladder in one or two
+against the *same* market object), and **cheap** (every sensitivity in one or two
 autodiff passes). The JAX-native design gives all three for free — the work is in
 aggregating and mapping them to risk factors, and in turning them into hedges.
 
 ## Why book Greeks compose exactly
 
 Portfolio Greeks are computed by differentiating a **summed portfolio value that
-reads a shared market pytree**. `valax/risk/ladders.py::compute_ladder` builds a
+reads a shared market pytree**. `valax/risk/sensitivities.py::compute_flat_sensitivities` builds a
 `pv(...)` closure that rebuilds the shared `DiscountCurve` via `eqx.tree_at`,
 `vmap`s a single pricer across the instruments, and **sums**:
 
 ```python
-from valax.risk import compute_ladder
+from valax.risk import compute_flat_sensitivities
 
-ladder = compute_ladder(pricing_fn, instruments, base)   # SensitivityLadder
+sens = compute_flat_sensitivities(pricing_fn, instruments, base)   # FlatSensitivities
 # first order  : jax.grad over (spots, vols, dfs, dividends)
 # second order : jax.hessian blocks (gamma, vanna, volga, cross_spot_rate, ...)
 ```
@@ -25,14 +25,14 @@ Sensitivities aggregate correctly because every instrument differentiates the
 **same curve/surface leaves** — the ones `jax.grad` traces. Rate Greeks are
 converted from discount-factor space to zero-rate space by the chain rule
 $\partial V/\partial r_i = \partial V/\partial \mathrm{DF}_i \cdot (-t_i\,\mathrm{DF}_i)$.
-The result is a `SensitivityLadder` (per-asset / per-pillar buckets) and, via
+The result is a `FlatSensitivities` (per-asset / per-pillar buckets) and, via
 `waterfall_pnl`, a `WaterfallPnL` P&L decomposition — the full runnable how-to is
 in the [Scenarios & Shocks guide](../risk-scenarios.md).
 
 !!! tip "Two passes, whole book"
     First-order sensitivities come from one reverse-mode pass over the summed
     value; second-order blocks from one `jax.hessian`. A traditional
-    bump-and-reprice ladder needs *O(factors)* full revaluations — VALAX needs
+    bump-and-reprice engine needs *O(factors)* full revaluations — VALAX needs
     *O(1)* AD passes, exact to machine precision.
 
 ## Mapping to risk factors: bucketing and PCA
@@ -41,7 +41,7 @@ Raw per-pillar sensitivities are too granular for reporting, limits, or
 regulatory bucketing. `valax/risk/bucketing.py` supplies the linear algebra:
 `BucketMap` aggregates a sensitivity vector ($\delta_b = A\,\delta_x$), pushes
 scenarios forward, and reparameterises covariance ($A\,\Sigma\,A^\top$);
-`bucket_sensitivity_ladder` maps a `SensitivityLadder` onto tenor/sector/currency
+`bucket_sensitivities` maps a `FlatSensitivities` onto tenor/sector/currency
 buckets (FRTB SBA, SIMM). `valax/risk/factors.py::RatesFactorModel` collapses many
 curve pillars onto a few PCA factors (level/slope/curvature). The maths is in
 [Theory → Risk Measures](../theory/risk-measures.md); the how-to in the
@@ -126,10 +126,10 @@ well-conditioned.
 
 ## Hedging (planned)
 
-The book Greek ladder is exactly the input a hedge engine needs, but the hedge
+The book's bucketed Greeks are exactly the input a hedge engine needs, but the hedge
 *construction* layer is not yet built. The intended scope:
 
-- **Hedge ratios** straight from the ladder — e.g. key-rate DV01 neutralised with
+- **Hedge ratios** straight from the sensitivities — e.g. key-rate DV01 neutralised with
   a basket of swaps, or delta/vega neutralised with liquid vanillas.
 - **Netting sets** — aggregate offsetting risk before hedging so only residual
   risk is traded.
@@ -139,6 +139,6 @@ The book Greek ladder is exactly the input a hedge engine needs, but the hedge
   [P5.3](../roadmap.md).
 
 !!! note "Built vs planned"
-    **Built:** exact book-level ladders (`compute_ladder`), waterfall P&L,
+    **Built:** exact book-level bucketed sensitivities (`compute_flat_sensitivities`), waterfall P&L,
     bucketing/PCA aggregation. **Planned:** hedge-ratio and netting-set
     construction, target-Greek optimisation, deep hedging.

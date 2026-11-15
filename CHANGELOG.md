@@ -12,6 +12,30 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Changed — risk: base-point bucketed Greeks are *sensitivities*, not *ladders*
+
+**Renamed** the base-point bucketed-Greek objects to the FRTB SA / ISDA SIMM
+term, reserving *ladder* for revaluation at shifted levels (a 1-D revaluation
+grid, now an open roadmap item, `RevaluationGrid`):
+`SensitivityLadder` → `FlatSensitivities`, `compute_ladder` →
+`compute_flat_sensitivities` (module `valax.risk.ladders` →
+`valax.risk.sensitivities`); `KeyedLadder` → `KeyedSensitivities`,
+`keyed_ladder` → `keyed_sensitivities`, `KeyedLadder.curve_ladder` →
+`KeyedSensitivities.key_rate_dv01` (module `valax.risk.state_ladders` →
+`valax.risk.state_sensitivities`); `BucketedLadder` →
+`BucketedSensitivities`, `bucket_sensitivity_ladder` →
+`bucket_sensitivities`; the `ladder=` keyword → `sensitivities=` on every
+function that took it. The P&L-explain "rungs" are now "terms". No numerical
+change.
+
+**Deprecated** every old name, method, keyword and module: each still works
+and emits a `DeprecationWarning` (`valax/risk/_deprecation.py`, gated by
+`tests/test_risk/test_ladder_deprecations.py`); removal is scheduled on the
+roadmap. The guide page moved from `docs/risk-ladders.md` to
+`docs/risk-sensitivities.md`; Theory § 7.4 is now *Bucketed Sensitivities*
+and defines sensitivities versus ladders / revaluation grids, and the risk
+glossary carries both terms.
+
 ### Changed — docs: one instrument × solver coverage matrix, checked against the code; coverage hub
 
 **Changed** the coverage matrix (`docs/applications/instrument-pricing.md`):

@@ -44,7 +44,7 @@ Two constraints follow directly from `vmap`:
   `eqx.field(static=True)` is part of the compiled graph, so it cannot vary
   element-by-element within one call.
 
-The same pattern powers book-level risk: [`compute_ladder`](../risk-ladders.md) and
+The same pattern powers book-level risk: [`compute_flat_sensitivities`](../risk-sensitivities.md) and
 the VaR engine `vmap` a single pricer across the instrument axis and sum to a
 portfolio value — see [Reliable Greeks & Hedging at Scale](greeks-and-hedging.md).
 

@@ -275,13 +275,13 @@ sensitivities) as well as to the base market, and the whole path is
 ### Keyed generators and the per-curve covariance layout
 
 A hand-written `KeyedScenario` expresses one move. To get a *distribution*
-of moves — a VaR number, a ladder, a stress library — the three
+of moves — a VaR number, a set of sensitivities, a stress library — the three
 representations a risk engine carries have to agree on what the factors
 are:
 
 - the **scenario** (which shocks are applied),
 - the **covariance matrix** (rows and columns of $\Sigma$), and
-- the **ladder** (which sensitivity belongs to which factor).
+- the **sensitivities** (which sensitivity belongs to which factor).
 
 `KeyedFactorLayout` is that agreement: an ordered tuple of `FactorBlock`s,
 **one block per named market object**, derived from the market itself.
@@ -355,7 +355,7 @@ curve id.
 #### The basis as a coordinate, not just a scenario
 
 `keyed_basis_shift` expresses a basis *move*. To give the basis a
-**variance** — and therefore its own VaR and its own P&L rung — it has to
+**variance** — and therefore its own VaR and its own P&L term — it has to
 be a coordinate. `as_basis_layout` reparameterises a projection curve's
 block into a spread over a discount curve, $r^{\text{proj}} = r^{\text{disc}} + b$:
 
@@ -380,9 +380,9 @@ together and the *spread* between them is the separate, much less volatile
 factor. In absolute coordinates you would have to encode that with a
 near-unit cross-correlation; in basis coordinates it is the structure.
 This is the `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>` factor of
-[Risk Factors § 3.2](risk-factors.md#32-interest-rates-multi-curve); its ladder and
+[Risk Factors § 3.2](risk-factors.md#32-interest-rates-multi-curve); its sensitivities and
 VaR contribution are in
-[Sensitivity Ladders § Keyed ladders](risk-ladders.md#keyed-ladders-on-a-marketstate).
+[Bucketed Sensitivities § Keyed sensitivities](risk-sensitivities.md#keyed-sensitivities-on-a-marketstate).
 
 ### Vol shocks: parallel shift, not node shock
 
@@ -407,14 +407,14 @@ working; repeated shifts accumulate instead of nesting wrappers. Option
 `eqx.tree_at(lambda s: s.vols, surface, ...)` and are the natural thing to
 plug into `shift_surface` later.
 
-**Consequence for the ladders.** (b) keeps the vol axis one scalar per
+**Consequence for the sensitivities.** (b) keeps the vol axis one scalar per
 surface, which is exactly the shape
-[`SensitivityLadder`](risk-ladders.md)'s `delta_vol`, `vanna` and `volga`
+[`FlatSensitivities`](risk-sensitivities.md)'s `delta_vol`, `vanna` and `volga`
 fields already assume — so they are unchanged by this work, but their
 *meaning* under a `MarketState` is a per-surface **parallel-shift vega**
 (a bucket vega), not a node vega. Had (a) been chosen, those three fields
 would have had to become identifier-keyed per-node arrays. Node-level vega
-ladders therefore remain future work, tracked in the
+buckets therefore remain future work, tracked in the
 [roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 !!! note "Repricing a keyed scenario"

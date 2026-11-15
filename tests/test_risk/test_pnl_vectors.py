@@ -10,7 +10,7 @@ from valax.instruments.options import EuropeanOption
 from valax.market.data import MarketData
 from valax.market.scenario import MarketScenario
 from valax.pricing.analytic.black_scholes import black_scholes_price
-from valax.risk.ladders import compute_ladder, waterfall_pnl
+from valax.risk.sensitivities import compute_flat_sensitivities, waterfall_pnl
 from valax.risk.pnl_vectors import (
     explained_unexplained_vector,
     hypothetical_pnl_vector,
@@ -70,14 +70,14 @@ def scenarios_small():
 class TestRTPL:
     def test_shape(self, simple_portfolio, scenarios_small):
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        rtpl = risk_theoretical_pnl_vector(ladder, scenarios_small, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        rtpl = risk_theoretical_pnl_vector(sens, scenarios_small, base)
         assert rtpl.shape == (5,)
 
     def test_zero_scenario_zero_pnl(self, simple_portfolio, scenarios_small):
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        rtpl = risk_theoretical_pnl_vector(ladder, scenarios_small, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        rtpl = risk_theoretical_pnl_vector(sens, scenarios_small, base)
         # Last scenario is the all-zero one
         assert jnp.abs(rtpl[-1]) < 1e-10
 
@@ -85,8 +85,8 @@ class TestRTPL:
         """Each entry of the RTPL vector must equal waterfall_pnl(...).predicted
         for the corresponding scenario."""
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
-        rtpl = risk_theoretical_pnl_vector(ladder, scenarios_small, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
+        rtpl = risk_theoretical_pnl_vector(sens, scenarios_small, base)
 
         # Reconstruct each scenario and call waterfall_pnl directly
         for i in range(scenarios_small.spot_shocks.shape[0]):
@@ -97,7 +97,7 @@ class TestRTPL:
                 dividend_shocks=scenarios_small.dividend_shocks[i],
                 multiplicative=scenarios_small.multiplicative,
             )
-            wf = waterfall_pnl(ladder, scenario, base)
+            wf = waterfall_pnl(sens, scenario, base)
             assert jnp.isclose(rtpl[i], wf.predicted, atol=1e-8), (
                 f"scenario {i}: rtpl={float(rtpl[i])}, predicted={float(wf.predicted)}"
             )
@@ -128,7 +128,7 @@ class TestExplainedUnexplained:
     def test_small_moves_small_unexplained(
         self, simple_portfolio, scenarios_small,
     ):
-        """For small scenarios, the second-order ladder should explain almost all P&L."""
+        """For small scenarios, the second-order sensitivities should explain almost all P&L."""
         instruments, base = simple_portfolio
         report = explained_unexplained_vector(
             _bs_market_fn, instruments, base, scenarios_small,
@@ -139,13 +139,13 @@ class TestExplainedUnexplained:
         # Each non-trivial scenario should be explained to better than 5%
         assert jnp.all(rel < 0.05), f"max relative unexplained {float(jnp.max(rel)):.4f}"
 
-    def test_precomputed_ladder_matches_on_the_fly(
+    def test_precomputed_sensitivities_match_on_the_fly(
         self, simple_portfolio, scenarios_small,
     ):
         instruments, base = simple_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
         r1 = explained_unexplained_vector(
-            _bs_market_fn, instruments, base, scenarios_small, ladder=ladder,
+            _bs_market_fn, instruments, base, scenarios_small, sensitivities=sens,
         )
         r2 = explained_unexplained_vector(
             _bs_market_fn, instruments, base, scenarios_small,

@@ -98,10 +98,10 @@ On the risk side this is built: a `KeyedScenario` applied by
 `valax.risk.shock` moves any named curve of a `MarketState`'s graph (OIS,
 projection, or a pure basis move), the keyed generators draw whole
 per-curve scenario sets from a `KeyedFactorLayout`, repricing goes
-through `price()`, and `keyed_ladder` / `keyed_component_var` report each
+through `price()`, and `keyed_sensitivities` / `keyed_component_var` report each
 curve's — and the basis's — own DV01 and VaR share. The mechanics live in
 [Scenarios & Shocks](../risk-scenarios.md#keyed-scenarios-on-a-marketstate)
-and [Sensitivity Ladders](../risk-ladders.md#keyed-ladders-on-a-marketstate);
+and [Bucketed Sensitivities](../risk-sensitivities.md#keyed-sensitivities-on-a-marketstate);
 the legacy positional `MarketScenario` / `apply_scenario` path on
 `MarketData` can only move the default curve. What is still open
 (credit / inflation / FX keyed shocks, node-level vega, the FRTB PLA

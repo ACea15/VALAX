@@ -130,7 +130,7 @@ for k in (curves.keys[1], curves.keys[-1]):
     print(f"  {k:<16}{ad:16,.2f}{fd:16,.2f}")
     assert abs(ad - fd) <= 1e-4 * max(1.0, abs(fd)) + 1e-2
 
-print(f"\n  Full ladder (PV change per +1 bp in each quote):")
+print(f"\n  Full quote-sensitivity vector (PV change per +1 bp in each quote):")
 for k in curves.keys:
     print(f"    {k:<16}{float(book_risk.quotes[k]) * 1e-4:14,.2f}")
 print("  ✓ one sweep = Σ per-trade risk = autodiff = full-revaluation FD")

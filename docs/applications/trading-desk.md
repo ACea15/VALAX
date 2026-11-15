@@ -55,7 +55,7 @@ Here is the claim that separates VALAX from any bank's existing EOD stack. It is
 A bank's risk system tells you delta to the *model's* inputs. What a desk actually needs to hedge is sensitivity to the *liquid instruments it can trade* — the swaps, futures, and options it calibrated the curves and surfaces from. Getting there means differentiating **through the calibration**, which is exactly where finite-difference stacks become expensive and noisy and where autodiff becomes a categorical advantage:
 
 ```python
-# ∂(calibrated curve/surface) / ∂(market quotes) — one linear solve, not a bump ladder.
+# ∂(calibrated curve/surface) / ∂(market quotes) — one linear solve, not one bump per quote.
 # optimistix.ImplicitAdjoint differentiates the *fixed point* of the calibration,
 # so the cost is independent of the solver's iteration count.
 J = quote_jacobian(curve_graph, instruments, by="zero_rate")   # (n_outputs, n_quotes)
@@ -63,7 +63,7 @@ J = quote_jacobian(curve_graph, instruments, by="zero_rate")   # (n_outputs, n_q
 
 - **The hedge is expressed in instruments you can trade**, because the chain rule composes the pricer's sensitivities with the calibration Jacobian automatically. No separate "risk-in-hedge-instruments" transform to build and maintain.
 - **It is exact and cheap.** Implicit differentiation through the calibration fixed point (`optimistix.ImplicitAdjoint`) costs one linear solve regardless of how many Newton steps the bootstrap took — where a bump-through-recalibration approach costs a full re-solve per quote and carries finite-difference noise.
-- **An EOD C++ analytics batch approximates this with a bumped delta ladder.** VALAX produces the true Jacobian as a byproduct of the graph it already evaluated. This rung is essentially *shipped* — the machinery lives in the curve build (`quote_jacobian`, [Productionisation § 11.9](../architecture/production.md#11-multi-curve-framework)).
+- **An EOD C++ analytics batch approximates this with bumped per-quote deltas.** VALAX produces the true Jacobian as a byproduct of the graph it already evaluated. This rung is essentially *shipped* — the machinery lives in the curve build (`quote_jacobian`, [Productionisation § 11.9](../architecture/production.md#11-multi-curve-framework)).
 
 ### 2.2 Gradient-based intraday decisions — the pricer and the control problem share one graph (frontier)
 
@@ -135,7 +135,7 @@ greeks = jax.grad(price_one)(instrument, market)
 # Gamma / vanna / volga: second-order, same one-liner
 hedge_convexity = jax.hessian(price_one)(instrument, market)
 
-# Batched: the full Greek ladder for the whole book in one compiled call
+# Batched: the full bucketed Greeks for the whole book in one compiled call
 book_greeks = jax.vmap(jax.grad(price_one), in_axes=(0, None))(instruments, market)
 ```
 
@@ -144,7 +144,7 @@ Why this matters specifically for an intraday desk:
 - **Exact deltas, same graph as the price, free cross-Greeks.** The `FO` payoff of exact autodiff risk — no finite-difference noise near barriers/expiry, no price-vs-delta drift between code paths, and the full second-order matrix (gamma, vanna, volga, cross-gamma) at no extra engineering — is set out in [Applications § 2.1](index.md#21-exact-autodiff-risk-no-bump-and-reprice).
 - **Sensitivities to *calibrated* inputs.** Because calibration is itself differentiable (see [§ 5](#5-calibration-robustness-the-differentiable-inner-loop)), you can propagate to sensitivities against the *raw market quotes* — the hedge instruments you can actually trade — via the quote Jacobian (`quote_jacobian` for curves), not just against model parameters.
 
-The [Greeks (Theory § 6)](../theory/greeks.md#6-greeks-and-automatic-differentiation) and [`valax/greeks/`](../api/greeks.md) document the wrappers; the point for this audience is that a new product ships with its complete risk ladder the moment its price function exists.
+The [Greeks (Theory § 6)](../theory/greeks.md#6-greeks-and-automatic-differentiation) and [`valax/greeks/`](../api/greeks.md) document the wrappers; the point for this audience is that a new product ships with its complete set of sensitivities the moment its price function exists.
 
 ---
 

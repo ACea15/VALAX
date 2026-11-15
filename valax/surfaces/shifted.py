@@ -16,8 +16,8 @@ than one scalar per asset.  Two representations were possible:
 VALAX ships (b) as the scenario primitive: :class:`ShiftedVolSurface`
 here, applied by :func:`valax.risk.state_shocks.shift_surface`.  It is
 type-agnostic, composes with itself, and keeps the shock magnitude a
-single differentiable scalar — the same shape the sensitivity ladders
-already assume (``SensitivityLadder.delta_vol`` is one vega per asset).
+single differentiable scalar — the same shape the bucketed sensitivities
+already assume (``FlatSensitivities.delta_vol`` is one vega per asset).
 Node-level shocks stay available per surface type via the surfaces'
 own leaves (``eqx.tree_at(lambda s: s.vols, surface, ...)``) and are the
 natural place to plug (a) in later without changing this type.

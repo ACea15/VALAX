@@ -448,10 +448,10 @@ swaption cubes and `ConstantVol` all coexist in the same container
     `MarketState.from_market_data(md, asset_ids=…)` and
     `state.to_market_data()` are a lossless two-way view for everything
     `MarketData` can express, so the legacy flat risk path (`apply_scenario`,
-    `compute_ladder`, `pnl_attribution`, the RTPL / HPL vectors) keeps working
+    `compute_flat_sensitivities`, `pnl_attribution`, the RTPL / HPL vectors) keeps working
     while you migrate. `MarketData` is legacy and scheduled for removal: new
     code shocks a `MarketState` with a `KeyedScenario` (`valax.risk.shock`)
-    and measures it with the keyed ladders / VaR or
+    and measures it with the keyed sensitivities / VaR or
     [`market_risk`](#every-entry-the-trade-touches-market_risk)
     ([API → Risk](../api/risk.md), [API → Market Data](../api/market.md)).
 

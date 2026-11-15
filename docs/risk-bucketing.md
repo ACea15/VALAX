@@ -1,6 +1,6 @@
 # Risk Bucketing
 
-*Re-expressing fine-grained autodiff sensitivities in coarser, standardised coordinates — FRTB/SIMM vertices, trader buckets, PCA factors. Prerequisite: [Sensitivity Ladders](risk-ladders.md). Factor registry: [Risk Factors § 7](risk-factors.md#7-bucketing). Maths: [Models & Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations).*
+*Re-expressing fine-grained autodiff sensitivities in coarser, standardised coordinates — FRTB/SIMM vertices, trader buckets, PCA factors. Prerequisite: [Bucketed Sensitivities](risk-sensitivities.md). Factor registry: [Risk Factors § 7](risk-factors.md#7-bucketing). Maths: [Models & Theory § 7.8](theory/risk-measures.md#78-risk-bucketing-linear-and-jacobian-transformations).*
 
 ## Risk Bucketing
 
@@ -28,8 +28,8 @@ A = jnp.array([
 ])
 rate_bm = BucketMap(matrix=A, bucket_labels=("short", "long"))
 
-# Bucket a DV01 ladder
-bucket_dv01 = aggregate(rate_bm, ladder.delta_rate)         # shape (2,)
+# Bucket the key-rate DV01s
+bucket_dv01 = aggregate(rate_bm, sens.delta_rate)           # shape (2,)
 
 # Push a bucket-level shock back to raw factors (the dual operation)
 bucket_shock = jnp.array([0.0010, 0.0025])                  # +10 bp / +25 bp
@@ -78,14 +78,14 @@ from valax.risk import (
 
 # Hand-built level / slope / curvature factors (fixed Jacobian)
 J = level_slope_curvature_jacobian(pillar_times)  # (n_pillars, 3)
-lsc_delta = pushforward_sensitivities(J, ladder.delta_rate)  # 3 numbers
+lsc_delta = pushforward_sensitivities(J, sens.delta_rate)  # 3 numbers
 
 # PCA on 250 days of curve returns → top 3 components
 J_pca, eigvals, frac_explained = pca_jacobian(
     curve_returns,        # shape (250, n_pillars)
     n_components=3,
 )
-pca_delta = pushforward_sensitivities(J_pca, ladder.delta_rate)
+pca_delta = pushforward_sensitivities(J_pca, sens.delta_rate)
 pca_cov = reparameterize_covariance(J_pca, raw_cov)
 
 # Stress scenario in PCA space: +1 std on level only
@@ -107,17 +107,17 @@ svi_param_vega = pushforward_sensitivities(J, raw_grid_vega)
 
 For the rates-focused PCA workflow (level/slope/curvature scores from historical curve moves), see the [PCA Curve Shocks (Rates)](guide/pca-rates.md) guide.
 
-### Bucketing a full sensitivity ladder
+### Bucketing a full sensitivity set
 
-`bucket_sensitivity_ladder` applies independent bucket maps to every component of a `SensitivityLadder`, including bilateral aggregation of the cross-gamma blocks:
+`bucket_sensitivities` applies independent bucket maps to every component of a `FlatSensitivities`, including bilateral aggregation of the cross-gamma blocks:
 
 ```python
-from valax.risk import compute_ladder, bucket_sensitivity_ladder
+from valax.risk import compute_flat_sensitivities, bucket_sensitivities
 
-ladder = compute_ladder(pricing_fn, instruments, base_market)
+sens = compute_flat_sensitivities(pricing_fn, instruments, base_market)
 
-bucketed = bucket_sensitivity_ladder(
-    ladder,
+bucketed = bucket_sensitivities(
+    sens,
     rate_bucket=rate_bm,        # bucket pillar dimension
     spot_bucket=sector_bm,      # bucket asset dimension
     # vol_bucket / div_bucket: omitted ⇒ left at full granularity
@@ -129,7 +129,7 @@ bucketed.cross_spot_rate     # (n_spot_buckets, n_rate_buckets) — bilaterally 
 bucketed.rate_bucket_labels  # human-readable bucket names
 ```
 
-The bucketed ladder is itself a pytree — it can be fed back into `waterfall_pnl`-style arithmetic when paired with bucket-level scenarios.
+The `BucketedSensitivities` result is itself a pytree — it can be fed back into `waterfall_pnl`-style arithmetic when paired with bucket-level scenarios.
 
 ### When to use which
 

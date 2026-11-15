@@ -11,11 +11,11 @@ from valax.market.data import MarketData
 from valax.pricing.analytic.black_scholes import black_scholes_price
 from valax.risk.bucketing import (
     BucketMap,
-    BucketedLadder,
+    BucketedSensitivities,
     aggregate,
     aggregate_covariance,
     aggregate_matrix,
-    bucket_sensitivity_ladder,
+    bucket_sensitivities,
     equal_weight_bucket_map,
     jacobian_from_fn,
     level_slope_curvature_jacobian,
@@ -26,7 +26,7 @@ from valax.risk.bucketing import (
     reparameterize_covariance,
     tenor_bucket_map,
 )
-from valax.risk.ladders import compute_ladder
+from valax.risk.sensitivities import compute_flat_sensitivities
 
 
 # ── BucketMap basics ────────────────────────────────────────────────
@@ -287,7 +287,7 @@ class TestAggregateMatrix:
         assert agg.shape == (2, 3)
 
 
-# ── Bucket sensitivity ladder (end-to-end) ────────────────────────
+# ── Bucketing a full sensitivity set (end-to-end) ────────────────────────
 
 
 def _bs_market_fn(option, market: MarketData) -> jnp.ndarray:
@@ -327,10 +327,10 @@ def two_asset_portfolio():
     return instruments, base
 
 
-class TestBucketSensitivityLadder:
+class TestBucketSensitivities:
     def test_shapes(self, two_asset_portfolio):
         instruments, base = two_asset_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
 
         # Bucket 4 pillars → 2 buckets (short / long)
         rate_bm = BucketMap(
@@ -343,8 +343,8 @@ class TestBucketSensitivityLadder:
         # Bucket 2 assets → 1 sector
         spot_bm = equal_weight_bucket_map((0, 0), n_buckets=1)
 
-        bucketed = bucket_sensitivity_ladder(
-            ladder, rate_bucket=rate_bm, spot_bucket=spot_bm,
+        bucketed = bucket_sensitivities(
+            sens, rate_bucket=rate_bm, spot_bucket=spot_bm,
         )
 
         assert bucketed.delta_rate.shape == (2,)
@@ -359,7 +359,7 @@ class TestBucketSensitivityLadder:
         """A bucket shock pushed back to factor space gives the same PnL
         as the bucket-space PnL."""
         instruments, base = two_asset_portfolio
-        ladder = compute_ladder(_bs_market_fn, instruments, base)
+        sens = compute_flat_sensitivities(_bs_market_fn, instruments, base)
 
         rate_bm = BucketMap(
             matrix=jnp.array([
@@ -367,12 +367,12 @@ class TestBucketSensitivityLadder:
                 [0.0, 0.0, 1.0, 1.0],
             ]),
         )
-        bucketed_dv01 = aggregate(rate_bm, ladder.delta_rate)
+        bucketed_dv01 = aggregate(rate_bm, sens.delta_rate)
         bucket_shock = jnp.array([0.0010, 0.0025])  # +10 bp short, +25 bp long
 
         # PnL in bucket space
         pnl_bucket = jnp.dot(bucketed_dv01, bucket_shock)
         # PnL in raw factor space using the dual shock
         raw_shock = pushforward_scenario(rate_bm, bucket_shock)
-        pnl_raw = jnp.dot(ladder.delta_rate, raw_shock)
+        pnl_raw = jnp.dot(sens.delta_rate, raw_shock)
         assert jnp.isclose(pnl_bucket, pnl_raw, rtol=1e-10)

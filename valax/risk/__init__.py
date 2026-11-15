@@ -1,4 +1,4 @@
-"""Risk measurement: scenario generation, shock application, VaR, ladders.
+"""Risk measurement: scenarios, shocks, sensitivities, P&L explain, VaR.
 
 Modules
 -------
@@ -9,11 +9,16 @@ Modules
   :class:`~valax.risk.scenarios.KeyedFactorLayout`.
 - :mod:`valax.risk.var`           — VaR, ES, parametric VaR, scalar P&L attribution.
 - :mod:`valax.risk.state_var`     — group repricing / P&L / gradients through ``price``.
-- :mod:`valax.risk.ladders`       — sensitivity ladders and waterfall P&L.
-- :mod:`valax.risk.state_ladders` — *keyed* ladders / waterfall / VaR on a
-  ``MarketState``, one block per named curve, surface and asset.
+- :mod:`valax.risk.sensitivities`       — bucketed sensitivities and waterfall
+  P&L on the flat ``MarketData`` view.
+- :mod:`valax.risk.state_sensitivities` — *keyed* sensitivities / waterfall /
+  VaR on a ``MarketState``, one block per named curve, surface and asset.
 - :mod:`valax.risk.pnl_vectors`   — HPL / RTPL P&L vectors over scenario sets.
 - :mod:`valax.risk.backtesting`   — Kupiec / Christoffersen / FRTB PLA tests.
+
+Terminology: *sensitivities* are base-point bucketed Greeks (the FRTB SA /
+ISDA SIMM sense).  The former ``*Ladder`` names (``SensitivityLadder``,
+``KeyedLadder``, ...) remain importable with a ``DeprecationWarning``.
 """
 
 from valax.risk.shocks import (
@@ -87,18 +92,18 @@ from valax.risk.state_var import (
     group_market_gradient,
     group_model_gradient,
 )
-from valax.risk.ladders import (
-    SensitivityLadder,
+from valax.risk.sensitivities import (
+    FlatSensitivities,
     WaterfallPnL,
-    compute_ladder,
+    compute_flat_sensitivities,
     waterfall_pnl,
     waterfall_pnl_report,
 )
-from valax.risk.state_ladders import (
+from valax.risk.state_sensitivities import (
     BASIS_POINT,
-    KeyedLadder,
+    KeyedSensitivities,
     KeyedWaterfall,
-    keyed_ladder,
+    keyed_sensitivities,
     keyed_waterfall_pnl,
     keyed_waterfall_report,
     keyed_parametric_var,
@@ -122,7 +127,7 @@ from valax.risk.backtesting import (
 )
 from valax.risk.bucketing import (
     BucketMap,
-    BucketedLadder,
+    BucketedSensitivities,
     aggregate,
     pushforward_scenario,
     aggregate_covariance,
@@ -135,13 +140,15 @@ from valax.risk.bucketing import (
     equal_weight_bucket_map,
     level_slope_curvature_jacobian,
     pca_jacobian,
-    bucket_sensitivity_ladder,
+    bucket_sensitivities,
 )
 from valax.risk.factors import (
     RatesFactorModel,
     fit_rates_pca,
     zero_rate_returns_from_snapshots,
 )
+from valax.risk._deprecation import RENAMED_SYMBOLS as _RENAMED_SYMBOLS
+from valax.risk._deprecation import deprecated_module_getattr as _deprecated_getattr
 from valax.risk.oas import (
     callable_bond_oas,
     bond_z_spread,
@@ -154,3 +161,6 @@ from valax.risk.oas import (
     continuous_to_compounded_spread,
     compounded_to_continuous_spread,
 )
+
+# Deprecated ``*Ladder`` aliases, served with a ``DeprecationWarning``.
+__getattr__ = _deprecated_getattr(__name__, globals(), _RENAMED_SYMBOLS)

@@ -126,7 +126,7 @@ The architecture is not "JAX because JAX is cool." Each choice is a targeted res
 | **Autodiff Greeks via `jax.grad`.** No bump-and-reprice framework. | § 3.1 (drift between pricing and risk) and § 3.3 (XVA Greek consistency) | The single largest source of front-office vs middle-office disagreement is bump frameworks drifting out of sync with the pricer they shadow. With autodiff there is no separate framework — the pricer *is* the Greek engine. The trader's delta and the regulator's DV01 come from the same line of code. |
 | **One JIT-compiled code path for the trader's hot price and the overnight risk run.** | § 3.3 (what-if at trader speed) | Eliminates the "research vs production" duality. A pre-trade what-if uses the same compiled pricing function as the EOD risk batch; the only difference is the input book. Whatever speed-up you buy on the batch flows straight into the trader's quote latency. |
 | **Integer ordinals + static day-count conventions in JAX-traced code.** | § 3.1 (calendar / timestamp ambiguity) | Calendar bugs are the #2 source of cross-system inconsistency after identifier bugs. By forcing dates into JIT-safe integer ordinals with day-count conventions as static module fields, every pricing function declares its date semantics structurally — and the type system catches mismatches before they reach production. |
-| **`equinox.Module` pytrees for every domain type** — curves, surfaces, models, scenarios, ladders, bucket maps. | § 3.3 (joint factor consistency) | Uniform composability. `jit` / `vmap` / `grad` work without ceremony across the entire stack. Risk types and pricing types and calibration types all participate in the same pytree machinery, so a joint scenario across asset classes is one `KeyedScenario` pytree, not a hand-rolled struct per asset class. |
+| **`equinox.Module` pytrees for every domain type** — curves, surfaces, models, scenarios, sensitivities, bucket maps. | § 3.3 (joint factor consistency) | Uniform composability. `jit` / `vmap` / `grad` work without ceremony across the entire stack. Risk types and pricing types and calibration types all participate in the same pytree machinery, so a joint scenario across asset classes is one `KeyedScenario` pytree, not a hand-rolled struct per asset class. |
 | **GPU-first `vmap` over scenarios and instruments.** | § 3.3 (XVA, full-revaluation what-if) | A 10,000-scenario × 10,000-instrument VaR is one JIT-compiled call, not a Python loop. The CVA nested-MC inner loop that takes a bank's grid overnight collapses to a daytime run on a single GPU. This is the single largest *quantitative* advantage VALAX has over QuantLib-style stacks. |
 
 The crucial property is that these choices **compose multiplicatively, not additively**. Determinism + autodiff + single JIT path means an audit trail of a stress scenario is identical to a trader's pre-trade what-if is identical to the regulator's IMA backtest. They are not three different systems with reconciliation jobs between them — they are three call sites of the same function. How each choice pays off per business line is set out in [Applications § 2](../applications/index.md#2-what-makes-valax-distinctive-capability-by-capability); the rules contributors follow to keep these properties are in [Architecture → Invariants for contributors](../architecture/overview.md#invariants-for-contributors).
@@ -151,11 +151,11 @@ In VALAX, every row is *the same call*:
 # Trader hot price
 pv = price(instrument, model, market_now).price
 
-# EOD risk: every curve, surface and asset in one ladder
-ladder = keyed_ladder(book, model, market_eod, second_order=True)
+# EOD risk: every curve, surface and asset in one set of sensitivities
+sens = keyed_sensitivities(book, model, market_eod, second_order=True)
 
-# Regulatory capital: the same ladder in regulatory coordinates
-frtb_krd = aggregate(frtb_tenor_map, ladder.curve_ladder("USD.OIS"))
+# Regulatory capital: the same sensitivities in regulatory coordinates
+frtb_krd = aggregate(frtb_tenor_map, sens.key_rate_dv01("USD.OIS"))
 
 # What-if
 pv_after = price(instrument, model, shock(market_now, hypothetical_shock)).price
@@ -227,7 +227,7 @@ The design rationale in § 4 is a *targeted* claim, not a universal one. VALAX w
 
 VALAX is not a finished competitor to the systems in [Peer Tools & Market Segments](peers.md). Today it is:
 
-- **Operationally**, a pricing kernel and risk-ladder library covering standard equity options, vanilla and exotic rates, FX vanillas/forwards, inflation, credit-curve scaffolding, and four pricing methods (analytical / MC / PDE / lattice) with autodiff Greeks throughout — roughly the inner box of [Vision § "The shape of the mature engine"](../vision.md). The authoritative per-instrument status is the [coverage matrix](../applications/instrument-pricing.md).
+- **Operationally**, a pricing kernel and risk-sensitivity library covering standard equity options, vanilla and exotic rates, FX vanillas/forwards, inflation, credit-curve scaffolding, and four pricing methods (analytical / MC / PDE / lattice) with autodiff Greeks throughout — roughly the inner box of [Vision § "The shape of the mature engine"](../vision.md). The authoritative per-instrument status is the [coverage matrix](../applications/instrument-pricing.md).
 - **Structurally**, the only stack the authors are aware of in this slot that is JAX-native, pure-functional, GPU-first, and differentiable end-to-end.
 - **Strategically**, with `MarketState` and the multi-curve graph now shipped, on a roadmap whose next priorities (XVA + FRTB capital, then the service layer and market-data persistence) move VALAX from "library" to "deployable third-ring component" — see [Roadmap § "Production Priority Roadmap"](../roadmap.md#production-priority-roadmap-snapshot-reconciled-against-the-codebase).
 

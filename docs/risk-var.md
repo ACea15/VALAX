@@ -86,10 +86,10 @@ Three things follow, and they are the reason the port matters:
     Distributions of keyed scenarios come from the keyed generators over a
     per-curve `KeyedFactorLayout`
     ([Scenarios § Keyed generators](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout));
-    ladders, the per-block waterfall and delta-normal VaR with an additive
-    per-curve decomposition are `keyed_ladder`, `keyed_waterfall_report`,
+    sensitivities, the per-block waterfall and delta-normal VaR with an additive
+    per-curve decomposition are `keyed_sensitivities`, `keyed_waterfall_report`,
     `keyed_parametric_var` and `keyed_component_var`
-    ([Sensitivity Ladders § Keyed ladders](risk-ladders.md#keyed-ladders-on-a-marketstate)).
+    ([Bucketed Sensitivities § Keyed sensitivities](risk-sensitivities.md#keyed-sensitivities-on-a-marketstate)).
     What has **not** moved yet: the FRTB PLA vector pair below
     (`hypothetical_pnl_vector` / `risk_theoretical_pnl_vector`),
     `pnl_attribution` and the flat `parametric_var` still take a
@@ -204,7 +204,7 @@ The returned dict contains:
 | `actual` | True P&L from full repricing |
 | `unexplained` | `actual - total_second_order` |
 
-All sensitivities are computed via `jax.grad` and `jax.hessian` — no finite differences. For the fully bucketed, ten-rung version with all cross terms, see [Sensitivity Ladders](risk-ladders.md#sensitivity-ladders-and-waterfall-pl).
+All sensitivities are computed via `jax.grad` and `jax.hessian` — no finite differences. For the fully bucketed, ten-term version with all cross terms, see [Bucketed Sensitivities](risk-sensitivities.md#bucketed-sensitivities-and-waterfall-pl).
 
 ---
 
@@ -217,9 +217,9 @@ For the theoretical framing of HPL / RTPL / APL and why these three series are k
 !!! note "Still on the flat path"
     The three helpers below take a `pricing_fn` and a `MarketData`, and
     `risk_theoretical_pnl_vector` consumes the positional
-    `SensitivityLadder`. On a `MarketState`, the HPL vector is
+    `FlatSensitivities`. On a `MarketState`, the HPL vector is
     `group_scenario_pnl` ([above](#repricing-through-price)); porting the
-    RTPL/HPL pair onto `KeyedLadder` is open on the
+    RTPL/HPL pair onto `KeyedSensitivities` is open on the
     [roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 ### Hypothetical P&L (full revaluation)
@@ -235,19 +235,19 @@ hpl = hypothetical_pnl_vector(pricing_fn, instruments, base_market, scenarios)
 
 This is identical to `portfolio_pnl` — the alias exists so risk-engine code reads consistently when both HPL and RTPL vectors appear side by side.
 
-### Risk-theoretical P&L (ladder-based prediction)
+### Risk-theoretical P&L (sensitivity-based prediction)
 
-`risk_theoretical_pnl_vector` is the vectorised version of the waterfall: one precomputed ladder, $N$ cheap arithmetic contractions:
+`risk_theoretical_pnl_vector` is the vectorised version of the waterfall: one precomputed set of sensitivities, $N$ cheap arithmetic contractions:
 
 ```python
-from valax.risk import compute_ladder, risk_theoretical_pnl_vector
+from valax.risk import compute_flat_sensitivities, risk_theoretical_pnl_vector
 
-ladder = compute_ladder(pricing_fn, instruments, base_market)
-rtpl = risk_theoretical_pnl_vector(ladder, scenarios, base_market)
+sens = compute_flat_sensitivities(pricing_fn, instruments, base_market)
+rtpl = risk_theoretical_pnl_vector(sens, scenarios, base_market)
 # rtpl.shape == (n_scenarios,)
 ```
 
-For a 10 000-scenario VaR run on an option-heavy portfolio, RTPL is typically two to three orders of magnitude cheaper than HPL because the expensive call is the ladder build, not the per-scenario evaluation.
+For a 10 000-scenario VaR run on an option-heavy portfolio, RTPL is typically two to three orders of magnitude cheaper than HPL because the expensive call is computing the sensitivities, not the per-scenario evaluation.
 
 ### Comparing both at once
 
@@ -259,12 +259,12 @@ from valax.risk import explained_unexplained_vector
 report = explained_unexplained_vector(
     pricing_fn, instruments, base_market, scenarios,
 )
-report["rtpl"]         # shape (n_scenarios,) — ladder prediction
+report["rtpl"]         # shape (n_scenarios,) — sensitivity-based prediction
 report["hpl"]          # shape (n_scenarios,) — full-revaluation
 report["unexplained"]  # shape (n_scenarios,) — hpl - rtpl
 ```
 
-The unexplained vector is a direct diagnostic: a large or systematically biased unexplained means the second-order ladder is missing something (third-order convexity, missing risk factors, or a scenario regime the ladder was not built for).
+The unexplained vector is a direct diagnostic: a large or systematically biased unexplained means the second-order sensitivities are missing something (third-order convexity, missing risk factors, or a scenario regime the sensitivities were not computed for). The all-orders alternative — revaluation at a grid of shifted levels — is planned.
 
 ### From P&L vector to VaR/ES
 

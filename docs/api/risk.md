@@ -93,7 +93,7 @@ surface type. The result is a new pytree (`eqx.tree_at`, never mutation)
 and is differentiable in both the base market and the shock magnitudes.
 
 The guide walkthrough, including the surface design fork and what it
-implies for the sensitivity ladders, is in
+implies for the bucketed sensitivities, is in
 [Scenarios & Shocks § Keyed scenarios](../risk-scenarios.md#keyed-scenarios-on-a-marketstate).
 
 ::: valax.risk.state_shocks.shock
@@ -130,7 +130,7 @@ implies for the sensitivity ladders, is in
 The replacement for the flat positional `[spots, vols, rates, dividends]`
 layout: an ordered tuple of blocks, **one per named market object**, so
 every curve on the graph owns its own coordinates in a scenario, in a
-covariance matrix and in a ladder alike. Rationale and recipes:
+covariance matrix and in a sensitivity vector alike. Rationale and recipes:
 [Scenarios & Shocks § Keyed generators](../risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout).
 
 ::: valax.risk.scenarios.FactorBlock
@@ -143,7 +143,7 @@ covariance matrix and in a ladder alike. Rationale and recipes:
 discount curve, which is what gives
 `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<pillar>`
 ([Risk Factors § 3.2](../risk-factors.md#32-interest-rates-multi-curve)) a variance, a
-P&L rung and a VaR contribution of its own rather than only a scenario.
+P&L term and a VaR contribution of its own rather than only a scenario.
 
 ::: valax.risk.scenarios.as_basis_layout
 
@@ -335,14 +335,14 @@ pending. For a per-curve attribution on a `MarketState` use
 ## P&L vectors
 
 The RTPL / HPL pair still consumes the flat `MarketData` view (a
-`SensitivityLadder` and a `ScenarioSet`); re-targeting it onto the keyed
-ladder is open work on the
+`FlatSensitivities` and a `ScenarioSet`); re-targeting it onto the keyed
+sensitivities is open work on the
 [roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation).
 
 ### Risk-theoretical P&L (RTPL)
 
-Predicted P&L for each scenario from a precomputed `SensitivityLadder`.
-Implements the 10-rung waterfall (delta, vega, rho, dividend,
+Predicted P&L for each scenario from a precomputed `FlatSensitivities`.
+Implements the 10-term waterfall (delta, vega, rho, dividend,
 gamma-spot, gamma-rate, vanna, volga, cross spot×rate, cross vol×rate)
 as batched array contractions — one cheap pass per scenario, no
 repricing. Respects `scenarios.multiplicative`.
@@ -361,48 +361,54 @@ workflows.
 
 ::: valax.risk.pnl_vectors.explained_unexplained_vector
 
-## Sensitivity ladders
+## Bucketed sensitivities
 
-The flat, positional ladder over a `MarketData` (legacy, kept for one
+Base-point first- and second-order sensitivities, one entry per
+risk-factor bucket — the FRTB SA / ISDA SIMM *sensitivities* (VALAX
+formerly called them "ladders"; the old names still import with a
+`DeprecationWarning`, see
+[Bucketed Sensitivities](../risk-sensitivities.md)). This section is the
+flat, positional layout over a `MarketData` (legacy, kept for one
 deprecation cycle and still the input of the RTPL vector). On a
-`MarketState` use the [keyed ladders](#keyed-ladders-on-a-marketstate)
+`MarketState` use the [keyed sensitivities](#keyed-sensitivities-on-a-marketstate)
 below.
 
-::: valax.risk.ladders.SensitivityLadder
+::: valax.risk.sensitivities.FlatSensitivities
 
-::: valax.risk.ladders.WaterfallPnL
+::: valax.risk.sensitivities.WaterfallPnL
 
-::: valax.risk.ladders.compute_ladder
+::: valax.risk.sensitivities.compute_flat_sensitivities
 
-::: valax.risk.ladders.waterfall_pnl
+::: valax.risk.sensitivities.waterfall_pnl
 
-::: valax.risk.ladders.waterfall_pnl_report
+::: valax.risk.sensitivities.waterfall_pnl_report
 
-## Keyed ladders on a `MarketState`
+## Keyed sensitivities on a `MarketState`
 
 The counterpart of the above for the container the unified pricer takes,
 indexed by a
 [`KeyedFactorLayout`](#keyed-per-curve-factor-layout) rather than
-positionally — so a dual-curve book reports an OIS ladder and a projection
-(or basis) ladder instead of one summed `delta_rate` vector.
+positionally — so a dual-curve book reports OIS key-rate DV01s and
+projection (or basis) key-rate DV01s instead of one summed `delta_rate`
+vector.
 
 Sensitivities are taken with respect to the **shock magnitudes** of a
 keyed scenario rather than the market leaves, which removes the
 DF → zero-rate chain rule entirely and gives one well-defined vega per
 surface whatever its type. Rationale and recipes:
-[Sensitivity Ladders § Keyed ladders](../risk-ladders.md#keyed-ladders-on-a-marketstate).
+[Bucketed Sensitivities § Keyed sensitivities](../risk-sensitivities.md#keyed-sensitivities-on-a-marketstate).
 
-::: valax.risk.state_ladders.KeyedLadder
+::: valax.risk.state_sensitivities.KeyedSensitivities
 
-::: valax.risk.state_ladders.keyed_ladder
+::: valax.risk.state_sensitivities.keyed_sensitivities
 
 ### Per-block waterfall
 
-::: valax.risk.state_ladders.KeyedWaterfall
+::: valax.risk.state_sensitivities.KeyedWaterfall
 
-::: valax.risk.state_ladders.keyed_waterfall_pnl
+::: valax.risk.state_sensitivities.keyed_waterfall_pnl
 
-::: valax.risk.state_ladders.keyed_waterfall_report
+::: valax.risk.state_sensitivities.keyed_waterfall_report
 
 ### Per-curve delta-normal VaR
 
@@ -411,9 +417,9 @@ additive decomposition of the book's VaR in which a projection curve — or,
 on an `as_basis_layout` layout, the `IR.BASIS...` factor — carries its own
 contribution.
 
-::: valax.risk.state_ladders.keyed_parametric_var
+::: valax.risk.state_sensitivities.keyed_parametric_var
 
-::: valax.risk.state_ladders.keyed_component_var
+::: valax.risk.state_sensitivities.keyed_component_var
 
 ## Backtesting
 
@@ -517,13 +523,13 @@ pattern.
 
 ::: valax.risk.shocks.pca_curve_shock
 
-### Bucketed sensitivity ladders
+### Bucketing a full sensitivity set
 
 Apply independent bucket maps to every component of a
-`SensitivityLadder`. Cross blocks (`cross_spot_rate`,
+`FlatSensitivities`. Cross blocks (`cross_spot_rate`,
 `cross_vol_rate`) are bilaterally bucketed. The returned
-`BucketedLadder` pytree preserves the bucket labels for reporting.
+`BucketedSensitivities` pytree preserves the bucket labels for reporting.
 
-::: valax.risk.bucketing.BucketedLadder
+::: valax.risk.bucketing.BucketedSensitivities
 
-::: valax.risk.bucketing.bucket_sensitivity_ladder
+::: valax.risk.bucketing.bucket_sensitivities

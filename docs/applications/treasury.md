@@ -38,8 +38,8 @@ Here is Treasury's daily production loop in one picture, with each stage annotat
 │  2. Reprice banking book ─────────────► price() via group_pv    │
 │     (bonds, FRNs, swaps, caps)                                   │
 │                                                                  │
-│  3. Compute EVE + NII sensitivity ────► keyed_ladder             │
-│     (KRD ladder, DV01 per curve)        (curve_ladder, dv01)     │
+│  3. Compute EVE + NII sensitivity ────► keyed_sensitivities      │
+│     (KRDs, DV01 per curve)               (key_rate_dv01, dv01)   │
 │                                                                  │
 │  4. Apply IRRBB 6 scenarios ──────────► keyed_curve_stress      │
 │                                          (parallel / steepener / │
@@ -50,7 +50,7 @@ Here is Treasury's daily production loop in one picture, with each stage annotat
 │                                                                  │
 │  6. Bucket to Basel tenor grid ───────► tenor_bucket_map,        │
 │                                          aggregate on            │
-│                                          curve_ladder            │
+│                                          key_rate_dv01            │
 │                                                                  │
 │  7. SOT check vs. Tier 1 ─────────────► arithmetic on ΔEVE       │
 │                                                                  │
@@ -59,8 +59,9 @@ Here is Treasury's daily production loop in one picture, with each stage annotat
 │                                          🟡 behavioural overlays │
 │                                             are the honest gap    │
 │                                                                  │
-│  9. Investment portfolio mark ────────► group_pv / keyed_ladder  │
-│     + duration/KRD                       over HQLA instruments   │
+│  9. Investment portfolio mark ────────► group_pv /               │
+│     + duration/KRD                       keyed_sensitivities     │
+│                                          over HQLA instruments   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -99,8 +100,8 @@ The scenario magnitudes are prescribed per currency (e.g. USD: parallel ±200 bp
 | Short-rate shock up / down | `KeyedScenario(curve_shocks={"USD.OIS": front_end_bumps})` — the BCBS short-rate decay shape as a per-pillar vector |
 | Banking-book instruments (fixed / floating bonds, FRNs, swaps, caps, callable bonds) | [`valax/instruments/bonds.py`](../guide/fixed-income.md), [`valax/instruments/rates.py`](../guide/rates-exotics.md), [callable bonds guide](../guide/callable-bonds.md) |
 | ΔEVE via re-discounting under each scenario | `group_scenario_pnl(positions, model, market, irrbb_scenarios)` — full revaluation through `price()` |
-| Key-rate durations, DV01 ladder | `keyed_ladder(...).curve_ladder("USD.OIS")` — pillar-level KRDs per named curve from one autodiff pass; `basis_dv01` for the projection-vs-OIS basis |
-| Bucket to Basel tenor grid | `tenor_bucket_map(pillar_times, basel_vertices)` + `aggregate` on the curve's ladder |
+| Key-rate durations, key-rate DV01s | `keyed_sensitivities(...).key_rate_dv01("USD.OIS")` — pillar-level KRDs per named curve from one autodiff pass; `basis_dv01` for the projection-vs-OIS basis |
+| Bucket to Basel tenor grid | `tenor_bucket_map(pillar_times, basel_vertices)` + `aggregate` on the curve's key-rate DV01s |
 | PCA level/slope/curvature (industry-standard factor reduction) | `pca_jacobian` + `pushforward_sensitivities` — see [PCA Curve Shocks](../guide/pca-rates.md) |
 | SOT check | `jnp.max(jnp.abs(delta_eve)) / tier1_capital` |
 
@@ -113,7 +114,7 @@ import jax.numpy as jnp
 from valax.market import KeyedScenario, stack_keyed_scenarios
 from valax.risk import (
     KeyedFactorLayout, keyed_curve_stress, keyed_steepener, keyed_flattener,
-    group_scenario_pnl, keyed_ladder, tenor_bucket_map, aggregate,
+    group_scenario_pnl, keyed_sensitivities, tenor_bucket_map, aggregate,
 )
 
 OIS = "USD.OIS"
@@ -140,9 +141,9 @@ worst = jnp.min(delta_eve)           # most negative EVE change
 sot_ratio = jnp.abs(worst) / tier1_capital
 sot_pass  = sot_ratio < 0.15         # BCBS 368 threshold
 
-# 4. Ladder for KRD / DV01 attribution — where the sensitivity is concentrated
-ladder = keyed_ladder(positions, model, market, layout)
-krd = ladder.curve_ladder(OIS)       # per-pillar KRDs of the OIS curve
+# 4. Sensitivities for KRD / DV01 attribution — where the risk is concentrated
+sens = keyed_sensitivities(positions, model, market, layout)
+krd = sens.key_rate_dv01(OIS)         # per-pillar KRDs of the OIS curve
 
 # 5. Bucket to Basel 19-tenor IRRBB grid for the ITS / EBA return
 basel_vertices = jnp.array([
@@ -150,7 +151,7 @@ basel_vertices = jnp.array([
 ])
 tenor_bm = tenor_bucket_map(pillar_times, basel_vertices, weight="linear")
 krd_basel = aggregate(tenor_bm, krd)
-# krd_basel is the KRD ladder on the Basel tenor grid — ready for the ITS return.
+# krd_basel is the KRD vector on the Basel tenor grid — ready for the ITS return.
 ```
 
 Under the hood, `group_scenario_pnl` uses `jax.vmap` over scenarios and — inside each scenario — over instruments. For a 500 000-position retail banking book with six IRRBB scenarios, that is **3 000 000 repricings compiled into a single JIT call** rather than a Python loop over positions. On a single GPU this runs in seconds; on CPU it is still competitive with vendor ALM engines that need overnight batches.
@@ -198,7 +199,7 @@ The bank's own portfolio of sovereigns, covered bonds, agency MBS, and supranati
 |---|---|
 | Bond present-value (fixed, floating, callable) | [`valax/pricing/analytic/bonds.py`](../guide/fixed-income.md), [callable bonds guide](../guide/callable-bonds.md) |
 | Yield-to-maturity, duration, convexity | `jax.grad` / `jax.hessian` on the pricer |
-| Key-rate durations at Treasury's chosen bucket grid | `keyed_ladder(...).curve_ladder(curve_id)` + `tenor_bucket_map` / `aggregate` |
+| Key-rate durations at Treasury's chosen bucket grid | `keyed_sensitivities(...).key_rate_dv01(curve_id)` + `tenor_bucket_map` / `aggregate` |
 | Portfolio-level stress (parallel, steepener, basis) | `keyed_curve_stress` / `keyed_basis_shift` + `group_scenario_pnl` (credit-spread shocks are not yet keyed — [roadmap](../roadmap.md#remaining-work)) |
 | Multi-scenario ES for HQLA VaR | `expected_shortfall` on the `group_scenario_pnl` vector |
 | Callable-bond OAS (option-adjusted spread) | Callable-bond lattice pricer (guide/callable-bonds) |
@@ -282,7 +283,7 @@ The net effect: the same code path that produces a trader's DV01 on a swap at 14
 ## 11. So — the pitch, tailored to the buyer
 
 **To the Head of ALM:**
-*A production-grade IRRBB Standardised Approach engine using primitives that exist today. The six BCBS 368 scenarios are already named functions; ΔEVE + KRD ladders are one call each; the Basel tenor bucketing is a matrix multiply. Stand up a challenger IRRBB batch in weeks, defend it against your incumbent vendor with a QuantLib comparison, and use the same code path for your CFO's ITS return and your own management dashboard.*
+*A production-grade IRRBB Standardised Approach engine using primitives that exist today. The six BCBS 368 scenarios are already named functions; ΔEVE and the KRDs are one call each; the Basel tenor bucketing is a matrix multiply. Stand up a challenger IRRBB batch in weeks, defend it against your incumbent vendor with a QuantLib comparison, and use the same code path for your CFO's ITS return and your own management dashboard.*
 
 **To the Treasurer:**
 *Your HQLA book, your IRRBB report, your NII sensitivity, and your (future) FTP curve all live in the same differentiable pricing kernel. Numbers reconcile by construction — the HQLA duration on your risk report and the HQLA duration in the CFO's return are the same array, sliced differently.*

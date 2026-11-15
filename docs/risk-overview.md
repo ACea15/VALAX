@@ -26,11 +26,11 @@ Real banks do not have "a risk department". They have at least five distinct fun
 
 | Audience | Cares about… | Cadence | VALAX outputs they would use |
 |---|---|---|---|
-| **Trader** | "What's my P&L? What's my delta? If SPX drops 2%, what do I lose?" | Intraday + EOD | Greeks ladder; stress scenarios; `keyed_waterfall_report` (legacy flat: `pnl_attribution`, `waterfall_pnl_report`). |
-| **Risk Manager (MRM)** | "Is this desk within its DV01 / vega / VaR / stress limit? Did our risk model under-predict yesterday's loss?" | EOD + weekly | `keyed_ladder`; `keyed_component_var`; `value_at_risk`; `var_breaches`; `kupiec_pof`; `bucket_sensitivity_ladder`. |
+| **Trader** | "What's my P&L? What's my delta? If SPX drops 2%, what do I lose?" | Intraday + EOD | Bucketed Greeks (`keyed_sensitivities`); stress scenarios; `keyed_waterfall_report` (legacy flat: `pnl_attribution`, `waterfall_pnl_report`). |
+| **Risk Manager (MRM)** | "Is this desk within its DV01 / vega / VaR / stress limit? Did our risk model under-predict yesterday's loss?" | EOD + weekly | `keyed_sensitivities`; `keyed_component_var`; `value_at_risk`; `var_breaches`; `kupiec_pof`; `bucket_sensitivities`. |
 | **Model Validator / Quant** | "Does our pricing engine agree with the market? Does our risk model explain actual P&L (FRTB PLA)?" | Monthly + ad-hoc | `explained_unexplained_vector`; `pla_spearman`; `pla_ks`; calibration residuals. |
-| **Treasury / ALM** | "What's our IR sensitivity by bucket? Funding gap by tenor? CVA on the dealer book?" | Daily | Bucketed `delta_rate`; multi-curve KRDs (`KeyedLadder.curve_ladder`, `basis_dv01`); (planned) credit/CVA aggregation. |
-| **Chief Risk Officer** | "Top-of-house VaR. Concentration risk. Stress P&L under named scenarios." | EOD + monthly board pack | Portfolio VaR/ES; named stress (`steepener`, `crash`, …); CRO dashboard built on bucketed ladders. |
+| **Treasury / ALM** | "What's our IR sensitivity by bucket? Funding gap by tenor? CVA on the dealer book?" | Daily | Bucketed `delta_rate`; multi-curve KRDs (`KeyedSensitivities.key_rate_dv01`, `basis_dv01`); (planned) credit/CVA aggregation. |
+| **Chief Risk Officer** | "Top-of-house VaR. Concentration risk. Stress P&L under named scenarios." | EOD + monthly board pack | Portfolio VaR/ES; named stress (`steepener`, `crash`, …); CRO dashboard built on bucketed sensitivities. |
 | **Regulator** (Basel / national supervisor) | "Capital. Backtest pass/fail. PLA pass/fail. Bucketed sensitivities at the standard vertices." | Quarterly | Bucketed Greeks at FRTB / SIMM vertices; `basel_traffic_light`; `pla_traffic_light`. |
 | **Internal & external auditor** | "Reproduce yesterday's risk numbers from yesterday's market data." | Annual + ad-hoc | The fact that every VALAX function is *pure* — same inputs ⇒ same outputs. |
 
@@ -65,9 +65,10 @@ Every number in §2 is produced by the same chain of transformations. From left 
            │   one reverse-mode pass
            ▼
   ┌────────────────┐
-  │ Sensitivity    │   δ_x = ∇_x V       (autodiff, no bumps)
-  │ ladder         │   γ_x = ∇²_x V
-  └────────┬───────┘       (valax/risk/state_ladders.py)
+  │ Bucketed       │   δ_x = ∇_x V       (autodiff, no bumps)
+  │ sensitivities  │   γ_x = ∇²_x V      at the base market
+  └────────┬───────┘       (keyed_sensitivities → KeyedSensitivities,
+           │                valax/risk/state_sensitivities.py)
            │
            ├──────────────► bucket via A or J ──► bucketed Δ, γ ──► limits / capital
            │                (valax/risk/bucketing.py)
@@ -76,7 +77,7 @@ Every number in §2 is produced by the same chain of transformations. From left 
   │ Scenarios      │ ── shock ───────────► many ──►   │   P&L vector  │
   │ (historical /  │                       reprices   │  (n_scenarios)│
   │  parametric /  │   or                             └───────┬───────┘
-  │  stress)       │ ── waterfall rungs ──►  RTPL ──►         │
+  │  stress)       │ ── waterfall terms ──►  RTPL ──►         │
   └────────────────┘  (cheap arithmetic)                      │
            │                                                  ▼
            │                                          ┌───────────────┐
@@ -90,6 +91,13 @@ Every number in §2 is produced by the same chain of transformations. From left 
    Capital:    bucketed Δ at FRTB vertices → SBA formula (planned)
 ```
 
+*Bucketed sensitivities* are base-point Greeks, one per risk-factor bucket
+(see the [glossary](#9-glossary) and
+[Theory § 7.4](theory/risk-measures.md#74-bucketed-sensitivities)); they are
+what desks call a DV01 or vega "ladder". VALAX reserves *ladder* for a
+revaluation grid at shifted levels (planned), which would sit beside the
+scenario box as an all-orders alternative to the waterfall.
+
 The container in that picture is `MarketState` — the calibrated,
 multi-curve container the unified pricer takes, with a keyed `CurveGraph`
 (OIS discount + projection curves, basis, XCCY) and vol surfaces — and
@@ -100,27 +108,27 @@ every stage is drawn in identifier-keyed coordinates:
 whole distribution of them
 ([guide](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout)),
 `group_pv` / `group_scenario_pnl` for the repricing loop
-([guide](risk-var.md#repricing-through-price)), and `KeyedLadder` +
+([guide](risk-var.md#repricing-through-price)), and `KeyedSensitivities` +
 `keyed_component_var` for the sensitivities and their VaR
-([guide](risk-ladders.md#keyed-ladders-on-a-marketstate)). The practical
+([guide](risk-sensitivities.md#keyed-sensitivities-on-a-marketstate)). The practical
 difference: every curve on the graph — and the *basis* between two of them
-— is a named factor with its own P&L rung and its own VaR contribution,
+— is a named factor with its own P&L term and its own VaR contribution,
 rather than being summed into one `rates` block.
 
 The **legacy** flat path — `MarketData` + `MarketScenario` +
 `apply_scenario`, repriced by `valax/risk/var.py` and measured by
-`compute_ladder` (`valax/risk/ladders.py`) — draws the same picture with
+`compute_flat_sensitivities` (`valax/risk/sensitivities.py`) — draws the same picture with
 one positional `rates` block, and is kept for one deprecation cycle. Two
 stages still run only on it: the FRTB PLA vector pair
 (`hypothetical_pnl_vector` / `risk_theoretical_pnl_vector`) and the
-ladder-level bucketing of a `SensitivityLadder`; their keyed port is
+full-set bucketing of a `FlatSensitivities` (`bucket_sensitivities`); their keyed port is
 pending ([roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)).
 `value_at_risk`, `expected_shortfall` and the backtests act on a P&L
 array, so they serve both paths unchanged.
 
 Three things are worth stressing about this picture:
 
-1. **There is only one pricing function.** Everything else (Greeks, ladders, scenarios, VaR, backtests) is a *derived* quantity. If `V(market)` is wrong, every downstream number is wrong; if `V(market)` is right and differentiable, every downstream number is right by construction.
+1. **There is only one pricing function.** Everything else (Greeks, bucketed sensitivities, scenarios, VaR, backtests) is a *derived* quantity. If `V(market)` is wrong, every downstream number is wrong; if `V(market)` is right and differentiable, every downstream number is right by construction.
 2. **There is only one P&L vector primitive.** VaR is a quantile of it. ES is a tail-mean of it. Backtests count its breaches. The FRTB PLA test compares two of them (HPL vs RTPL). All four are sample statistics over the same array shape.
 3. **Bucketing is a coordinate change, not a separate computation.** The same sensitivity that lives on a curve's `discount_factors` inside the `MarketState`'s `CurveGraph` becomes a "DV01 at 5Y" or a "first PCA score" purely by multiplying by an aggregation matrix or a Jacobian.
 
@@ -148,7 +156,7 @@ $$
 \delta_x = \frac{\partial V}{\partial x}, \qquad \gamma_{xy} = \frac{\partial^2 V}{\partial x \partial y}
 $$
 
-In VALAX they come from `jax.grad` and `jax.hessian` on the pricing function — one reverse-mode pass per order — and are collected into a `KeyedLadder` by [`keyed_ladder`](risk-ladders.md#keyed-ladders-on-a-marketstate) (or, on the legacy flat `MarketData` path, a `SensitivityLadder` by [`compute_ladder`](risk-ladders.md#sensitivity-ladders-and-waterfall-pl)); a single instrument's market risk comes from `valax.greeks.market_risk`. No bump-and-reprice. No finite differences. **The "Greeks" a trader sees and the "key-rate DV01" a regulator wants are literally the same array, sliced and bucketed differently** — see [Theory § 6](theory/greeks.md#6-greeks-and-automatic-differentiation) for the autodiff derivation and [Theory § 7.4](theory/risk-measures.md#74-sensitivity-ladders) for ladders.
+In VALAX they come from `jax.grad` and `jax.hessian` on the pricing function — one reverse-mode pass per order — and are collected into a `KeyedSensitivities` by [`keyed_sensitivities`](risk-sensitivities.md#keyed-sensitivities-on-a-marketstate) (or, on the legacy flat `MarketData` path, a `FlatSensitivities` by [`compute_flat_sensitivities`](risk-sensitivities.md#bucketed-sensitivities-and-waterfall-pl)); a single instrument's market risk comes from `valax.greeks.market_risk`. No bump-and-reprice. No finite differences. **The "Greeks" a trader sees and the "key-rate DV01" a regulator wants are literally the same array, sliced and bucketed differently** — see [Theory § 6](theory/greeks.md#6-greeks-and-automatic-differentiation) for the autodiff derivation and [Theory § 7.4](theory/risk-measures.md#74-bucketed-sensitivities) for bucketed sensitivities.
 
 ### 4.3 What's a bad day for my book?
 
@@ -157,16 +165,16 @@ This is **VaR and Expected Shortfall**. A "bad day" is the left tail of the dist
 - $\text{VaR}_\alpha$ = the loss exceeded with probability $1-\alpha$.
 - $\text{ES}_\alpha$ = the average loss conditional on exceeding $\text{VaR}_\alpha$.
 
-The distribution comes from a **P&L vector**: full-revaluation under many scenarios (historical or Monte Carlo) gives **HPL**; passing the same scenarios through the second-order ladder gives **RTPL** much faster. Both vectors plug straight into [`value_at_risk`](api/risk.md) and [`expected_shortfall`](api/risk.md). The conceptual derivation lives in [Theory § 7.1](theory/risk-measures.md#71-value-at-risk-var) and [§ 7.2](theory/risk-measures.md#72-expected-shortfall-cvar); the workflow code is in the [VaR & P&L guide](risk-var.md#full-revaluation-var).
+The distribution comes from a **P&L vector**: full-revaluation under many scenarios (historical or Monte Carlo) gives **HPL**; passing the same scenarios through the second-order sensitivities gives **RTPL** much faster. Both vectors plug straight into [`value_at_risk`](api/risk.md) and [`expected_shortfall`](api/risk.md). The conceptual derivation lives in [Theory § 7.1](theory/risk-measures.md#71-value-at-risk-var) and [§ 7.2](theory/risk-measures.md#72-expected-shortfall-cvar); the workflow code is in the [VaR & P&L guide](risk-var.md#full-revaluation-var).
 
 ### 4.4 Is the risk model honest?
 
 This is **backtesting**. A model that consistently under-predicts losses is dangerous; a model that wildly over-predicts is wasteful of capital. Two regulator-mandated tests, both shipped in VALAX:
 
 - **VaR backtest** — count how often realised P&L breaches the model's forecast, and apply the Basel traffic-light zoning (`basel_traffic_light`) plus the Kupiec POF and Christoffersen independence tests for finer power. ([Theory § 7.6](theory/risk-measures.md#76-var-backtesting).)
-- **FRTB P&L Attribution test (PLA)** — compare *risk-theoretical* P&L (from the ladder) to *hypothetical* P&L (from full revaluation) over 250 days. Use Spearman rank correlation for monotonic agreement and a Kolmogorov-Smirnov test for distributional agreement, then read the BCBS d558 zone with `pla_traffic_light`. ([Theory § 7.7](theory/risk-measures.md#77-frtb-pl-attribution-test).)
+- **FRTB P&L Attribution test (PLA)** — compare *risk-theoretical* P&L (from the sensitivities) to *hypothetical* P&L (from full revaluation) over 250 days. Use Spearman rank correlation for monotonic agreement and a Kolmogorov-Smirnov test for distributional agreement, then read the BCBS d558 zone with `pla_traffic_light`. ([Theory § 7.7](theory/risk-measures.md#77-frtb-pl-attribution-test).)
 
-When PLA fails red, the desk loses its right to use the **Internal Models Approach** for capital and has to fall back to the (usually more punitive) **Standardised Approach**. This is the largest single financial incentive in the entire framework: keep the ladder sharp.
+When PLA fails red, the desk loses its right to use the **Internal Models Approach** for capital and has to fall back to the (usually more punitive) **Standardised Approach**. This is the largest single financial incentive in the entire framework: keep the sensitivities sharp.
 
 ### 4.5 How much capital does the bank need?
 
@@ -174,7 +182,7 @@ This is where every prior question becomes a real dollar number that hits the ba
 
 | Approach | What it consumes | Where in VALAX |
 |---|---|---|
-| **Standardised Approach (SBA)** | Bucketed sensitivities at *standard vertices* (FRTB IR tenor grid, equity sectors, …), aggregated via prescribed correlations into a capital number. | `compute_ladder` → `tenor_bucket_map` / `equal_weight_bucket_map` → `bucket_sensitivity_ladder` → (planned) SBA aggregation formulas. Runs on the legacy flat `SensitivityLadder`; graph-aware bucketing of a `KeyedLadder` is open. |
+| **Standardised Approach (SBA)** | Bucketed sensitivities at *standard vertices* (FRTB IR tenor grid, equity sectors, …), aggregated via prescribed correlations into a capital number. | `compute_flat_sensitivities` → `tenor_bucket_map` / `equal_weight_bucket_map` → `bucket_sensitivities` → (planned) SBA aggregation formulas. Runs on the legacy flat `FlatSensitivities`; graph-aware bucketing of a `KeyedSensitivities` is open. |
 | **Internal Models Approach (IMA)** | Expected Shortfall on a stressed-period scenario set, plus a stress-add-on for non-modellable risk factors. Subject to passing PLA + VaR backtest. | `risk_theoretical_pnl_vector` / `hypothetical_pnl_vector` (still on the flat `MarketData` path; keyed port pending) → `expected_shortfall` → PLA check → (planned) capital scaling. |
 
 The crucial point: **both methodologies start from the same sensitivities and the same P&L vectors that the trader and MRM already use**. The regulator's capital number, the trader's Greek, and the risk officer's VaR are not three separate systems — they are three slices of one pipeline. (Bucketing is what aligns the slices; see [§ 5](#5-the-standardization-layer-why-bucketing-matters) below.)
@@ -208,10 +216,10 @@ Every design choice in the library is in service of the pipeline above. The full
 |---|---|
 | **`MarketState` is one pytree** | A single object carries every risk factor's level — every named curve, surface, spot and dividend. `jax.grad(V)(market)` returns sensitivities to *all of them* in one call — no plumbing per factor. |
 | **All pricing functions are pure** (`(instrument, market) → price`) | Determinism: an auditor can replay yesterday's books to the bit. Composability: every downstream layer is just function composition. |
-| **`equinox.Module` pytrees** | Curves, surfaces, models, scenarios, ladders, bucket maps — every type is a pytree, so `jit` / `vmap` / `grad` work uniformly across the stack. |
-| **Autodiff Greeks** | First-order ladder: one reverse pass, ~3× one pricing call. Hessian: one forward-over-reverse pass, ~3N× one pricing call. *Same code path for vanilla and exotic instruments.* No 50 000-line bump framework to maintain. |
+| **`equinox.Module` pytrees** | Curves, surfaces, models, scenarios, sensitivities, bucket maps — every type is a pytree, so `jit` / `vmap` / `grad` work uniformly across the stack. |
+| **Autodiff Greeks** | First-order sensitivities: one reverse pass, ~3× one pricing call. Hessian: one forward-over-reverse pass, ~3N× one pricing call. *Same code path for vanilla and exotic instruments.* No 50 000-line bump framework to maintain. |
 | **`vmap` over scenarios** | A 10 000-scenario VaR run is one JIT-compiled call, not a Python loop. Bank-scale portfolios become feasible on a single GPU. |
-| **Bucketing as a matrix multiply** | Trader view, MRM view, and regulator view are all the same ladder × a different `A` or `J`. New views are five-line additions. |
+| **Bucketing as a matrix multiply** | Trader view, MRM view, and regulator view are all the same sensitivity vector × a different `A` or `J`. New views are five-line additions. |
 | **Dates as integer ordinals** | The calibration and risk loops fit inside `jit` end-to-end — no Python `datetime` round-trips on the hot path. |
 
 The combined effect: the *same* code path handles "compute a delta for a trader at 14:31" and "compute the firm-wide 99% ES on 250 stressed-period scenarios overnight". One library, one mental model, two orders of magnitude difference in scale and zero difference in semantics.
@@ -228,10 +236,10 @@ What is in the library **today** (✅) and what is signposted for the next itera
 |---|---|---|
 | Market data containers | ✅ | `MarketState` (the market object: multi-curve `CurveGraph` — dict of `DiscountCurve` keyed by identifier, built jointly by `bootstrap_curve_graph` — plus surfaces, spots, dividends; `MarketState.flat(...)` for a constant single-curve market), `KeyedScenario`, `SurvivalCurve`, `InflationCurve`, vol surfaces. Legacy, for one deprecation cycle: `MarketData`, `MarketScenario`, `ScenarioSet` (`MarketState.to_market_data()` projects onto them) and `MultiCurveSet` (single-currency two-tier view over a `CurveGraph`). |
 | Pricing engines | ✅ (broad) / 📋 (XVA, CDS) | Equity, FX, rates, inflation, callable / puttable bonds, credit CDS pricer planned. |
-| Sensitivity ladders | ✅ | First- and second-order ladder, ten-rung waterfall, autodiff throughout; plus identifier-keyed per-curve ladders (`KeyedLadder`) with a per-block waterfall. |
+| Bucketed sensitivities | ✅ | First- and second-order sensitivities, ten-term waterfall, autodiff throughout; plus identifier-keyed per-curve sensitivities (`KeyedSensitivities`) with a per-block waterfall. |
 | Scenario generation | ✅ | Historical, parametric Gaussian / t, named stress (parallel, steepener, butterfly, …) — in the flat layout and in the keyed per-curve layout (`KeyedFactorLayout`, incl. basis stresses). |
 | Shock primitives | ✅ | `valax.risk.shock` on a `MarketState`: any named curve (multi-curve, basis), surfaces (parallel shift via `shift_surface`), spots, dividends; flat curve bumps and credit-hazard bumps on the curve objects. 🚧 Credit / inflation / FX curves not yet addressable by `shock` (hazard primitives exist, unwired). 📋 Vol surface (node-level), inflation bumps, FX vol. |
-| P&L vectors | ✅ | Keyed full-revaluation P&L (`group_scenario_pnl`); FRTB PLA pair HPL (`hypothetical_pnl_vector`), RTPL (`risk_theoretical_pnl_vector`), unexplained. 🚧 The PLA pair still runs on flat `MarketData` and the positional ladder. |
+| P&L vectors | ✅ | Keyed full-revaluation P&L (`group_scenario_pnl`); FRTB PLA pair HPL (`hypothetical_pnl_vector`), RTPL (`risk_theoretical_pnl_vector`), unexplained. 🚧 The PLA pair still runs on flat `MarketData` and the positional `FlatSensitivities`. |
 | VaR / ES | ✅ | Full-revaluation and parametric delta-normal (`keyed_parametric_var`), the latter with an additive per-curve / per-basis decomposition (`keyed_component_var`). Legacy flat `parametric_var` still ships; its retirement is pending. |
 | Backtesting | ✅ | Breach detection, Kupiec POF, Christoffersen independence, Basel traffic light. |
 | FRTB PLA | ✅ | Spearman + KS, BCBS d558 zoning. |
@@ -239,9 +247,9 @@ What is in the library **today** (✅) and what is signposted for the next itera
 | **SBA capital aggregation** | 📋 | Bucket-level Δ + γ are computed today; the prescribed inter-bucket correlation matrices and curvature add-ons are next. |
 | **XVA (CVA / FVA / KVA)** | 📋 | Needs the planned CDS pricer + a credit-IR joint Monte Carlo path generator. |
 | **IMA stress-period selection** | 📋 | The 250-day historical window is currently chosen by the caller; automated stress-period identification will land alongside the SBA work. |
-| **Named factor registry** | 🚧 | Factor IDs (`IR.OIS.USD.5Y`, `IR.BASIS.USD.SOFR3M.OIS.5Y`, …) are live for curves, surfaces, spots and dividends: `KeyedFactorLayout.factor_ids()` is the shared index of the keyed scenarios, the per-curve covariance and the `KeyedLadder`. Still positional: the legacy `MarketData` path, the FRTB PLA vectors, and the FX / credit / inflation / model-parameter families (roadmap item 7). |
+| **Named factor registry** | 🚧 | Factor IDs (`IR.OIS.USD.5Y`, `IR.BASIS.USD.SOFR3M.OIS.5Y`, …) are live for curves, surfaces, spots and dividends: `KeyedFactorLayout.factor_ids()` is the shared index of the keyed scenarios, the per-curve covariance and the `KeyedSensitivities`. Still positional: the legacy `MarketData` path, the FRTB PLA vectors, and the FX / credit / inflation / model-parameter families (roadmap item 7). |
 
-The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](risk-factors.md#4-roadmap) and the project-wide [Roadmap](roadmap.md). The shortest critical path to a desk-usable bank-style risk system was: **(a) multi-curve risk → (b) vol-surface risk factors → (c) FRTB SBA capital aggregation**. Step (a) has now landed on the `MarketState` path — keyed per-curve scenarios, covariance, repricing and ladders, with the basis as a named factor — so the live front is (b) node-level vega, plus portfolio aggregation above the group primitives and re-targeting the PLA vectors onto the keyed ladder.
+The full priority order, with dependencies, is in [Risk Factors § 4 Roadmap](risk-factors.md#4-roadmap) and the project-wide [Roadmap](roadmap.md). The shortest critical path to a desk-usable bank-style risk system was: **(a) multi-curve risk → (b) vol-surface risk factors → (c) FRTB SBA capital aggregation**. Step (a) has now landed on the `MarketState` path — keyed per-curve scenarios, covariance, repricing and sensitivities, with the basis as a named factor — so the live front is (b) node-level vega, plus portfolio aggregation above the group primitives and re-targeting the PLA vectors onto the keyed sensitivities.
 
 ---
 
@@ -251,7 +259,7 @@ Different audiences will follow different paths from here:
 
 - **Quants / pricing developers** → [Models & Theory](theory/index.md) for the math, [Risk Factors](risk-factors.md) for what's in the engine, [API: Risk](api/risk.md) for signatures.
 - **Risk system developers / engineers** → [Scenarios & Shocks](risk-scenarios.md) for the workflow, [Risk Factors § 5 Instrument → Factor matrix](risk-factors.md#5-instrument-factor-matrix) for coverage, [Roadmap](roadmap.md) for the priorities.
-- **Front-office (trader / structurer)** → [Greeks (Theory § 6)](theory/greeks.md#6-greeks-and-automatic-differentiation) and the [Sensitivity Ladders](risk-ladders.md#sensitivity-ladders-and-waterfall-pl) page.
+- **Front-office (trader / structurer)** → [Greeks (Theory § 6)](theory/greeks.md#6-greeks-and-automatic-differentiation) and the [Bucketed Sensitivities](risk-sensitivities.md#bucketed-sensitivities-and-waterfall-pl) page.
 - **Regulators / validators** → [Theory § 7.6–7.8](theory/risk-measures.md#76-var-backtesting) for the backtesting + PLA + bucketing maths, [Risk Factors](risk-factors.md) for the audit-trail of what is and is not modelled.
 
 ---
@@ -264,10 +272,10 @@ A pocket dictionary of the terms used above and across the risk section.
 |---|---|---|
 | **APL** | *Actual P&L.* The end-of-day P&L from the books — includes trading, fees, valuation adjustments. Not produced by the engine; computed by Finance. | (input, not generated) |
 | **HPL** | *Hypothetical P&L.* Today's portfolio repriced under tomorrow's market — strips out intraday flow. | `group_scenario_pnl`; `hypothetical_pnl_vector` (flat path) |
-| **RTPL** | *Risk-theoretical P&L.* The risk engine's prediction from the ladder. | `risk_theoretical_pnl_vector` |
-| **Greek** | Generic name for a partial derivative of price w.r.t. a market input (delta, gamma, vega, rho, …). | `keyed_ladder`, `market_greeks`, `jax.grad(V)`; `compute_ladder` (flat path) |
-| **DV01** | *Dollar value of 01.* P&L change for +1 bp parallel rate move. | `KeyedLadder.dv01(curve_id)`; `ladder.delta_rate` summed (flat path) |
-| **KRD** | *Key-rate duration.* DV01 sliced per tenor pillar. | `KeyedLadder.curve_ladder(curve_id)`; `ladder.delta_rate` (flat path) |
+| **RTPL** | *Risk-theoretical P&L.* The risk engine's prediction from the bucketed sensitivities. | `risk_theoretical_pnl_vector` |
+| **Greek** | Generic name for a partial derivative of price w.r.t. a market input (delta, gamma, vega, rho, …). | `keyed_sensitivities`, `market_greeks`, `jax.grad(V)`; `compute_flat_sensitivities` (flat path) |
+| **DV01** | *Dollar value of 01.* P&L change for +1 bp parallel rate move. | `KeyedSensitivities.dv01(curve_id)`; `FlatSensitivities.delta_rate` summed (flat path) |
+| **KRD** | *Key-rate duration / key-rate DV01.* DV01 sliced per tenor pillar — what rates desks call a "DV01 ladder". | `KeyedSensitivities.key_rate_dv01(curve_id)`; `FlatSensitivities.delta_rate` (flat path) |
 | **VaR** | *Value at Risk.* Loss exceeded with probability $1-\alpha$ over a horizon. | `value_at_risk` |
 | **ES / CVaR** | *Expected Shortfall.* Mean loss conditional on exceeding VaR. | `expected_shortfall` |
 | **Backtest** | Comparing forecast VaR to realised P&L over a window. | `var_breaches`, `kupiec_pof`, `christoffersen_*`, `basel_traffic_light` |
@@ -281,11 +289,13 @@ A pocket dictionary of the terms used above and across the risk section.
 | **Survival probability** | $S(t) = \Pr(\tau > t)$ — probability the issuer is still alive at $t$. | `SurvivalCurve` |
 | **Hazard rate** | Instantaneous default intensity; $S(t) = \exp(-\int_0^t h)$. | `hazard_rate`, `piecewise_hazards` |
 | **Recovery rate** | Fraction of notional recovered on default (≈40% senior unsecured). | (parameter) |
-| **Basis** | Spread between two related curves (3M vs OIS, SOFR vs Fed Funds, FX cross-currency). | `keyed_basis_shift`, `as_basis_layout`, `KeyedLadder.basis_dv01`; `bump_forward_curve`, `parallel_basis_shift` (`MultiCurveSet` view) |
-| **Bucketing** | Aggregating raw-factor sensitivities into a coarser standardised grid. | `BucketMap`, `bucket_sensitivity_ladder` |
+| **Basis** | Spread between two related curves (3M vs OIS, SOFR vs Fed Funds, FX cross-currency). | `keyed_basis_shift`, `as_basis_layout`, `KeyedSensitivities.basis_dv01`; `bump_forward_curve`, `parallel_basis_shift` (`MultiCurveSet` view) |
+| **Bucketing** | Aggregating raw-factor sensitivities into a coarser standardised grid. | `BucketMap`, `bucket_sensitivities` |
 | **PCA factors** | Principal components of factor returns; first three on a yield curve are level / slope / curvature. | `pca_jacobian` |
-| **Ladder** | A bucketed vector of sensitivities across a risk-factor dimension. | `KeyedLadder`; `SensitivityLadder` (flat path) |
-| **Waterfall** | The rung-by-rung P&L decomposition built from a ladder. | `keyed_waterfall_pnl`, `keyed_waterfall_report`; `waterfall_pnl`, `waterfall_pnl_report` (flat path) |
+| **Bucketed sensitivities** | First- (and optionally second-) order derivatives of value **at the base market**, one entry per risk-factor bucket (tenor pillar, asset, surface). The FRTB SA / ISDA SIMM *sensitivities*. Formerly called "ladders" in VALAX. | `KeyedSensitivities` (`keyed_sensitivities`); `FlatSensitivities` (flat path) |
+| **Ladder** | A one-dimensional **revaluation grid**: PV and delta recomputed at a set of shift levels (*rungs*) along one direction, so the P&L of any move up to the outer rung is read off by integration / interpolation, to all orders. Desks also say "DV01 ladder" for key-rate DV01s; VALAX does not. | Planned (`RevaluationGrid`) |
+| **Revaluation grid** | PV (and delta) on a grid of shift levels along one or more risk-factor directions; FRTB curvature and grid-based partial revaluation use it. A 1-D grid is a ladder. | Planned (`RevaluationGrid`) |
+| **Waterfall** | The term-by-term second-order P&L explain built from bucketed sensitivities. | `keyed_waterfall_pnl`, `keyed_waterfall_report`; `waterfall_pnl`, `waterfall_pnl_report` (flat path) |
 
 ---
 

@@ -19,7 +19,7 @@ price(instrument, model, market: MarketState) → PricingResult
 - **Greeks** are `jax.grad` of `price` with respect to the market (`market_risk`), back to the quoted instruments through the calibration (`chain_adjoint`).
 - **Portfolios** are `jax.vmap` of `price` over a batch of trades.
 - **VaR / ES** are sample statistics on a P&L vector produced by `vmap` over keyed scenarios.
-- **Regulatory capital** is a bucketed contraction of the sensitivity ladder.
+- **Regulatory capital** is a bucketed contraction of the sensitivities.
 - **Neural surrogates** train against the pricer's own gradient as ground truth.
 - **Deep-hedging policies** learn against the gradient of P&L through the SDE simulation.
 
@@ -37,9 +37,9 @@ Business tags: `MRM` Market Risk & Model Validation · `QR` Quant Research · `F
 
 ### 2.1 Exact autodiff risk — no bump-and-reprice
 
-Every Greek, and the full first-/second-order sensitivity ladder, comes from one reverse-mode pass over the pricer (`jax.grad` / `jax.hessian` through `price()`; `market_risk` for a trade, `keyed_ladder` for a book) — exact to machine precision, with no separate bump framework to drift out of sync with the pricer it shadows.
+Every Greek, and the full set of first-/second-order bucketed sensitivities, comes from one reverse-mode pass over the pricer (`jax.grad` / `jax.hessian` through `price()`; `market_risk` for a trade, `keyed_sensitivities` for a book) — exact to machine precision, with no separate bump framework to drift out of sync with the pricer it shadows.
 
-**Who it serves:** `MRM` the entire factor ladder in one pass, and a bump-free RTPL that stops finite-difference noise from failing FRTB PLA · `FO` exact hedge deltas with none of the noise that is worst near barriers and expiry · `REG` the sensitivities FRTB asks for *are* `jax.grad` output — no 50k-line bump engine · `TRE` exact key-rate durations across 20+ pillars, no bump-width dispute with the auditor · `QR` every new model ships with all Greeks the moment its price function exists.
+**Who it serves:** `MRM` every factor sensitivity in one pass, and a bump-free RTPL that stops finite-difference noise from failing FRTB PLA · `FO` exact hedge deltas with none of the noise that is worst near barriers and expiry · `REG` the sensitivities FRTB asks for *are* `jax.grad` output — no 50k-line bump engine · `TRE` exact key-rate durations across 20+ pillars, no bump-width dispute with the auditor · `QR` every new model ships with all Greeks the moment its price function exists.
 
 ### 2.2 Batch at scale — `vmap` + JIT + GPU
 
@@ -51,7 +51,7 @@ Every Greek, and the full first-/second-order sensitivity ladder, comes from one
 
 A single `MarketState` pytree carries every risk factor, each named by identifier (`USD.OIS`, `USD.SOFR.3M`, a surface id, an asset id), and the *same* JIT-compiled `price` serves the trader's hot price, the EOD risk batch, the regulator's backtest, and the audit replay. Internal numbers reconcile by construction rather than through a nightly reconciliation job.
 
-**Who it serves:** `MRM` trader Greeks, desk DV01, CRO cross-gamma, FRTB SBA, and PLA RTPL are all slices of one ladder · `REG` SBA and IMA prototype against the same instruments and the same `MarketState`, with no second stack · `TRE` the HQLA duration in the ALM report and in the CFO's return are the same array, sliced differently · `FO` a pre-trade what-if runs the same compiled function as the overnight batch · **product control / finance** explain the day-over-day move in official P&L with `keyed_waterfall_report`, one rung per named curve, surface and asset, on the same ladder the desk sees.
+**Who it serves:** `MRM` trader Greeks, desk DV01, CRO cross-gamma, FRTB SBA, and PLA RTPL are all slices of one set of sensitivities · `REG` SBA and IMA prototype against the same instruments and the same `MarketState`, with no second stack · `TRE` the HQLA duration in the ALM report and in the CFO's return are the same array, sliced differently · `FO` a pre-trade what-if runs the same compiled function as the overnight batch · **product control / finance** explain the day-over-day move in official P&L with `keyed_waterfall_report`, one term per named curve, surface and asset, on the same sensitivities the desk sees.
 
 ### 2.4 Determinism & independent validation
 
@@ -99,7 +99,7 @@ The top two audiences stand for two different theses about the library:
 
 **Asks:** *"Is this desk within its DV01 / vega / VaR / stress limit? Did the model under-predict yesterday's loss? Does the engine agree with QuantLib, and is the calibration stable?"*
 
-The daily MRM production loop runs in one code path: sensitivity ladders, waterfall P&L explain, full-revaluation VaR/ES, Basel backtesting, limits monitoring and FRTB PLA. For Model Validation, VALAX is an independent-by-construction challenger pricer in Python + JAX rather than C++. A QuantLib comparison suite is already in the tree, covering options, fixed income, Heston, SABR, caps, swaptions, MC, PDE, lattice, SLV and Greeks. Deterministic replay supports supervisory inspections.
+The daily MRM production loop runs in one code path: bucketed sensitivities, waterfall P&L explain, full-revaluation VaR/ES, Basel backtesting, limits monitoring and FRTB PLA. For Model Validation, VALAX is an independent-by-construction challenger pricer in Python + JAX rather than C++. A QuantLib comparison suite is already in the tree, covering options, fixed income, Heston, SABR, caps, swaptions, MC, PDE, lattice, SLV and Greeks. Deterministic replay supports supervisory inspections.
 
 ### 3.2 Quant Research
 
@@ -148,17 +148,17 @@ This is the single, consolidated coverage reference for every application above;
 | Capability | Status | Business | Component(s) / notes |
 |---|---|---|---|
 | Differentiable pricer `price(instrument, model, market) → PricingResult` | ✅ | All | Every route on the `price()` front door (`valax/core/`); the `valax/pricing/*` kernels it dispatches to are public API too |
-| Autodiff Greeks & sensitivity ladders (1st/2nd order: Δ, Γ, vega, vanna, volga, DV01 per curve, KRD) | ✅ | All | `market_risk` (single trade), `keyed_ladder` / `KeyedLadder` (book, one block per named curve, surface, asset); `jax.grad`/`jax.hessian` through `price()` |
+| Autodiff Greeks & bucketed sensitivities (1st/2nd order: Δ, Γ, vega, vanna, volga, DV01 per curve, KRD) | ✅ | All | `market_risk` (single trade), `keyed_sensitivities` / `KeyedSensitivities` (book, one block per named curve, surface, asset); `jax.grad`/`jax.hessian` through `price()` |
 | Whole-book / universe batched revaluation | ✅ | All | `group_pv` / `group_reprice` through `price()`, `jax.vmap` + `@eqx.filter_jit` |
 | GPU / TPU execution (same code) | ✅ | All | JAX / XLA |
 | VaR & Expected Shortfall (full-reval + parametric delta-normal, with per-curve Euler decomposition) | ✅ | MRM, REG | `group_scenario_pnl` + `value_at_risk` / `expected_shortfall`; `keyed_parametric_var`, `keyed_component_var` |
 | Scenario generation (historical, parametric, named stress, per-curve and basis) | ✅ | MRM, REG, TRE | `keyed_historical_scenarios`, `keyed_parametric_scenarios` over a per-curve `block_covariance`; `keyed_stress_scenario`, `keyed_curve_stress` (steepener / flattener / butterfly), `keyed_basis_shift` |
 | Scenario / pre-trade "what-if" P&L (incl. intraday grids) | ✅ | FO, MRM, REG, TRE | `KeyedScenario` + `shock`, `group_scenario_pnl`, nested `vmap` |
-| FRTB PLA P&L vectors (HPL / RTPL) | ✅ / 🟡 | MRM, REG | `hypothetical_pnl_vector`, `risk_theoretical_pnl_vector` — shipped on the legacy flat `MarketData` path; port to the keyed ladder is [open](../roadmap.md#remaining-work) |
-| Waterfall P&L explain (one rung per market object + unexplained) | ✅ | MRM, REG | `keyed_waterfall_report`, `keyed_waterfall_pnl` (a pure basis move lands on the basis rung only) |
+| FRTB PLA P&L vectors (HPL / RTPL) | ✅ / 🟡 | MRM, REG | `hypothetical_pnl_vector`, `risk_theoretical_pnl_vector` — shipped on the legacy flat `MarketData` path; port to the keyed sensitivities is [open](../roadmap.md#remaining-work) |
+| Waterfall P&L explain (one term per market object + unexplained) | ✅ | MRM, REG | `keyed_waterfall_report`, `keyed_waterfall_pnl` (a pure basis move lands on the basis term only) |
 | Basel VaR backtest (Kupiec, Christoffersen, traffic light) | ✅ | MRM, REG | `var_breaches`, `kupiec_pof`, `christoffersen_conditional_coverage`, `basel_traffic_light` |
 | FRTB PLA test (Spearman + KS + d558 zone) | ✅ | MRM, REG | `pla_spearman`, `pla_ks`, `pla_traffic_light` |
-| Bucketing (FRTB/SIMM vertices, sector, PCA, Basel tenor) | ✅ | MRM, REG, TRE | `tenor_bucket_map`, `equal_weight_bucket_map`, `pca_jacobian`; `bucket_sensitivity_ladder` still reads the flat ladder |
+| Bucketing (FRTB/SIMM vertices, sector, PCA, Basel tenor) | ✅ | MRM, REG, TRE | `tenor_bucket_map`, `equal_weight_bucket_map`, `pca_jacobian`; `bucket_sensitivities` still reads the flat sensitivities |
 | Differentiable SDE path simulation | ✅ | QR | `diffrax` — GBM, Heston, LMM, SABR, local vol, SLV |
 | Robust gradient-based calibration (Heston, SABR, SLV) | ✅ | QR, FO | `optimistix` LM + `optax`, `valax/calibration/` |
 | Vol-surface models (SABR, SVI, SLV, Dupire) | ✅ | QR | `valax/surfaces/`, `valax/models/slv.py`, `valax/models/local_vol.py` |
@@ -169,12 +169,12 @@ This is the single, consolidated coverage reference for every application above;
 | HQLA / investment-portfolio pricing (fixed, floating, callable) | ✅ | TRE | `valax/instruments/bonds.py`, `valax/pricing/analytic/bonds.py`, callable-bond lattice |
 | QuantLib comparison suite (14 modules) | ✅ | MRM, QR, FO | `tests/test_quantlib_comparison/` |
 | Golden tests / deterministic replay for audit | ✅ | All | `tests/golden/` + `golden_manifest.json`; pure functions + integer-ordinal dates |
-| Vol-surface risk factors (grid / SABR / SVI parameter risk) | ✅ / 📋 | MRM, REG | Per-surface parallel vega (`shift_surface`) and quote-space vega for rates cubes shipped; node-level vega ladders planned |
+| Vol-surface risk factors (grid / SABR / SVI parameter risk) | ✅ / 📋 | MRM, REG | Per-surface parallel vega (`shift_surface`) and quote-space vega for rates cubes shipped; node-level vega buckets planned |
 | Intraday `MarketState` build + calibration diagnostics | 🟡 | FO | [Productionisation § 5](../architecture/production.md#5-layer-2-3-build-and-calibration-workflow); not fully packaged |
 | Long-lived pricing service (gRPC/REST, resident state) | 🟡 | FO, MRM | [Productionisation § 8](../architecture/production.md#8-layer-6-service-layer-deferred) — deferred |
 | NII 12-month simulation engine (position walker) | 🟡 | TRE | All primitives present; orchestration layer not yet packaged |
 | LCR / NSFR contractual cash-flow bucketing | 🟡 | TRE | Schedule + bucketing primitives present; run-off-factor library not shipped |
-| Multi-curve market (OIS + SOFR + basis + XCCY) | ✅ | MRM, REG, TRE | `CurveGraph` (`bootstrap_curve_graph`) inside `MarketState`; per-curve shocks, ladders and VaR, basis as its own factor (`as_basis_layout`, `KeyedLadder.basis_dv01`) |
+| Multi-curve market (OIS + SOFR + basis + XCCY) | ✅ | MRM, REG, TRE | `CurveGraph` (`bootstrap_curve_graph`) inside `MarketState`; per-curve shocks, sensitivities and VaR, basis as its own factor (`as_basis_layout`, `KeyedSensitivities.basis_dv01`) |
 | Keyed shocks for credit / inflation / FX on `MarketState` | 📋 | MRM, REG, TRE | Curves and spots are priced from `MarketState`; not yet addressable by `KeyedScenario` — [roadmap](../roadmap.md#remaining-work) |
 | SBA capital aggregation (inter-bucket correlations + curvature) | 📋 | MRM, REG | Bucket-level Δ + γ today; prescribed correlation formulas planned |
 | Named risk factors (`IR.OIS.USD.5Y`, …) | ✅ | MRM | `KeyedFactorLayout` names every coordinate ([Risk Factors § 1.2](../risk-factors.md#12-factor-identifier-convention)); the legacy flat path stays positional |

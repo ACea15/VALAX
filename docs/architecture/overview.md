@@ -84,7 +84,7 @@ valax/
 ├── greeks/        # Market / model greeks, IFT adjoints, quote risk through chains
 ├── surfaces/      # Vol surfaces and cubes (constant, grid, SABR, SVI, optionlet)
 ├── market/        # QuoteSet, provenance, keyed scenarios, synthetic markets
-├── risk/          # Keyed shocks, repricing, ladders, VaR/ES, bucketing
+├── risk/          # Keyed shocks, repricing, sensitivities, VaR/ES, bucketing
 └── portfolio/     # Homogeneous vmap batch pricing (legacy)
 ```
 

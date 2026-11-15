@@ -29,7 +29,7 @@ the chain rule gives
 
 which reduces to the linear case for ``J = A^{\\top}``.  PCA scores
 (``J`` = top eigenvectors of ``\\Sigma_x``), classical
-level / slope / curvature factors, and SVI / SABR parameter ladders all
+level / slope / curvature factors, and SVI / SABR parameter vectors all
 fit this template.
 
 See :doc:`../theory.md` §7.8 for the full derivation and the
@@ -46,6 +46,8 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Float
 from jax import Array
+
+from valax.risk._deprecation import deprecated_module_getattr, renamed_kwarg
 
 
 # ── Core type ────────────────────────────────────────────────────────
@@ -142,7 +144,7 @@ def aggregate_matrix(
 
     ``M_b = A_r\\,M\\,A_c^{\\top}``.  Useful for the
     ``cross_spot_rate`` / ``cross_vol_rate`` blocks of a
-    :class:`valax.risk.ladders.SensitivityLadder`.
+    :class:`valax.risk.sensitivities.FlatSensitivities`.
     """
     return bucket_map_rows.matrix @ matrix @ bucket_map_cols.matrix.T
 
@@ -391,21 +393,21 @@ def pca_jacobian(
     return jacobian, top_eigvals, fraction_explained
 
 
-# ── Ladder convenience ─────────────────────────────────────────────
+# ── Bucketing a full sensitivity set ──────────────────────────────
 
 
-class BucketedLadder(eqx.Module):
-    """Sensitivity ladder expressed in bucket coordinates.
+class BucketedSensitivities(eqx.Module):
+    """Bucketed sensitivities expressed in bucket coordinates.
 
-    Mirrors :class:`valax.risk.ladders.SensitivityLadder` but each
+    Mirrors :class:`valax.risk.sensitivities.FlatSensitivities` but each
     component is reduced to its respective bucket dimension.  Cross
     blocks are bilaterally bucketed: ``cross_spot_rate`` becomes
     ``(n_spot_buckets, n_rate_buckets)``.
 
-    Optional labels are preserved as static tuples on each ladder
+    Optional labels are preserved as static tuples on each
     component for human-readable reporting.
 
-    Attributes mirror :class:`SensitivityLadder` with the trailing
+    Attributes mirror :class:`~valax.risk.sensitivities.FlatSensitivities` with the trailing
     dimensions replaced by their bucket counts; ``*_labels`` fields
     carry the corresponding bucket names.
     """
@@ -438,32 +440,35 @@ def _identity_bucket_map(n: int) -> BucketMap:
     return BucketMap(matrix=jnp.eye(n), bucket_labels=(), factor_labels=())
 
 
-def bucket_sensitivity_ladder(
-    ladder: "SensitivityLadder",
+@renamed_kwarg("ladder", "sensitivities")
+def bucket_sensitivities(
+    sensitivities: "FlatSensitivities",
     *,
     rate_bucket: BucketMap | None = None,
     spot_bucket: BucketMap | None = None,
     vol_bucket: BucketMap | None = None,
     div_bucket: BucketMap | None = None,
-) -> BucketedLadder:
-    """Aggregate every component of a :class:`SensitivityLadder` into buckets.
+) -> BucketedSensitivities:
+    """Aggregate every component of a :class:`~valax.risk.sensitivities.FlatSensitivities` into buckets.
 
     Each ``*_bucket`` argument is optional; when omitted the
     corresponding factor axis is left at full granularity (identity
-    bucket map).  Diagonal second-order rungs are bucketed with the
-    same map as the corresponding first-order rung (gamma_spot via
+    bucket map).  Diagonal second-order terms are bucketed with the
+    same map as the corresponding first-order term (gamma_spot via
     ``spot_bucket``, volga via ``vol_bucket``, gamma_rate via
     ``rate_bucket``, vanna via ``spot_bucket``).  Cross blocks are
     bucketed bilaterally.
 
-    The ``vanna`` rung in :class:`SensitivityLadder` is stored as a
+    The ``vanna`` field of :class:`~valax.risk.sensitivities.FlatSensitivities` is stored as a
     diagonal indexed by asset, so it is bucketed by ``spot_bucket``
     only — its vol axis is implicit (same asset index as the spot).
     For full vol-axis bucketing of vanna, build the explicit
     cross-vol-spot Hessian block instead.
 
     Args:
-        ladder: Source :class:`SensitivityLadder`.
+        sensitivities: Source :class:`~valax.risk.sensitivities.FlatSensitivities`
+            (the deprecated keyword ``ladder=`` is still accepted, with a
+            warning).
         rate_bucket: Optional :class:`BucketMap` for the rate axis.
         spot_bucket: Optional :class:`BucketMap` for the spot axis
             (also used for ``gamma_spot`` and ``vanna``).
@@ -472,26 +477,37 @@ def bucket_sensitivity_ladder(
         div_bucket: Optional :class:`BucketMap` for the dividend axis.
 
     Returns:
-        A :class:`BucketedLadder` in bucket coordinates.
+        A :class:`BucketedSensitivities` in bucket coordinates.
     """
-    rb = rate_bucket or _identity_bucket_map(ladder.delta_rate.shape[0])
-    sb = spot_bucket or _identity_bucket_map(ladder.delta_spot.shape[0])
-    vb = vol_bucket or _identity_bucket_map(ladder.delta_vol.shape[0])
-    db = div_bucket or _identity_bucket_map(ladder.delta_div.shape[0])
+    rb = rate_bucket or _identity_bucket_map(sensitivities.delta_rate.shape[0])
+    sb = spot_bucket or _identity_bucket_map(sensitivities.delta_spot.shape[0])
+    vb = vol_bucket or _identity_bucket_map(sensitivities.delta_vol.shape[0])
+    db = div_bucket or _identity_bucket_map(sensitivities.delta_div.shape[0])
 
-    return BucketedLadder(
-        delta_spot=aggregate(sb, ladder.delta_spot),
-        delta_vol=aggregate(vb, ladder.delta_vol),
-        delta_rate=aggregate(rb, ladder.delta_rate),
-        delta_div=aggregate(db, ladder.delta_div),
-        gamma_spot=aggregate(sb, ladder.gamma_spot),
-        gamma_rate=aggregate(rb, ladder.gamma_rate),
-        volga=aggregate(vb, ladder.volga),
-        vanna=aggregate(sb, ladder.vanna),
-        cross_spot_rate=aggregate_matrix(sb, ladder.cross_spot_rate, rb),
-        cross_vol_rate=aggregate_matrix(vb, ladder.cross_vol_rate, rb),
+    return BucketedSensitivities(
+        delta_spot=aggregate(sb, sensitivities.delta_spot),
+        delta_vol=aggregate(vb, sensitivities.delta_vol),
+        delta_rate=aggregate(rb, sensitivities.delta_rate),
+        delta_div=aggregate(db, sensitivities.delta_div),
+        gamma_spot=aggregate(sb, sensitivities.gamma_spot),
+        gamma_rate=aggregate(rb, sensitivities.gamma_rate),
+        volga=aggregate(vb, sensitivities.volga),
+        vanna=aggregate(sb, sensitivities.vanna),
+        cross_spot_rate=aggregate_matrix(sb, sensitivities.cross_spot_rate, rb),
+        cross_vol_rate=aggregate_matrix(vb, sensitivities.cross_vol_rate, rb),
         spot_bucket_labels=sb.bucket_labels,
         vol_bucket_labels=vb.bucket_labels,
         rate_bucket_labels=rb.bucket_labels,
         div_bucket_labels=db.bucket_labels,
     )
+
+
+# Deprecated aliases (old ``*Ladder`` names), served with a warning.
+__getattr__ = deprecated_module_getattr(
+    __name__,
+    globals(),
+    {
+        "BucketedLadder": "BucketedSensitivities",
+        "bucket_sensitivity_ladder": "bucket_sensitivities",
+    },
+)

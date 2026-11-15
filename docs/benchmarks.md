@@ -157,8 +157,8 @@ materially or because the feature is VALAX-specific:
   pointed to match VALAX's log-DF log-linear approach. The simultaneous Newton
   solver gives identical DFs at pillars; interpolation differences show up
   between pillars. Planned as part of fixed-income expansion.
-- **Risk ladders and waterfall** — VALAX-specific; validated internally
-  against a sum-of-rungs identity rather than QL.
+- **Bucketed sensitivities and waterfall** — VALAX-specific; validated internally
+  against a sum-of-terms identity rather than QL.
 
 ## 5. Performance Benchmarks (Planned — P5.2)
 

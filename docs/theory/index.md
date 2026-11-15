@@ -56,7 +56,7 @@ own page under `theory/`.
   - [7.1 Value at Risk (VaR)](risk-measures.md#71-value-at-risk-var)
   - [7.2 Expected Shortfall (CVaR)](risk-measures.md#72-expected-shortfall-cvar)
   - [7.3 P&L Attribution](risk-measures.md#73-pl-attribution)
-  - [7.4 Sensitivity Ladders](risk-measures.md#74-sensitivity-ladders)
+  - [7.4 Bucketed Sensitivities](risk-measures.md#74-bucketed-sensitivities)
   - [7.5 P&L Vectors: Hypothetical, Risk-Theoretical, Actual](risk-measures.md#75-pl-vectors-hypothetical-risk-theoretical-actual)
   - [7.6 VaR Backtesting](risk-measures.md#76-var-backtesting)
   - [7.7 FRTB P&L Attribution Test](risk-measures.md#77-frtb-pl-attribution-test)

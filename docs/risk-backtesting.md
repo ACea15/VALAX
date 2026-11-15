@@ -112,12 +112,12 @@ The zone applies the BCBS d558 thresholds: green if Spearman ≥ 0.80 *and* KS $
 
 ### End-to-end PLA workflow
 
-Putting the pieces together: compute the ladder once, build both vectors over the same scenario set (the 250-day historical window), and read the test outputs:
+Putting the pieces together: compute the sensitivities once, build both vectors over the same scenario set (the 250-day historical window), and read the test outputs:
 
 ```python
 import jax.numpy as jnp
 from valax.risk import (
-    compute_ladder,
+    compute_flat_sensitivities,
     risk_theoretical_pnl_vector,
     hypothetical_pnl_vector,
     pla_spearman,
@@ -126,8 +126,8 @@ from valax.risk import (
 )
 
 # scenarios: 250-day historical ScenarioSet
-ladder = compute_ladder(pricing_fn, instruments, base_market)
-rtpl   = risk_theoretical_pnl_vector(ladder, scenarios, base_market)
+sens   = compute_flat_sensitivities(pricing_fn, instruments, base_market)
+rtpl   = risk_theoretical_pnl_vector(sens, scenarios, base_market)
 hpl    = hypothetical_pnl_vector(pricing_fn, instruments, base_market, scenarios)
 
 rho = pla_spearman(rtpl, hpl)
@@ -136,4 +136,4 @@ zone = pla_traffic_light(rho, D, n_obs=rtpl.shape[0])
 print(f"Spearman={float(rho):.3f}, KS={float(D):.3f}, zone={zone}")
 ```
 
-If the zone is red, inspect the unexplained vector first — large systematic residuals point to missing risk factors or third-order convexity that the ladder doesn't capture.
+If the zone is red, inspect the unexplained vector first — large systematic residuals point to missing risk factors or third-order convexity that the second-order sensitivities don't capture.

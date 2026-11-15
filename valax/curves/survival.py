@@ -34,7 +34,7 @@ class SurvivalCurve(eqx.Module):
     """Term structure of survival probabilities for a single credit entity.
 
     Mirrors :class:`valax.curves.discount.DiscountCurve` in shape so the
-    same shock primitives, ladder builders, and key-rate routines can
+    same shock primitives, sensitivity builders, and key-rate routines can
     be reused with minimal duplication.
 
     Attributes:

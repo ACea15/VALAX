@@ -22,7 +22,7 @@ This roadmap organizes every missing piece into prioritized tiers. Each tier unl
 | **Portfolio** | `batch_price()` and `batch_greeks()` via vmap |
 | **Market Data** | `MarketState` — the market object behind `price()`: a `CurveGraph` (OIS discount + projection curves, basis, XCCY), surfaces, spots and dividends, with `MarketState.flat(...)` for a constant single-curve market; `KeyedScenario` + `valax.risk.shock` for identifier-keyed risk-factor shocks. Legacy (scheduled for removal, see [Remaining work](#remaining-work)): the flat `MarketData` container and the positional `MarketScenario` / `ScenarioSet` + `apply_scenario`, reachable via `MarketState.to_market_data()`. Full synthetic-data subpackage (`valax.market.synthetic`) covering Stages 1–6 of the workflow — `SyntheticMarketConfig`, `SeedRegistry`, NSS / flat curve samplers, random PSD correlation matrices, ground-truth model parameters, noisy observation layer, option / swap portfolio samplers, correlated-GBM market tapes, scenario sets, and deliberate arbitrage injectors |
 | **Testing infrastructure** | Versioned golden-dataset harness (`tests/golden/`, `assert_matches_golden`, `REGEN_GOLDEN=1` regeneration); shared `SeedRegistry` fixture; pytest markers `arbitrage` / `golden` / `detects`; non-tautological closed-loop tests (pricer × implied-vol roundtrip, analytic vs MC within 3·stderr, autodiff vs finite-difference Greeks, NSS curve self-consistency, SABR calibration at the observation-noise floor, bootstrap roundtrip on off-pillar dates); reserved arbitrage exception types in `valax.core.diagnostics`; `@pytest.mark.xfail` backlog of missing safety checks |
-| **Risk** | Curve shocks (parallel, steepener, butterfly, key-rate), parametric/historical/stress scenarios, VaR, ES, sensitivity ladders with waterfall P&L — keyed on a `MarketState` (`keyed_*` generators, `group_*` repricing through `price()`, `keyed_ladder`, `keyed_waterfall_pnl`, `keyed_parametric_var` / `keyed_component_var`; single-instrument risk via `valax.greeks.market_risk`), with the flat `MarketData` counterparts kept as legacy ([§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)) |
+| **Risk** | Curve shocks (parallel, steepener, butterfly, key-rate), parametric/historical/stress scenarios, VaR, ES, bucketed sensitivities with waterfall P&L — keyed on a `MarketState` (`keyed_*` generators, `group_*` repricing through `price()`, `keyed_sensitivities`, `keyed_waterfall_pnl`, `keyed_parametric_var` / `keyed_component_var`; single-instrument risk via `valax.greeks.market_risk`), with the flat `MarketData` counterparts kept as legacy ([§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)) |
 | **MC infrastructure** | Unified `mc_price_dispatch(instrument, model, ...)` with `(instrument, model)` → recipe registry. Recipes span equity (GBM / Heston / local vol / SLV), multi-asset equity (correlated GBM), and rates (LMM plus the Hull-White / G2++ / Cheyette short-rate models). `register()` decorator for contributor extensions. Coverage per instrument: the *MC* column of the [coverage matrix](applications/instrument-pricing.md#coverage-matrix); engine mechanics: [Monte Carlo guide](guide/monte-carlo.md#2-recipes-by-model-family). |
 | **Multi-asset MC** | `MultiAssetGBMModel` with per-asset vols/dividends + correlation matrix. `generate_correlated_gbm_paths` (exact log-Euler via Cholesky). Spread-option MC (validates Margrabe + Kirk analytical) and worst-of basket MC with correlation Greeks via `jax.grad`. |
 
@@ -102,7 +102,7 @@ the short-rate overlay in
 **build → `MarketState` → `resolve` → analytic / MC / PDE rates pricers**, and
 now through **short-rate calibration**. It stops at **surfaces and
 portfolio**; **risk** is most of the way across — scenarios, scenario
-generators, the repricing loop (`price(...)` on a `MarketState`), ladders,
+generators, the repricing loop (`price(...)` on a `MarketState`), sensitivities,
 waterfall and delta-normal VaR are all keyed, but the FRTB PLA vector pair,
 `pnl_attribution` and the flat `parametric_var` still consume the legacy
 flat `MarketData` view, and portfolio aggregation is not built. **Surfaces** are
@@ -126,7 +126,7 @@ quotes ─▶ bootstrap_curve_graph ─▶ MarketState ─▶ resolve ─▶ ana
             greeks 🟡 ── risk 🟡 ── calibration 🟡 ── surfaces 🟡 ── portfolio ❌
                         (keyed scenarios ✅,   (HW/G2++ ✅,   (rates cubes +
                          repricing loop ✅,     Cheyette       optionlets ✅,
-                         generators, ladders,   refuses)       equity surfaces
+                         generators, Greeks,    refuses)       equity surfaces
                          VaR ✅; PLA flat)                     still curve-free)
 ```
 
@@ -135,10 +135,10 @@ So a book can be **priced** multi-curve today and its short-rate models
 (`valax.risk.shock` on a `MarketState`) and **repriced** per curve
 (`valax.risk.state_var` through `price(...)`), so a basis widening now
 reaches a P&L number. Keyed generators (`keyed_parametric_scenarios`, …)
-draw those moves from a per-curve `KeyedFactorLayout`, and `keyed_ladder` /
+draw those moves from a per-curve `KeyedFactorLayout`, and `keyed_sensitivities` /
 `keyed_waterfall_pnl` / `keyed_parametric_var` measure them per curve. What
 is still driven by unkeyed `MarketScenario` vectors on the legacy
-`MarketData` path is the rest of the measurement layer — `compute_ladder`,
+`MarketData` path is the rest of the measurement layer — `compute_flat_sensitivities`,
 the RTPL/HPL vectors, `pnl_attribution` and the flat `parametric_var` (see
 [Remaining work § 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)).
 On the **surfaces** side the rates objects are across: a swaption cube or
@@ -276,9 +276,9 @@ The whole point of multi-curve is that OIS and projection curves are
 That now holds along the whole chain for a *group*: a keyed scenario shocks
 any curve on the graph by identifier, keyed generators draw a whole
 distribution of such moves from a **per-curve covariance layout**, the
-repricing loop goes through `price(...)`, and a keyed ladder reports each
-curve's — and the basis's — own DV01, P&L rung and VaR contribution. What
-is still flat is the **legacy** `valax/risk/var.py` / `valax/risk/ladders.py`
+repricing loop goes through `price(...)`, and keyed sensitivities report each
+curve's — and the basis's — own DV01, P&L term and VaR contribution. What
+is still flat is the **legacy** `valax/risk/var.py` / `valax/risk/sensitivities.py`
 pair (kept for one deprecation cycle) and the **portfolio aggregation**
 layer above the group primitives.
 
@@ -293,7 +293,7 @@ layer above the group primitives.
   (`from_market_state`) and naming every coordinate with the hierarchical
   identifier of [Risk Factors § 1.2](risk-factors.md#12-factor-identifier-convention).
   `flatten` / `unflatten` are exact inverses (batched or not), so the same
-  layout indexes a scenario, a covariance matrix and a ladder. On top of it:
+  layout indexes a scenario, a covariance matrix and a sensitivity vector. On top of it:
   `block_covariance` (per-curve blocks + explicit cross-correlations,
   factored by `psd_factor` so a singular covariance samples instead of
   returning NaNs), `historical_block_covariance`, and the generators
@@ -314,10 +314,10 @@ layer above the group primitives.
   the pricer; a graph curve a `MarketScenario` cannot address is reported
   as a `UserWarning`, never silently. Gate:
   `tests/test_risk/test_var.py::TestCurveGraphSurvivesVaRPath`
-- [ ] **Node-level (surface-keyed) vega ladders** — the keyed vol shock is
+- [ ] **Node-level (surface-keyed) vega sensitivities** — the keyed vol shock is
   a per-surface **parallel shift** (`ShiftedVolSurface`), which is why
-  `SensitivityLadder.delta_vol` / `vanna` / `volga` stay one scalar per
-  asset. A node-level vega ladder needs those fields to become
+  `FlatSensitivities.delta_vol` / `vanna` / `volga` stay one scalar per
+  asset. Node-level (bucketed) vega needs those fields to become
   identifier-keyed per-node arrays; see
   [Scenarios & Shocks § Vol shocks](risk-scenarios.md#vol-shocks-parallel-shift-not-node-shock)
 - [ ] **Keyed shocks for credit / inflation / FX on `MarketState`** —
@@ -338,33 +338,62 @@ layer above the group primitives.
   `tests/test_risk/test_state_var.py` — bit-exact against the legacy path
   on a single-curve book, plus the common-random-numbers gate for MC
   groups. Recipe: [VaR & P&L § Repricing through `price()`](risk-var.md#repricing-through-price)
-- [x] **Port the *measurement* layer: keyed ladders, waterfall and VaR** —
-  `valax/risk/state_ladders.py` is the `MarketState` counterpart of
-  `ladders.py`: `keyed_ladder` returns a `KeyedLadder` indexed by a
-  `KeyedFactorLayout` (one `jax.grad` for the whole first-order ladder, one
+- [x] **Port the *measurement* layer: keyed sensitivities, waterfall and VaR** —
+  `valax/risk/state_sensitivities.py` is the `MarketState` counterpart of
+  `sensitivities.py`: `keyed_sensitivities` returns a `KeyedSensitivities` indexed by a
+  `KeyedFactorLayout` (one `jax.grad` for every first-order sensitivity, one
   `jax.hessian` for the second-order block matrix, all through
-  `price(...)`), with `dv01(curve_id)` / `curve_ladder` / `vega` /
+  `price(...)`), with `dv01(curve_id)` / `key_rate_dv01` / `vega` /
   `basis_dv01` / `block_totals` / `to_dict` accessors. The sensitivities are
   taken w.r.t. the **shock magnitudes** rather than the market leaves, which
   deletes the hand-written DF→zero-rate chain rule (and its gamma
   correction) and gives one well-defined vega for *every* surface type.
   `keyed_waterfall_pnl` / `keyed_waterfall_report` attribute P&L with one
-  rung per named market object — a pure basis widening puts exactly zero on
-  the discount rung — and `keyed_parametric_var` / `keyed_component_var`
+  term per named market object — a pure basis widening puts exactly zero on
+  the discount term — and `keyed_parametric_var` / `keyed_component_var`
   give a delta-normal VaR whose Euler decomposition is additive across
   curves, so a projection curve and a basis each carry their own VaR
   (measured 5,922 OIS + 494 basis on a two-swap book). Gate:
-  `tests/test_risk/test_state_ladders.py` (ladder vs finite differences of
+  `tests/test_risk/test_state_sensitivities.py` (sensitivities vs finite differences of
   the same shock map; second-order explain to <1e-5 of actual; component VaR
   summing to total; delta-normal within 5% of a 20k-scenario simulated VaR).
-  Recipe: [Sensitivity Ladders § Keyed ladders](risk-ladders.md#keyed-ladders-on-a-marketstate)
-- [ ] **Port the rest of the measurement layer** — `compute_ladder` still
+  Recipe: [Bucketed Sensitivities § Keyed sensitivities](risk-sensitivities.md#keyed-sensitivities-on-a-marketstate).
+  *(Renamed from `KeyedLadder` / `keyed_ladder` / `state_ladders.py`; see the
+  alias-removal item below.)*
+- [ ] **Port the rest of the measurement layer** — `compute_flat_sensitivities` still
   builds DF-space Hessians over flat `MarketData` vectors and
-  `risk_theoretical_pnl_vector` consumes *those* ladders, so the FRTB PLA
+  `risk_theoretical_pnl_vector` consumes *those* sensitivities, so the FRTB PLA
   path (`valax/risk/pnl_vectors.py`) and `pnl_attribution` are still
-  positional. The keyed ladder above is what they re-target onto; the
+  positional. The keyed sensitivities above are what they re-target onto; the
   remaining work is the RTPL/HPL vector pair and retiring the flat
   `parametric_var`
+- [x] **Industry terminology: *sensitivities*, not *ladders*** — base-point
+  bucketed Greeks are now `FlatSensitivities` / `compute_flat_sensitivities`
+  (`valax/risk/sensitivities.py`), `KeyedSensitivities` /
+  `keyed_sensitivities` with `key_rate_dv01` (`valax/risk/state_sensitivities.py`)
+  and `BucketedSensitivities` / `bucket_sensitivities`, matching FRTB SA /
+  ISDA SIMM usage; *ladder* is reserved for revaluation at shifted levels.
+  The old names stay importable with a `DeprecationWarning`
+  (`valax/risk/_deprecation.py`). Gate:
+  `tests/test_risk/test_ladder_deprecations.py`. Definition:
+  [Theory § 7.4](theory/risk-measures.md#74-bucketed-sensitivities)
+- [ ] **Remove the deprecated `*Ladder` aliases** — `SensitivityLadder`,
+  `compute_ladder`, `KeyedLadder`, `keyed_ladder`,
+  `KeyedLadder.curve_ladder`, `BucketedLadder`, `bucket_sensitivity_ladder`,
+  the `ladder=` keyword and the shim modules `valax.risk.ladders` /
+  `valax.risk.state_ladders`. Blocker: one deprecation cycle (the first
+  tagged release after the rename); delete `valax/risk/_deprecation.py`
+  and `tests/test_risk/test_ladder_deprecations.py` with them
+- [ ] **Revaluation grids (ladders) at shifted levels** — `RevaluationGrid`
+  / `revaluation_grid` / `revaluation_grid_pnl` in
+  `valax/risk/revaluation_grids.py`: PV and directional delta (`jax.jvp`)
+  at a grid of shift levels along per-pillar or parallel directions of a
+  `KeyedFactorLayout`, `vmap`ped over levels, with P&L read off by cubic
+  Hermite interpolation — all orders along each direction, unlike the
+  second-order waterfall, and the engine FRTB SA curvature needs. Cross
+  terms between directions come from `KeyedSensitivities.gamma`. Blocker:
+  none (builds on `shock` / `group_pv`); 2-D product grids (spot × vol)
+  follow. Definition: [Theory § 7.4](theory/risk-measures.md#74-bucketed-sensitivities)
 - [x] **Market-sourced equity model parameters** — `BlackScholesModel`,
   `HestonModel` and `LocalVolModel` now accept `rate` / `dividend` (and
   BS `vol`) as `None`, sourced from the `MarketState` at price time by
@@ -402,20 +431,20 @@ layer above the group primitives.
   zero-rate bump — the two things
   [Risk Factors § 3.2](risk-factors.md#32-interest-rates-multi-curve)
   asked for. Consequences: the basis carries its own variance in
-  `block_covariance`, its own rung in `keyed_waterfall_pnl`, its own
-  `KeyedLadder.basis_dv01`, and its own `keyed_component_var` share — and
+  `block_covariance`, its own term in `keyed_waterfall_pnl`, its own
+  `KeyedSensitivities.basis_dv01`, and its own `keyed_component_var` share — and
   a *pure discount* move in basis coordinates correctly drags the
   projection curve with it, which the absolute layout can only fake with a
   near-unit correlation
 - [ ] **Graph-level greeks API** — *(delivered for groups; `market_greeks`
-  itself unchanged)* `KeyedLadder` is the graph-aware, all-curves-at-once
-  ladder API at the **group** level: one `jax.grad` fills every curve's
-  block and `curve_ladder` / `dv01` / `block_totals` / `to_dict` read them
+  itself unchanged)* `KeyedSensitivities` is the graph-aware, all-curves-at-once
+  sensitivity API at the **group** level: one `jax.grad` fills every curve's
+  block and `key_rate_dv01` / `dv01` / `block_totals` / `to_dict` read them
   back by identifier. What is still true of
   `valax/greeks/market_greeks.py` is unchanged: `curve_pillar_deltas`
   resolves exactly one `curve_id` per call and `bucketed_curve_deltas`
   takes a flat pillar vector with no curve identity, so the
-  **single-instrument** greeks API still has no `dict[curve_id, ladder]`
+  **single-instrument** greeks API still has no `dict[curve_id, key-rate DV01s]`
   form and no graph-aware bucketing. Retargeting it onto the keyed layout
   (and composing `BucketMap` with `KeyedFactorLayout` for graph-aware
   bucketing) is the remaining work
@@ -702,11 +731,11 @@ are well covered (`tests/test_curves/`, `tests/test_pricing/test_graph_pricing.p
   graph through the whole VaR path. `test_curve_graph_carried_through`
   still asserts a *named* graph curve comes back unchanged from
   `apply_scenario` — which is now the documented contract of the unkeyed
-  legacy vectors, not an accident. The VaR / ladder hole is now closed too:
+  legacy vectors, not an accident. The VaR / sensitivity hole is now closed too:
   `tests/test_risk/test_keyed_scenarios.py::TestBasisRiskReachesPnL` draws a
   scenario set on the **basis block alone** and gets a loss distribution out
   of `group_scenario_pnl`, and
-  `tests/test_risk/test_state_ladders.py::TestKeyedVaR` gates per-curve
+  `tests/test_risk/test_state_sensitivities.py::TestKeyedVaR` gates per-curve
   component VaR (additive, and zero for a curve with no variance) plus
   agreement between delta-normal and 20k-scenario simulated VaR
 - [x] **Multi-curve calibration tests** — `tests/test_calibration/test_dual_curve_calibration.py`
@@ -718,10 +747,10 @@ are well covered (`tests/test_curves/`, `tests/test_pricing/test_graph_pricing.p
   and `TestJax` (gradient flow through the dual-curve residual)
 - [ ] **Multi-curve greeks tests** — `tests/test_greeks/test_market_greeks.py`
   runs entirely against single-curve markets; nothing asserts separate
-  OIS vs projection ladders. Note this is now a gap in the
+  OIS vs projection key-rate DV01s. Note this is now a gap in the
   **single-instrument** greeks API only: separate OIS / projection /  basis
-  ladders *are* gated at group level in
-  `tests/test_risk/test_state_ladders.py::TestPerCurveLadders` (including
+  sensitivities *are* gated at group level in
+  `tests/test_risk/test_state_sensitivities.py::TestPerCurveSensitivities` (including
   the control that an unused projection curve carries exactly zero risk)
 - [x] **Multi-curve surface tests** — `tests/test_surfaces/test_caplet_stripping.py`
   strips a cap strip against an OIS discount curve and a distinct 3M
@@ -736,14 +765,14 @@ are well covered (`tests/test_curves/`, `tests/test_pricing/test_graph_pricing.p
    scenarios + `shock` on a `MarketState`; the repricing loop and the
    gradient pytree through `price(...)` (`valax/risk/state_var.py`); keyed
    generators + the per-curve covariance layout (`KeyedFactorLayout`,
-   `block_covariance`); and the keyed ladders, per-block waterfall and
-   per-curve VaR decomposition (`valax/risk/state_ladders.py`), which also
+   `block_covariance`); and the keyed sensitivities, per-block waterfall and
+   per-curve VaR decomposition (`valax/risk/state_sensitivities.py`), which also
    closed the `IR.BASIS` factor. So a basis move now reaches a P&L *and* a
    VaR number, attributed to the basis by name. What is left above it is
    the **portfolio aggregation** of the three additive quantities across
    groups (a quantile of a sum is not a sum of quantiles, so the risk
    measure belongs at the top only), re-targeting the FRTB PLA vectors
-   (`valax/risk/pnl_vectors.py`) onto the keyed ladder, and the
+   (`valax/risk/pnl_vectors.py`) onto the keyed sensitivities, and the
    single-instrument graph-level greeks API — which wants the same
    per-curve plumbing and should reuse `KeyedFactorLayout` rather than
    grow its own.
@@ -1322,8 +1351,8 @@ and its limits (no basis volatility).
 Scaling the engine from a single instrument to a whole book and across devices —
 see the [Scaling Up](scaling/index.md) section for the full design.
 
-- [x] **Homogeneous batch pricing / Greeks** — `jax.vmap` over a batched instrument pytree (`valax/portfolio/batch.py`; `risk/ladders.py`, `risk/var.py`)
-- [x] **Book-level aggregation & bucketing** — `SensitivityLadder`, `BucketMap`, PCA factor model (`valax/risk/{ladders,bucketing,factors}.py`)
+- [x] **Homogeneous batch pricing / Greeks** — `jax.vmap` over a batched instrument pytree (`valax/portfolio/batch.py`; `risk/sensitivities.py`, `risk/var.py`)
+- [x] **Book-level aggregation & bucketing** — `FlatSensitivities`, `BucketMap`, PCA factor model (`valax/risk/{sensitivities,bucketing,factors}.py`)
 - [ ] **`Portfolio` container** — heterogeneous trade collection with per-trade pricing keys (design in [Productionisation](architecture/production.md))
 - [ ] **Heterogeneous dispatch-and-aggregate** — group a mixed book by `(instrument, model)`, price each group under one JIT kernel via the MC/PDE registry, aggregate to book value / Greeks
 - [ ] **Shape-stable / padded batching** — fixed-shape padding so the JIT cache is reused across differently-sized books

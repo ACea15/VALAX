@@ -72,7 +72,7 @@ Where no external reference exists, we say so rather than imply otherwise. The
 Cheyette model has no QuantLib engine, so it is validated through its exact
 Gaussian reduction (zero skew gives Hull-White and G2++), which *is* checked
 against QuantLib. Inflation pricers and spread options have no QuantLib
-comparison today, and risk ladders are validated against internal identities.
+comparison today, and bucketed risk sensitivities are validated against internal identities.
 Performance benchmarks against QuantLib are not yet published. The current
 picture is in
 [Benchmarks and QuantLib Validation](benchmarks.md), the

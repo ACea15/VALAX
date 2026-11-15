@@ -50,13 +50,13 @@ simultaneously.
     The `MarketState` counterparts are [`KeyedScenario`](#keyed-scenarios-for-marketstate)
     + [`valax.risk.shock`](risk.md#keyed-shocks-on-a-marketstate) for
     shocks, the keyed generators, `valax.risk.state_var` for repricing
-    through `price(...)`, and the keyed ladders / waterfall / VaR in
-    `valax.risk.state_ladders` ([API → Risk](risk.md)).
+    through `price(...)`, and the keyed sensitivities / waterfall / VaR in
+    `valax.risk.state_sensitivities` ([API → Risk](risk.md)).
 
     What still consumes the legacy view is the rest of `valax.risk.var`
     (`reprice_under_scenario`, `portfolio_pnl`, the flat `parametric_var`,
     `pnl_attribution`, and the deprecated `wrap_equity_pricing_fn`),
-    the flat `compute_ladder` / `waterfall_pnl_report`, the RTPL / HPL
+    the flat `compute_flat_sensitivities` / `waterfall_pnl_report`, the RTPL / HPL
     vectors, and the flat scenario generators — frozen at current
     behaviour until `MarketData` goes.
 

@@ -84,7 +84,7 @@ prices = batch_price(black_scholes_price, options,
 - **Surfaces** — SVI, SABR and grid volatility surfaces, leverage surfaces for SLV
 - **Calibration** — gradient-based calibration for Heston, SABR and SLV (optimistix/optax)
 - **Market** — market data and scenario containers, synthetic market data generation
-- **Risk** — VaR, sensitivity ladders, bucketing, PCA-based rates factor models
+- **Risk** — VaR, bucketed sensitivities, bucketing, PCA-based rates factor models
 - **Dates** — JIT-compatible integer ordinal dates, day count conventions (Act/360, Act/365, 30/360), schedule generation
 - **Greeks** — generic autodiff wrappers (`greeks`, `greek`) for any pricing function
 - **Portfolio** — `vmap`-based batch pricing and risk aggregation
@@ -109,7 +109,7 @@ valax/
 │   ├── pde/       # Finite difference (Crank-Nicolson)
 │   └── lattice/   # Binomial trees (CRR), Hull-White trinomial tree
 ├── greeks/        # Autodiff wrappers
-├── risk/          # VaR, ladders, bucketing, PCA factor models
+├── risk/          # VaR, sensitivities, bucketing, PCA factor models
 └── portfolio/     # vmap batch pricing, risk aggregation
 ```
 
