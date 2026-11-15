@@ -421,6 +421,28 @@ contribution.
 
 ::: valax.risk.state_sensitivities.keyed_component_var
 
+## Revaluation grids
+
+Ladders at shifted levels: PV and the exact directional delta at every rung
+of every direction, through `price()`, and the P&L of a move read off by
+interpolation — **all orders** along each direction (only the
+interpolation error remains), where the sensitivities above stop at second
+order. Cross-direction terms come, at second order, from a
+`KeyedSensitivities`. Rationale, measured accuracy and recipes:
+[Revaluation Grids](../risk-revaluation-grids.md).
+
+::: valax.risk.revaluation_grids.revaluation_grid
+
+::: valax.risk.revaluation_grids.RevaluationGrid
+
+::: valax.risk.revaluation_grids.revaluation_grid_pnl
+
+::: valax.risk.revaluation_grids.GridPnL
+
+::: valax.risk.revaluation_grids.key_rate_directions
+
+::: valax.risk.revaluation_grids.parallel_direction
+
 ## Backtesting
 
 ### VaR backtests

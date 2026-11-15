@@ -13,6 +13,8 @@ Modules
   P&L on the flat ``MarketData`` view.
 - :mod:`valax.risk.state_sensitivities` — *keyed* sensitivities / waterfall /
   VaR on a ``MarketState``, one block per named curve, surface and asset.
+- :mod:`valax.risk.revaluation_grids` — revaluation grids (ladders): PV and
+  delta at shifted levels per direction, P&L to all orders along each.
 - :mod:`valax.risk.pnl_vectors`   — HPL / RTPL P&L vectors over scenario sets.
 - :mod:`valax.risk.backtesting`   — Kupiec / Christoffersen / FRTB PLA tests.
 
@@ -108,6 +110,15 @@ from valax.risk.state_sensitivities import (
     keyed_waterfall_report,
     keyed_parametric_var,
     keyed_component_var,
+)
+from valax.risk.revaluation_grids import (
+    INTERPOLATIONS,
+    GridPnL,
+    RevaluationGrid,
+    key_rate_directions,
+    parallel_direction,
+    revaluation_grid,
+    revaluation_grid_pnl,
 )
 from valax.risk.pnl_vectors import (
     risk_theoretical_pnl_vector,

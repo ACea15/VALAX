@@ -61,7 +61,7 @@ zone = pla_traffic_light(rho, D, n_obs=rtpl.shape[0])        # green / amber / r
 
 The traffic light applies the d558 thresholds directly: green if Spearman ≥ 0.80 *and* KS $p$-value ≥ 0.264; red if either Spearman < 0.70 or KS $p$-value < 0.055; amber otherwise (see [FRTB P&L Attribution Test](../risk-backtesting.md#frtb-pl-attribution-test)).
 
-If a desk lands amber or red, [`explained_unexplained_vector`](../risk-var.md#comparing-both-at-once) gives the per-scenario residual — a direct diagnostic pointing at missing risk factors or third-order convexity the second-order sensitivities didn't capture (the all-orders alternative, a revaluation grid, is planned).
+If a desk lands amber or red, [`explained_unexplained_vector`](../risk-var.md#comparing-both-at-once) gives the per-scenario residual — a direct diagnostic pointing at missing risk factors or third-order convexity the second-order sensitivities didn't capture — a [revaluation grid](../risk-revaluation-grids.md) keeps those orders along each direction.
 
 !!! tip "Practical FRTB workflow"
     Compute the sensitivities once, sweep the 250-day historical window, read the zone. If it fails, look at the unexplained vector to prioritise *which* factors to add before re-submission.
@@ -120,7 +120,7 @@ The single status map of FRTB (and ISDA SIMM) components against the code, again
 | Commodity delta | SA | 📋 | — | — | No commodity instruments or factors — [W1b, W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
 | FX delta | SA | 🟡 | `market_risk` | `tests/test_greeks/test_market_risk.py` | FX-spot risk per single trade only; FX spots are not a keyed factor block, so not book-level or scenario-addressable — [W1b](../roadmap.md#44-frtb-and-desk-risk-programme) |
 | Vega (σ · ∂V/∂σ on option-maturity vertices) | SA | 🟡 | `KeyedSensitivities.vega` | `tests/test_risk/test_state_sensitivities.py` | One parallel vega per surface; node-level vega on maturity vertices is planned — [W1b](../roadmap.md#44-frtb-and-desk-risk-programme) |
-| Curvature (CVR± at risk-weight shocks) | SA | 📋 | `keyed_stress_scenario`, `group_scenario_pnl` (primitives) | — | Full revaluation under a shock exists; the risk-weight shocks, CVR± and the curvature aggregation do not — [W1d, W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Curvature (CVR± at risk-weight shocks) | SA | 🟡 | `revaluation_grid`, `parallel_direction` | `tests/test_risk/test_revaluation_grids.py` | Full revaluation at shifted levels per direction exists (a three-rung grid at ± the risk weight is the CVR input); the risk weights, CVR± and the curvature aggregation do not — [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
 | Bucketing onto regulatory vertices and buckets | SA, SIMM | ✅ | `BucketMap`, `tenor_bucket_map`, `equal_weight_bucket_map`, `bucket_sensitivities` | `tests/test_risk/test_bucketing.py` | Second-order bucketing reads the flat `FlatSensitivities` until the keyed port — [W1c](../roadmap.md#44-frtb-and-desk-risk-programme) |
 | Risk weights, correlations (ρ, γ), bucket tables | SA | 📋 | — | — | Versioned, cited parameter tables — [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
 | Intra- / inter-bucket aggregation, low / medium / high correlation scenarios | SA | 📋 | — | — | [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |

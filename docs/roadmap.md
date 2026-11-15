@@ -384,16 +384,26 @@ layer above the group primitives.
   `valax.risk.state_ladders`. Blocker: one deprecation cycle (the first
   tagged release after the rename); delete `valax/risk/_deprecation.py`
   and `tests/test_risk/test_ladder_deprecations.py` with them
-- [ ] **Revaluation grids (ladders) at shifted levels** — `RevaluationGrid`
-  / `revaluation_grid` / `revaluation_grid_pnl` in
-  `valax/risk/revaluation_grids.py`: PV and directional delta (`jax.jvp`)
-  at a grid of shift levels along per-pillar or parallel directions of a
-  `KeyedFactorLayout`, `vmap`ped over levels, with P&L read off by cubic
-  Hermite interpolation — all orders along each direction, unlike the
-  second-order waterfall, and the engine FRTB SA curvature needs. Cross
-  terms between directions come from `KeyedSensitivities.gamma`. Blocker:
-  none (builds on `shock` / `group_pv`); 2-D product grids (spot × vol)
-  follow. Definition: [Theory § 7.4](theory/risk-measures.md#74-bucketed-sensitivities)
+- [x] **Revaluation grids (ladders) at shifted levels** — `RevaluationGrid`
+  / `revaluation_grid` / `revaluation_grid_pnl` / `GridPnL` with the
+  direction helpers `key_rate_directions` / `parallel_direction` in
+  `valax/risk/revaluation_grids.py`: PV and the exact directional delta
+  (one `jax.jvp` per node) at a grid of shift levels along any directions
+  of a `KeyedFactorLayout`, `vmap`ped over directions × levels through
+  `price(...)`. P&L is read off by cubic Hermite (O(w⁴)) or delta
+  integration (O(w²)) — **all orders** along each direction, where the
+  waterfall stops at second order (measured: 5.9e-4 error against 1.76 for
+  the second-order explain on a +23.7 spot move of an option book) — with
+  out-of-range flags and the second-order cross-direction terms from
+  `KeyedSensitivities` (dual-curve swap book, +100 bp: 0.027 against 966
+  without them). Gate: `tests/test_risk/test_revaluation_grids.py`. Guide:
+  [Revaluation Grids](risk-revaluation-grids.md); maths:
+  [Theory § 7.4](theory/risk-measures.md#revaluation-grids-pl-beyond-second-order)
+- [ ] **Two-dimensional revaluation grids** — product grids over a pair of
+  directions (spot × vol, discount × projection curve) so mixed terms of
+  third and higher order between two directions are revalued rather than
+  truncated at the second-order cross term. Blocker: none (the 1-D grid's
+  node machinery extends with a second `vmap`); cost is `n_levels²` per pair
 - [x] **Market-sourced equity model parameters** — `BlackScholesModel`,
   `HestonModel` and `LocalVolModel` now accept `rate` / `dividend` (and
   BS `vol`) as `None`, sourced from the `MarketState` at price time by
@@ -1274,11 +1284,11 @@ One programme for two audiences: **FRTB teams** (standardised approach, internal
 - [ ] **W1a Position layer** — a `Position` (quantity, sign, trade id, book path) and aggregation across *heterogeneous* instrument groups in `valax/portfolio/positions.py`, so book PV, sensitivities and P&L vectors are position-weighted sums. Blocker: none (the group primitives in `valax/risk/state_var.py` exist; see also the `Portfolio` container in [§ 5.5](#55-portfolio-and-multi-device-scaling)). Unblocks desk-level PLA / backtesting, per-trade capital and marginal VaR
 - [ ] **W1b Factor kinds beyond rates and equity** — node-level vol blocks (expiry × strike or delta), FX-spot, inflation and credit-spread blocks in `KeyedFactorLayout` and `shock`, and an `IR.VOL` category so rates cubes stop being labelled `EQ.VOL`. Blocker: the open items *Node-level vega sensitivities* and *Keyed shocks for credit / inflation / FX* in [§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation); credit spread risk (CSR) also needs the CDS pricer ([§ 3.4](#34-credit-derivatives))
 - [ ] **W1c Measurement layer on `MarketState`** — keyed RTPL / HPL vectors and `BucketMap` composed with `KeyedFactorLayout` (keyed bucketing of first and second order). Blocker: none; this is the open *Port the rest of the measurement layer* item of [§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)
-- [ ] **W1d Revaluation grids** — `RevaluationGrid` ([§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)): ladders at shifted levels, the shared engine of desk spot / vol ladders and FRTB curvature
+- [x] **W1d Revaluation grids** — `revaluation_grid` → `RevaluationGrid` ([§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)): ladders at shifted levels, P&L to all orders per direction, the shared engine of desk spot / vol ladders and FRTB curvature
 
 **W2 — Trader toolkit**
 
-- [ ] **Spot / vol / rate ladders and 2-D grids** for desks — on top of W1d (spot × vol product grids)
+- [ ] **2-D grids for desks** (spot × vol, curve × curve) — 1-D spot / vol / rate ladders ship with W1d; the product grids are the open *Two-dimensional revaluation grids* item of [§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)
 - [ ] **Node-level vega buckets per surface** — on top of W1b
 - [ ] **Theta, carry and roll-down by valuation-date roll** — re-dating the market and the trade together; today `valax.greeks.theta` raises `NotImplementedError` for date-based rates trades. Blocker: a valuation-date roll on `MarketState`
 - [ ] **Hedge optimiser** — solve for hedge notionals in a chosen instrument set, minimising P&L variance, a tail measure, or SA capital (W3), plus transaction cost, with `optimistix` / `lineax`. Blocker: W1a; the capital objective needs W3
@@ -1290,7 +1300,7 @@ One programme for two audiences: **FRTB teams** (standardised approach, internal
 - [ ] **Versioned parameter tables** — risk weights, correlations (ρ, γ), buckets and vertices per risk class (GIRR, CSR non-securitisation and securitisation, equity, commodity, FX), each value cited to its MAR21 paragraph, as static data. Blocker: none
 - [ ] **FRTB sensitivity definitions per risk class** — GIRR / CSR PV01 at the regulatory vertices (0.25, 0.5, 1, 2, 3, 5, 10, 15, 20, 30Y) from `KeyedSensitivities` in zero-rate space, equity / commodity / FX delta per 1% relative move, vega as σ · ∂V/∂σ on option-maturity vertices. Blocker: W1b for every class except GIRR and equity delta
 - [ ] **Delta and vega aggregation** — intra-bucket and inter-bucket aggregation under the low / medium / high correlation scenarios, maximum taken, as one pure JAX function of the sensitivities. Blocker: the two items above
-- [ ] **Curvature** — CVR± by full revaluation at the risk-weight shocks (a three-node revaluation grid per bucket). Blocker: W1d
+- [ ] **Curvature** — CVR± by full revaluation at the risk-weight shocks (a three-rung `revaluation_grid` per bucket, shipped). Blocker: the parameter tables above
 - [ ] **Capital attribution and capital Greeks by autodiff** — ∂K/∂s per vertex and ∂K/∂q per trade (Euler: they sum to K, since the SBM charge is homogeneous of degree one in positions), with the active correlation scenario reported at kinks. Blocker: aggregation above and W1a
 - [ ] **Residual risk add-on (RRAO, MAR23)** and **default risk charge (DRC, MAR22)**. Blocker: instrument flags for exotic underlyings (RRAO); CDS pricer and jump-to-default (DRC)
 - [ ] **CRIF export of sensitivities for ISDA SIMM** — export only; the SIMM calculation itself needs an ISDA licence and is out of scope. Blocker: W1b
@@ -1307,7 +1317,7 @@ One programme for two audiences: **FRTB teams** (standardised approach, internal
 
 | # | Delivers | Needs |
 |---|---|---|
-| M1 | GIRR + equity SA capital with curvature, per-trade capital attribution, capital-aware hedging | W1a, W1d, W3 (GIRR / equity) |
+| M1 | GIRR + equity SA capital with curvature, per-trade capital attribution, capital-aware hedging | W1a, W3 (GIRR / equity); W1d shipped |
 | M2 | Desk-level keyed PLA and backtesting | W1a, W1c |
 | M3 | FX, inflation and CSR risk classes | W1b, CDS pricer |
 | M4 | IMA ES with liquidity horizons, stressed calibration, NMRF, IMCC | W4 |

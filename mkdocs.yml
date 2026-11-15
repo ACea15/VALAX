@@ -161,6 +161,7 @@ nav:
       - Risk Factors: risk-factors.md
       - Scenarios & Shocks: risk-scenarios.md
       - Bucketed Sensitivities: risk-sensitivities.md
+      - Revaluation Grids (Ladders): risk-revaluation-grids.md
       - "VaR & P&L": risk-var.md
       - Risk Bucketing: risk-bucketing.md
       - Backtesting & FRTB PLA: risk-backtesting.md

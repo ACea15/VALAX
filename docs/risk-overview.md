@@ -95,8 +95,9 @@ Every number in §2 is produced by the same chain of transformations. From left 
 (see the [glossary](#9-glossary) and
 [Theory § 7.4](theory/risk-measures.md#74-bucketed-sensitivities)); they are
 what desks call a DV01 or vega "ladder". VALAX reserves *ladder* for a
-revaluation grid at shifted levels (planned), which would sit beside the
-scenario box as an all-orders alternative to the waterfall.
+[revaluation grid](risk-revaluation-grids.md) at shifted levels
+(`revaluation_grid`), which sits beside the scenario box: P&L to all
+orders along each direction, where the waterfall stops at second order.
 
 The container in that picture is `MarketState` — the calibrated,
 multi-curve container the unified pricer takes, with a keyed `CurveGraph`
@@ -237,6 +238,7 @@ What is in the library **today** (✅) and what is signposted for the next itera
 | Market data containers | ✅ | `MarketState` (the market object: multi-curve `CurveGraph` — dict of `DiscountCurve` keyed by identifier, built jointly by `bootstrap_curve_graph` — plus surfaces, spots, dividends; `MarketState.flat(...)` for a constant single-curve market), `KeyedScenario`, `SurvivalCurve`, `InflationCurve`, vol surfaces. Legacy, for one deprecation cycle: `MarketData`, `MarketScenario`, `ScenarioSet` (`MarketState.to_market_data()` projects onto them) and `MultiCurveSet` (single-currency two-tier view over a `CurveGraph`). |
 | Pricing engines | ✅ (broad) / 📋 (XVA, CDS) | Equity, FX, rates, inflation, callable / puttable bonds, credit CDS pricer planned. |
 | Bucketed sensitivities | ✅ | First- and second-order sensitivities, ten-term waterfall, autodiff throughout; plus identifier-keyed per-curve sensitivities (`KeyedSensitivities`) with a per-block waterfall. |
+| Revaluation grids (ladders) | ✅ | PV and exact delta at shifted levels per direction (`revaluation_grid`); P&L to all orders along each direction, second-order cross terms from the sensitivities ([guide](risk-revaluation-grids.md)). 📋 Two-dimensional product grids. |
 | Scenario generation | ✅ | Historical, parametric Gaussian / t, named stress (parallel, steepener, butterfly, …) — in the flat layout and in the keyed per-curve layout (`KeyedFactorLayout`, incl. basis stresses). |
 | Shock primitives | ✅ | `valax.risk.shock` on a `MarketState`: any named curve (multi-curve, basis), surfaces (parallel shift via `shift_surface`), spots, dividends; flat curve bumps and credit-hazard bumps on the curve objects. 🚧 Credit / inflation / FX curves not yet addressable by `shock` (hazard primitives exist, unwired). 📋 Vol surface (node-level), inflation bumps, FX vol. |
 | P&L vectors | ✅ | Keyed full-revaluation P&L (`group_scenario_pnl`); FRTB PLA pair HPL (`hypothetical_pnl_vector`), RTPL (`risk_theoretical_pnl_vector`), unexplained. 🚧 The PLA pair still runs on flat `MarketData` and the positional `FlatSensitivities`. |
@@ -293,8 +295,8 @@ A pocket dictionary of the terms used above and across the risk section.
 | **Bucketing** | Aggregating raw-factor sensitivities into a coarser standardised grid. | `BucketMap`, `bucket_sensitivities` |
 | **PCA factors** | Principal components of factor returns; first three on a yield curve are level / slope / curvature. | `pca_jacobian` |
 | **Bucketed sensitivities** | First- (and optionally second-) order derivatives of value **at the base market**, one entry per risk-factor bucket (tenor pillar, asset, surface). The FRTB SA / ISDA SIMM *sensitivities*. Formerly called "ladders" in VALAX. | `KeyedSensitivities` (`keyed_sensitivities`); `FlatSensitivities` (flat path) |
-| **Ladder** | A one-dimensional **revaluation grid**: PV and delta recomputed at a set of shift levels (*rungs*) along one direction, so the P&L of any move up to the outer rung is read off by integration / interpolation, to all orders. Desks also say "DV01 ladder" for key-rate DV01s; VALAX does not. | Planned (`RevaluationGrid`) |
-| **Revaluation grid** | PV (and delta) on a grid of shift levels along one or more risk-factor directions; FRTB curvature and grid-based partial revaluation use it. A 1-D grid is a ladder. | Planned (`RevaluationGrid`) |
+| **Ladder** | A one-dimensional **revaluation grid**: PV and delta recomputed at a set of shift levels (*rungs*) along one direction, so the P&L of any move up to the outer rung is read off by integration / interpolation, to all orders. Desks also say "DV01 ladder" for key-rate DV01s; VALAX does not. | `revaluation_grid` → `RevaluationGrid` ([guide](risk-revaluation-grids.md)) |
+| **Revaluation grid** | PV (and delta) on a grid of shift levels along one or more risk-factor directions; FRTB curvature and grid-based partial revaluation use it. A 1-D grid is a ladder. VALAX ships 1-D grids per direction; 2-D product grids are planned. | `RevaluationGrid`, `revaluation_grid_pnl` |
 | **Waterfall** | The term-by-term second-order P&L explain built from bucketed sensitivities. | `keyed_waterfall_pnl`, `keyed_waterfall_report`; `waterfall_pnl`, `waterfall_pnl_report` (flat path) |
 
 ---

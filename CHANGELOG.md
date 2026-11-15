@@ -12,6 +12,31 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — risk: revaluation grids (ladders), P&L to all orders along a direction
+
+**Added** `valax/risk/revaluation_grids.py`: `revaluation_grid` →
+`RevaluationGrid` reprices a homogeneous group through `price()` at a grid
+of shift levels along chosen directions of a `KeyedFactorLayout` (helpers
+`key_rate_directions`, `parallel_direction`, or any `KeyedScenario`),
+recording the PV and the exact directional delta (one `jax.jvp` per node)
+at every rung. `revaluation_grid_pnl` → `GridPnL` reads the P&L of a move
+off the grid by cubic Hermite (O(w⁴), exact at the rungs) or delta
+integration (O(w²)), so the P&L along each direction keeps **every order**
+rather than stopping at second order like the waterfall; moves past the
+outer rung are extrapolated linearly and flagged, and second-order
+cross-direction terms can be added from `KeyedSensitivities`. Measured:
+5.9e-4 error against 1.76 for the second-order explain on a +23.7 spot
+move of an option book; 0.027 against 966 (ladders without cross terms) on
+a dual-curve swap book moved +100 bp. Gate:
+`tests/test_risk/test_revaluation_grids.py`.
+
+**Docs:** new guide [Revaluation Grids (Ladders)](docs/risk-revaluation-grids.md);
+Theory § 7.4 gains *Revaluation grids: P&L beyond second order* (the
+Taylor remainder the grid keeps, interpolation error bounds, the
+per-direction / cross-term decomposition); API page section; risk register
+entry R-11; FRTB curvature row now 🟡 (the shifted-level revaluation it
+needs ships); roadmap items flipped, with two-dimensional grids open.
+
 ### Added — docs: FRTB & desk risk programme, FRTB capability matrix, risk register
 
 **Added** a risk programme to the roadmap (Tier 4.4, *FRTB and Desk Risk

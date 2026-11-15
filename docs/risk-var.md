@@ -264,7 +264,7 @@ report["hpl"]          # shape (n_scenarios,) — full-revaluation
 report["unexplained"]  # shape (n_scenarios,) — hpl - rtpl
 ```
 
-The unexplained vector is a direct diagnostic: a large or systematically biased unexplained means the second-order sensitivities are missing something (third-order convexity, missing risk factors, or a scenario regime the sensitivities were not computed for). The all-orders alternative — revaluation at a grid of shifted levels — is planned.
+The unexplained vector is a direct diagnostic: a large or systematically biased unexplained means the second-order sensitivities are missing something (third-order convexity, missing risk factors, or a scenario regime the sensitivities were not computed for). The all-orders alternative along each direction is a [revaluation grid](risk-revaluation-grids.md): full revaluation at shifted levels, read off by interpolation.
 
 ### From P&L vector to VaR/ES
 

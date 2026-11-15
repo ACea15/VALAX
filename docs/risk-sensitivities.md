@@ -125,7 +125,7 @@ The existing `pnl_attribution` computes a scalar decomposition with spot gamma o
 | No cross terms | **Full cross-gamma** (spot×rate, vol×rate) |
 | 5 output fields | **15 output fields** with full waterfall |
 
-For small moves, both give similar results. For large moves (crash scenarios, rate shocks ≥ 100bp, vol moves ≥ 5pts), the second-order terms significantly reduce the unexplained residual. Beyond that, a second-order expansion is still an approximation: the all-orders alternative is a revaluation grid (planned, see the [glossary](risk-overview.md#9-glossary)).
+For small moves, both give similar results. For large moves (crash scenarios, rate shocks ≥ 100bp, vol moves ≥ 5pts), the second-order terms significantly reduce the unexplained residual. Beyond that, a second-order expansion is still an approximation: the all-orders alternative is a [revaluation grid](risk-revaluation-grids.md), which reprices at shifted levels and keeps every order along each direction.
 
 Both of these are laid out **positionally**, with one rate block; for a
 multi-curve book see [§ Keyed sensitivities](#keyed-sensitivities-on-a-marketstate)

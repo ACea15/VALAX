@@ -29,6 +29,7 @@ _MEASURE_MODULES = (
     "valax.risk.pnl_vectors",
     "valax.risk.backtesting",
     "valax.risk.bucketing",
+    "valax.risk.revaluation_grids",
 )
 
 #: Risk measures and scenario machinery exported from mixed modules.

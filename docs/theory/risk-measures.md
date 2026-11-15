@@ -82,7 +82,7 @@ First-order entries are delta / vega / rho (a curve's per-pillar entries are its
     \mathrm{P\&L}_k(\Delta x_k) = \int_0^{\Delta x_k} \frac{\partial V}{\partial x_k}\bigg|_{x_0 + h e_k} dh ,
     $$
 
-    which contains **every order** along that direction, whereas the bucketed sensitivities below truncate at second order. FRTB's curvature charge and grid-based partial revaluation are built on the same object. Per-direction ladders still miss cross terms between directions, which the off-diagonal $\Gamma_{kl}$ supply. Revaluation grids are planned (`RevaluationGrid`, see the [roadmap](../roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)).
+    which contains **every order** along that direction, whereas the bucketed sensitivities below truncate at second order. FRTB's curvature charge and grid-based partial revaluation are built on the same object. Per-direction ladders still miss cross terms between directions, which the off-diagonal $\Gamma_{kl}$ supply. VALAX implements them as `RevaluationGrid` — maths in [Revaluation grids: P&L beyond second order](#revaluation-grids-pl-beyond-second-order) below, how-to in the [Revaluation Grids guide](../risk-revaluation-grids.md).
 
 #### Why Banks Use Bucketed Sensitivities
 
@@ -135,6 +135,40 @@ In VALAX:
 This is a structural advantage that compounds with portfolio size. The sensitivity set that takes a traditional system thousands of bump-and-reprice calls falls out of two autodiff passes.
 
 **VALAX implementation:** `valax/risk/sensitivities.py` provides `FlatSensitivities` (bucketed pytree of all sensitivities), `compute_flat_sensitivities()` (Jacobian + Hessian computation), `waterfall_pnl()` (arithmetic decomposition from precomputed sensitivities), and `waterfall_pnl_report()` (full decomposition including repricing for the unexplained) on the legacy flat `MarketData` layout, with one undivided rate block. The `MarketState` counterpart in `valax/risk/state_sensitivities.py` — `keyed_sensitivities()` → `KeyedSensitivities`, `keyed_waterfall_pnl()`, `keyed_waterfall_report()` — differentiates through `price(...)` w.r.t. the shock magnitudes of a `KeyedFactorLayout`, so every named curve (and a basis) carries its own sensitivity block and P&L term. Either way the sensitivities can be computed once and reused across many scenarios — the waterfall arithmetic is instantaneous.
+
+#### Revaluation grids: P&L beyond second order
+
+Write $f(m) = V(x_0 + m\,d)$ for the value along a direction $d$. The waterfall above is the Taylor polynomial of $f$ cut at second order, so its error is the whole remainder
+
+$$
+f(m) - f(0) - \Bigl[f'(0)\,m + \tfrac12 f''(0)\,m^2\Bigr] \;=\; \sum_{n \ge 3} \frac{f^{(n)}(0)}{n!}\, m^n ,
+$$
+
+which is small only while $m$ is small. A **revaluation grid** (ladder) does not expand $f$ at all: it evaluates $f$ and $f'$ by full revaluation at rungs $h_1 < \dots < h_m$ (with $h_z = 0$) and interpolates between them, so
+
+$$
+\mathrm{P\&L}(m) = \int_0^m f'(h)\,dh = f(m) - f(0)
+$$
+
+is recovered **to all orders** — the third, fourth and higher derivatives of the book along $d$ are in the rungs' values — up to an interpolation error that vanishes as the rungs get closer:
+
+| Interpolant | Construction on $[h_i, h_{i+1}]$, $w = h_{i+1} - h_i$ | Error bound |
+|---|---|---|
+| Cubic Hermite (`"hermite"`) | the cubic matching $f$ and $f'$ at both rungs | $\lvert f - H\rvert \le \dfrac{w^4}{384}\max\lvert f^{(4)}\rvert$, exact at every rung |
+| Delta integration (`"delta"`) | $\int_0^m \ell(h)\,dh$, $\ell$ the piecewise-linear interpolant of the delta rungs | $\le \dfrac{w^2}{8}\,\lvert m\rvert\,\max\lvert f'''\rvert$ |
+
+The Hermite reader is the natural one once the PVs are on the grid; delta integration is the classical desk recipe that uses only the delta rungs. Beyond the outer rung the grid can only extrapolate (VALAX does it linearly, first order, and flags the move), so the outer rungs must cover the largest move to be explained.
+
+**Several directions.** For directions $d_k$ with disjoint support and a move $x = \sum_k m_k d_k$,
+
+$$
+V(x_0 + x) - V(x_0) \;=\; \sum_k \bigl[f_k(m_k) - f_k(0)\bigr]
+\;+\; \sum_{k < l} m_k m_l\, d_k^{\top} \Gamma\, d_l \;+\; O\bigl(\text{mixed third order}\bigr),
+$$
+
+where $f_k(m) = V(x_0 + m d_k)$. The first sum is what a set of one-dimensional ladders delivers, each term to all orders; the second is the second-order cross term, taken from the bucketed sensitivities' Hessian $\Gamma$; mixed terms of third and higher order ($m_k^2 m_l\,\partial^3 V/\partial x_k^2\partial x_l$, …) need a two-dimensional grid over the pair. So a grid **raises the order** along each direction from two to all, and leaves the cross-direction order at two.
+
+**VALAX implementation:** `valax/risk/revaluation_grids.py` — `revaluation_grid()` → `RevaluationGrid` (PV and exact directional delta by one `jax.jvp` per node, `vmap`-ped over directions × rungs, through `price(...)` on the same shock map the sensitivities differentiate), `revaluation_grid_pnl()` → `GridPnL` (both interpolants, out-of-range flags, optional cross terms from `KeyedSensitivities`), and the direction helpers `key_rate_directions()` / `parallel_direction()`. Measured accuracy and the cross-term example: [Revaluation Grids guide](../risk-revaluation-grids.md#rungs-and-how-many-you-need).
 
 ### 7.5 P&L Vectors: Hypothetical, Risk-Theoretical, Actual
 
