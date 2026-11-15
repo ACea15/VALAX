@@ -17,6 +17,9 @@ the [guides](../guide/calibration.md)), derivations (the
 [coverage matrix](instrument-pricing.md) and the [roadmap](../roadmap.md)):
 each entry links to those instead. A planned improvement is a roadmap line;
 the entry here links to it.
+The sibling page for risk measures (sensitivities, VaR / ES, PLA,
+backtesting, bucketing) is the
+[Risk Methodology & Assumptions Register](risk-register.md).
 
 **Keeping it true.** A calibration entry point without an entry here fails
 `tests/test_docs/test_calibration_register.py`, and adding or changing a

@@ -31,7 +31,7 @@ Operationally, a migrating desk can prototype *both* approaches against the same
 
 ### 2.2 Bucketed sensitivities at FRTB vertices (SBA)
 
-FRTB SBA requires sensitivities delivered at **regulatory** vertices (10 IR tenors `{0.25, 0.5, 1, 2, 3, 5, 10, 15, 20, 30}`, 11 equity sector buckets, 18 credit buckets, …) rather than the bank's internal pillar grid. VALAX exposes this as a *coordinate change* on top of autodiff sensitivities. For delta, the keyed sensitivities are the current route: `keyed_sensitivities(instruments, model, market)` gives each named curve its own pillar-level key-rate DV01s (`key_rate_dv01(curve_id)`), which `aggregate` pushes onto the FRTB grid. The full second-order bucketing below, including the cross-gamma blocks SBA curvature needs, still runs on the legacy flat `FlatSensitivities` built from a `MarketData` until its keyed port lands ([roadmap](../roadmap.md#remaining-work)):
+FRTB SBA requires sensitivities delivered at **regulatory** vertices (10 IR tenors `{0.25, 0.5, 1, 2, 3, 5, 10, 15, 20, 30}`, 13 equity buckets by market cap × economy × sector (MAR21.72), 18 non-securitisation credit buckets, …) rather than the bank's internal pillar grid. VALAX exposes this as a *coordinate change* on top of autodiff sensitivities. For delta, the keyed sensitivities are the current route: `keyed_sensitivities(instruments, model, market)` gives each named curve its own pillar-level key-rate DV01s (`key_rate_dv01(curve_id)`), which `aggregate` pushes onto the FRTB grid. The full second-order bucketing below, including the cross-gamma blocks SBA curvature needs, still runs on the legacy flat `FlatSensitivities` built from a `MarketData` until its keyed port lands ([roadmap](../roadmap.md#remaining-work)):
 
 - [`compute_flat_sensitivities(pricing_fn, instruments, base_market)`](../risk-sensitivities.md#computing-flat-sensitivities) produces a full first- and second-order `FlatSensitivities` — delta_spot, vega, DV01 per pillar, gamma_spot, gamma_rate, vanna, volga, cross_spot_rate, cross_vol_rate — via a single `jax.grad` + `jax.hessian` pass, with no bump-and-reprice.
 - [`tenor_bucket_map(pillar_times, frtb_vertices, weight="indicator" | "linear")`](../risk-bucketing.md#standard-bucket-builders) builds the aggregation matrix that pushes internal pillars onto the FRTB tenor grid.
@@ -104,6 +104,40 @@ FRTB IR bucketing distinguishes OIS, SOFR/ESTR, basis, and cross-currency basis.
 
 What is still open: the FRTB PLA vector pair (`hypothetical_pnl_vector`, `risk_theoretical_pnl_vector`) still runs on the legacy flat `MarketData` path, so PLA does not yet see the per-curve split, and the vol-surface risk factors and SBA aggregation matrices remain to be built (see [Risk: End-to-End § 7](../risk-overview.md#7-the-state-of-the-risk-section-and-whats-next) and the [Roadmap](../roadmap.md#remaining-work)).
 
+### 2.7 FRTB capability matrix {#frtb-capability-matrix}
+
+<!-- coverage-map -->
+
+The single status map of FRTB (and ISDA SIMM) components against the code, against the BCBS consolidated framework (MAR21–MAR33). Other pages link here rather than restating FRTB status. Planned work is sequenced in the roadmap's [FRTB and desk risk programme](../roadmap.md#44-frtb-and-desk-risk-programme).
+
+**Legend:** ✅ shipped and tested (the gate is named) · 🟡 partial — the inputs or some pieces exist, the component as FRTB defines it does not · 📋 planned — nothing in code yet. `tests/test_docs/test_frtb_capabilities.py` checks that every symbol named here imports, every gate exists, and every 🟡 / 📋 row links to a roadmap section with an open item.
+
+| Component | Approach | Status | VALAX today | Gate | Gap and roadmap |
+|---|---|---|---|---|---|
+| GIRR delta (PV01 at the 10 vertices, per currency) | SA | 🟡 | `KeyedSensitivities.key_rate_dv01`, `tenor_bucket_map`, `aggregate` | `tests/test_risk/test_state_sensitivities.py` | Per-curve key-rate DV01s in zero-rate space can be bucketed onto the vertices; the FRTB sensitivity definition, risk weights, per-currency buckets and the inflation / cross-currency-basis factors are missing — [W1b, W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| CSR delta (non-securitisation, securitisation) | SA | 📋 | — | — | No credit-spread factor block and no CDS pricer — [W1b](../roadmap.md#44-frtb-and-desk-risk-programme), [CDS](../roadmap.md#34-credit-derivatives) |
+| Equity delta (spot; repo) | SA | 🟡 | `KeyedSensitivities.spot_delta`, `equal_weight_bucket_map` | `tests/test_risk/test_state_sensitivities.py` | Spot delta and sector bucketing exist; the 1% relative-move definition, the repo-rate factor and the 13-bucket table (MAR21.72–21.80) do not — [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Commodity delta | SA | 📋 | — | — | No commodity instruments or factors — [W1b, W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| FX delta | SA | 🟡 | `market_risk` | `tests/test_greeks/test_market_risk.py` | FX-spot risk per single trade only; FX spots are not a keyed factor block, so not book-level or scenario-addressable — [W1b](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Vega (σ · ∂V/∂σ on option-maturity vertices) | SA | 🟡 | `KeyedSensitivities.vega` | `tests/test_risk/test_state_sensitivities.py` | One parallel vega per surface; node-level vega on maturity vertices is planned — [W1b](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Curvature (CVR± at risk-weight shocks) | SA | 📋 | `keyed_stress_scenario`, `group_scenario_pnl` (primitives) | — | Full revaluation under a shock exists; the risk-weight shocks, CVR± and the curvature aggregation do not — [W1d, W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Bucketing onto regulatory vertices and buckets | SA, SIMM | ✅ | `BucketMap`, `tenor_bucket_map`, `equal_weight_bucket_map`, `bucket_sensitivities` | `tests/test_risk/test_bucketing.py` | Second-order bucketing reads the flat `FlatSensitivities` until the keyed port — [W1c](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Risk weights, correlations (ρ, γ), bucket tables | SA | 📋 | — | — | Versioned, cited parameter tables — [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Intra- / inter-bucket aggregation, low / medium / high correlation scenarios | SA | 📋 | — | — | [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Capital attribution per trade and capital Greeks | SA | 📋 | — | — | Autodiff of the SA charge (Euler allocation) — [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Residual risk add-on (MAR23) | SA | 📋 | — | — | [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Default risk charge (MAR22) | SA | 📋 | — | — | Needs the CDS pricer and jump-to-default — [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Expected Shortfall on a P&L vector | IMA | ✅ | `expected_shortfall`, `value_at_risk` | `tests/test_risk/test_var.py` | Plain empirical tail mean at any confidence |
+| Liquidity-horizon cascade (10 / 20 / 40 / 60 / 120 days) | IMA | 📋 | — | — | [W4](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Stressed-period calibration, reduced-set ratio | IMA | 📋 | — | — | The caller supplies the window today — [W4](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| Non-modellable risk factors (eligibility test, SES) | IMA | 📋 | — | — | [W4](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| HPL / RTPL vectors | IMA | 🟡 | `hypothetical_pnl_vector`, `risk_theoretical_pnl_vector`, `group_scenario_pnl` | `tests/test_risk/test_pnl_vectors.py` | Keyed full-revaluation HPL exists; the RTPL pair runs on the flat `MarketData` path with one rate block — [W1c](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| PLA test statistics (Spearman, KS, d558 zones) | IMA | ✅ | `pla_spearman`, `pla_ks`, `ks_statistic`, `pla_traffic_light` | `tests/test_risk/test_backtesting.py` | Work on plain arrays; not desk-level until the position layer — [W4](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| VaR backtesting (Kupiec, Christoffersen, traffic light) | IMA | ✅ | `var_breaches`, `kupiec_pof`, `christoffersen_conditional_coverage`, `basel_traffic_light` | `tests/test_risk/test_backtesting.py` | — |
+| Desk-level, position-weighted PLA and backtesting | IMA | 📋 | — | — | Needs the position layer — [W1a, W4](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| IMCC and capital aggregation across desks | IMA | 📋 | — | — | [W4](../roadmap.md#44-frtb-and-desk-risk-programme) |
+| CRIF export for ISDA SIMM | SIMM | 📋 | — | — | Export only; the SIMM calculation needs an ISDA licence — [W3](../roadmap.md#44-frtb-and-desk-risk-programme) |
+
 ---
 
 ## 3. CCAR / DFAST annual stress tests
@@ -173,6 +207,8 @@ CCAR results are heavily audited. Every VALAX price comes from `price(instrument
 ## 4. Coverage today vs. roadmap
 
 The full, cross-audience coverage matrix now lives in one place — **[Applications → Coverage](index.md#4-coverage-what-ships-today-vs-roadmap)** (scan the *Business* column for `REG`).
+
+FRTB component by component — what ships, what is partial, what is planned — is the [FRTB capability matrix](#frtb-capability-matrix) above.
 
 The multi-curve market, once first on the critical path, has shipped. The shortest remaining path to a desk-usable, bank-style FRTB/CCAR system is **(a) port the PLA vector pair onto the keyed sensitivities → (b) node-level vol-surface risk factors → (c) FRTB SBA capital aggregation**. Full priority order lives in [Risk Factors § 4](../risk-factors.md#4-roadmap) and the project [Roadmap](../roadmap.md).
 

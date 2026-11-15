@@ -164,6 +164,7 @@ nav:
       - "VaR & P&L": risk-var.md
       - Risk Bucketing: risk-bucketing.md
       - Backtesting & FRTB PLA: risk-backtesting.md
+      - Risk Methodology Register: applications/risk-register.md
       - PCA Curve Shocks (Rates): guide/pca-rates.md
   - Examples:
       - Tutorial — The Unified Pricing Contract: guide/tutorial-unified-pricing.md

@@ -12,6 +12,39 @@ version tag in `pyproject.toml`. The first tagged release will compress the
 history below into a single `[0.1.0]` entry; until then, all changes accumulate
 under `[Unreleased]` and are grouped by feature area for discoverability.
 
+### Added — docs: FRTB & desk risk programme, FRTB capability matrix, risk register
+
+**Added** a risk programme to the roadmap (Tier 4.4, *FRTB and Desk Risk
+Programme*): foundations (position layer, factor kinds beyond rates and
+equity, keyed measurement layer, revaluation grids), a trader toolkit, the
+FRTB standardised approach (cited parameter tables, sensitivity definitions,
+delta / vega / curvature aggregation, capital attribution by autodiff, RRAO,
+DRC, CRIF export) and the internal models approach (liquidity-horizon ES,
+stressed calibration, NMRF, desk-level PLA, IMCC), with milestones M1–M5.
+P3.2 / P3.3 link to it.
+
+**Added** the FRTB capability matrix (`docs/applications/regulatory.md`
+§ 2.7), the single map of FRTB SA / IMA / SIMM components against the code,
+checked by `tests/test_docs/test_frtb_capabilities.py` (symbols import, gates
+exist, planned rows link to an open roadmap item).
+
+**Added** the Risk Methodology & Assumptions Register
+(`docs/applications/risk-register.md`): per risk measure the definition and
+defaults, assumptions, limitations with evidence, validation tolerances and
+improvement path; `tests/test_docs/test_risk_register.py` requires an entry
+for every public risk-measure entry point. Both new maps are on the coverage
+hub.
+
+**Fixed** stale claims: component VaR exists (`keyed_component_var`) and only
+per-trade marginal / incremental VaR is open; "book-level aggregation" is
+bucketing, not position-weighted aggregation; the emitted factor identifiers
+are `IR.CURVE.<curve_id>.<t>Y` (Risk Factors § 1.2 now lists them beside the
+target convention); "intraday grids ✅" split into what-if P&L ✅ and
+revaluation grids 📋; `SwaptionCube` exists; the instrument × factor matrix
+marks named OIS / projection / basis curves as keyed factors for every routed
+instrument with a curve selector; FRTB has 13 equity buckets (MAR21.72), not
+11.
+
 ### Changed — risk: base-point bucketed Greeks are *sensitivities*, not *ladders*
 
 **Renamed** the base-point bucketed-Greek objects to the FRTB SA / ISDA SIMM

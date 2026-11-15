@@ -824,8 +824,8 @@ Banks cannot go live without regulatory compliance. These items satisfy Basel re
 | # | Task | Why It's Critical | Tier Ref |
 |---|------|-------------------|----------|
 | **P3.1** | **XVA Suite (CVA, DVA, FVA at minimum)** | XVA is now a first-class P&L line at every bank. CVA alone changes pricing by 10–50 bps on uncollateralized trades. This is where JAX's GPU acceleration creates the biggest competitive advantage (nested MC). | 4.3 |
-| **P3.2** | **FRTB Standardized Approach** | Basel III.1/IV mandates FRTB for market risk capital. The Standardized Approach (SA) is the minimum — sensitivity-based with prescribed risk weights. Banks need this for regulatory capital reporting. | — |
-| **P3.3** | **Marginal / Component / Incremental VaR** | Current VaR is portfolio-level only. Desks need to attribute risk to individual trades and see the marginal impact of new trades. | 4.1 |
+| **P3.2** | **FRTB Standardized Approach** — planned in the [FRTB & desk risk programme](#44-frtb-and-desk-risk-programme) (W3, milestone M1) | Basel III.1/IV mandates FRTB for market risk capital. The Standardized Approach (SA) is the minimum — sensitivity-based with prescribed risk weights. Banks need this for regulatory capital reporting. Today the delta inputs for GIRR and equity exist (`KeyedSensitivities`, `tenor_bucket_map`); risk weights, correlations, aggregation and curvature do not. | 4.4 |
+| **P3.3** | **Marginal / Component / Incremental VaR** — ✅ component (per factor block, `keyed_component_var`); marginal / incremental per trade pending | Per-block delta-normal component VaR ships. Desks still need to attribute risk to individual trades and see the marginal impact of new trades, which needs the position layer ([§ 4.4](#44-frtb-and-desk-risk-programme) W1a). | 4.1, 4.4 |
 
 ### Priority 4 — Service Layer *(Required for Integration)*
 
@@ -1228,7 +1228,8 @@ Portfolio-level risk management and valuation adjustments.
 - [x] **Parametric VaR** — delta-normal using autodiff sensitivities and covariance matrix
 - [x] **Monte Carlo VaR** — full revaluation under simulated scenarios (parametric + t-distribution)
 - [x] **Expected Shortfall (CVaR)** — tail risk measure
-- [ ] **Marginal / component / incremental VaR**
+- [x] **Component VaR (delta-normal, per block)** — `keyed_component_var` (`valax/risk/state_sensitivities.py`): Euler allocation of `keyed_parametric_var` across the blocks of a `KeyedFactorLayout`, additive to the total. Gate: `tests/test_risk/test_state_sensitivities.py::TestKeyedVaR`
+- [ ] **Marginal / incremental VaR and ES, per trade** — per-*trade* (not per-factor-block) contributions, full-revaluation (not only delta-normal) contributions, and the what-if of adding or removing a trade. Blocker: the position layer ([§ 4.4 W1a](#44-frtb-and-desk-risk-programme)); tracked as W2 there
 
 **Why:** Regulatory requirement (Basel III/IV). Every bank risk system computes these daily.
 
@@ -1263,6 +1264,54 @@ Portfolio-level risk management and valuation adjustments.
 **Why:** XVA is now a first-class P&L item at every bank. XVA desks are among the most compute-intensive in banking.
 
 **Approach:** Exposure simulation via MC (reuse existing path generators). At each simulation date, reprice the netting set (this is where GPU acceleration via JAX gives massive speedup). CVA = integral of discounted expected exposure * default probability. Autodiff gives XVA sensitivities.
+
+### 4.4 FRTB and Desk Risk Programme
+
+One programme for two audiences: **FRTB teams** (standardised approach, internal models approach, PLA, backtesting) and **trading desks** (risk ladders, hedging, P&L explain, capital cost of a trade). The building blocks are shared — a revaluation grid is both a desk's spot ladder and FRTB's curvature engine, and differentiating the SA capital formula gives both a regulator's capital number and a trader's per-trade capital contribution — so the work is sequenced as foundations first, then the two engines. Status per FRTB component lives in the [FRTB capability matrix](applications/regulatory.md#frtb-capability-matrix); the maths of bucketed sensitivities versus revaluation grids is [Theory § 7.4](theory/risk-measures.md#74-bucketed-sensitivities). Regulatory baseline: the BCBS consolidated framework (MAR21–MAR33); jurisdiction overlays (EU CRR3, UK PRA, US) come later as parameter-table variants.
+
+**W1 — Foundations (prerequisites of everything below)**
+
+- [ ] **W1a Position layer** — a `Position` (quantity, sign, trade id, book path) and aggregation across *heterogeneous* instrument groups in `valax/portfolio/positions.py`, so book PV, sensitivities and P&L vectors are position-weighted sums. Blocker: none (the group primitives in `valax/risk/state_var.py` exist; see also the `Portfolio` container in [§ 5.5](#55-portfolio-and-multi-device-scaling)). Unblocks desk-level PLA / backtesting, per-trade capital and marginal VaR
+- [ ] **W1b Factor kinds beyond rates and equity** — node-level vol blocks (expiry × strike or delta), FX-spot, inflation and credit-spread blocks in `KeyedFactorLayout` and `shock`, and an `IR.VOL` category so rates cubes stop being labelled `EQ.VOL`. Blocker: the open items *Node-level vega sensitivities* and *Keyed shocks for credit / inflation / FX* in [§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation); credit spread risk (CSR) also needs the CDS pricer ([§ 3.4](#34-credit-derivatives))
+- [ ] **W1c Measurement layer on `MarketState`** — keyed RTPL / HPL vectors and `BucketMap` composed with `KeyedFactorLayout` (keyed bucketing of first and second order). Blocker: none; this is the open *Port the rest of the measurement layer* item of [§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)
+- [ ] **W1d Revaluation grids** — `RevaluationGrid` ([§ 1](#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation)): ladders at shifted levels, the shared engine of desk spot / vol ladders and FRTB curvature
+
+**W2 — Trader toolkit**
+
+- [ ] **Spot / vol / rate ladders and 2-D grids** for desks — on top of W1d (spot × vol product grids)
+- [ ] **Node-level vega buckets per surface** — on top of W1b
+- [ ] **Theta, carry and roll-down by valuation-date roll** — re-dating the market and the trade together; today `valax.greeks.theta` raises `NotImplementedError` for date-based rates trades. Blocker: a valuation-date roll on `MarketState`
+- [ ] **Hedge optimiser** — solve for hedge notionals in a chosen instrument set, minimising P&L variance, a tail measure, or SA capital (W3), plus transaction cost, with `optimistix` / `lineax`. Blocker: W1a; the capital objective needs W3
+- [ ] **Marginal / incremental VaR and ES, per trade** — see [§ 4.1](#41-var-and-expected-shortfall). Blocker: W1a
+- [ ] **Historical crisis replay and reverse stress** — see [§ 4.2](#42-stress-testing-and-scenario-analysis)
+
+**W3 — FRTB standardised approach (sensitivities-based method)** in `valax/risk/frtb/`
+
+- [ ] **Versioned parameter tables** — risk weights, correlations (ρ, γ), buckets and vertices per risk class (GIRR, CSR non-securitisation and securitisation, equity, commodity, FX), each value cited to its MAR21 paragraph, as static data. Blocker: none
+- [ ] **FRTB sensitivity definitions per risk class** — GIRR / CSR PV01 at the regulatory vertices (0.25, 0.5, 1, 2, 3, 5, 10, 15, 20, 30Y) from `KeyedSensitivities` in zero-rate space, equity / commodity / FX delta per 1% relative move, vega as σ · ∂V/∂σ on option-maturity vertices. Blocker: W1b for every class except GIRR and equity delta
+- [ ] **Delta and vega aggregation** — intra-bucket and inter-bucket aggregation under the low / medium / high correlation scenarios, maximum taken, as one pure JAX function of the sensitivities. Blocker: the two items above
+- [ ] **Curvature** — CVR± by full revaluation at the risk-weight shocks (a three-node revaluation grid per bucket). Blocker: W1d
+- [ ] **Capital attribution and capital Greeks by autodiff** — ∂K/∂s per vertex and ∂K/∂q per trade (Euler: they sum to K, since the SBM charge is homogeneous of degree one in positions), with the active correlation scenario reported at kinks. Blocker: aggregation above and W1a
+- [ ] **Residual risk add-on (RRAO, MAR23)** and **default risk charge (DRC, MAR22)**. Blocker: instrument flags for exotic underlyings (RRAO); CDS pricer and jump-to-default (DRC)
+- [ ] **CRIF export of sensitivities for ISDA SIMM** — export only; the SIMM calculation itself needs an ISDA licence and is out of scope. Blocker: W1b
+
+**W4 — FRTB internal models approach**
+
+- [ ] **ES at 97.5% with the liquidity-horizon cascade** (10 / 20 / 40 / 60 / 120 days, MAR33) on top of `expected_shortfall`. Blocker: factor-to-liquidity-horizon mapping on `KeyedFactorLayout`
+- [ ] **Stressed-period calibration** — stressed-window search and the reduced-set ratio. Blocker: historical snapshot store (§ 6.1)
+- [ ] **Non-modellable risk factors** — the risk-factor eligibility test and the stressed scenario (SES) charge. Blocker: observation data per factor
+- [ ] **Desk-level PLA and backtesting** — position-weighted keyed RTPL / HPL into the existing `pla_*` and `var_breaches` / `kupiec_pof` tests. Blocker: W1a, W1c
+- [ ] **IMCC and capital aggregation** across desks. Blocker: the three items above
+
+**Milestones**
+
+| # | Delivers | Needs |
+|---|---|---|
+| M1 | GIRR + equity SA capital with curvature, per-trade capital attribution, capital-aware hedging | W1a, W1d, W3 (GIRR / equity) |
+| M2 | Desk-level keyed PLA and backtesting | W1a, W1c |
+| M3 | FX, inflation and CSR risk classes | W1b, CDS pricer |
+| M4 | IMA ES with liquidity horizons, stressed calibration, NMRF, IMCC | W4 |
+| M5 | DRC and RRAO | W3 tail items |
 
 ---
 
@@ -1352,7 +1401,7 @@ Scaling the engine from a single instrument to a whole book and across devices �
 see the [Scaling Up](scaling/index.md) section for the full design.
 
 - [x] **Homogeneous batch pricing / Greeks** — `jax.vmap` over a batched instrument pytree (`valax/portfolio/batch.py`; `risk/sensitivities.py`, `risk/var.py`)
-- [x] **Book-level aggregation & bucketing** — `FlatSensitivities`, `BucketMap`, PCA factor model (`valax/risk/{sensitivities,bucketing,factors}.py`)
+- [x] **Bucketing and factor reparameterisation** — `BucketMap`, `bucket_sensitivities`, PCA factor model (`valax/risk/{sensitivities,bucketing,factors}.py`). *Book-level* aggregation of a heterogeneous, position-weighted book is not built: see the two items below and [§ 4.4](#44-frtb-and-desk-risk-programme) W1a
 - [ ] **`Portfolio` container** — heterogeneous trade collection with per-trade pricing keys (design in [Productionisation](architecture/production.md))
 - [ ] **Heterogeneous dispatch-and-aggregate** — group a mixed book by `(instrument, model)`, price each group under one JIT kernel via the MC/PDE registry, aggregate to book value / Greeks
 - [ ] **Shape-stable / padded batching** — fixed-shape padding so the JIT cache is reused across differently-sized books

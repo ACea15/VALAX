@@ -40,6 +40,18 @@ For example:
 | `MOD.HESTON.AAPL.KAPPA` | Heston mean-reversion for AAPL |
 | `CORR.EQ.AAPL.MSFT` | AAPL–MSFT spot correlation |
 
+The table above is the **target convention**. The identifiers the code emits today come from `KeyedFactorLayout.factor_ids()` and use the market object's own identifier as the subtype:
+
+| Factor kind | Emitted identifier | Example |
+|---|---|---|
+| Curve pillar | `IR.CURVE.<curve_id>.<t>Y` | `IR.CURVE.USD.OIS.5Y` |
+| Basis pillar (`as_basis_layout`) | `IR.BASIS.<ccy>.<tenorA>.<tenorB>.<t>Y` | `IR.BASIS.USD.SOFR3M.OIS.5Y` |
+| Vol surface (parallel shift) | `EQ.VOL.<surface_id>` | `EQ.VOL.SPX.VOL` |
+| Spot | `EQ.SPOT.<asset_id>` | `EQ.SPOT.SPX` |
+| Dividend yield | `EQ.DIV.<asset_id>` | `EQ.DIV.SPX` |
+
+Pillar tenors are printed with four significant digits (`0.4959Y`), and rates vol cubes are labelled `EQ.VOL` too until the `IR.VOL` category lands ([roadmap § 4.4 W1b](roadmap.md#44-frtb-and-desk-risk-programme)).
+
 The identifier is what links a factor across **scenarios** (coordinates of a stacked `KeyedScenario`), **covariance matrices** (rows / columns of $\Sigma$), **sensitivities** (entries of `KeyedSensitivities.to_dict()`), and **PLA reports** (per-factor RTPL contributions — still positional, see below).
 
 !!! note "Current code"
@@ -52,8 +64,8 @@ The identifier is what links a factor across **scenarios** (coordinates of a sta
     The **current** one is identifier-keyed:
     [`KeyedFactorLayout`](api/risk.md#keyed-per-curve-factor-layout) holds
     one `FactorBlock` per named market object (every curve on the
-    `CurveGraph`, every surface, every asset) and emits exactly the
-    identifiers below from `layout.factor_ids()`. The same layout indexes
+    `CurveGraph`, every surface, every asset) and emits the identifiers
+    listed above from `layout.factor_ids()`. The same layout indexes
     scenarios ([`keyed_parametric_scenarios`](risk-scenarios.md#keyed-generators-and-the-per-curve-covariance-layout)),
     covariance matrices (`block_covariance`) and sensitivities
     ([`KeyedSensitivities`](risk-sensitivities.md#keyed-sensitivities-on-a-marketstate)), so
@@ -239,7 +251,7 @@ A `MarketState` already carries full surfaces (`MarketState.surfaces`), but the 
 | `EQ.VOL.<asset>.<strike>.<expiry>` 📋 | Implied vol at every node of a `GridVolSurface`. | The surface is already in `MarketState.surfaces`. Needed: a node-level keyed shock (per-node bump and parametric ATM-level / skew / convexity / term-structure) and node-level, surface-keyed vega buckets — open on the [roadmap](roadmap.md#1-risk-engine-keyed-end-to-end-bar-portfolio-aggregation). | Equity options priced from a surface; future Dupire local-vol PDE; smile-aware MC. |
 | `EQ.SABR.<asset>.<expiry>.{ALPHA,RHO,NU,BETA}` 📋 | SABR slice parameters per expiry. | A `SABRVolSurface` already sits in `MarketState.surfaces`; needed is a parameter-level shock (bump each parameter and reconstruct vol) wired into the keyed layout. | `pricing/analytic/sabr.py`, MC paths in `pricing/mc/sabr_paths.py`. |
 | `EQ.SVI.<asset>.<expiry>.{A,B,RHO,M,SIGMA}` 📋 | SVI raw parameters per slice. | Same pattern as SABR. | Equity options on SVI-fitted surfaces. |
-| `RATES.SWAPTION_VOL.<ccy>.<expiry>.<tenor>` 📋 | Black / Bachelier vol cube on the swaption grid. | `SwaptionVolCube` type + cube-bumping primitives. | `pricing/analytic/swaptions.py`. |
+| `RATES.SWAPTION_VOL.<ccy>.<expiry>.<tenor>` 🚧 | Black / Bachelier vol cube on the swaption grid. | The cube type exists — `SwaptionCube` (`valax/surfaces/swaption_cube.py`, calibrated by `calibrate_swaption_cube_from_curves`), with quote-space vega via `vol_quote_vegas`. Missing: node-level cube shocks in `KeyedScenario` / `KeyedFactorLayout` (the keyed vol shock is one parallel shift per surface, labelled `EQ.VOL`) — [roadmap § 4.4 W1b](roadmap.md#44-frtb-and-desk-risk-programme). | `pricing/analytic/swaptions.py`. |
 
 ### 3.6 Model Parameters
 
@@ -290,6 +302,8 @@ Each tier deliberately keeps the autodiff invariant intact: every new factor is 
 
 Quick reverse lookup: which factors does each instrument load on? `*` indicates a factor that is consumed but not yet exposed as an independent risk factor in the keyed risk layer (`KeyedFactorLayout` on a `MarketState`).
 
+In the **Rate (OIS)**, **Rate (Fwd)** and **Basis** columns, ✅ means the instrument names the curve through its `discount_id` / `forward_id` (or `foreign_discount_id`) selector and is priced through `price()`, and the keyed layer gives every curve on the graph its own block (the basis via `as_basis_layout`). The selector contract — price gradient non-zero on the declared curves, zero elsewhere — is gated for every route by `tests/test_core/test_route_contract.py`; per-curve and basis sensitivities on a dual-curve swap book by `tests/test_risk/test_state_sensitivities.py::TestPerCurveSensitivities` and `::TestBasisDV01`. `OISSwap` has no curve selector and reads only the default curve. Pytree-only instruments (no pricer yet) keep `*`.
+
 | Instrument | Spot | Vol | Rate (single) | Rate (OIS) | Rate (Fwd) | Basis | Credit | FX | Inflation | Vol surface | Model params |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
 | `EuropeanOption` (BSM) | ✅ | ✅ | ✅ | — | — | — | — | — | — | * | — |
@@ -301,24 +315,24 @@ Quick reverse lookup: which factors does each instrument load on? `*` indicates 
 | `WorstOfBasketOption` | ✅ | ✅ | ✅ | — | — | — | — | — | — | * | * (corr) |
 | `SpreadOption` | ✅ | ✅ | ✅ | — | — | — | — | — | — | — | * (corr) |
 | `VarianceSwap` | ✅ | ✅ | ✅ | — | — | — | — | — | — | * | — |
-| `ZeroCouponBond` / `FixedRateBond` | — | — | ✅ | * | — | — | * | — | — | — | — |
-| `FloatingRateBond` | — | — | ✅ | * | * | * | * | — | — | — | — |
-| `CallableBond` / `PuttableBond` | — | — | ✅ | * | — | — | * | — | — | — | * (HW $a,\sigma$) |
+| `ZeroCouponBond` / `FixedRateBond` | — | — | ✅ | ✅ | — | — | * | — | — | — | — |
+| `FloatingRateBond` | — | — | ✅ | ✅ | ✅ | ✅ | * | — | — | — | — |
+| `CallableBond` / `PuttableBond` | — | — | ✅ | ✅ | — | — | * | — | — | — | * (HW $a,\sigma$) |
 | `ConvertibleBond` | * | * | ✅ | * | — | — | * | — | — | * | * |
-| `InterestRateSwap` | — | — | ✅ | * | * | * | — | — | — | — | — |
+| `InterestRateSwap` | — | — | ✅ | ✅ | ✅ | ✅ | — | — | — | — | — |
 | `OISSwap` | — | — | ✅ | * | — | — | — | — | — | — | — |
-| `CrossCurrencySwap` | — | — | ✅ | * | * | * | — | * | — | — | — |
-| `Swaption` / `BermudanSwaption` | — | — | ✅ | * | * | — | — | — | — | * | * (LMM) |
-| `Caplet` / `Cap` | — | — | ✅ | * | * | — | — | — | — | * | — |
-| `CMSSwap` / `CMSCapFloor` | — | — | ✅ | * | * | — | — | — | — | * | * (convexity) |
+| `CrossCurrencySwap` | — | — | ✅ | ✅ | * | * | — | * | — | — | — |
+| `Swaption` / `BermudanSwaption` | — | — | ✅ | ✅ | ✅ | — | — | — | — | * | * (LMM) |
+| `Caplet` / `Cap` | — | — | ✅ | ✅ | ✅ | — | — | — | — | * | — |
+| `CMSSwap` / `CMSCapFloor` | — | — | ✅ | ✅ | ✅ | — | — | — | — | * | * (convexity) |
 | `CDS` | — | — | ✅ | * | — | — | ✅ (planned engine) | — | — | — | — |
 | `CDOTranche` | — | — | ✅ | * | — | — | * | — | — | — | * (base corr) |
-| `FXForward` | — | — | ✅ | * | — | — | — | * | — | — | — |
-| `FXVanillaOption` / `FXBarrierOption` | — | — | ✅ | * | — | — | — | * | — | * | — |
+| `FXForward` | — | — | ✅ | ✅ | — | — | — | * | — | — | — |
+| `FXVanillaOption` / `FXBarrierOption` | — | — | ✅ | ✅ (vanilla) | — | — | — | * | — | * | — |
 | `QuantoOption` | * | * | ✅ | * | — | — | — | * | — | * | * (corr) |
 | `TARF` | — | — | ✅ | * | — | — | — | * | — | * | — |
-| `ZeroCouponInflationSwap` / `YoYInflationSwap` | — | — | ✅ | * | — | — | — | — | * | — | — |
-| `InflationCapFloor` | — | — | ✅ | * | — | — | — | — | * | * | — |
+| `ZeroCouponInflationSwap` / `YoYInflationSwap` | — | — | ✅ | ✅ | — | — | — | — | * | — | — |
+| `InflationCapFloor` | — | — | ✅ | ✅ | — | — | — | — | * | * | — |
 
 A `*` entry is the highest-priority area for the next iteration: the engine *uses* the factor but does not yet shock it as a named risk-factor input.
 

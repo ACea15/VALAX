@@ -153,7 +153,8 @@ This is the single, consolidated coverage reference for every application above;
 | GPU / TPU execution (same code) | ✅ | All | JAX / XLA |
 | VaR & Expected Shortfall (full-reval + parametric delta-normal, with per-curve Euler decomposition) | ✅ | MRM, REG | `group_scenario_pnl` + `value_at_risk` / `expected_shortfall`; `keyed_parametric_var`, `keyed_component_var` |
 | Scenario generation (historical, parametric, named stress, per-curve and basis) | ✅ | MRM, REG, TRE | `keyed_historical_scenarios`, `keyed_parametric_scenarios` over a per-curve `block_covariance`; `keyed_stress_scenario`, `keyed_curve_stress` (steepener / flattener / butterfly), `keyed_basis_shift` |
-| Scenario / pre-trade "what-if" P&L (incl. intraday grids) | ✅ | FO, MRM, REG, TRE | `KeyedScenario` + `shock`, `group_scenario_pnl`, nested `vmap` |
+| Scenario / pre-trade "what-if" P&L | ✅ | FO, MRM, REG, TRE | `KeyedScenario` + `shock`, `group_scenario_pnl`, nested `vmap` |
+| Revaluation grids / ladders at shifted levels (spot, vol, rate; FRTB curvature) | 📋 | FO, MRM, REG | No grid function yet; a caller can nest `vmap` over `group_scenario_pnl` by hand — `RevaluationGrid` is [planned](../roadmap.md#44-frtb-and-desk-risk-programme) |
 | FRTB PLA P&L vectors (HPL / RTPL) | ✅ / 🟡 | MRM, REG | `hypothetical_pnl_vector`, `risk_theoretical_pnl_vector` — shipped on the legacy flat `MarketData` path; port to the keyed sensitivities is [open](../roadmap.md#remaining-work) |
 | Waterfall P&L explain (one term per market object + unexplained) | ✅ | MRM, REG | `keyed_waterfall_report`, `keyed_waterfall_pnl` (a pure basis move lands on the basis term only) |
 | Basel VaR backtest (Kupiec, Christoffersen, traffic light) | ✅ | MRM, REG | `var_breaches`, `kupiec_pof`, `christoffersen_conditional_coverage`, `basel_traffic_light` |
@@ -176,8 +177,8 @@ This is the single, consolidated coverage reference for every application above;
 | LCR / NSFR contractual cash-flow bucketing | 🟡 | TRE | Schedule + bucketing primitives present; run-off-factor library not shipped |
 | Multi-curve market (OIS + SOFR + basis + XCCY) | ✅ | MRM, REG, TRE | `CurveGraph` (`bootstrap_curve_graph`) inside `MarketState`; per-curve shocks, sensitivities and VaR, basis as its own factor (`as_basis_layout`, `KeyedSensitivities.basis_dv01`) |
 | Keyed shocks for credit / inflation / FX on `MarketState` | 📋 | MRM, REG, TRE | Curves and spots are priced from `MarketState`; not yet addressable by `KeyedScenario` — [roadmap](../roadmap.md#remaining-work) |
-| SBA capital aggregation (inter-bucket correlations + curvature) | 📋 | MRM, REG | Bucket-level Δ + γ today; prescribed correlation formulas planned |
-| Named risk factors (`IR.OIS.USD.5Y`, …) | ✅ | MRM | `KeyedFactorLayout` names every coordinate ([Risk Factors § 1.2](../risk-factors.md#12-factor-identifier-convention)); the legacy flat path stays positional |
+| SBA capital aggregation (inter-bucket correlations + curvature) | 📋 | MRM, REG | Bucket-level Δ + γ today; prescribed correlation formulas planned — component status in the [FRTB capability matrix](regulatory.md#frtb-capability-matrix) |
+| Named risk factors (`IR.CURVE.USD.OIS.5Y`, …) | ✅ | MRM | `KeyedFactorLayout` names every coordinate ([Risk Factors § 1.2](../risk-factors.md#12-factor-identifier-convention)); the legacy flat path stays positional |
 | IMA stressed-period selection (automated) | 📋 | REG | Caller supplies the 250-day window today |
 | XVA (CVA / FVA / KVA) | 📋 | REG, QR | Needs planned CDS pricer + credit-IR joint MC |
 | Streaming / incremental market-data updates | 📋 | FO | [Roadmap → Real-Time Risk](../roadmap.md#63-real-time-risk) |
