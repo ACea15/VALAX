@@ -189,7 +189,7 @@ flag computed inside the function), Python `if` is wrong and will raise
 | `jnp.where(cond, x, y)` | Elementwise selection — **both** `x` and `y` are computed everywhere, then masked. See §3 for the autodiff trap |
 | `lax.scan(f, init, xs)` | Bounded loop with carry state — the workhorse, see `valax/pricing/mc/paths.py:223` (Heston QE), `valax/pricing/mc/local_vol_paths.py:217` (LV stepper) |
 | `lax.fori_loop(lower, upper, body, init)` | Bounded loop without inputs — see `valax/pricing/mc/bermudan.py` (LSM backward induction) |
-| `lax.while_loop(cond, body, init)` | Unbounded loop — **no autodiff support**; use only when convergence depends on a runtime condition |
+| `lax.while_loop(cond, body, init)` | Unbounded loop — **no reverse-mode autodiff** (`jax.grad` raises; forward mode works); use only when convergence depends on a runtime condition |
 
 The cost ordering, lowest-to-highest XLA footprint, is roughly: Python `if` (one
 branch in the graph) < `lax.cond` (both branches in the graph, runtime select)

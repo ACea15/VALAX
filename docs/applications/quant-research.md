@@ -80,7 +80,7 @@ solution = optx.least_squares(calibration_residual, solver, initial_params,
                               args=(market_prices, market_data))
 ```
 
-No hand-written LM, no numerical Jacobian — `optimistix` gets the exact Jacobian by autodiff-differentiating the residual through your pricer. Want a different optimiser? Swap `LevenbergMarquardt` for `BFGS`, or `optax.adam` for a non-convex loss. The pricer does not change. Shipped calibrations demonstrate the pattern: [Heston](../guide/calibration.md), [SABR](../guide/vol-surfaces.md), [SLV](../guide/slv.md), [Hull-White tree](../api/models.md).
+No hand-written LM, no numerical Jacobian — `optimistix` gets the exact Jacobian by differentiating the residual through your pricer with autodiff. Want a different optimiser? Swap `LevenbergMarquardt` for `BFGS`, or `optax.adam` for a non-convex loss. The pricer does not change. Shipped calibrations demonstrate the pattern: [Heston](../guide/calibration.md), [SABR](../guide/vol-surfaces.md), [SLV](../guide/slv.md), [Hull-White tree](../api/models.md).
 
 ### 3.3 Rapid paper-to-calibrated-prototype pipeline
 

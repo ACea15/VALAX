@@ -27,7 +27,7 @@ Every risk number in VALAX is built from three maps:
 
 1. **Calibration** — quotes and fixed inputs → calibrated objects, through a
    chain of levels ``R(θ; q, upstream, p) = 0``.
-2. **Pricing** — ``price(instrument, model, market)``; reverse-mode AD gives the
+2. **Pricing** — ``price(instrument, model, market)``; AAD (reverse-mode autodiff) gives the
    market and model cotangents.
 3. **Aggregation** — linear, so it commutes with differentiation: a book's
    cotangent is the sum of its trades'.
@@ -112,7 +112,7 @@ root level of `curve_graph_node`, `calibrate_swaption_cube_from_curves`
 shares `swaption_cube_level` with `swaption_cube_node`.
 
 **D5 — No `custom_vjp`.** Calibrations are differentiated by the implicit
-function theorem (explicitly, or through `optimistix`), pricers by plain AD.
+function theorem (explicitly, or through `optimistix`), pricers by plain AAD.
 A custom rule would be reverse-only and could hide non-convergence.
 
 **D6 — Validation happens when a node is built, not when it runs.** Node
@@ -145,7 +145,7 @@ strip as its child. `converged` and `check()` cover every child, so a caller
 checks one object, and each child keeps its own level for the adjoint.
 
 **D9 — A Monte Carlo fixed point is an explicit level differentiated by
-plain AD, never by the IFT.** The SLV leverage `L_{k+1} = G(L_k)` is computed
+plain AAD, never by the IFT.** The SLV leverage `L_{k+1} = G(L_k)` is computed
 by `n_iterations` unrolled passes, each a self-consistent Guyon–Henry-Labordère
 sweep of the particle swarm with fresh randomness. There is no residual the
 solver drives to zero — the
@@ -154,7 +154,7 @@ increment never falls below the Monte Carlo noise floor — so there is no
 pretending otherwise would differentiate a fiction. `calibrate_slv_leverage`
 therefore returns an explicit level (`theta=None`, `problem="fixed_point"`):
 its value is a differentiable map of the inputs (Heston model, target surface,
-spot) and its risk is reverse-mode AD through the passes. Convergence is still
+spot) and its risk is AAD through the passes. Convergence is still
 reported, by `fixed_point_diagnostics`: the residual is the last increment
 `L_K − L_{K−1}`, `converged` is `max|ΔL| ≤ settings.atol` with `atol`
 (`SLV_SETTINGS`, `5e-2`) set deliberately above the noise floor

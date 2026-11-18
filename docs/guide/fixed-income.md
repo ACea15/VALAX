@@ -184,7 +184,7 @@ $$\text{KRD}_i = -\frac{1}{P} \frac{\partial P}{\partial r_i}$$
 This is computed via `jax.grad` through the discount curve pytree — the exact same mechanism that gives delta and gamma for options.
 
 !!! tip "Autodiff Advantage"
-    In a traditional library, key-rate durations require N+1 curve builds (one per pillar bump). VALAX computes all of them in a **single backward pass** through `jax.grad`, which is both faster and exact to machine precision.
+    In a traditional library, key-rate durations require N+1 curve builds (one per pillar bump). VALAX computes all of them in a **single backward (AAD) pass** through `jax.grad`, which is both faster and exact to machine precision.
 
 ### Z-Spread and Spread DV01
 

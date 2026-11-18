@@ -62,7 +62,7 @@ coordinates may be used directly.
 
 **Explicit levels** have no solve — installing a quoted spot, a flat rate, a
 Dupire transform of an upstream surface. They are differentiated by plain
-reverse-mode AD. A Monte Carlo fixed point run for a fixed number of passes
+AAD (reverse-mode autodiff). A Monte Carlo fixed point run for a fixed number of passes
 (the SLV leverage) is explicit in the same sense; see §I.8.
 
 **Batched levels** — one independent fit per node (smile per expiry, SABR per
@@ -142,8 +142,8 @@ desk actually trades, plus the sensitivities to every held-fixed choice.
 ### I.5 Two independent derivatives
 
 The same $(\bar q, \bar p)$ can be obtained without inspecting any level:
-differentiate $q \mapsto \mathrm{price}(\mathrm{calibrate}(q, p))$ with
-reverse-mode AD, letting each solver's built-in implicit adjoint handle the
+differentiate $q \mapsto \mathrm{price}(\mathrm{calibrate}(q, p))$ by
+AAD end to end (the autodiff path, `quote_risk_autodiff`), letting each solver's built-in implicit adjoint handle the
 solves. VALAX exposes **both** and a reconciliation between them. They fail in
 different ways — the explicit sweep on a singular or ill-conditioned
 $\partial R/\partial\theta$, the autodiff route on a calibrator that is not
@@ -195,8 +195,8 @@ L_K = G\big(G(\cdots G(L_0)\cdots)\big), \qquad L_0 \equiv 1 ,
 $$
 
 an **explicit** function of the upstream inputs, and VALAX treats it as an
-explicit level ($\theta = \varnothing$) differentiated by plain reverse-mode
-AD through the $K$ unrolled passes.
+explicit level ($\theta = \varnothing$) differentiated by plain AAD
+through the $K$ unrolled passes.
 
 The implicit function theorem is not used, because its hypothesis fails: it
 needs a point with $R(\theta^\star) = 0$, and the natural candidate
@@ -557,7 +557,7 @@ $$
 - **Constrained surface.** Sensitivities come from the KKT system above and can jump when a constraint becomes active or inactive. Active-set changes between snapshots are monitored.
 - **Single stocks.** The joint forward-and-vol block per expiry has an American pricer inside its residual; its adjoint is the discrete adjoint of that PDE or tree.
 - **Rates delta.** The discount curve is the rates curve, so equity trades receive adjoints on rates OIS quotes.
-- **Local-stochastic vol.** A leverage function fitted by Monte Carlo fixed point is a noisy solve; define the residual on a PDE so the IFT applies, or report its sensitivities by bumping. (VALAX takes a third route for its particle calibration: the fixed point is an explicit level differentiated by AD through the unrolled passes, with convergence measured on the last increment — §I.8.)
+- **Local-stochastic vol.** A leverage function fitted by Monte Carlo fixed point is a noisy solve; define the residual on a PDE so the IFT applies, or report its sensitivities by bumping. (VALAX takes a third route for its particle calibration: the fixed point is an explicit level differentiated by AAD through the unrolled passes, with convergence measured on the last increment — §I.8.)
 - **Pricing.** Monte Carlo with smoothed triggers and barriers (autocallables, barriers, digital coupons); regression with frozen coefficients for products with a real exercise decision; PDE in one or two dimensions where possible.
 
 **Requirements**

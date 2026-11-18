@@ -30,10 +30,11 @@ The result is a `FlatSensitivities` (per-asset / per-pillar buckets) and, via
 in the [Scenarios & Shocks guide](../risk-scenarios.md).
 
 !!! tip "Two passes, whole book"
-    First-order sensitivities come from one reverse-mode pass over the summed
-    value; second-order blocks from one `jax.hessian`. A traditional
-    bump-and-reprice engine needs *O(factors)* full revaluations — VALAX needs
-    *O(1)* AD passes, exact to machine precision.
+    First-order sensitivities come from one reverse-mode (AAD) pass over the
+    summed value; second-order blocks from one `jax.hessian`
+    (forward-over-reverse). A traditional bump-and-reprice engine needs
+    *O(factors)* full revaluations for first order — VALAX needs one AAD pass,
+    exact to machine precision.
 
 ## Mapping to risk factors: bucketing and PCA
 
@@ -69,8 +70,8 @@ ratios ("trade X of the 5y5y swaption to flatten this vega"), and they aggregate
 cleanly across a heterogeneous book because every instrument differentiates the
 *same* quote leaves.
 
-The principled way to get them is **adjoint/algorithmic differentiation through
-the calibration pipeline** — quotes → calibrate (bootstrap curves, fit surfaces,
+The principled way to get them is **AAD (adjoint algorithmic differentiation)
+through the calibration pipeline** — quotes → calibrate (bootstrap curves, fit surfaces,
 calibrate model params) → price → PV — differentiated end to end:
 
 $$\frac{\partial \text{PV}}{\partial q}

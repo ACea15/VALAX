@@ -78,7 +78,7 @@ infrastructure component is expected to:
 1. Drive its happy path through `valax.market.synthetic` rather than
    adding hard-coded numbers.
 2. Add at least one non-tautological assertion from § 2 (cross-engine
-   or AD-vs-FD is usually the cheapest).
+   or autodiff-vs-FD is usually the cheapest).
 3. If it introduces a numerical contract worth pinning, register a
    golden via `assert_matches_golden` and ship the artifact + manifest
    entry in the same PR.

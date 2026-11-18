@@ -1,10 +1,11 @@
 # Greeks
 
-Automatic-differentiation Greeks for any pure pricing function
-`(instrument, *market_args) -> scalar`. First- and second-order Greeks
-come from `jax.grad`; theta is computed by bumping the instrument's
-`expiry` field (autodiff w.r.t. calendar time would require making
-`expiry` a float leaf, which is intentionally avoided).
+Autodiff Greeks for any pure pricing function
+`(instrument, *market_args) -> scalar` ([Theory § 6.2](../theory/greeks.md#62-automatic-differentiation)).
+First- and second-order Greeks come from `jax.grad`. The kernel-layer
+`greeks()` / `greek()` compute theta by a one-day backward bump of the
+instrument's `expiry`, for any pricer; the unified [`theta`](#unified-market-model-contract-greeks)
+below differentiates `expiry` exactly where the engine allows it.
 
 !!! warning "Argument order matters"
     `greeks()` maps positional `market_args` to Greek names by index:

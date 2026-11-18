@@ -449,6 +449,13 @@ example, or status table between pages:
 - **Theory** (`docs/theory/`) owns the maths; **API** (`docs/api/`) is
   mkdocstrings autodoc of public symbols.
 
+**Terminology.** In documentation prose, **autodiff** is the general term for
+JAX's automatic differentiation in any mode. **AAD** (adjoint algorithmic
+differentiation) means reverse mode only: use it where the one-backward-pass
+property is the point (first-order Greeks and sensitivities, quote risk, the
+AAD audit). Don't write bare "AD", and name forward mode explicitly where it
+is used. The definition lives in [Theory § 6.2](docs/theory/greeks.md).
+
 ### 5.1 What goes where
 
 | Type of change | Doc to update |

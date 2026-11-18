@@ -4,27 +4,17 @@
 
 VALAX is a quantitative finance library built entirely on JAX and its ecosystem. One `price(instrument, model, market, config)` contract covers rates, equity, FX, inflation and credit trades across analytic, Monte Carlo, PDE and lattice engines. Curve building, calibration, pricing and Greeks run as one differentiable program.
 
-**The pricing engine runs on the same stack that builds frontier machine-learning models.** JAX, XLA, `equinox` and `optax` train large neural networks today, and they are also the backend of VALAX's pricers, calibrators and risk. A pricer, a calibration and a neural network are therefore all differentiable functions on the same pytrees, and they compose in one program. Gradients flow through a price into a network's weights, or from a network's output into a calibrated model. You can train on pricing-model outputs and autodiff Greeks, or put a learned component inside a pricing pipeline, without a second ML stack or a bridge between two runtimes. The same compilation path puts pricing on GPUs and TPUs (see *Fast by construction* below).
+**The pricing engine runs on the same stack that builds frontier machine-learning models.** JAX, XLA, `equinox` and `optax` train large neural networks today, and they are also the backend of VALAX's infrastructure. A pricer, a calibration and a neural network are therefore all differentiable functions on the same pytrees, and they compose in one program. Gradients flow through a price into a network's weights, or from a network's output into a calibrated model. You can train on pricing-model outputs and autodiff Greeks, or put a learned component inside a pricing pipeline, without a second ML stack or a bridge between two runtimes. The same compilation path puts pricing on GPUs and TPUs (see *Fast by construction* below).
 
 The ML-native pieces already in the library are gradient-based calibration (`optax`, `optimistix`, `lineax`) and implicit differentiation through the calibration chain. Neural surrogate pricers, published GPU benchmarks and multi-device sharding are scheduled on the [Roadmap](roadmap.md).
 
-## Why this exists
-
-In a bank-scale quant system, the maths of any single model is rarely the hard part. The hard part is keeping many interdependent components consistent for years while different teams change them. In practice that means a bump-and-reprice risk framework drifting out of sync with the pricer, front-office and risk numbers that have to be reconciled, and past results that cannot be replayed for audit.
-
-VALAX is designed so those problems do not arise inside the library:
-
-- **One implementation per instrument.** Price, Greeks and scenario P&L all come from the same pricing function. Greeks are its derivatives, not the output of a separate bump framework that can drift.
-- **Pure functions on immutable pytrees.** The same inputs always give the same number, so any result can be replayed.
-- **Calibration in the same differentiable graph.** Sensitivities to market quotes flow back through the curve and model calibration, with no separate re-bootstrap to keep aligned.
-
-Some consistency work still needs people (reference data, model governance, regulatory approval), and VALAX does not remove it. What it removes is the engineering time spent reconciling two implementations of the same Greek. That time can go into research, new products and models, and a shorter path from idea to production.
-
-The full argument — what actually sinks bank programmes, which choices in the library target which pain points, and what VALAX deliberately does *not* fix — is in [Positioning & Design Rationale](positioning/index.md).
-
 ## Key Features
 
-- **Autodiff Greeks** — `jax.grad` gives exact delta, gamma, vega, vanna, volga, rho and more, with no bump-size tuning. Higher-order Greeks via nested differentiation. This works for every engine (analytic, Monte Carlo, PDE and lattice) without per-pricer Greek code, and reverse mode returns all first-order sensitivities in one backward pass.
+- **AAD Greeks** — sensitivities come from adjoint algorithmic differentiation (reverse-mode `jax.grad`), not from bumping inputs and repricing.
+    - **The cost does not grow with the number of inputs.** Finite differences need one or two extra pricings *per input*, so N inputs cost O(N) pricings: a trade sensitive to 300 curve and vol quotes needs 301 to 601. AAD returns the sensitivity to all N inputs from one forward pricing plus one backward pass, typically a few times the cost of a single pricing whatever N is, so O(1) in N. That holds per output, so the full risk of a book's total P&L is still one backward pass. The trade-off is memory: the backward pass needs the forward pass's intermediate values.
+    - **Exact, not approximate.** Greeks are accurate to machine precision, with no bump size to tune and none of the truncation or cancellation error finite differences carry.
+    - **Every engine, no extra code.** Delta, gamma, vega, vanna, volga, rho and more work for analytic, Monte Carlo, PDE and lattice pricers without per-pricer Greek code. Higher-order Greeks come from nested differentiation; a full N × N gamma matrix takes O(N) passes, against O(N²) pricings by bumping.
+    - **Cannot drift from the price.** Greeks are derivatives of the pricing function itself, so they cannot fall out of sync with the price the way a separate bump-and-reprice framework can.
 - **Fast by construction** — `jit` traces a pricer once and XLA compiles it into fused native kernels, so repeat calls skip Python entirely. `vmap` batches across instruments, scenarios and Monte Carlo paths, and the compiled program (including its gradients) runs on CPU, GPU or TPU. Published benchmarks are on the [Roadmap](roadmap.md).
 - **Strong scientific libraries, not hand-rolled numerics** — SDE paths use `diffrax`, root-finding and least-squares use `optimistix`, structured linear solves use `lineax`, and gradient-based optimisation uses `optax`. These are maintained, tested and differentiable, and the calibrations and PDE/MC engines inherit that.
 - **Four engine families** — analytic, Monte Carlo, PDE and lattice. Which instruments each one covers is in the [coverage matrix](applications/instrument-pricing.md).
@@ -33,7 +23,7 @@ The full argument — what actually sinks bank programmes, which choices in the 
     - **PDE:** 1D Crank-Nicolson with Rannacher start-up and American exercise, and 2D ADI (Douglas, Craig-Sneyd, Hundsdorfer-Verwer) for Heston, G2++ and Cheyette 2F, on `lineax` tridiagonal solves.
     - **Lattice:** CRR binomial with American exercise, and Hull-White trinomial trees (including time-dependent volatility) for callable and puttable bonds and Bermudan swaptions.
 - **Curves, surfaces and calibration** — joint multi-curve bootstrap, plus CDS survival and inflation curves. Vol surfaces include SABR, SVI, caplet strips, optionlet surfaces and swaption cubes. Heston, Hull-White, G2++, Cheyette and SLV models calibrate to market, including per-trade co-terminal baskets. Calibrations compose into a chain with implicit differentiation, so sensitivities to market quotes flow through every level. Each calibration's assumptions and limitations are in the [Calibration Register](applications/calibration-register.md).
-- **Pure functional** — No mutable state. Every data structure is a JAX pytree via equinox. The JAX idioms this relies on, each anchored on real code, are in [JAX Patterns in VALAX](architecture/jax-patterns.md).
+- **Pure functional** — No mutable state. Every data structure is a JAX pytree via equinox, so the same inputs always give the same number and any result can be replayed. The JAX idioms this relies on, each anchored on real code, are in [JAX Patterns in VALAX](architecture/jax-patterns.md).
 
 ## Accuracy and validation
 
@@ -196,4 +186,4 @@ See the [Examples](examples.md) page for the full index, per-example walkthrough
 - [Vision](vision.md): how VALAX is meant to be used by trading desks, asset managers and quant researchers.
 - [Roadmap](roadmap.md): what is built and what is planned, tier by tier.
 - [Research Ideas](research-ideas.md): uncommitted explorations that may or may not become roadmap work.
-- [Positioning & Design Rationale](positioning/index.md): where VALAX sits among the other systems on a trading floor, and which parts of the hard problems it is built to solve.
+- [Positioning & Design Rationale](positioning/index.md): why VALAX exists — where it sits among the other systems on a trading floor, which consistency problems it is built to remove, and what it deliberately does not fix.

@@ -469,8 +469,8 @@ Found while building the volatility layer's adjoint — not by a failing test.
 ### Symptom
 
 $\partial\sigma/\partial F$ at the at-the-money strike was wrong by **18%** in
-the lognormal branch (AD $-10.910$ against a true $-9.222$) and **identically
-zero** in the normal branch (AD $0.000$ against a true $0.051$). Every *price*
+the lognormal branch (autodiff $-10.910$ against a true $-9.222$) and **identically
+zero** in the normal branch (autodiff $0.000$ against a true $0.051$). Every *price*
 was correct to machine precision, at every strike, in both conventions.
 
 ### The misleading signals (what it was *not*)
@@ -499,7 +499,7 @@ This one produced three false exonerations in a row, and the order matters.
 ### Root cause
 
 A constant has zero derivative. `jnp.where(is_small, 1.0, ...)` returns the
-right *value* at $z = 0$ and propagates **nothing**, so AD discarded the entire
+right *value* at $z = 0$ and propagates **nothing**, so autodiff discarded the entire
 $z/x$ contribution. The true limiting slope is
 $\mathrm{d}(z/x)/\mathrm{d}z \to -\rho/2 \neq 0$.
 
@@ -558,7 +558,7 @@ Corollaries:
   Newton to $10^{-14}$ and re-difference — took one run.
 - **Value tests cannot see derivative bugs.** A differentiable library needs
   derivative tests *at* its singular points, not merely near them. Guarded by
-  `tests/test_models/test_sabr.py::TestATMDerivatives`, which checks AD against
+  `tests/test_models/test_sabr.py::TestATMDerivatives`, which checks autodiff against
   FD at the money and asserts the ATM forward derivative is non-zero.
 
 ### The debugging playbook

@@ -356,7 +356,7 @@ model. Tracked on the [roadmap](../roadmap.md#26-libor-market-model-lmm-bgm).
 |---|---|
 | **Entry points** | `market_inputs_node` |
 | **Fits / holds fixed** | Nothing: quotes map directly to spots, dividends, flat curves (`flat_curve`, act/365) and constant vols. |
-| **Targets & objective** | `explicit`; differentiated by plain AD. |
+| **Targets & objective** | `explicit`; differentiated by plain AAD. |
 | **Assumptions** | Constant parameters (Tier 0). |
 | **Limitations** | — |
 | **Validation** | `tests/test_calibration/test_chain.py`; example 10 (textbook Black-Scholes Greeks). |
@@ -373,8 +373,8 @@ model. Tracked on the [roadmap](../roadmap.md#26-libor-market-model-lmm-bgm).
 | **Settings** | `SLV_SETTINGS` (only `atol = 5e-2` is read). |
 | **Market inputs** | The target implied-vol surface (Dupire, guarded), loose scalars. |
 | **Assumptions** | The Markovian projection reprices the smile; the kernel estimate of E[V \| k] is shrunk toward the unconditional mean by `ridge` pseudo-particles. |
-| **Limitations** | Vanilla error at example 17's budget (50k particles, 48 rows, full ξ ≈ 1.1): 9–24 bp RMS per expiry across passes; ≈ 25–37 bp at 20k particles, 24 rows, ξ ≈ 1.3 ([SLV guide § limitations](../guide/slv.md#limitations-and-known-approximations)). The max\|ΔL\| noise floor is 0.11–0.14 on a 48×17 grid (sparse early / wing cells), so the default `atol = 5e-2` needs roughly 10× more particles (example 17 uses 0.2). A swarm step coarser than the pricer's costs tens of bp at high ξ (use `n_substeps`). AD through the Heston parameters is only pathwise — Andersen-QE switches branch, so a bump FD through the Heston refit does not converge; with the backbone held, AD matches FD to 2e-4. Local-vol paths are evaluated through the guard (|k| ≤ 8·√(ATM total variance), implied-variance fallback, variance in [1e-8, 25 × ATM]); `guard=None` gives raw Dupire. |
-| **Validation** | `tests/test_calibration/test_slv_calibration.py` (flat-surface one-pass exactness; high-ξ repricing at least as good as the old two-pass scheme; ridge semantics; `heston=` child; jit = eager); `tests/test_pricing/test_local_vol_paths.py` (guarded NaN repro finite, gradients finite, guard = raw inside the domain); example 17 (AD vs FD with the backbone held, 1.8e-4). |
+| **Limitations** | Vanilla error at example 17's budget (50k particles, 48 rows, full ξ ≈ 1.1): 9–24 bp RMS per expiry across passes; ≈ 25–37 bp at 20k particles, 24 rows, ξ ≈ 1.3 ([SLV guide § limitations](../guide/slv.md#limitations-and-known-approximations)). The max\|ΔL\| noise floor is 0.11–0.14 on a 48×17 grid (sparse early / wing cells), so the default `atol = 5e-2` needs roughly 10× more particles (example 17 uses 0.2). A swarm step coarser than the pricer's costs tens of bp at high ξ (use `n_substeps`). AAD through the Heston parameters is only pathwise — Andersen-QE switches branch, so a bump FD through the Heston refit does not converge; with the backbone held, AAD matches FD to 2e-4. Local-vol paths are evaluated through the guard (|k| ≤ 8·√(ATM total variance), implied-variance fallback, variance in [1e-8, 25 × ATM]); `guard=None` gives raw Dupire. |
+| **Validation** | `tests/test_calibration/test_slv_calibration.py` (flat-surface one-pass exactness; high-ξ repricing at least as good as the old two-pass scheme; ridge semantics; `heston=` child; jit = eager); `tests/test_pricing/test_local_vol_paths.py` (guarded NaN repro finite, gradients finite, guard = raw inside the domain); example 17 (AAD vs FD with the backbone held, 1.8e-4). |
 | **Improve** | A smooth / continuous QE variant for parameter risk; Fokker–Planck PDE calibration (SLV-2); a norm-weighted convergence metric; averaging passes (open). Strategy: [SLV § fixed point](../guide/slv.md#how-the-fixed-point-is-reported), [Calibration Chains § I.8](../theory/calibration-chains.md#i8-fixed-point-levels). |
 
 ## Not calibrations

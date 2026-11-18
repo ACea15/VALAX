@@ -37,7 +37,7 @@ Business tags: `MRM` Market Risk & Model Validation · `QR` Quant Research · `F
 
 ### 2.1 Exact autodiff risk — no bump-and-reprice
 
-Every Greek, and the full set of first-/second-order bucketed sensitivities, comes from one reverse-mode pass over the pricer (`jax.grad` / `jax.hessian` through `price()`; `market_risk` for a trade, `keyed_sensitivities` for a book) — exact to machine precision, with no separate bump framework to drift out of sync with the pricer it shadows.
+Every first-order Greek and bucketed sensitivity comes from one reverse-mode (AAD) pass over the pricer, and the second-order set from one `jax.hessian` on the same function (`jax.grad` / `jax.hessian` through `price()`; `market_risk` for a trade, `keyed_sensitivities` for a book) — exact to machine precision, with no separate bump framework to drift out of sync with the pricer it shadows.
 
 **Who it serves:** `MRM` every factor sensitivity in one pass, and a bump-free RTPL that stops finite-difference noise from failing FRTB PLA · `FO` exact hedge deltas with none of the noise that is worst near barriers and expiry · `REG` the sensitivities FRTB asks for *are* `jax.grad` output — no 50k-line bump engine · `TRE` exact key-rate durations across 20+ pillars, no bump-width dispute with the auditor · `QR` every new model ships with all Greeks the moment its price function exists.
 

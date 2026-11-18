@@ -2,7 +2,7 @@
 
 A quantitative finance valuation and risk engine built entirely on [JAX](https://github.com/jax-ml/jax).
 
-VALAX takes a functional approach to derivatives pricing: instruments are data-only pytrees, pricing is done by pure functions, and Greeks come from automatic differentiation — not finite differences.
+VALAX takes a functional approach to derivatives pricing: instruments are data-only pytrees, pricing is done by pure functions, and Greeks come from automatic differentiation (autodiff) — in reverse mode, the AAD (adjoint algorithmic differentiation) of quant finance — not finite differences.
 
 ## Why JAX?
 
@@ -136,7 +136,7 @@ Runnable scripts in `examples/` demonstrate the full library with synthetic mark
 | `14_unified_rates_per_trade_model.py` | Curves → swaption cube → per-trade Hull–White σ(t) co-terminal bootstrap → Bermudan through `price()` (PDE) → quote risk and vega profile |
 | `15_unified_rates_caps_optionlet_chain.py` | Cap strip → optionlet SABR as chain nodes → caps / floors through `price()` → quote risk |
 | `16_unified_calibration_diagnostics.py` | Bad quotes named by `check()` / `failed_labels()`, conditioning alerts, engine provenance |
-| `17_unified_slv_fixed_point.py` | SLV leverage as a fixed-point level, LV / Heston / SLV barrier, risk by AD |
+| `17_unified_slv_fixed_point.py` | SLV leverage as a fixed-point level, LV / Heston / SLV barrier, risk by AAD |
 | `18_unified_rates_per_trade_g2pp_cheyette.py` | Per-trade G2++ and Cheyette σ(t), exact vs engine-consistent calibration, model risk vs Hull–White |
 | `19_unified_book_workflow.py` | Rates book end to end: quotes → curves → `price()` → `market_risk` → bond kernels → PCA + basis `KeyedScenario`s, P&L explain, VaR / ES |
 | `20_unified_fx_inflation_xccy.py` | FX forward / option, cross-currency and basis swaps, ZCIS / YoY / caps on one multi-currency market; parity checks; risk exactly zero outside declared entries |
